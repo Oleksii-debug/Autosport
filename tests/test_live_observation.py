@@ -524,6 +524,133 @@ class LiveObservationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_precommit_clock_failure_resets_stateful_provider_snapshot(self):
+        batch = self._provider().read_batch(max_items=10)
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def __init__(self) -> None:
+                self.read_calls = 0
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.read_calls += 1
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health_store = SourceHealthStore(root / "source_health.json")
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+
+                with self.assertRaises(ValueError):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        provider,
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: "not-a-timestamp",
+                    )
+
+                self.assertEqual(provider.read_calls, 1)
+                self.assertEqual(provider.reset_calls, 1)
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
+    def test_precommit_health_read_failure_resets_stateful_provider_snapshot(self):
+        batch = self._provider().read_batch(max_items=10)
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def __init__(self) -> None:
+                self.read_calls = 0
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.read_calls += 1
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health_store = SourceHealthStore(root / "source_health.json")
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+
+                with patch.object(
+                    health_store,
+                    "get",
+                    side_effect=OSError("health read unavailable"),
+                ):
+                    with self.assertRaisesRegex(OSError, "health read unavailable"):
+                        poll_open_market_store_once(
+                            store,
+                            health_store,
+                            provider,
+                            mirror_updates=updates,
+                            max_items=10,
+                            clock=lambda: _RECEIVE_TIME,
+                        )
+
+                self.assertEqual(provider.read_calls, 1)
+                self.assertEqual(provider.reset_calls, 1)
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
+    def test_precommit_cleanup_failure_preserves_primary_clock_error(self):
+        batch = self._provider().read_batch(max_items=10)
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                raise RuntimeError("reset failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health_store = SourceHealthStore(root / "source_health.json")
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+
+                with self.assertRaises(ValueError) as raised:
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        Provider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: "not-a-timestamp",
+                    )
+
+                self.assertTrue(
+                    any(
+                        "pre-commit provider cleanup also failed: RuntimeError: reset failed"
+                        in note
+                        for note in getattr(raised.exception, "__notes__", ())
+                    )
+                )
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
     def test_sqlite_retry_revalidates_provider_source_identity_before_cached_batch_reuse(self):
         batch = ProviderBatch(
             source_id="live-fixture",

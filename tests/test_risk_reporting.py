@@ -402,7 +402,7 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(path.points[2].equity, Decimal("75"))
         self.assertEqual(path.minimum_equity, Decimal("75"))
         self.assertEqual(path.minimum_equity_point_id, path.points[2].point_id)
-        self.assertTrue(path.availability_complete)
+        self.assertFalse(path.availability_complete)
         self.assertTrue(path.settled_history_complete)
         self.assertEqual(len(path.path_sha256), 64)
 
@@ -457,6 +457,27 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertFalse(report.settled_history_complete)
         self.assertEqual(report.current_drawdown_amount, Decimal("0"))
         self.assertEqual(report.committed_stake, Decimal("40"))
+
+    def test_complete_settlement_timestamps_do_not_mint_opening_capital_availability(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(84),),
+            Decimal("10"),
+            placed_at="2026-09-21T16:20:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T16:25:00+00:00",
+        )
+
+        path = build_product_issued_paper_equity_path(book, self._goal())
+
+        self.assertFalse(path.availability_complete)
+        self.assertIsNone(path.points[0].available_at)
+        self.assertFalse(path.historical_as_known_supported)
 
     def test_missing_settlement_availability_keeps_current_path_but_marks_chronology_incomplete(self) -> None:
         book = PaperBook("100")

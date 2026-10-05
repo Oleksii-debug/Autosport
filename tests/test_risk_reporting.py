@@ -837,6 +837,62 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertNotEqual(first.goal_contract_sha256, second.goal_contract_sha256)
         self.assertNotEqual(first.path_sha256, second.path_sha256)
 
+    def test_coherent_history_rewrite_cannot_mint_product_issued_path(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(84),),
+            Decimal("25"),
+            placed_at="2026-09-21T16:20:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T16:25:00+00:00",
+        )
+
+        ticket.status = TicketStatus.OPEN
+        ticket.payout = Decimal("0")
+        ticket.settled_at = None
+        book._lifecycle.pop()
+        book._settlement_times.clear()
+
+        # The rewritten object remains structurally/economically self-consistent:
+        # a structural validator alone would now reinterpret the loss as open risk.
+        PaperBook._validate_loaded_state(book)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "product-issued authority is unavailable",
+        ):
+            build_product_issued_paper_equity_path(book, self._goal())
+
+    def test_coherent_opening_stake_rewrite_cannot_mint_product_issued_path(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(85),),
+            Decimal("25"),
+            placed_at="2026-09-21T16:30:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T16:35:00+00:00",
+        )
+
+        ticket.stake = Decimal("10")
+        book.balance = Decimal("90")
+        PaperBook._validate_loaded_state(book)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "product-issued authority is unavailable",
+        ):
+            build_product_issued_paper_equity_path(book, self._goal())
+
     def test_durable_resolver_rejects_goal_change_after_final_book_read(self) -> None:
         book = PaperBook("100")
         goal = self._goal()

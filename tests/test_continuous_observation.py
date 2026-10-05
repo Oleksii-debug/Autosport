@@ -611,6 +611,60 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(health.total_received, 2)
             self.assertEqual(health.total_accepted, 1)
 
+    def test_status_path_cannot_overwrite_market_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            market_path = workspace / "market.db"
+            sentinel = b"canonical-market-sentinel"
+            market_path.write_bytes(sentinel)
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=market_path,
+            )
+
+            with self.assertRaisesRegex(ValueError, "status_path must not collide"):
+                self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertEqual(market_path.read_bytes(), sentinel)
+
+    def test_status_path_symlink_alias_cannot_overwrite_health_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            health_path = workspace / "source_health.json"
+            health_path.write_text('{"sentinel": true}', encoding="utf-8")
+            alias = workspace / "status-alias.json"
+            try:
+                alias.symlink_to(health_path.name)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable on this platform")
+
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=alias,
+            )
+
+            with self.assertRaisesRegex(ValueError, "status_path must not collide"):
+                self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertEqual(
+                health_path.read_text(encoding="utf-8"),
+                '{"sentinel": true}',
+            )
+
     def test_invalid_previous_status_fails_before_any_provider_io(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

@@ -387,7 +387,7 @@ def _decode_state(raw: bytes, *, workspace_instance_id: str) -> dict[str, object
         product_clock_authoritative=bool(parsed["product_clock_authoritative"]),
         transition_id=str(parsed["transition_id"]),
     )
-    if parsed != canonical or raw != _canonical_json_bytes(canonical):
+    if parsed != canonical or raw != _CANONICAL_JSON_BYTES(canonical):
         raise EconomicSessionIntegrityError("economic-session state is not canonical")
     return canonical
 
@@ -522,10 +522,10 @@ class ProductEconomicSessionStore:
             goal = _ECONOMIC_GOAL_LOAD(self._goal_store_witness)
             provenance = provenance_for(goal)
             if os.path.lexists(self._state_path_witness):
-                raw = _read_regular_bytes(
+                raw = self._read_regular_bytes_witness(
                     self._state_path_witness, limit=_MAX_STATE_BYTES, label="economic-session state"
                 )
-                payload = _decode_state(
+                payload = self._decode_state_witness(
                     raw,
                     workspace_instance_id=self._authority_witness.workspace_instance_id,
                 )
@@ -534,8 +534,8 @@ class ProductEconomicSessionStore:
                 recovery = _AUTHORITY_RECOVER(
                     self._authority_witness,
                     observed_state_sha256=observed,
-                    tx_id=_tx_id(payload),
-                    semantic_binding_sha256=_semantic_binding(payload),
+                    tx_id=self._tx_id_witness(payload),
+                    semantic_binding_sha256=self._semantic_binding_witness(payload),
                 )
                 if recovery.disposition not in {
                     RecoveryDisposition.CURRENT,
@@ -603,14 +603,14 @@ class ProductEconomicSessionStore:
             bankroll_id=goal.bankroll_id,
             currency=goal.currency,
             goal_contract_sha256=goal_contract_sha256,
-            started_at=_clock_instant(self._clock),
+            started_at=self._clock_instant_witness(self._clock),
             opening_paperbook_sha256=opening_sha256,
             product_clock_authoritative=self._product_clock,
             transition_id=_UUID4().hex,
         )
-        intended = _state_sha256(payload)
-        binding = _semantic_binding(payload)
-        tx_id = _tx_id(payload)
+        intended = self._state_sha256_witness(payload)
+        binding = self._semantic_binding_witness(payload)
+        tx_id = self._tx_id_witness(payload)
         self._require_configuration_authority()
         _AUTHORITY_PREPARE(
             self._authority_witness,
@@ -620,7 +620,7 @@ class ProductEconomicSessionStore:
             semantic_binding_sha256=binding,
         )
         atomic_write_json(self._state_path_witness, payload)
-        raw = _read_regular_bytes(
+        raw = self._read_regular_bytes_witness(
             self._state_path_witness, limit=_MAX_STATE_BYTES, label="economic-session state"
         )
         observed = hashlib.sha256(raw).hexdigest()

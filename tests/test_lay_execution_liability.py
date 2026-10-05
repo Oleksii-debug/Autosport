@@ -11,12 +11,15 @@ import autosport.paper as paper_module
 from autosport.domain import TicketLeg, TicketStatus
 from autosport.exchange_exposure import locked_capital_for_exchange_side
 from autosport.paper import PaperBook
+import autosport.paper_execution_reality as paper_reality
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
     PaperExecutionEvidenceRecord,
     PaperExecutionEvidenceRegistry,
+    PaperExecutionIntegrityError,
     PaperExecutionLedger,
+    PaperLegAttempt,
     PaperExecutionModelConfig,
     PaperExecutionStateError,
     RecoveryDecision,
@@ -154,6 +157,63 @@ class ExchangeLockedCapitalTests(unittest.TestCase):
                 odds=Decimal("NaN"),
                 exchange_side="LAY",
             )
+
+
+class DurableSideIntegrityTests(unittest.TestCase):
+    @staticmethod
+    def _attempt(*, outcome: PaperAttemptOutcome, side: str) -> PaperLegAttempt:
+        return PaperLegAttempt(
+            attempt_id="attempt-1",
+            run_id="run-1",
+            plan_id="plan-1",
+            action_id="action-1",
+            sequence=0,
+            bookmaker_id="paper-exchange",
+            account_id="paper-account",
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            side=side,
+            decision_quote_id="quote-1",
+            decision_odds=Decimal("2.00"),
+            requested_stake=Decimal("10.00"),
+            decision_observed_at=QUOTE_AT,
+            execution_observed_at=STARTED_AT,
+            delay_ms=100,
+            quote_age_ms=100,
+            outcome=outcome,
+            execution_odds=None,
+            execution_stake=None,
+            suspended=False,
+            evidence_grade=EvidenceGrade.SYNTHETIC,
+            evidence_source="test",
+            evidence_id=None,
+            evidence_sha256=None,
+            model_fingerprint="model-1",
+            reason="test",
+        )
+
+    def test_rejected_durable_attempt_does_not_normalize_side(self):
+        attempt = self._attempt(
+            outcome=PaperAttemptOutcome.REJECTED,
+            side=" back ",
+        )
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "noncanonical exchange side",
+        ):
+            paper_reality._derive_run_economics(("action-1",), (attempt,))
+
+    def test_unknown_durable_attempt_does_not_normalize_lay_side(self):
+        attempt = self._attempt(
+            outcome=PaperAttemptOutcome.UNKNOWN,
+            side=" lay ",
+        )
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "noncanonical exchange side",
+        ):
+            paper_reality._derive_run_economics(("action-1",), (attempt,))
 
 
 class LayExecutionLiabilityTests(unittest.TestCase):

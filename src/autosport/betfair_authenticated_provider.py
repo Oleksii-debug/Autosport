@@ -351,9 +351,10 @@ class BetfairAuthenticatedMarketProvider:
             self._pending = ()
             self._pending_offset = 0
 
+        page_cursor = quotes[-1].sequence if quotes else self._sequence
         return ProviderBatch(
             self.source_id,
             quotes,
-            cursor=str(self._sequence),
+            cursor=str(page_cursor),
             quality_flags=("TRUNCATED_BATCH",) if truncated else (),
         )

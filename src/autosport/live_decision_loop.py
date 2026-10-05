@@ -1167,13 +1167,43 @@ class PersistentLiveDecisionLoop:
                 append_generation = store.append_generation_hint()
                 decision_time = self._sample_clock()
                 frozen_history: tuple[tuple[MarketEvent, int], ...] | None = None
-                if self._decision_refresh_may_need_history(decision_time) and any(
-                    self.dependencies.requires_current_history_fallback(
-                        input_id,
-                        as_of=decision_time,
+                dependency_ids = self.dependencies.input_ids
+                try:
+                    dependency_revisions = tuple(
+                        (
+                            input_id,
+                            self.dependencies.dependency_revision(input_id),
+                        )
+                        for input_id in dependency_ids
                     )
-                    for input_id in self.dependencies.input_ids
-                ):
+                    history_required = (
+                        self._decision_refresh_may_need_history(decision_time)
+                        and any(
+                            self.dependencies.requires_current_history_fallback(
+                                input_id,
+                                as_of=decision_time,
+                            )
+                            for input_id in dependency_ids
+                        )
+                    )
+                    registry_stable = (
+                        self.dependencies.input_ids == dependency_ids
+                        and all(
+                            self.dependencies.dependency_revision(input_id)
+                            == revision
+                            for input_id, revision in dependency_revisions
+                        )
+                    )
+                except KeyError:
+                    registry_stable = False
+                    history_required = False
+                if not registry_stable:
+                    # A focused selector was registered, retired, or replaced while
+                    # history need was being classified. Re-sample the complete
+                    # market frontier rather than freezing history for a stale
+                    # dependency incarnation.
+                    continue
+                if history_required:
                     frozen_history = tuple(store.events_with_append_generation())
 
                 if store.external_change_token() == expected_token:

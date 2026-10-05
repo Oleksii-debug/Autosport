@@ -1037,12 +1037,16 @@ def _seal_paperbook_snapshot_install_authority(method):
 
 
 def _seal_paperbook_save_candidate_authority(method):
-    """Inject closure-captured snapshot candidate authorities into save."""
+    """Inject closure-captured snapshot candidate and dispatch authorities into save."""
     method_code = method.__code__
     opening_candidate = _require_snapshot_candidate_opening_authority
     opening_candidate_code = opening_candidate.__code__
     causal_candidate = _require_snapshot_candidate_causal_history_authority
     causal_candidate_code = causal_candidate.__code__
+    canonical_raw_snapshot = _decode_canonical_paperbook_raw_snapshot
+    canonical_raw_snapshot_code = canonical_raw_snapshot.__code__
+    canonical_snapshot_path = _canonical_paperbook_snapshot_path
+    canonical_snapshot_path_code = canonical_snapshot_path.__code__
 
     def require_opening(source_book: object, candidate_book: object) -> None:
         if opening_candidate.__code__ is not opening_candidate_code:
@@ -1066,11 +1070,17 @@ def _seal_paperbook_save_candidate_authority(method):
             raise ValueError("PaperBook snapshot opening candidate authority changed")
         if causal_candidate.__code__ is not causal_candidate_code:
             raise ValueError("PaperBook snapshot causal candidate authority changed")
+        if canonical_raw_snapshot.__code__ is not canonical_raw_snapshot_code:
+            raise ValueError("PaperBook raw snapshot dispatch authority changed")
+        if canonical_snapshot_path.__code__ is not canonical_snapshot_path_code:
+            raise ValueError("PaperBook snapshot path dispatch authority changed")
         result = method(
             self,
             *args,
             _opening_candidate_authority=require_opening,
             _causal_candidate_authority=require_causal,
+            _canonical_snapshot_decode=canonical_raw_snapshot,
+            _snapshot_path=canonical_snapshot_path,
             **kwargs,
         )
         if method.__code__ is not method_code:
@@ -1471,11 +1481,13 @@ class PaperBook:
         *,
         _opening_candidate_authority=None,
         _causal_candidate_authority=None,
+        _canonical_snapshot_decode=None,
+        _snapshot_path=None,
         _json_dump=None,
     ) -> None:
         # Runtime visible-state + hidden-authority validation is performed once
         # by the closure-captured guard before this body executes.
-        destination = self._canonical_snapshot_path(path)
+        destination = _snapshot_path(type(self), path)
         raw = {
             "schema_version": _PAPER_SNAPSHOT_SCHEMA_VERSION,
             "initial_bankroll": str(self.initial_bankroll),
@@ -1516,7 +1528,7 @@ class PaperBook:
         # The raw snapshot is detached from the mutable live object. Validate
         # that exact candidate against product-issued opening commitments before
         # any durable replacement, closing coherent mutation during collection.
-        candidate = self._from_raw_snapshot(raw)
+        candidate = _canonical_snapshot_decode(type(self), raw)
         _opening_candidate_authority(self, candidate)
         _causal_candidate_authority(self, candidate)
 

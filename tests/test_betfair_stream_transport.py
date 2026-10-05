@@ -550,7 +550,9 @@ def test_fragmented_crlf_frame_is_reassembled_exactly_with_authenticated_origin(
     fake = connected_socket(tail=frame[:7])
     fake.chunks.extend([frame[7:-1], frame[-1:]])
     ticks = iter((100, 200, 300, 400))
-    monkeypatch.setattr(stream.time, "monotonic_ns", lambda: next(ticks))
+    fake_monotonic_ns = lambda: next(ticks)
+    monkeypatch.setattr(stream, "_MONOTONIC_NS", fake_monotonic_ns)
+    monkeypatch.setattr(stream.time, "monotonic_ns", fake_monotonic_ns)
     transport = make_transport(monkeypatch, fake)
     transport.connect()
 
@@ -573,7 +575,9 @@ def test_coalesced_frames_are_split_without_byte_loss(
     second = b'{"op":"mcm","clk":"b"}\r\n'
     fake = connected_socket(tail=first + second)
     ticks = iter((100, 200))
-    monkeypatch.setattr(stream.time, "monotonic_ns", lambda: next(ticks))
+    fake_monotonic_ns = lambda: next(ticks)
+    monkeypatch.setattr(stream, "_MONOTONIC_NS", fake_monotonic_ns)
+    monkeypatch.setattr(stream.time, "monotonic_ns", fake_monotonic_ns)
     transport = make_transport(monkeypatch, fake)
     transport.connect()
 
@@ -584,6 +588,22 @@ def test_coalesced_frames_are_split_without_byte_loss(
     assert [one.frame_sequence, two.frame_sequence] == [1, 2]
     assert [one.received_monotonic_ns, two.received_monotonic_ns] == [200, 200]
     assert one.connection_generation == two.connection_generation == 1
+
+def test_monotonic_receive_clock_rebinding_fails_closed_before_frame_issue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = connected_socket()
+    transport = make_transport(monkeypatch, fake)
+    transport.connect()
+    fake.chunks.append(b'{"op":"mcm","clk":"next"}\r\n')
+    monkeypatch.setattr(stream.time, "monotonic_ns", lambda: 999)
+
+    with pytest.raises(
+        stream.BetfairStreamTransportError,
+        match="monotonic receive clock dispatch changed",
+    ):
+        transport.read_authenticated_frame()
+
 
 def test_oversized_no_newline_frame_fails_before_persistence(
     monkeypatch: pytest.MonkeyPatch,

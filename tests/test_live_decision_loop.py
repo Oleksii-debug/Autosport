@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -453,6 +454,90 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(
                 factory.calls[-1],
                 ("input-a", (("selection-a", 2, "open"),)),
+            )
+            loop.close()
+
+
+    def test_peer_health_failure_invalidates_input_without_market_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            peer_event = replace(self._event(sequence=1), source_id="provider-b")
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((peer_event,))
+            finally:
+                seed_store.close()
+
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-b",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="peer-healthy",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=_EmptyProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 1, "open"),)),
+            )
+            first_progress = json.loads(
+                loop.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(first_progress["schema_version"], 3)
+            self.assertEqual(
+                first_progress["health_boundaries"],
+                [
+                    {
+                        "source_id": "provider-b",
+                        "recorded_at": (
+                            self.START + timedelta(milliseconds=500)
+                        ).isoformat(),
+                        "transition_order": 1,
+                    }
+                ],
+            )
+
+            health_store.record_failure(
+                "provider-b",
+                now=(self.START + timedelta(seconds=1, milliseconds=500)).isoformat(),
+                error=ConnectionError("peer source failed"),
+            )
+            clock.value = self.START + timedelta(seconds=2)
+
+            second = loop.run_cycle()
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls[-1], ("input-a", ()))
+            second_progress = json.loads(
+                loop.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                second_progress["health_boundaries"][0]["transition_order"],
+                2,
             )
             loop.close()
 

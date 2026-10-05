@@ -302,10 +302,17 @@ class IngestionEngine:
                         ),
                     )
                 except Exception as health_error:
-                    exc.add_note(
-                        "source health failure persistence also failed: "
-                        f"{type(health_error).__name__}: {health_error}"
-                    )
+                    try:
+                        try:
+                            health_detail = str(health_error)
+                        except BaseException:
+                            health_detail = "<unprintable exception>"
+                        exc.add_note(
+                            "source health failure persistence also failed: "
+                            f"{type(health_error).__name__}: {health_detail}"
+                        )
+                    except BaseException:
+                        pass
                     raise exc from health_error
             raise
 

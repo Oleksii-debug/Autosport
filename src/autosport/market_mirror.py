@@ -267,8 +267,13 @@ class MarketMirror:
                     "conflicting MarketEvent payload reused an existing source-local sequence"
                 )
 
+            previous_decision_causal = key in self._decision_causal_keys
             try:
-                semantic_refresh = same_semantic_market_state(previous, event)
+                semantic_refresh = (
+                    previous_decision_causal
+                    and decision_causal
+                    and same_semantic_market_state(previous, event)
+                )
             except MarketStateIdentityError:
                 # A malformed/unsupported claimed semantic contract cannot mint
                 # duplicate suppression. Preserve the durable acquisition as an

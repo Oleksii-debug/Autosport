@@ -37,6 +37,8 @@ _ORIGINAL_EXPECTED_RUN_ID = PaperExecutionAdoptionRuntime.expected_run_id
 _ORIGINAL_EXECUTE_UNLOCKED = PaperExecutionAdoptionRuntime._execute_unlocked
 _ORIGINAL_PAPERBOOK_SAVE = _adoption.PaperBook.save
 _ORIGINAL_PAPERBOOK_LOAD = _adoption.PaperBook.load
+_ORIGINAL_LEDGER_EVENTS = _reality.PaperExecutionLedger.events
+_ORIGINAL_LEDGER_LOAD_RUN = _reality.PaperExecutionLedger.load_run
 _PREPARED_WITNESSES: dict[int, tuple[PreparedPaperExecution, str]] = {}
 _ACTION_WITNESSES: dict[int, tuple[ExecutionAction, str, str]] = {}
 _BINDING_WITNESSES: dict[int, tuple[PaperExposureBinding, tuple[str, str | None, str | None, str | None]]] = {}
@@ -693,7 +695,7 @@ def _execute_unlocked(
         run_id=expected_run_id,
         action_ids=action_ids,
     )
-    run = type(self.ledger).load_run(
+    run = _ORIGINAL_LEDGER_LOAD_RUN(
         self.ledger,
         run_id=expected_run_id,
         trigger_id=trigger_id,
@@ -1149,7 +1151,7 @@ def _durable_observation_evidence_ids(
         )
     reservations = [
         event
-        for event in type(ledger).events(ledger, run_id)
+        for event in _ORIGINAL_LEDGER_EVENTS(ledger, run_id)
         if event["event_type"] == "RUN_RESERVED"
     ]
     if len(reservations) != 1:
@@ -1242,7 +1244,7 @@ def _assert_recoverable_book_state(
         run_id=run_id,
         action_ids=action_ids,
     )
-    run = type(self.ledger).load_run(
+    run = _ORIGINAL_LEDGER_LOAD_RUN(
         self.ledger,
         run_id=run_id,
         trigger_id=trigger_id,

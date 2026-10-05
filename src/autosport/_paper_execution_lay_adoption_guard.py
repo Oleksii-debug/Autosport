@@ -859,6 +859,11 @@ def _assert_recoverable_book_state(
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
     )
+    # Durable ledger reads are callback boundaries. Re-prove the runtime and
+    # minted plan/bindings before re-reading them to reconstruct economic state.
+    self._require_minted(prepared)
+    _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
+    _reality._require_canonical_execution_config_surface(self.config)
     if run is None:
         raise PaperExecutionAdoptionError(
             "PaperBook changed before any durable #623 run evidence"

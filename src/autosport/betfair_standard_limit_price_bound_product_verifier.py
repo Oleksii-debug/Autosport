@@ -11,6 +11,8 @@ their durable state is re-opened through canonical classes before verification.
 from pathlib import Path
 
 from . import betfair_standard_limit_price_bound_verifier as _verifier_module
+from . import real_execution_ledger as _ledger_module
+from . import supervised_plan_issuance as _issuance_module
 from . import trusted_runtime_code_profile as _runtime_profile
 from .betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
@@ -60,16 +62,30 @@ def _build_product_entrypoint():
     )
     canonical_store_init = canonical_store_type.__init__
     canonical_store_init_code = canonical_store_init.__code__
+    canonical_issuance_path_factory = _issuance_module.Path
+    canonical_issuance_directory = _issuance_module._DIRECTORY
     canonical_ledger_type = RealExecutionLedger
     canonical_ledger_path_class_attr = canonical_ledger_type.__dict__.get(
         "path", missing_class_field
     )
     canonical_ledger_init = canonical_ledger_type.__init__
     canonical_ledger_init_code = canonical_ledger_init.__code__
+    canonical_ledger_path_factory = _ledger_module.Path
+    canonical_threading_module = _ledger_module.threading
+    canonical_rlock_factory = canonical_threading_module.RLock
     path_factory = Path
     canonical_path_type = type(Path("."))
     canonical_path_resolve = canonical_path_type.resolve
     canonical_path_resolve_code = canonical_path_resolve.__code__
+    canonical_path_mkdir = canonical_path_type.mkdir
+    canonical_path_mkdir_code = canonical_path_mkdir.__code__
+    canonical_path_with_name = canonical_path_type.with_name
+    canonical_path_with_name_code = canonical_path_with_name.__code__
+    canonical_path_truediv = canonical_path_type.__truediv__
+    canonical_path_truediv_code = canonical_path_truediv.__code__
+    canonical_path_parent = canonical_path_type.parent
+    canonical_path_parent_getter = canonical_path_parent.fget
+    canonical_path_parent_getter_code = canonical_path_parent_getter.__code__
     object_new = object.__new__
 
     def authority_graph_unchanged() -> bool:
@@ -101,10 +117,26 @@ def _build_product_entrypoint():
             is canonical_ledger_path_class_attr
             and canonical_store_type.__init__ is canonical_store_init
             and canonical_store_init.__code__ is canonical_store_init_code
+            and _issuance_module.Path is canonical_issuance_path_factory
+            and canonical_issuance_path_factory is path_factory
+            and _issuance_module._DIRECTORY is canonical_issuance_directory
             and canonical_ledger_type.__init__ is canonical_ledger_init
             and canonical_ledger_init.__code__ is canonical_ledger_init_code
+            and _ledger_module.Path is canonical_ledger_path_factory
+            and canonical_ledger_path_factory is path_factory
+            and _ledger_module.threading is canonical_threading_module
+            and canonical_threading_module.RLock is canonical_rlock_factory
             and canonical_path_type.resolve is canonical_path_resolve
             and canonical_path_resolve.__code__ is canonical_path_resolve_code
+            and canonical_path_type.mkdir is canonical_path_mkdir
+            and canonical_path_mkdir.__code__ is canonical_path_mkdir_code
+            and canonical_path_type.with_name is canonical_path_with_name
+            and canonical_path_with_name.__code__ is canonical_path_with_name_code
+            and canonical_path_type.__truediv__ is canonical_path_truediv
+            and canonical_path_truediv.__code__ is canonical_path_truediv_code
+            and canonical_path_type.parent is canonical_path_parent
+            and canonical_path_parent.fget is canonical_path_parent_getter
+            and canonical_path_parent_getter.__code__ is canonical_path_parent_getter_code
         )
 
     def exact_instance_field(value: object, field: str, owner: str):

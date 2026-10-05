@@ -1499,6 +1499,30 @@ def test_result_digest_rejects_unbounded_dataset_and_evidence_identity() -> None
         raise AssertionError("oversize evidence identity entered authority digest")
 
 
+
+def test_risk_root_rejects_captured_paperbook_binding_replacement(monkeypatch) -> None:
+    policy = _policy(max_risk_of_ruin=Decimal("1"))
+    book = PaperBook("100")
+    context = _context(1)
+    calls = {"validate": 0}
+
+    def forged_validate(candidate):
+        calls["validate"] += 1
+        return None
+
+    monkeypatch.setattr(
+        risk_module,
+        "_CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE",
+        forged_validate,
+    )
+
+    decision = policy.evaluate(book, Decimal("1"), context=context)
+
+    assert not decision.allowed
+    assert calls == {"validate": 0}
+    assert "authority" in decision.reason or "invalid" in decision.reason
+
+
 def test_risk_helper_witnesses_bind_to_executing_policy_type(monkeypatch) -> None:
     policy = _policy(max_risk_of_ruin=Decimal("1"))
     book = PaperBook("100")

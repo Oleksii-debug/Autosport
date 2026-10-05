@@ -22,6 +22,12 @@ from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .paper import PaperBook
 
+# Capture the source-defined MarketEvent serialization entrypoints once. Risk
+# validation must not dispatch through later mutable class attributes on an
+# authority-bearing decision path.
+_CANONICAL_MARKET_EVENT_TO_DICT = MarketEvent.to_dict
+_CANONICAL_MARKET_EVENT_FROM_DICT = MarketEvent.from_dict
+
 
 def _verify_product_risk_of_ruin_authority(
     registry_path: str | Path | None,
@@ -418,7 +424,9 @@ class ProposedTicketRiskContext:
             ):
                 raise ValueError("proposed ticket context contains an invalid quote")
             try:
-                validated_quote = MarketEvent.from_dict(quote.to_dict())
+                validated_quote = _CANONICAL_MARKET_EVENT_FROM_DICT(
+                    _CANONICAL_MARKET_EVENT_TO_DICT(quote)
+                )
                 _canonical_context_timestamp("quote observed_ts", quote.observed_ts)
                 if quote.source_ts is not None:
                     _canonical_context_timestamp("quote source_ts", quote.source_ts)

@@ -134,6 +134,44 @@ def test_request_accepts_zero_only_excess_fractional_clock_precision() -> None:
     assert payload["causal_cutoff"] == "2026-01-02T00:00:00.123456+00:00"
     assert payload["evaluated_at"] == "2026-01-03T00:00:00.123456+00:00"
 
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "base_portfolio_sha256",
+        "capital_state_sha256",
+        "target_sha256",
+        "research_protocol_sha256",
+        "reproducibility_bundle_sha256",
+        "dataset_manifest_sha256",
+    ),
+)
+def test_request_rejects_uppercase_digest_aliases(field: str) -> None:
+    request = _request(planned=2)
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="canonical lowercase SHA-256 digest",
+    ):
+        replace(request, **{field: getattr(request, field).upper()})
+
+
+def test_durable_result_parser_rejects_uppercase_digest_alias() -> None:
+    direct = evaluate_risk_of_ruin(
+        _request(planned=2),
+        workspace_instance_id="workspace:test",
+        issued_at="2026-01-04T00:00:00+00:00",
+        source_sha256=SHA_F,
+    )
+    payload = direct.canonical_payload()
+    payload["request_sha256"] = str(payload["request_sha256"]).upper()
+
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="invalid issued risk-of-ruin result",
+    ):
+        IssuedRiskOfRuinResult.from_payload(payload)
+
 def test_request_has_no_caller_upper_bound_field() -> None:
     names = {field.name for field in fields(RiskOfRuinEvaluationRequest)}
     assert "upper_bound" not in names

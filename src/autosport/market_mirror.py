@@ -208,8 +208,8 @@ class MarketMirror:
         *,
         decision_causal: bool,
     ) -> MirrorApplyResult:
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
         if type(decision_causal) is not bool:
             raise TypeError("decision_causal must be a bool")
         _validate_persistable_sequence(event.sequence)
@@ -313,8 +313,8 @@ class MarketMirror:
         """
         if type(store) is not SQLiteMarketStore:
             raise TypeError("store must be an exact SQLiteMarketStore")
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
 
         admitted_event = self._snapshot_event(event)
         prior = self.event_for_quote_key(
@@ -745,8 +745,8 @@ class MarketMirror:
                     "(MarketEvent, generation) tuples"
                 )
             event, append_generation = item
-            if not isinstance(event, MarketEvent):
-                raise TypeError("proven market history must contain MarketEvent values")
+            if type(event) is not MarketEvent:
+                raise TypeError("proven market history must contain exact MarketEvent values")
             if type(append_generation) is not int or append_generation < 0:
                 raise ValueError(
                     "proven market history append generation must be non-negative"

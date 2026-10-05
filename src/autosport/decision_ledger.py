@@ -430,6 +430,16 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger payload contains future-result fields{location}"
             )
+        if MATERIAL_ACTION_ID_PAYLOAD_KEY in payload:
+            material_action_id = payload[MATERIAL_ACTION_ID_PAYLOAD_KEY]
+            if (
+                not isinstance(material_action_id, str)
+                or not material_action_id.strip()
+                or material_action_id != material_action_id.strip()
+            ):
+                raise DecisionLedgerIntegrityError(
+                    f"Decision Ledger material_action_id is invalid{location}"
+                )
         if (
             "decision_kind" in record
             and ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY not in payload
@@ -656,6 +666,10 @@ class JsonlDecisionLedger:
 
     def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
         self._assert_persistence_authority()
+        if self._writer_lock_path_authority.exists():
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer lock exists; verified snapshot is unavailable"
+            )
         try:
             raw = self._absolute_path_authority.read_bytes()
         except OSError as exc:
@@ -663,6 +677,10 @@ class JsonlDecisionLedger:
                 "Decision Ledger file is missing or unreadable"
             ) from exc
         self._assert_persistence_authority()
+        if self._writer_lock_path_authority.exists():
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer lock exists; verified snapshot is unavailable"
+            )
         record_count = self._verify_bytes(raw)
         return VerifiedDecisionLedgerSnapshot(
             payload=raw,

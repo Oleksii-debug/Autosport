@@ -1632,3 +1632,81 @@ def test_serialized_operation_rejects_in_place_closure_callable_code_mutation() 
 
     assert book.balance == Decimal("100")
 
+def _same_name_closure_callable(function, name: str):
+    return next(
+        cell.cell_contents
+        for cell in function.__closure__ or ()
+        if callable(cell.cell_contents)
+        and getattr(cell.cell_contents, "__name__", None) == name
+    )
+
+
+def test_constructor_rejects_in_place_wrapped_callable_code_mutation() -> None:
+    constructor = PaperBook.__init__
+    raw_constructor = _same_name_closure_callable(constructor, "__init__")
+    original_code = raw_constructor.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        raw_constructor.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="constructor callable authority changed"):
+            PaperBook("100")
+    finally:
+        raw_constructor.__code__ = original_code
+
+
+def test_open_ticket_rejects_in_place_nested_callable_code_mutation() -> None:
+    book = PaperBook("100")
+    serialized = PaperBook.open_ticket
+    runtime_guard = _same_name_closure_callable(serialized, "open_ticket")
+    transition_guard = _same_name_closure_callable(runtime_guard, "open_ticket")
+    raw_open = _same_name_closure_callable(transition_guard, "open_ticket")
+    original_code = raw_open.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        raw_open.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="open callable authority changed"):
+            book.open_ticket([_leg()], "10", placed_at=_TS)
+    finally:
+        raw_open.__code__ = original_code
+
+    assert book.balance == Decimal("100")
+    assert book.tickets == {}
+
+
+def test_save_rejects_in_place_nested_publish_callable_code_mutation(tmp_path) -> None:
+    book = PaperBook("100")
+    serialized = PaperBook.save
+    runtime_guard = _same_name_closure_callable(serialized, "save")
+    candidate_guard = _same_name_closure_callable(runtime_guard, "save")
+    publish_guard = _same_name_closure_callable(candidate_guard, "save")
+    original_code = publish_guard.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+    destination = tmp_path / "nested-publish-code-mutation.json"
+
+    try:
+        publish_guard.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="save candidate callable authority changed"):
+            book.save(destination)
+    finally:
+        publish_guard.__code__ = original_code
+
+    assert not destination.exists()
+
+
+def test_load_bytes_rejects_in_place_raw_decode_callable_code_mutation() -> None:
+    descriptor = PaperBook.__dict__["load_bytes"]
+    sealed = descriptor.__func__
+    raw_decode = _same_name_closure_callable(sealed, "load_bytes")
+    original_code = raw_decode.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+    payload = b'{"schema_version":7,"initial_bankroll":"100","balance":"100","tickets":[],"lifecycle":[]}'
+
+    try:
+        raw_decode.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="JSON decode callable authority changed"):
+            PaperBook.load_bytes(payload)
+    finally:
+        raw_decode.__code__ = original_code
+

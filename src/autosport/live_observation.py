@@ -66,10 +66,13 @@ def _validate_observation_ingress(
     if not source_id or source_id.strip() != source_id or "|" in source_id:
         raise ValueError("provider source_id must be canonical")
     if source_id == BETFAIR_STREAM_SOURCE_ID:
-        raise TypeError(
-            "Betfair Exchange Stream source requires the canonical authenticated "
-            "stream-to-provider bridge"
-        )
+        from .betfair_authenticated_provider import BetfairAuthenticatedMarketProvider
+
+        if type(provider) is not BetfairAuthenticatedMarketProvider:
+            raise TypeError(
+                "Betfair Exchange Stream source requires the canonical authenticated "
+                "stream-to-provider bridge"
+            )
     return effective_policy
 
 
@@ -573,6 +576,13 @@ def poll_open_market_store_once(
         policy=policy,
         clock=clock,
     )
+    if provider.source_id == BETFAIR_STREAM_SOURCE_ID:
+        from .betfair_authenticated_provider import BetfairAuthenticatedMarketProvider
+
+        if type(provider) is not BetfairAuthenticatedMarketProvider:
+            raise TypeError("noncanonical Betfair stream provider reached durable ingress")
+        if not provider.durable_bound:
+            provider.bind_durable_current(store.current_by_source())
 
     bus = MarketEventBus(store)
     bus.subscribe(mirror_updates.accept_persisted)
@@ -649,6 +659,14 @@ def observe_workspace_once(
                     persisted_event,
                     append_generation=append_generation,
                 )
+
+        if provider.source_id == BETFAIR_STREAM_SOURCE_ID:
+            from .betfair_authenticated_provider import BetfairAuthenticatedMarketProvider
+
+            if type(provider) is not BetfairAuthenticatedMarketProvider:
+                raise TypeError("noncanonical Betfair stream provider reached durable ingress")
+            if not provider.durable_bound:
+                provider.bind_durable_current(store.current_by_source())
 
         bus = MarketEventBus(store)
         bus.subscribe(mirror_updates.accept_persisted)

@@ -1232,6 +1232,51 @@ class LiveObservationTests(unittest.TestCase):
         self.assertEqual(result.stats.received, canonical.stats.received)
         result.validate()
 
+    def test_observation_result_binds_stats_to_durable_health_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        health_type = type(canonical.health)
+        stats_type = type(canonical.stats)
+
+        def health(**overrides):
+            values = {
+                name: getattr(canonical.health, name)
+                for name in canonical.health.__dataclass_fields__
+            }
+            values.update(overrides)
+            return health_type(**values)
+
+        with self.assertRaisesRegex(ValueError, "cursor must match"):
+            ObservationResult(
+                canonical.stats,
+                health(last_cursor="different-cursor"),
+                canonical.current_quotes,
+            )
+        with self.assertRaisesRegex(ValueError, "quality flags must match"):
+            ObservationResult(
+                canonical.stats,
+                health(quality_flags=("STALE_SOURCE",)),
+                canonical.current_quotes,
+            )
+
+        oversized_stats = stats_type(
+            canonical.stats.source_id,
+            canonical.health.total_received + 1,
+            0,
+            0,
+            canonical.stats.elapsed_seconds,
+            canonical.stats.cursor,
+            canonical.stats.quality_flags,
+            canonical.stats.health_status,
+        )
+        with self.assertRaisesRegex(ValueError, "cannot exceed durable source health totals"):
+            ObservationResult(
+                oversized_stats,
+                canonical.health,
+                canonical.current_quotes,
+            )
+
     def test_observation_result_rejects_noncanonical_snapshot_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             canonical = self._observe(tmp)

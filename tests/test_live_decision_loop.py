@@ -5628,6 +5628,86 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             resumed.close()
 
+    def test_registry_change_after_snapshot_capture_blocks_pending_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            original_market_sha = loop._market_state_sha256
+            mutated = [False]
+
+            def mutate_registry_after_capture():
+                value = original_market_sha()
+                if not mutated[0]:
+                    mutated[0] = True
+                    self.assertTrue(loop.unregister_input("input-a"))
+                    loop.register_input(
+                        "input-a",
+                        selection_ids="selection-b",
+                    )
+                return value
+
+            with (
+                patch.object(
+                    loop,
+                    "_market_state_sha256",
+                    side_effect=mutate_registry_after_capture,
+                ),
+                self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "registry changed after snapshot capture",
+                ),
+            ):
+                loop.run_cycle()
+
+            self.assertFalse(loop.progress_path.exists())
+            loop.close()
+
+    def test_unfinished_progress_blocks_dependency_registry_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            def fail_after_pending(_input_id, _snapshot):
+                raise RuntimeError("stop after pending")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            loop.intent_factory = fail_after_pending
+            with self.assertRaisesRegex(RuntimeError, "stop after pending"):
+                loop.run_cycle()
+
+            self.assertIsNotNone(loop._progress)
+            self.assertEqual(loop._progress.phase, "pending")
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "cannot unregister live input while economic progress is unfinished",
+            ):
+                loop.unregister_input("input-a")
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "cannot register live input while economic progress is unfinished",
+            ):
+                loop.register_input("input-b", selection_ids="selection-b")
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+            loop.close()
+
     def test_pending_frontier_allows_prior_same_time_live_decision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -198,6 +198,33 @@ def test_invalid_override_is_invalid_not_configuration_required():
 def test_payload_size_is_bounded():
     with pytest.raises(OperatorSourceConfigError, match="size"):
         parse_operator_source_config(b"x" * 4097)
+    with pytest.raises(OperatorSourceConfigError, match="size"):
+        parse_operator_source_config(memoryview(bytearray(4097)))
+
+
+def test_payload_subclasses_are_rejected_before_protocol_dispatch():
+    valid = build_operator_source_config("betfair-exchange").to_json_bytes()
+
+    class HostileBytes(bytes):
+        def __bytes__(self) -> bytes:
+            raise AssertionError("bytes subtype materialization must not execute")
+
+    class HostileBytearray(bytearray):
+        def __len__(self) -> int:
+            raise AssertionError("bytearray subtype length must not execute")
+
+    with pytest.raises(TypeError, match="exact bytes-like"):
+        parse_operator_source_config(HostileBytes(valid))
+    with pytest.raises(TypeError, match="exact bytes-like"):
+        parse_operator_source_config(HostileBytearray(valid))
+
+
+def test_released_memoryview_fails_closed_before_materialization():
+    view = memoryview(build_operator_source_config("betfair-exchange").to_json_bytes())
+    view.release()
+
+    with pytest.raises(OperatorSourceConfigError, match="cannot be inspected"):
+        parse_operator_source_config(view)
 
 
 def test_integrity_string_subclass_is_rejected_before_equality_dispatch():

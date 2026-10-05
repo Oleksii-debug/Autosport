@@ -556,6 +556,68 @@ def _seal_paperbook_open_transition_authority(method):
     return sealed
 
 
+def _seal_paperbook_snapshot_decode_authority(method):
+    """Inject closure-captured authority revocation into raw snapshot decoding."""
+    revoke_opening = _revoke_ticket_opening_authority
+    revoke_opening_code = revoke_opening.__code__
+    revoke_causal = _revoke_paperbook_causal_history_authority
+    revoke_causal_code = revoke_causal.__code__
+
+    def revoke(book: object) -> None:
+        if revoke_opening.__code__ is not revoke_opening_code:
+            raise ValueError("PaperBook opening revoke authority changed")
+        if revoke_causal.__code__ is not revoke_causal_code:
+            raise ValueError("PaperBook causal-history revoke authority changed")
+        revoke_opening(book)
+        if revoke_opening.__code__ is not revoke_opening_code:
+            raise ValueError("PaperBook opening revoke authority changed")
+        revoke_causal(book)
+        if revoke_causal.__code__ is not revoke_causal_code:
+            raise ValueError("PaperBook causal-history revoke authority changed")
+
+    @wraps(method)
+    def sealed(cls, *args, **kwargs):
+        if revoke_opening.__code__ is not revoke_opening_code:
+            raise ValueError("PaperBook opening revoke authority changed")
+        if revoke_causal.__code__ is not revoke_causal_code:
+            raise ValueError("PaperBook causal-history revoke authority changed")
+        return method(cls, *args, _snapshot_authority_revoke=revoke, **kwargs)
+
+    del sealed.__wrapped__
+    return sealed
+
+
+def _seal_paperbook_snapshot_install_authority(method):
+    """Inject closure-captured authority installation into trusted file load."""
+    install_opening = _install_validated_ticket_opening_authority
+    install_opening_code = install_opening.__code__
+    install_causal = _install_validated_paperbook_causal_history_authority
+    install_causal_code = install_causal.__code__
+
+    def install(book: object) -> None:
+        if install_opening.__code__ is not install_opening_code:
+            raise ValueError("PaperBook opening install authority changed")
+        if install_causal.__code__ is not install_causal_code:
+            raise ValueError("PaperBook causal-history install authority changed")
+        install_opening(book)
+        if install_opening.__code__ is not install_opening_code:
+            raise ValueError("PaperBook opening install authority changed")
+        install_causal(book)
+        if install_causal.__code__ is not install_causal_code:
+            raise ValueError("PaperBook causal-history install authority changed")
+
+    @wraps(method)
+    def sealed(cls, *args, **kwargs):
+        if install_opening.__code__ is not install_opening_code:
+            raise ValueError("PaperBook opening install authority changed")
+        if install_causal.__code__ is not install_causal_code:
+            raise ValueError("PaperBook causal-history install authority changed")
+        return method(cls, *args, _snapshot_authority_install=install, **kwargs)
+
+    del sealed.__wrapped__
+    return sealed
+
+
 def _seal_paperbook_save_candidate_authority(method):
     """Inject closure-captured snapshot candidate authorities into save."""
     opening_candidate = _require_snapshot_candidate_opening_authority
@@ -1585,7 +1647,13 @@ class PaperBook:
             ) from exc
 
     @classmethod
-    def _from_raw_snapshot(cls, raw: object) -> "PaperBook":
+    @_seal_paperbook_snapshot_decode_authority
+    def _from_raw_snapshot(
+        cls,
+        raw: object,
+        *,
+        _snapshot_authority_revoke=None,
+    ) -> "PaperBook":
         if type(raw) is not dict:
             raise ValueError("PaperBook snapshot root must be an object")
         schema_version = raw.get("schema_version", _SCHEMA_MISSING)
@@ -1748,8 +1816,7 @@ class PaperBook:
         cls._validate_loaded_state(book)
         # Decoding arbitrary bytes proves structure only. It must not mint the
         # product-issued opening authority needed for economic mutation/readout.
-        _revoke_ticket_opening_authority(book)
-        _revoke_paperbook_causal_history_authority(book)
+        _snapshot_authority_revoke(book)
         return book
 
     @classmethod
@@ -1771,8 +1838,13 @@ class PaperBook:
         return cls._from_raw_snapshot(raw)
 
     @classmethod
-    def load(cls, path: str | Path) -> "PaperBook":
+    @_seal_paperbook_snapshot_install_authority
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        _snapshot_authority_install=None,
+    ) -> "PaperBook":
         book = cls.load_bytes(cls._canonical_snapshot_path(path).read_bytes())
-        _install_validated_ticket_opening_authority(book)
-        _install_validated_paperbook_causal_history_authority(book)
+        _snapshot_authority_install(book)
         return book

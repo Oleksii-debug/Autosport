@@ -32,6 +32,9 @@ class IngestionStats:
     health_status: str = "unknown"
 
     def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
         if (
             type(self.source_id) is not str
             or not self.source_id

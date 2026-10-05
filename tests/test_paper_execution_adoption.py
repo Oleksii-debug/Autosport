@@ -1475,6 +1475,50 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(len(committed_book.tickets), 1)
             self.assertEqual(PaperBook.load(book_path).tickets, committed_book.tickets)
 
+    def test_live_batch_callback_mutation_rolls_back_prior_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            first = action("batch-atomic-a1", stake="10.00")
+            second = action("batch-atomic-a2", stake="10.00")
+            current_prepared = prepared(runtime, first, second)
+            second_binding = current_prepared.exposure_bindings[1]
+            original_open_ticket = PaperBook.open_ticket
+            live_calls = 0
+
+            def open_then_mutate_later_authority(target, *args, **kwargs):
+                nonlocal live_calls
+                ticket = original_open_ticket(target, *args, **kwargs)
+                if target is book:
+                    live_calls += 1
+                    if live_calls == 1:
+                        object.__setattr__(
+                            second_binding,
+                            "bankroll_id",
+                            "mutated-after-first-live-open",
+                        )
+                return ticket
+
+            with patch.object(
+                PaperBook,
+                "open_ticket",
+                open_then_mutate_later_authority,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "authority changed after mint",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="trigger-batch-atomic-callback",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(live_calls, 1)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(book.committed_capital, Decimal("0"))
+
     def test_second_action_rejection_keeps_only_first_accepted_exposure(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

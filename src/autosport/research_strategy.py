@@ -290,7 +290,7 @@ class ResearchStrategyPlan:
         if source_sha256 is None:
             canonical = _canonical_plan_json(raw)
             source_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return cls(instructions, source_sha256.lower())
+        return cls(instructions, source_sha256)
 
     def preflight(self, events: Iterable[MarketEvent]) -> None:
         """Bind every planned decision to the same causal replay state before economic mutation."""

@@ -29,6 +29,7 @@ _ORIGINAL_DEBIT_BALANCE = _paper.PaperBook._debit_balance.__func__
 _ORIGINAL_VALIDATE_PLACED_AT = _paper.PaperBook._validate_placed_at.__func__
 _ORIGINAL_REQUIRE_UTF8_STRING = _paper.PaperBook._require_utf8_string
 _ORIGINAL_VALIDATE_TICKET_PROVENANCE = _paper.PaperBook._validate_ticket_provenance.__func__
+_ORIGINAL_CANONICAL_DECIMAL_INPUT = getattr(_paper.PaperBook, "_canonical_decimal_input", None)
 
 
 def _paperbook_operation_context(book: _paper.PaperBook):
@@ -42,7 +43,7 @@ def _paperbook_operation_context(book: _paper.PaperBook):
 
 def _canonical_open_legs(legs):
     """Preserve the canonical exact-container ingress once PaperBook provides it."""
-    if hasattr(_paper.PaperBook, "_canonical_decimal_input") and type(legs) not in {
+    if _ORIGINAL_CANONICAL_DECIMAL_INPUT is not None and type(legs) not in {
         list,
         tuple,
     }:
@@ -51,12 +52,28 @@ def _canonical_open_legs(legs):
 
 
 def _canonical_open_stake(book: _paper.PaperBook, stake) -> Decimal:
-    parser = getattr(_paper.PaperBook, "_canonical_decimal_input", None)
-    if parser is not None:
-        return parser(stake, "stake")
+    if _ORIGINAL_CANONICAL_DECIMAL_INPUT is not None:
+        return _ORIGINAL_CANONICAL_DECIMAL_INPUT(stake, "stake")
     amount = Decimal(str(stake))
     _ORIGINAL_REQUIRE_FINITE(amount, "stake")
     return amount
+
+
+def _canonical_lay_debit_balance(balance: Decimal, amount: Decimal) -> Decimal:
+    _ORIGINAL_REQUIRE_FINITE(balance, "balance")
+    _ORIGINAL_REQUIRE_FINITE(amount, "stake")
+    if amount <= 0:
+        raise ValueError("stake must be positive")
+    if amount > balance:
+        raise ValueError("insufficient virtual bankroll")
+    try:
+        with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+            new_balance = balance - amount
+            if context.flags[Inexact]:
+                raise ValueError("PaperBook stake debit loses Decimal precision")
+    except DecimalException as exc:
+        raise ValueError("PaperBook stake debit arithmetic is not representable") from exc
+    return new_balance
 
 
 def _is_lay_leg(leg: object) -> bool:
@@ -176,7 +193,7 @@ def _open_ticket_unlocked(
         odds=leg.locked_odds,
         exchange_side="LAY",
     )
-    new_balance = _ORIGINAL_DEBIT_BALANCE(_paper.PaperBook, self.balance, locked_capital)
+    new_balance = _canonical_lay_debit_balance(self.balance, locked_capital)
 
     ticket_placed_at = _ORIGINAL_VALIDATE_PLACED_AT(
         _paper.PaperBook,

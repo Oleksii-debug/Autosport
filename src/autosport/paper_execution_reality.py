@@ -731,6 +731,12 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     key=lambda item: item.sequence,
                 )
             )
+            for durable_attempt in attempts:
+                _require_durable_attempt_evidence_binding(
+                    events=events,
+                    reservation_payload=reservations[0]["payload"],
+                    attempt=durable_attempt,
+                )
             derived = _derive_run_economics(tuple(action_ids_raw), attempts)
             if not derived.can_complete:
                 raise PaperExecutionStateError(
@@ -851,6 +857,12 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 key=lambda item: item.sequence,
             )
         )
+        for durable_attempt in attempts:
+            _require_durable_attempt_evidence_binding(
+                events=events,
+                reservation_payload=durable_reserve,
+                attempt=durable_attempt,
+            )
         derived = _derive_run_economics(
             action_ids,
             attempts,

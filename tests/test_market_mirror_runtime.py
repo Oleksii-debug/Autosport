@@ -1114,6 +1114,52 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             dependencies.all_matching_keys(),
         )
 
+    def test_incremental_view_falls_back_when_key_index_revision_is_stale(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.event(selection="selection-a", sequence=1)
+        runtime.accept_persisted(first)
+        runtime.drain()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+
+        second = self.event(selection="selection-b", sequence=1)
+        mirror.apply(second)
+
+        with patch.object(mirror, "active_view", wraps=mirror.active_view) as full_view:
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(
+            tuple(sorted(event.quote_key for event in snapshot.events)),
+            tuple(sorted((first.quote_key, second.quote_key))),
+        )
+        full_view.assert_called_once()
+
+    def test_incremental_view_stays_bounded_after_routed_revision(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        event = self.event(sequence=1)
+        runtime.accept_persisted(event)
+        dependencies.affected_inputs(runtime.drain())
+
+        with patch.object(
+            mirror,
+            "active_view",
+            side_effect=AssertionError("full focused fallback is forbidden"),
+        ):
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(snapshot.events, (event,))
     def test_focused_dependency_overflow_fails_safe_to_all_registered_inputs(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=1)
@@ -1142,15 +1188,18 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             full_refresh_required=True,
             has_more=False,
         )
-        original_snapshot = mirror.snapshot
+        original_view = mirror.view
+        raced = [False]
 
-        def race_registry():
-            snapshot = original_snapshot()
-            self.assertTrue(dependencies.unregister("old"))
-            dependencies.register("new", source_ids="provider-a")
+        def race_registry(*args, **kwargs):
+            snapshot = original_view(*args, **kwargs)
+            if not raced[0]:
+                raced[0] = True
+                self.assertTrue(dependencies.unregister("old"))
+                dependencies.register("new", source_ids="provider-a")
             return snapshot
 
-        with patch.object(mirror, "snapshot", side_effect=race_registry):
+        with patch.object(mirror, "view", side_effect=race_registry):
             affected = dependencies.affected_inputs(batch)
 
         self.assertEqual(affected, ("new",))

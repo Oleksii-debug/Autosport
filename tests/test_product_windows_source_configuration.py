@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,7 +10,10 @@ from autosport.operator_source_configuration import (
     OperatorSourceConfigurationError,
 )
 from autosport.operator_source_registry import resolve_product_source_entry
-from autosport.product_windows_gui import ProductWindowsAutosportApp
+from autosport.product_windows_gui import (
+    ProductWindowsAutosportApp,
+    _bind_product_workspace_environment,
+)
 
 
 class _Value:
@@ -67,6 +71,68 @@ def _start_surface(tmp_path: Path) -> SimpleNamespace:
     surface._active_workspace = surface.workspace
     surface._recovery_view = None
     return surface
+
+
+def test_missing_product_workspace_env_binds_to_gui_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = (tmp_path / "workspace").resolve()
+
+    with patch.dict(os.environ, {}, clear=True):
+        _bind_product_workspace_environment(workspace)
+
+        assert os.environ["AUTOSPORT_PRODUCT_WORKSPACE"] == str(workspace)
+
+
+def test_conflicting_product_workspace_fails_before_runtime_or_session_teardown(
+    tmp_path: Path,
+) -> None:
+    surface = _start_surface(tmp_path)
+    teardown_calls: list[str] = []
+    surface._hide_uncertain_economic_state = lambda _message: (
+        teardown_calls.append("teardown") or True
+    )
+    conflicting = (tmp_path / "other-workspace").resolve()
+
+    with (
+        patch.dict(
+            os.environ,
+            {"AUTOSPORT_PRODUCT_WORKSPACE": str(conflicting)},
+            clear=True,
+        ),
+        patch(
+            "autosport.product_windows_gui.load_operator_source_configuration",
+            return_value=_configured(),
+        ),
+    ):
+        ProductWindowsAutosportApp.start_product_runtime(surface)
+
+    assert teardown_calls == []
+    assert surface.product_worker.started == []
+    assert "не збігається" in surface.product_status.value
+
+
+def test_changed_gui_workspace_env_fails_before_runtime_side_effects(
+    tmp_path: Path,
+) -> None:
+    surface = _start_surface(tmp_path)
+    changed_gui_workspace = (tmp_path / "changed-gui-workspace").resolve()
+
+    with (
+        patch.dict(
+            os.environ,
+            {"AUTOSPORT_WORKSPACE": str(changed_gui_workspace)},
+            clear=True,
+        ),
+        patch(
+            "autosport.product_windows_gui.load_operator_source_configuration",
+            return_value=_configured(),
+        ),
+    ):
+        ProductWindowsAutosportApp.start_product_runtime(surface)
+
+    assert surface.product_worker.started == []
+    assert "не збігається" in surface.product_status.value
 
 
 def test_start_requires_persisted_source_configuration(tmp_path: Path) -> None:

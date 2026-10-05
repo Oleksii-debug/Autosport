@@ -2526,14 +2526,23 @@ class PersistentLiveDecisionLoop:
     def _assert_canonical_persistence_authority(
         self,
         *,
+        expected_live_mode: LiveDecisionMode,
         expected_execution_model_fingerprint: str | None = None,
     ) -> None:
+        if self.mode is not expected_live_mode:
+            raise LiveDecisionProgressError(
+                "live decision mode authority changed after decision preparation"
+            )
         canonical_decision_ledger = self.workspace / "decisions.jsonl"
         if self.decision_ledger.path != canonical_decision_ledger:
             raise LiveDecisionProgressError(
                 "live Decision Ledger persistence authority changed after construction"
             )
         if self.paper_execution is None:
+            if expected_execution_model_fingerprint is not None:
+                raise LiveDecisionProgressError(
+                    "PAPER execution authority disappeared after decision preparation"
+                )
             return
         if self.paper_execution.book is not self.book:
             raise LiveDecisionProgressError(
@@ -2567,6 +2576,7 @@ class PersistentLiveDecisionLoop:
         detail: str = "",
         decision_context_sha256_override: str | None = None,
     ) -> LiveCycleResult:
+        expected_live_mode = self.mode
         if decision_context_sha256_override is None:
             decision_context_sha256 = self._decision_context_sha256()
         else:
@@ -2609,6 +2619,7 @@ class PersistentLiveDecisionLoop:
                 }
 
         self._assert_canonical_persistence_authority(
+            expected_live_mode=expected_live_mode,
             expected_execution_model_fingerprint=(
                 None
                 if expected_execution_payload is None
@@ -2667,6 +2678,7 @@ class PersistentLiveDecisionLoop:
             self.dependencies.registry_mutation_guard(),
         ):
             self._assert_canonical_persistence_authority(
+                expected_live_mode=expected_live_mode,
                 expected_execution_model_fingerprint=(
                     None
                     if expected_execution_payload is None
@@ -2867,6 +2879,7 @@ class PersistentLiveDecisionLoop:
             # the exact run instead of fabricating a fresh fill.
             if prepared_execution is not None:
                 self._assert_canonical_persistence_authority(
+                    expected_live_mode=expected_live_mode,
                     expected_execution_model_fingerprint=expected_execution_payload[
                         "model_fingerprint"
                     ]
@@ -2875,7 +2888,7 @@ class PersistentLiveDecisionLoop:
                     prepared=prepared_execution,
                     trigger_id=decision_id,
                     started_at=plan.decision_ts,
-                    materialize_exposure=(self.mode is LiveDecisionMode.PAPER),
+                    materialize_exposure=(expected_live_mode is LiveDecisionMode.PAPER),
                 )
                 assert expected_execution_payload is not None
                 if execution_result.run.run_id != expected_execution_payload["run_id"]:

@@ -62,6 +62,24 @@ def test_lay_locked_capital_accepts_each_exact_domain_vocabulary(
     ) == Decimal("40")
 
 
+def test_liability_api_exposes_no_authority_override_kwargs() -> None:
+    with pytest.raises(TypeError):
+        locked_capital_for_exchange_side(
+            stake=Decimal("10"),
+            odds=Decimal("5"),
+            exchange_side="LAY",
+            _multiply=lambda _left, _right: Decimal("0"),  # type: ignore[call-arg]
+        )
+
+    with pytest.raises(TypeError):
+        locked_capital_for_exchange_side(
+            stake=Decimal("10"),
+            odds=Decimal("5"),
+            exchange_side="ATTACKER",
+            _supported_sides=frozenset({"ATTACKER"}),  # type: ignore[call-arg]
+        )
+
+
 def test_lay_liability_ignores_module_helper_rebinding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

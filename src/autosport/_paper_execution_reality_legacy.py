@@ -11,7 +11,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
-from .real_execution_ledger import ExecutionAction, ExecutionPlan
+from .real_execution_ledger import (
+    ExecutionAction,
+    ExecutionPlan,
+    _validate_decimal_text_resource_bound,
+)
 
 
 _SCHEMA_VERSION = 2
@@ -78,18 +82,24 @@ def _timestamp_text(value: datetime) -> str:
 
 def _decimal(value: object, name: str, *, allow_zero: bool = False) -> Decimal:
     try:
-        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+        parsed = value if type(value) is Decimal else Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError) as exc:
         raise ValueError(f"{name} must be a finite Decimal") from exc
     if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
         comparator = ">= 0" if allow_zero else "> 0"
         raise ValueError(f"{name} must be finite and {comparator}")
+    # Reuse the execution-ledger fixed-point resource law before any durable
+    # Decimal formatting can allocate a potentially enormous expanded string.
+    _validate_decimal_text_resource_bound(parsed)
     return parsed
 
 
 def _decimal_text(value: Decimal) -> str:
-    if not value.is_finite():
+    if type(value) is not Decimal or not value.is_finite():
         raise ValueError("Decimal must be finite")
+    # This is a second defensive preflight for caller-mutated frozen records:
+    # never reach format(..., "f") before the canonical resource policy agrees.
+    _validate_decimal_text_resource_bound(value)
     return format(value, "f")
 
 

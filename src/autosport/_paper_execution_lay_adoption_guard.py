@@ -481,6 +481,97 @@ def _preflight_adoption_inputs(
     return observation_snapshot
 
 
+def _preflight_materialization_batch(
+    self: PaperExecutionAdoptionRuntime,
+    candidates: list[tuple[object, ExecutionAction, PaperExposureBinding]],
+    *,
+    decision_id: str,
+) -> None:
+    """Prove the complete accepted batch against a detached PaperBook first."""
+    if not candidates:
+        return
+    _require_runtime_authority(self)
+    try:
+        type(self.book)._validate_loaded_state(self.book)
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "PaperBook state is invalid before batch materialization preflight"
+        ) from exc
+
+    shadow = _adoption.copy.deepcopy(self.book)
+    if type(shadow) is not _adoption.PaperBook:
+        raise PaperExecutionAdoptionError(
+            "batch materialization preflight requires exact PaperBook authority"
+        )
+    try:
+        type(shadow)._validate_loaded_state(shadow)
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "batch materialization preflight snapshot is invalid"
+        ) from exc
+
+    for attempt, action, binding in candidates:
+        _require_materialization_authority(action, binding)
+        side = _require_action_side(action)
+        self._require_attempt_action_identity(attempt, action)
+        if attempt.execution_odds is None or attempt.execution_stake is None:
+            raise PaperExecutionAdoptionError(
+                "accepted-equivalent attempt lacks execution odds/stake"
+            )
+
+        marker = f"{self._TICKET_MARKER}{attempt.attempt_id}"
+        matches = [
+            ticket
+            for ticket in shadow.tickets.values()
+            if marker in ticket.strategy_reason
+        ]
+        if len(matches) > 1:
+            raise PaperExecutionAdoptionError(
+                "PaperBook contains duplicate exposure for one execution attempt"
+            )
+        if matches:
+            if not self._ticket_matches_attempt(
+                ticket=matches[0],
+                attempt=attempt,
+                action=action,
+                binding=binding,
+            ):
+                raise PaperExecutionAdoptionError(
+                    "existing PaperBook exposure conflicts with durable execution attempt"
+                )
+            continue
+
+        shadow.open_ticket(
+            [
+                TicketLeg(
+                    event_id=attempt.event_id,
+                    market_id=attempt.market_id,
+                    selection_id=attempt.selection_id,
+                    locked_odds=attempt.execution_odds,
+                    sport=binding.sport,
+                    exchange_side=side.lower(),
+                )
+            ],
+            attempt.execution_stake,
+            reason=(
+                f"paper execution adoption; decision_id={decision_id}; "
+                f"run_id={attempt.run_id}; {marker}"
+            ),
+            placed_at=attempt.execution_observed_at,
+            provider_source_ids=(attempt.bookmaker_id,),
+            provider_accounts=((attempt.bookmaker_id, attempt.account_id),),
+            bankroll_id=binding.bankroll_id,
+            currency=binding.currency,
+        )
+
+    try:
+        type(shadow)._validate_loaded_state(shadow)
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "batch materialization preflight produced invalid PaperBook state"
+        ) from exc
+
+
 def _execute_unlocked(
     self: PaperExecutionAdoptionRuntime,
     *,
@@ -540,8 +631,9 @@ def _execute_unlocked(
     binding_by_id = {
         binding.action_id: binding for binding in prepared.exposure_bindings
     }
-    ticket_ids: list[str] = []
-    accepted_attempts = []
+    accepted_attempts: list[
+        tuple[object, ExecutionAction, PaperExposureBinding]
+    ] = []
     for attempt in run.attempts:
         if attempt.outcome not in {
             _adoption.PaperAttemptOutcome.ACCEPTED,
@@ -554,6 +646,16 @@ def _execute_unlocked(
             raise PaperExecutionAdoptionError(
                 "canonical execution attempt is not bound to prepared authority"
             )
+        accepted_attempts.append((attempt, action, binding))
+
+    _preflight_materialization_batch(
+        self,
+        accepted_attempts,
+        decision_id=prepared.execution_plan.decision_id,
+    )
+
+    ticket_ids: list[str] = []
+    for attempt, action, binding in accepted_attempts:
         ticket = self._materialize_attempt(
             attempt=attempt,
             action=action,
@@ -561,7 +663,6 @@ def _execute_unlocked(
             decision_id=prepared.execution_plan.decision_id,
         )
         ticket_ids.append(ticket.ticket_id)
-        accepted_attempts.append((attempt, action, binding))
 
     if accepted_attempts:
         # Materialization/domain code is another mutation boundary. Validate the

@@ -75,9 +75,14 @@ def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
 
 
 def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
-    sign = 1 if coefficient < 0 else 0
-    digits = tuple(int(ch) for ch in str(abs(coefficient)))
-    value = _DECIMAL_TYPE((sign, digits, exponent))
+    # Reconstruct through Decimal(int), which is exact and bypasses Python's
+    # process-global int-to-string digit limit. The product-owned Decimal
+    # resource validator remains the sole admission policy for the resulting
+    # fixed-point economic value.
+    coefficient_parts = _DECIMAL_TYPE(coefficient).as_tuple()
+    value = _DECIMAL_TYPE(
+        (coefficient_parts.sign, coefficient_parts.digits, exponent)
+    )
     _RESOURCE_BOUND_VALIDATOR(value)
     return value
 

@@ -269,11 +269,48 @@ class PaperExecutionAdoptionRuntime:
         )
         if self.max_quote_age <= timedelta(0):
             raise ValueError("effective max_quote_age must be positive")
+        self._book_authority = self.book
+        self._ledger_authority = self.ledger
+        self._config_authority = self.config
+        self._config_fingerprint_authority = self.config.fingerprint
+        self._paper_book_path_authority = self.paper_book_path
+        self._max_quote_age_authority = self.max_quote_age
+        self._execution_lock_authority = self._execution_lock
+
+    def _assert_runtime_authority(self) -> None:
+        if self.book is not self._book_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution PaperBook authority changed after construction"
+            )
+        if self.ledger is not self._ledger_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution ledger authority changed after construction"
+            )
+        if self.config is not self._config_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution model authority changed after construction"
+            )
+        if self.config.fingerprint != self._config_fingerprint_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution model semantics changed after construction"
+            )
+        if self.paper_book_path != self._paper_book_path_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution PaperBook path authority changed after construction"
+            )
+        if self.max_quote_age != self._max_quote_age_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution quote-age authority changed after construction"
+            )
+        if self._execution_lock is not self._execution_lock_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution serialization authority changed after construction"
+            )
 
     def _mint_prepared(self, prepared: PreparedPaperExecution) -> PreparedPaperExecution:
         if not isinstance(prepared, PreparedPaperExecution):
             raise TypeError("prepared must be PreparedPaperExecution")
-        with self._execution_lock:
+        with self.execution_guard():
             pre_run_book = copy.deepcopy(self.book)
             if not self._same_book_state(self.book, pre_run_book):
                 raise PaperExecutionAdoptionError(
@@ -307,6 +344,7 @@ class PaperExecutionAdoptionRuntime:
         intents: tuple[OpportunityIntent, ...],
         decision_id: str,
     ) -> PreparedPaperExecution | None:
+        self._assert_runtime_authority()
         if not isinstance(plan, PortfolioPlan):
             raise TypeError("plan must be PortfolioPlan")
         if type(intents) is not tuple or any(
@@ -861,8 +899,12 @@ class PaperExecutionAdoptionRuntime:
     @contextmanager
     def execution_guard(self) -> Iterator[None]:
         """Hold canonical paper-execution serialization across risk revalidation."""
-        with self._execution_lock:
+        self._assert_runtime_authority()
+        lock = self._execution_lock_authority
+        with lock:
+            self._assert_runtime_authority()
             yield
+            self._assert_runtime_authority()
 
     def execute(
         self,
@@ -875,7 +917,7 @@ class PaperExecutionAdoptionRuntime:
         evidence_registry: PaperExecutionEvidenceRegistry | None = None,
         suspended_action_ids: frozenset[str] = frozenset(),
     ) -> PaperExecutionAdoptionResult:
-        with self._execution_lock:
+        with self.execution_guard():
             return self._execute_unlocked(
                 prepared=prepared,
                 trigger_id=trigger_id,

@@ -60,6 +60,14 @@ def _build_product_entrypoint():
             and canonical_ledger_init.__code__ is canonical_ledger_init_code
         )
 
+    def reopen_graph_unchanged() -> bool:
+        return (
+            canonical_store_type.__init__ is canonical_store_init
+            and canonical_store_init.__code__ is canonical_store_init_code
+            and canonical_ledger_type.__init__ is canonical_ledger_init
+            and canonical_ledger_init.__code__ is canonical_ledger_init_code
+        )
+
     def require_runtime(
         runtime_profile: object,
         *,
@@ -158,6 +166,10 @@ def _build_product_entrypoint():
         # the caller-provided handle.
         canonical_store = canonical_store_type(workspace)
         canonical_ledger = canonical_ledger_type(ledger_path)
+        if not reopen_graph_unchanged():
+            raise BetfairStandardLimitPriceBoundError(
+                "canonical Betfair product verifier reopen authority changed"
+            )
 
         # Re-resolve after path canonicalization/re-open and again after the pure
         # verifier. If runtime/profile authority is revoked concurrently, no

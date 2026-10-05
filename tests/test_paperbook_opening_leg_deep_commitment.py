@@ -1154,3 +1154,113 @@ def test_snapshot_decimal_text_size_limit_applies_to_serialized_ingress() -> Non
     oversized = "1" * 513
     with pytest.raises(ValueError, match="decimal text exceeds the canonical size limit"):
         PaperBook._parse_snapshot_decimal(oversized, "stake")
+
+
+def test_open_ticket_never_executes_rebound_opening_write_authority(monkeypatch) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound opening write authority executed")
+
+    monkeypatch.setattr(paper_module, "_record_ticket_opening_authority", hostile)
+
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+
+    assert ticket.status.value == "open"
+    assert book.committed_stake == Decimal("10")
+    assert attacker_calls == 0
+
+
+def test_open_ticket_never_executes_rebound_causal_open_write_authority(
+    monkeypatch,
+) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound causal open write authority executed")
+
+    monkeypatch.setattr(
+        paper_module, "_advance_paperbook_causal_history_open", hostile
+    )
+
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+
+    assert ticket.status.value == "open"
+    assert book.committed_stake == Decimal("10")
+    assert attacker_calls == 0
+
+
+def test_settle_never_executes_rebound_causal_settle_write_authority(
+    monkeypatch,
+) -> None:
+    book = PaperBook("100")
+    leg = _leg()
+    ticket = book.open_ticket([leg], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound causal settle write authority executed")
+
+    monkeypatch.setattr(
+        paper_module, "_advance_paperbook_causal_history_settle", hostile
+    )
+
+    settled = book.settle(ticket.ticket_id, {leg.quote_key}, settled_at=_TS)
+
+    assert settled.status.value == "won"
+    assert book.committed_stake == Decimal("0")
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("authority_name", "operation", "message"),
+    (
+        (
+            "_record_ticket_opening_authority",
+            "open",
+            "opening write authority changed",
+        ),
+        (
+            "_advance_paperbook_causal_history_open",
+            "open",
+            "causal-history open write authority changed",
+        ),
+        (
+            "_advance_paperbook_causal_history_settle",
+            "settle",
+            "causal-history settle write authority changed",
+        ),
+    ),
+)
+def test_public_mutations_reject_in_place_write_authority_code_mutation(
+    authority_name: str,
+    operation: str,
+    message: str,
+) -> None:
+    book = PaperBook("100")
+    leg = _leg()
+    ticket = None
+    if operation == "settle":
+        ticket = book.open_ticket([leg], "10", placed_at=_TS)
+
+    authority = getattr(paper_module, authority_name)
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match=message):
+            if operation == "open":
+                book.open_ticket([leg], "10", placed_at=_TS)
+            else:
+                book.settle(ticket.ticket_id, {leg.quote_key}, settled_at=_TS)
+    finally:
+        authority.__code__ = original_code

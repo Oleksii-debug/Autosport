@@ -158,6 +158,13 @@ def _open_ticket_unlocked(
             "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
         )
 
+    # These containers are written after the economic debit. Require their exact
+    # built-in authority before validation so a patched fallback validator cannot
+    # admit caller-controlled append/mapping dispatch on the first LAY ticket.
+    if type(self._lifecycle) is not list:
+        raise ValueError("PaperBook lifecycle must be a canonical list")
+    if type(self._settlement_times) is not dict:
+        raise ValueError("PaperBook settlement-time witness must be a canonical mapping")
     _validate_loaded_state(_paper.PaperBook, self)
     _paper._require_ticket_opening_authority(self)
     _paper._require_paperbook_causal_history_authority(self)

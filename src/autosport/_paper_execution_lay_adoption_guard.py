@@ -708,8 +708,9 @@ def _execute_unlocked(
     )
 
     ticket_ids: list[str] = []
+    materialization_book = self.book
     pre_materialization_book = (
-        _authorized_paperbook_copy(self.book) if accepted_attempts else None
+        _authorized_paperbook_copy(materialization_book) if accepted_attempts else None
     )
     try:
         for attempt, action, binding in accepted_attempts:
@@ -736,7 +737,10 @@ def _execute_unlocked(
                 ) from exc
     except Exception:
         if pre_materialization_book is not None:
-            _restore_paperbook_from_snapshot(self.book, pre_materialization_book)
+            _restore_paperbook_from_snapshot(
+                materialization_book,
+                pre_materialization_book,
+            )
         raise
 
     if accepted_attempts:

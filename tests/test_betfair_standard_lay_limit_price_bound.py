@@ -11,6 +11,7 @@ import pytest
 from autosport.betfair_standard_lay_limit_price_bound import (
     BetfairStandardLayLimitPriceBoundError,
     BetfairStandardLayLimitPriceBoundEvidence,
+    require_betfair_standard_lay_limit_price_bound,
     resolve_betfair_standard_lay_limit_price_bound,
 )
 
@@ -118,6 +119,48 @@ def test_evidence_serialization_is_deterministic_and_truth_bounded() -> None:
     assert first["fill_proven"] is False
     assert first["real_money_execution_proven"] is False
 
+
+def test_forged_exact_evidence_cannot_authorize_without_request_re_resolution() -> None:
+    body = _body()
+    issued = resolve_betfair_standard_lay_limit_price_bound(body)
+    forged = object.__new__(BetfairStandardLayLimitPriceBoundEvidence)
+    for item in fields(BetfairStandardLayLimitPriceBoundEvidence):
+        object.__setattr__(forged, item.name, getattr(issued, item.name))
+
+    canonical = require_betfair_standard_lay_limit_price_bound(body, forged)
+
+    assert canonical is not forged
+    assert canonical.to_dict() == issued.to_dict()
+
+
+def test_forged_evidence_cannot_cross_bind_different_request_bytes() -> None:
+    body = _body()
+    issued = resolve_betfair_standard_lay_limit_price_bound(body)
+    forged = object.__new__(BetfairStandardLayLimitPriceBoundEvidence)
+    for item in fields(BetfairStandardLayLimitPriceBoundEvidence):
+        object.__setattr__(forged, item.name, getattr(issued, item.name))
+
+    changed = _request()
+    changed["params"]["instructions"][0]["limitOrder"]["price"] = "3.25"  # type: ignore[index]
+
+    with pytest.raises(
+        BetfairStandardLayLimitPriceBoundError,
+        match="does not match exact request re-resolution",
+    ):
+        require_betfair_standard_lay_limit_price_bound(_body(changed), forged)
+
+
+def test_require_rejects_evidence_subclass_before_re_resolution() -> None:
+    class DerivedEvidence(BetfairStandardLayLimitPriceBoundEvidence):
+        pass
+
+    derived = object.__new__(DerivedEvidence)
+
+    with pytest.raises(
+        BetfairStandardLayLimitPriceBoundError,
+        match="exact canonical evidence type",
+    ):
+        require_betfair_standard_lay_limit_price_bound(_body(), derived)
 
 def test_evidence_cannot_be_caller_constructed() -> None:
     with pytest.raises(BetfairStandardLayLimitPriceBoundError, match="issued only"):

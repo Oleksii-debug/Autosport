@@ -1371,6 +1371,72 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(len(snapshot.events), 1)
         self.assertEqual(snapshot.events[0].source_id, "provider-c")
 
+    def test_current_history_view_retries_dependency_replacement(self) -> None:
+        mirror = MarketMirror()
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        mirror.apply(provider_a)
+        mirror.apply(provider_b)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        reads = [0]
+
+        def fake_history(_store, **kwargs):
+            snapshot = mirror.active_view(**kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        with patch.object(
+            MarketMirror,
+            "current_history_view_from_store",
+            side_effect=fake_history,
+        ):
+            snapshot = dependencies.current_history_view(
+                "decision",
+                object(),
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(snapshot.events, (provider_b,))
+
+    def test_replay_view_retries_dependency_replacement(self) -> None:
+        mirror = MarketMirror()
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        mirror.apply(provider_a)
+        mirror.apply(provider_b)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        reads = [0]
+
+        def fake_replay(_store, **kwargs):
+            snapshot = mirror.active_view(**kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        with patch.object(
+            MarketMirror,
+            "replay_view_from_store",
+            side_effect=fake_replay,
+        ):
+            snapshot = dependencies.replay_view(
+                "decision",
+                object(),
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(snapshot.events, (provider_b,))
+
     def test_decision_view_retries_dependency_replacement_during_read(self) -> None:
         mirror = MarketMirror()
         provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)

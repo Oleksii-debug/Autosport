@@ -25,6 +25,7 @@ from . import monotonic_workspace_authority as _monotonic_module
 from . import json_integrity as _json_integrity_module
 from . import integrity as _integrity_module
 from . import workspace_lock as _workspace_lock_module
+from . import supervised_execution as _supervised_module
 from .betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
@@ -217,6 +218,23 @@ def _build_product_verifier():
     bound_verify_code = bound_verify.__code__
     bound_action_for = BoundSupervisedExecutionPlan.action_for
     bound_action_for_code = bound_action_for.__code__
+    bound_binding_helper = _supervised_module._bound_binding_sha256
+    bound_binding_helper_code = bound_binding_helper.__code__
+    supervised_digest = _supervised_module._digest
+    supervised_digest_code = supervised_digest.__code__
+    supervised_json_dumps = _supervised_module.json.dumps
+    supervised_json_dumps_code = supervised_json_dumps.__code__
+    supervised_hash_constructor = _supervised_module.hashlib.sha256
+    execution_plan_to_dict = _supervised_module.ExecutionPlan.to_dict
+    execution_plan_to_dict_code = execution_plan_to_dict.__code__
+    execution_plan_fingerprint_getter = _supervised_module.ExecutionPlan.fingerprint.fget
+    execution_plan_fingerprint_getter_code = execution_plan_fingerprint_getter.__code__
+    constraint_to_dict = _supervised_module.ExecutionLegConstraint.to_dict
+    constraint_to_dict_code = constraint_to_dict.__code__
+    approval_fingerprint_getter = _supervised_module.SupervisedApproval.fingerprint.fget
+    approval_fingerprint_getter_code = approval_fingerprint_getter.__code__
+    approval_ledger_identity_getter = _supervised_module.SupervisedApproval.ledger_identity.fget
+    approval_ledger_identity_getter_code = approval_ledger_identity_getter.__code__
     issuance_load = issuance_store_cls.load
     issuance_load_code = issuance_load.__code__
     issuance_load_locked = issuance_store_cls._load_locked
@@ -441,6 +459,23 @@ def _build_product_verifier():
             or bound_verify.__code__ is not bound_verify_code
             or BoundSupervisedExecutionPlan.action_for is not bound_action_for
             or bound_action_for.__code__ is not bound_action_for_code
+            or _supervised_module._bound_binding_sha256 is not bound_binding_helper
+            or bound_binding_helper.__code__ is not bound_binding_helper_code
+            or _supervised_module._digest is not supervised_digest
+            or supervised_digest.__code__ is not supervised_digest_code
+            or _supervised_module.json.dumps is not supervised_json_dumps
+            or supervised_json_dumps.__code__ is not supervised_json_dumps_code
+            or _supervised_module.hashlib.sha256 is not supervised_hash_constructor
+            or _supervised_module.ExecutionPlan.to_dict is not execution_plan_to_dict
+            or execution_plan_to_dict.__code__ is not execution_plan_to_dict_code
+            or _supervised_module.ExecutionPlan.fingerprint.fget is not execution_plan_fingerprint_getter
+            or execution_plan_fingerprint_getter.__code__ is not execution_plan_fingerprint_getter_code
+            or _supervised_module.ExecutionLegConstraint.to_dict is not constraint_to_dict
+            or constraint_to_dict.__code__ is not constraint_to_dict_code
+            or _supervised_module.SupervisedApproval.fingerprint.fget is not approval_fingerprint_getter
+            or approval_fingerprint_getter.__code__ is not approval_fingerprint_getter_code
+            or _supervised_module.SupervisedApproval.ledger_identity.fget is not approval_ledger_identity_getter
+            or approval_ledger_identity_getter.__code__ is not approval_ledger_identity_getter_code
         ):
             raise error_cls(
                 "canonical Betfair bound-plan dependency authority changed"

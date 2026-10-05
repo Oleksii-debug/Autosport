@@ -361,7 +361,10 @@ class LayExecutionLiabilityTests(unittest.TestCase):
             )
             object.__setattr__(attempt, "requested_stake", Decimal("1E+9000"))
 
-            with self.assertRaisesRegex(ValueError, "resource limit"):
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "canonical decimal resource bounds",
+            ):
                 ledger.record_attempt(attempt)
 
             self.assertEqual(ledger.events(), [])

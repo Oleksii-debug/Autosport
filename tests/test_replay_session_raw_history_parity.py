@@ -143,6 +143,30 @@ class ReplaySessionRawHistoryParityTests(unittest.TestCase):
         self.assertEqual(raw_sequences, [1, 1])
         self.assertEqual(strategy_sequences, [1])
 
+    def test_semantic_refresh_reaches_strategy_callback_for_live_replay_parity(self) -> None:
+        first = self._event(
+            sequence=1,
+            observed_ts="2026-01-01T00:01:00+00:00",
+            ingest_ts="2026-01-01T00:01:00+00:00",
+        )
+        refresh = self._event(
+            sequence=2,
+            observed_ts="2026-01-01T00:02:00+00:00",
+            ingest_ts="2026-01-01T00:02:00+00:00",
+        )
+        raw_sequences: list[int] = []
+        strategy_sequences: list[int] = []
+
+        run = ReplayEngine([first, refresh]).run(
+            lambda delivered: strategy_sequences.append(delivered.sequence),
+            run_id="semantic-refresh-live-parity",
+            on_raw_event=lambda delivered: raw_sequences.append(delivered.sequence),
+        )
+
+        self.assertEqual(run.event_count, 2)
+        self.assertEqual(raw_sequences, [1, 2])
+        self.assertEqual(strategy_sequences, [1, 2])
+
     def test_conflicting_same_sequence_fails_at_durable_raw_boundary(self) -> None:
         first = self._event(
             sequence=1,

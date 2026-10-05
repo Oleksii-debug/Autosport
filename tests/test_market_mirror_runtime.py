@@ -1000,6 +1000,23 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "exact MarketMirror"):
             BoundedMirrorInvalidationBuffer(hostile)
 
+    def test_dependency_routing_rejects_invalidation_batch_subclasses(self) -> None:
+        class Batch(MirrorInvalidationBatch):
+            pass
+
+        index = FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a")
+        hostile = Batch(
+            changed_keys=(),
+            full_refresh_required=False,
+            has_more=False,
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact MirrorInvalidationBatch"):
+            index.affected_inputs(hostile)
+        with self.assertRaisesRegex(TypeError, "exact MirrorInvalidationBatch"):
+            index.semantic_refresh_only_inputs(hostile)
+
     def test_registry_mutation_guard_blocks_direct_mutation_but_not_reads(self) -> None:
         mirror = MarketMirror()
         index = FocusedMirrorDependencyIndex(mirror)

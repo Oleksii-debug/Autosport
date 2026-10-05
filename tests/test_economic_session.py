@@ -439,14 +439,29 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         economic_session._DATETIME_FROMTIMESTAMP = forbidden_datetime
         try:
-            with self.assertRaises(AssertionError):
-                # The fresh store still uses its captured clock helper; the test
-                # assertion below is replaced once the source witness is checked.
-                fresh.current()
+            evidence = fresh.current()
         finally:
             economic_session._DATETIME_FROMTIMESTAMP = original_datetime
 
-        self.assertGreaterEqual(datetime_calls, 1)
+        self.assertFalse(evidence.product_clock_authoritative)
+        self.assertEqual(datetime_calls, 0)
+
+        fresh_atomic = self._store()
+        original_atomic = economic_session.atomic_write_json
+        atomic_calls = 0
+
+        def forbidden_atomic(*_args, **_kwargs):
+            nonlocal atomic_calls
+            atomic_calls += 1
+            raise AssertionError("hostile atomic writer executed")
+
+        economic_session.atomic_write_json = forbidden_atomic
+        try:
+            fresh_atomic.current()
+        finally:
+            economic_session.atomic_write_json = original_atomic
+
+        self.assertEqual(atomic_calls, 0)
 
     def test_pure_helper_rebinding_fails_before_execution(self) -> None:
         import autosport.economic_session as economic_session

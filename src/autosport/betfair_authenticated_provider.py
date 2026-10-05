@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
+from threading import RLock
 from typing import Mapping
 
 from .betfair_authenticated_stream import BetfairAuthenticatedStreamFreshnessRuntime
@@ -188,6 +189,7 @@ class BetfairAuthenticatedMarketProvider:
         if type(freshness_policy) is not BetfairStreamFreshnessPolicy:
             raise TypeError("freshness_policy must be canonical BetfairStreamFreshnessPolicy")
         self._runtime = runtime
+        self._lock = RLock()
         self._policy = BetfairStreamFreshnessPolicy(
             max_age_ms=freshness_policy.max_age_ms,
             max_future_skew_ms=freshness_policy.max_future_skew_ms,
@@ -201,9 +203,17 @@ class BetfairAuthenticatedMarketProvider:
 
     @property
     def durable_bound(self) -> bool:
-        return self._bound
+        with self._lock:
+            return self._bound
 
     def bind_durable_current(
+        self,
+        current: Mapping[tuple[str, str], MarketEvent],
+    ) -> None:
+        with self._lock:
+            self._bind_durable_current_locked(current)
+
+    def _bind_durable_current_locked(
         self,
         current: Mapping[tuple[str, str], MarketEvent],
     ) -> None:
@@ -278,6 +288,13 @@ class BetfairAuthenticatedMarketProvider:
         self._bound = True
 
     def assert_durable_current(
+        self,
+        current: Mapping[tuple[str, str], MarketEvent],
+    ) -> None:
+        with self._lock:
+            self._assert_durable_current_locked(current)
+
+    def _assert_durable_current_locked(
         self,
         current: Mapping[tuple[str, str], MarketEvent],
     ) -> None:
@@ -440,6 +457,10 @@ class BetfairAuthenticatedMarketProvider:
         return tuple(emitted)
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+        with self._lock:
+            return self._read_batch_locked(max_items)
+
+    def _read_batch_locked(self, max_items: int) -> ProviderBatch:
         if type(max_items) is not int or max_items <= 0:
             raise ValueError("max_items must be a positive non-boolean integer")
         if not self._bound:

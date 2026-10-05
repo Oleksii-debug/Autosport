@@ -1955,7 +1955,14 @@ class PersistentLiveDecisionLoop:
             and left._settlement_times == right._settlement_times
         )
 
-    def _decision_context_sha256_for_book(self, book: PaperBook) -> str:
+    def _decision_context_sha256_for_book(
+        self,
+        book: PaperBook,
+        *,
+        health_aware: bool = True,
+    ) -> str:
+        if type(health_aware) is not bool:
+            raise TypeError("health_aware must be a bool")
         self._verify_intent_factory_provenance()
         if not isinstance(book, PaperBook):
             raise TypeError("book must be PaperBook")
@@ -1969,7 +1976,7 @@ class PersistentLiveDecisionLoop:
         provenance = self.intent_provenance
         context_payload = {
             "schema": "autosport.live_decision_runtime_context",
-            "schema_version": 2,
+            "schema_version": 3 if health_aware else 2,
             "mode": self.mode.value,
             "intent_strategy_version_id": provenance.strategy_version_id,
             "intent_model_version_id": provenance.model_version_id,
@@ -1982,7 +1989,9 @@ class PersistentLiveDecisionLoop:
             "max_quote_age_seconds": str(
                 _timedelta_decimal_seconds(self.max_quote_age)
             ),
-            "max_health_age_seconds": (
+        }
+        if health_aware:
+            context_payload["max_health_age_seconds"] = (
                 None
                 if self._health_gate is None
                 else str(
@@ -1990,8 +1999,8 @@ class PersistentLiveDecisionLoop:
                         self._health_gate._max_health_age
                     )
                 )
-            ),
-        }
+            )
+
         if self.paper_execution is not None:
             context_payload["paper_execution_model_fingerprint"] = (
                 self.paper_execution.config.fingerprint
@@ -2058,7 +2067,10 @@ class PersistentLiveDecisionLoop:
 
         if (
             progress.decision_context_sha256
-            != self._decision_context_sha256_for_book(pre_action_book)
+            != self._decision_context_sha256_for_book(
+                pre_action_book,
+                health_aware=progress.health_boundaries is not None,
+            )
         ):
             raise LiveDecisionProgressError(
                 "unfinished live decision runtime context changed across restart"
@@ -3181,7 +3193,11 @@ class PersistentLiveDecisionLoop:
             if (
                 durable_progress is not None
                 and durable_progress.phase == _PHASE_PENDING
-                and self._decision_context_sha256() != decision_context_sha256
+                and self._decision_context_sha256_for_book(
+                    self.book,
+                    health_aware=durable_progress.health_boundaries is not None,
+                )
+                != decision_context_sha256
             ):
                 raise LiveDecisionProgressError(
                     "PaperBook/runtime context changed before promotion lock"

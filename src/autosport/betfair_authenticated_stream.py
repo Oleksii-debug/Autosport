@@ -448,6 +448,10 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         self._transport_by_identity: dict[
             BetfairQuoteIdentity, tuple[str, str, int]
         ] = {}
+        # The subscription acknowledgement is required to be authenticated frame 1.
+        # Every later market frame must therefore be consumed by this runtime without
+        # gaps; otherwise an unseen delta could make the local market image false.
+        self._next_frame_sequence = 2
 
     @property
     def subscription(self) -> BetfairAuthenticatedMarketSubscription:
@@ -473,6 +477,10 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                         self._subscription.connection_id,
                         self._subscription.connection_generation,
                     )
+                    if frame.frame_sequence != self._next_frame_sequence:
+                        raise BetfairAuthenticatedStreamError(
+                            "authenticated market frame sequence is discontinuous"
+                        )
                     raw = _decode_exact_transport_frame(frame)
                     if raw.get("op") != "mcm":
                         raise BetfairAuthenticatedStreamError(
@@ -501,6 +509,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                             frame.payload_sha256,
                             frame.received_monotonic_ns,
                         )
+                    self._next_frame_sequence += 1
                     return issued
                 except BetfairStreamAuthenticationError as exc:
                     self._transport_by_identity.clear()

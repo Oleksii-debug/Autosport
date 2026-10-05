@@ -2300,5 +2300,70 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(len(book.tickets), 1)
 
 
+    def test_instance_execute_unlocked_override_cannot_bypass_guard_entrypoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("instance-execute-unlocked-override", stake="10.00"),
+            )
+            hostile_calls = 0
+
+            def hostile_execute_unlocked(**_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("instance _execute_unlocked override must not run")
+
+            runtime._execute_unlocked = hostile_execute_unlocked
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="instance-execute-unlocked-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertEqual(len(book.tickets), 1)
+
+    def test_instance_authority_method_overrides_cannot_redirect_canonical_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("instance-authority-method-overrides", stake="10.00"),
+            )
+            calls = {"minted": 0, "run_id": 0, "scope": 0}
+
+            def hostile_minted(*_args, **_kwargs):
+                calls["minted"] += 1
+                raise AssertionError("instance _require_minted override must not run")
+
+            def hostile_run_id(*_args, **_kwargs):
+                calls["run_id"] += 1
+                return "forged-run-id"
+
+            def hostile_scope(*_args, **_kwargs):
+                calls["scope"] += 1
+                raise AssertionError("instance exposure-scope override must not run")
+
+            runtime._require_minted = hostile_minted
+            runtime.expected_run_id = hostile_run_id
+            runtime._publish_exposure_scope = hostile_scope
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="instance-authority-method-overrides",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(calls, {"minted": 0, "run_id": 0, "scope": 0})
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+
 if __name__ == "__main__":
     unittest.main()

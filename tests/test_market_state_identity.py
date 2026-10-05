@@ -229,3 +229,55 @@ def test_local_receipt_clocks_are_not_semantic_market_state() -> None:
     )
     assert same_semantic_market_state(first, second)
 
+@pytest.mark.parametrize(
+    ("field_name", "replacement", "message"),
+    (
+        ("provider", "other", "provider=prophetx"),
+        ("environment", "production", "sandbox environment"),
+        ("transport_surface", "other_surface", "canonical transport surface"),
+        ("sequence_source_id", "other:sequence:source", "canonical sequence source identity"),
+    ),
+)
+def test_contract_binding_fields_fail_closed(
+    field_name: str,
+    replacement: str,
+    message: str,
+) -> None:
+    payload = _event(sequence=1).to_dict()
+    payload["metadata"][field_name] = replacement
+    malformed = MarketEvent.from_dict(payload)
+
+    with pytest.raises(MarketStateIdentityError, match=message):
+        semantic_market_state_identity(malformed)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("request_fingerprint_sha256", "response_sha256", "snapshot_fingerprint_sha256"),
+)
+def test_digest_provenance_fields_require_lowercase_sha256(field_name: str) -> None:
+    payload = _event(sequence=1).to_dict()
+    payload["metadata"][field_name] = "A" * 64
+    malformed = MarketEvent.from_dict(payload)
+
+    with pytest.raises(MarketStateIdentityError, match=field_name):
+        semantic_market_state_identity(malformed)
+
+
+@pytest.mark.parametrize(
+    "bad_sequence",
+    (True, 0, -1, (1 << 63)),
+)
+def test_acquisition_sequence_requires_positive_signed_int64(
+    bad_sequence: object,
+) -> None:
+    payload = _event(sequence=1).to_dict()
+    payload["metadata"]["product_acquisition_sequence"] = bad_sequence
+    malformed = MarketEvent.from_dict(payload)
+
+    with pytest.raises(
+        MarketStateIdentityError,
+        match="acquisition sequence is inconsistent",
+    ):
+        semantic_market_state_identity(malformed)
+

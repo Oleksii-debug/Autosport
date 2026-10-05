@@ -3015,5 +3015,57 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
                 self.assertEqual(book._lifecycle, [])
 
 
+    def test_lay_open_rejects_in_place_timestamp_parser_code_mutation_before_execution(self):
+        book = PaperBook(Decimal("100"))
+        parser = lay_guard._ORIGINAL_PARSE_ISO_TIMESTAMP
+        original_code = parser.__code__
+        attacker_calls = 0
+
+        def hostile_parser(_value):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("mutated timestamp parser executed")
+
+        try:
+            parser.__code__ = hostile_parser.__code__
+            with self.assertRaisesRegex(ValueError, "canonical time authority changed"):
+                book.open_ticket(
+                    [self._lay_leg()],
+                    Decimal("10"),
+                    placed_at=QUOTE_AT,
+                )
+        finally:
+            parser.__code__ = original_code
+
+        self.assertEqual(attacker_calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+
+    def test_lay_open_rejects_in_place_clock_code_mutation_before_execution(self):
+        book = PaperBook(Decimal("100"))
+        clock = lay_guard._ORIGINAL_UTC_NOW_ISO
+        original_code = clock.__code__
+        attacker_calls = 0
+
+        def hostile_clock():
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("mutated clock executed")
+
+        try:
+            clock.__code__ = hostile_clock.__code__
+            with self.assertRaisesRegex(ValueError, "canonical time authority changed"):
+                book.open_ticket(
+                    [self._lay_leg()],
+                    Decimal("10"),
+                )
+        finally:
+            clock.__code__ = original_code
+
+        self.assertEqual(attacker_calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+
+
 if __name__ == "__main__":
     unittest.main()

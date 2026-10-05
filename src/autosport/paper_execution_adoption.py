@@ -233,6 +233,7 @@ class PaperExecutionAdoptionRuntime:
         # copied, reconstructed, or caller-authored PreparedPaperExecution values do
         # not carry execution authority. Restart re-mints from canonical inputs.
         self._prepared_authorities: dict[int, PreparedPaperExecution] = {}
+        self._prepared_snapshots: dict[int, PreparedPaperExecution] = {}
         self._prepared_book_states: dict[int, PaperBook] = {}
         if self.paper_book_path.exists():
             durable_book = PaperBook.load(self.paper_book_path)
@@ -317,6 +318,7 @@ class PaperExecutionAdoptionRuntime:
                     "PaperBook changed during execution preparation"
                 )
             self._prepared_authorities[id(prepared)] = prepared
+            self._prepared_snapshots[id(prepared)] = copy.deepcopy(prepared)
             self._prepared_book_states[id(prepared)] = pre_run_book
         return prepared
 
@@ -324,6 +326,11 @@ class PaperExecutionAdoptionRuntime:
         if self._prepared_authorities.get(id(prepared)) is not prepared:
             raise PaperExecutionAdoptionError(
                 "prepared execution was not minted by this runtime from canonical authority"
+            )
+        snapshot = self._prepared_snapshots.get(id(prepared))
+        if snapshot is None or prepared != snapshot:
+            raise PaperExecutionAdoptionError(
+                "prepared execution semantics changed after canonical mint"
             )
 
     def _require_fresh_prepared_book_state(

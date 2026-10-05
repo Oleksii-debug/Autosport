@@ -278,6 +278,26 @@ class LiveObservationTests(unittest.TestCase):
                         max_items=1,
                         clock="not-a-clock",
                     )
+                class Policy(IngestionPolicy):
+                    pass
+                with self.assertRaisesRegex(TypeError, "exact IngestionPolicy"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                        max_items=1,
+                        policy=Policy(),
+                    )
+                with self.assertRaisesRegex(ValueError, "exceeds backpressure limit"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                        max_items=2,
+                        policy=IngestionPolicy(max_batch_size=1),
+                    )
                 self.assertEqual(store.events(), ())
                 self.assertEqual(updates.mirror.view().events, ())
             finally:

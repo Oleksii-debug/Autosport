@@ -720,6 +720,41 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(health.get("source").status, "degraded")
             store.close()
 
+    def test_committed_delivery_outcome_survives_health_base_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            provider = StaticProvider(
+                "source",
+                [
+                    ProviderBatch(
+                        "source",
+                        (self._quote("2026-09-12T11:59:59+00:00"),),
+                        cursor="cursor-1",
+                    )
+                ],
+            )
+            health_failure = SystemExit("health-stop")
+
+            def fail_delivery(_event):
+                raise RuntimeError("subscriber-failed")
+
+            engine.bus.subscribe(fail_delivery)
+            try:
+                with patch.object(
+                    SourceHealthStore,
+                    "record_success",
+                    side_effect=health_failure,
+                ):
+                    with self.assertRaises(CommittedIngestionHealthError) as raised:
+                        engine.poll_once(provider, max_items=10)
+
+                self.assertIs(raised.exception.__cause__, health_failure)
+                self.assertIsNotNone(raised.exception.delivery_error)
+                self.assertEqual(raised.exception.outcome.accepted, 1)
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
     def test_committed_market_outcome_survives_health_base_exception(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, store, _health = self._engine(tmp)

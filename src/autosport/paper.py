@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import tempfile
 import threading
 import uuid
-import weakref
 from functools import wraps
 from decimal import (
     Context,
@@ -20,6 +18,7 @@ from decimal import (
     localcontext,
 )
 from pathlib import Path
+from weakref import ref
 
 from .domain import (
     PaperTicket,
@@ -31,53 +30,54 @@ from .domain import (
 from .forecasting import parse_iso_timestamp
 
 
-_CANONICAL_PAPER_DECIMAL_PRECISION = 28
-_CANONICAL_PAPER_DECIMAL_EMIN = -999999
-_CANONICAL_PAPER_DECIMAL_EMAX = 999999
-_CANONICAL_MAX_PAPER_DECIMAL_TEXT_CHARS = 512
-_CANONICAL_MAX_PAPER_SNAPSHOT_BYTES = 8 * 1024 * 1024
-_CANONICAL_PAPER_SNAPSHOT_SCHEMA_VERSION = 8
-_CANONICAL_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8})
-_CANONICAL_SCHEMA_MISSING = object()
-_CANONICAL_PAPER_DECIMAL_TYPE = Decimal
-_CANONICAL_DECIMAL_CONTEXT_TYPE = Context
-_CANONICAL_DECIMAL_EXCEPTION_TYPE = DecimalException
-_CANONICAL_INEXACT_SIGNAL = Inexact
-_CANONICAL_INVALID_OPERATION_SIGNAL = InvalidOperation
-_CANONICAL_OVERFLOW_SIGNAL = Overflow
-_CANONICAL_UNDERFLOW_SIGNAL = Underflow
-_CANONICAL_ROUND_HALF_EVEN = ROUND_HALF_EVEN
-_CANONICAL_LOCALCONTEXT = localcontext
-_CANONICAL_PAPER_PATH_CONSTRUCTOR = Path
-_CANONICAL_PAPER_PATH_TYPE = type(Path("."))
-_CANONICAL_PAPER_PATH_RESOLVE = Path.resolve
-_CANONICAL_PAPER_PATH_MKDIR = Path.mkdir
-_CANONICAL_PAPER_PATH_UNLINK = Path.unlink
-_CANONICAL_TICKET_STATUS_TYPE = TicketStatus
-_CANONICAL_TICKET_STATUS_OPEN = TicketStatus.OPEN
-_CANONICAL_TICKET_STATUS_WON = TicketStatus.WON
-_CANONICAL_TICKET_STATUS_LOST = TicketStatus.LOST
-_CANONICAL_TICKET_STATUS_VOID = TicketStatus.VOID
-_CANONICAL_PAPER_TICKET_TYPE = PaperTicket
-_CANONICAL_PAPER_TICKET_CONSTRUCTOR = PaperTicket
-_CANONICAL_TICKET_LEG_TYPE = TicketLeg
-_CANONICAL_TICKET_LEG_CONSTRUCTOR = TicketLeg
-_CANONICAL_UTC_NOW_ISO = utc_now_iso
-_CANONICAL_PARSE_ISO_TIMESTAMP = parse_iso_timestamp
-_CANONICAL_UUID4 = uuid.uuid4
-_CANONICAL_SEMANTIC_IDENTITY = _canonical_semantic_identity
-_CANONICAL_OS_OPEN = os.open
-_CANONICAL_OS_FSTAT = os.fstat
-_CANONICAL_OS_STAT = os.stat
-_CANONICAL_OS_CLOSE = os.close
-_CANONICAL_OS_FDOPEN = os.fdopen
-_CANONICAL_OS_SAMEOPENFILE = os.path.sameopenfile
-_CANONICAL_STAT_ISREG = stat.S_ISREG
-_CANONICAL_OS_RDONLY = os.O_RDONLY
-_CANONICAL_OS_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
-_CANONICAL_OS_NAME = os.name
+_PAPER_DECIMAL_PRECISION = 28
+_PAPER_DECIMAL_EMIN = -999999
+_PAPER_DECIMAL_EMAX = 999999
+_MAX_PAPER_DECIMAL_TEXT_CHARS = 512
+_PAPER_SNAPSHOT_SCHEMA_VERSION = 8
+_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8})
+_SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
+
+
+class _IdentityWeakKeyDictionary:
+    """Weak identity map that never executes caller-defined hash/equality hooks."""
+
+    def __init__(self) -> None:
+        self._entries: dict[int, tuple[object, object]] = {}
+
+    def _discard_dead(self, identity: int, dead_ref: object) -> None:
+        current = self._entries.get(identity)
+        if current is not None and current[0] is dead_ref:
+            self._entries.pop(identity, None)
+
+    def __setitem__(self, key: object, value: object) -> None:
+        identity = id(key)
+
+        def cleanup(dead_ref: object, *, _identity: int = identity) -> None:
+            self._discard_dead(_identity, dead_ref)
+
+        weak_key = ref(key, cleanup)
+        self._entries[identity] = (weak_key, value)
+
+    def get(self, key: object, default: object = None) -> object:
+        current = self._entries.get(id(key))
+        if current is None or current[0]() is not key:
+            return default
+        return current[1]
+
+    def pop(self, key: object, default: object = None) -> object:
+        identity = id(key)
+        current = self._entries.get(identity)
+        if current is None or current[0]() is not key:
+            return default
+        self._entries.pop(identity, None)
+        return current[1]
+
+    def __contains__(self, key: object) -> bool:
+        current = self._entries.get(id(key))
+        return current is not None and current[0]() is key
 
 
 def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
@@ -109,48 +109,20 @@ def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
 def _make_ticket_opening_authority_registry():
     # Opening economics are product-issued facts. Keep the authoritative copy
     # outside caller-visible PaperTicket fields so coherent field rewrites cannot
-    # become their own witness. Object identity, not caller-overridable hashing or
-    # equality, selects the authority record.
-    authorities: dict[
-        int,
-        tuple[
-            weakref.ReferenceType[object],
-            dict[str, tuple[object, ...]],
-        ],
-    ] = {}
+    # become their own witness.
+    authorities = _IdentityWeakKeyDictionary()
     guard = threading.RLock()
 
-    def _entry(book: object):
-        entry = authorities.get(id(book))
-        if entry is None or entry[0]() is not book:
-            return None
-        return entry
-
     def register_book(book: object) -> None:
-        identity = id(book)
-
-        def cleanup(reference: weakref.ReferenceType[object]) -> None:
-            with guard:
-                current = authorities.get(identity)
-                if current is not None and current[0] is reference:
-                    authorities.pop(identity, None)
-
-        reference = weakref.ref(book, cleanup)
         with guard:
-            current = authorities.get(identity)
-            if current is not None and current[0]() is book:
-                raise RuntimeError(
-                    "PaperBook opening authority registry is already registered"
-                )
-            authorities[identity] = (reference, {})
+            authorities[book] = {}
 
     def record(book: object, ticket: PaperTicket) -> None:
         commitment = _ticket_opening_commitment(ticket)
         with guard:
-            entry = _entry(book)
-            if entry is None:
+            current = authorities.get(book)
+            if current is None:
                 raise RuntimeError("PaperBook opening authority registry is unavailable")
-            current = entry[1]
             existing = current.get(ticket.ticket_id)
             if existing is not None and existing != commitment:
                 raise ValueError("PaperBook ticket opening authority cannot be rebound")
@@ -158,9 +130,7 @@ def _make_ticket_opening_authority_registry():
 
     def revoke(book: object) -> None:
         with guard:
-            entry = _entry(book)
-            if entry is not None:
-                authorities.pop(id(book), None)
+            authorities.pop(book, None)
 
     def install_validated_snapshot(book: object) -> None:
         commitments = {
@@ -168,19 +138,18 @@ def _make_ticket_opening_authority_registry():
             for ticket_id, ticket in book.tickets.items()
         }
         with guard:
-            entry = _entry(book)
-            if entry is None:
+            if book not in authorities:
                 raise RuntimeError("PaperBook opening authority registry is unavailable")
-            authorities[id(book)] = (entry[0], commitments)
+            authorities[book] = commitments
 
     def require_current(book: object) -> None:
         with guard:
-            entry = _entry(book)
-            if entry is None:
+            current = authorities.get(book)
+            if current is None:
                 raise ValueError(
                     "PaperBook byte-loaded snapshot lacks product-issued opening authority"
                 )
-            expected = dict(entry[1])
+            expected = dict(current)
         if set(expected) != set(book.tickets):
             raise ValueError(
                 "PaperBook ticket set changed outside product-issued opening authority"
@@ -193,12 +162,12 @@ def _make_ticket_opening_authority_registry():
 
     def require_candidate(source_book: object, candidate_book: object) -> None:
         with guard:
-            entry = _entry(source_book)
-            if entry is None:
+            current = authorities.get(source_book)
+            if current is None:
                 raise ValueError(
                     "PaperBook byte-loaded snapshot lacks product-issued opening authority"
                 )
-            expected = dict(entry[1])
+            expected = dict(current)
         candidate_tickets = getattr(candidate_book, "tickets", None)
         if type(candidate_tickets) is not dict or set(candidate_tickets) != set(expected):
             raise ValueError(
@@ -206,7 +175,7 @@ def _make_ticket_opening_authority_registry():
             )
         for ticket_id, ticket in candidate_tickets.items():
             if (
-                type(ticket) is not _CANONICAL_PAPER_TICKET_TYPE
+                type(ticket) is not PaperTicket
                 or _ticket_opening_commitment(ticket) != expected[ticket_id]
             ):
                 raise ValueError(
@@ -246,62 +215,27 @@ def _paperbook_causal_history_snapshot(book: object) -> tuple[object, ...]:
 
 def _make_paperbook_causal_history_authority_registry():
     # Lifecycle/settlement chronology is product-issued economic history. Keep
-    # the authoritative copy outside caller-visible mutable PaperBook fields and
-    # select records only by builtin object identity.
-    authorities: dict[
-        int,
-        tuple[
-            weakref.ReferenceType[object],
-            tuple[object, ...],
-        ],
-    ] = {}
+    # the authoritative copy outside caller-visible mutable PaperBook fields.
+    authorities = _IdentityWeakKeyDictionary()
     guard = threading.RLock()
 
-    def _entry(book: object):
-        entry = authorities.get(id(book))
-        if entry is None or entry[0]() is not book:
-            return None
-        return entry
-
     def register_book(book: object) -> None:
-        identity = id(book)
-
-        def cleanup(reference: weakref.ReferenceType[object]) -> None:
-            with guard:
-                current = authorities.get(identity)
-                if current is not None and current[0] is reference:
-                    authorities.pop(identity, None)
-
-        reference = weakref.ref(book, cleanup)
         with guard:
-            current = authorities.get(identity)
-            if current is not None and current[0]() is book:
-                raise RuntimeError(
-                    "PaperBook causal history authority registry is already registered"
-                )
-            authorities[identity] = (reference, ((), ()))
+            authorities[book] = ((), ())
 
     def revoke(book: object) -> None:
         with guard:
-            entry = _entry(book)
-            if entry is not None:
-                authorities.pop(id(book), None)
+            authorities.pop(book, None)
 
     def install_validated_snapshot(book: object) -> None:
         snapshot = _paperbook_causal_history_snapshot(book)
         with guard:
-            entry = _entry(book)
-            if entry is None:
-                raise RuntimeError(
-                    "PaperBook causal history authority registry is unavailable"
-                )
-            authorities[id(book)] = (entry[0], snapshot)
+            authorities[book] = snapshot
 
     def require_current(book: object) -> None:
         actual = _paperbook_causal_history_snapshot(book)
         with guard:
-            entry = _entry(book)
-            expected = None if entry is None else entry[1]
+            expected = authorities.get(book)
         if expected is None:
             raise ValueError(
                 "PaperBook byte-loaded snapshot lacks product-issued causal history authority"
@@ -314,8 +248,7 @@ def _make_paperbook_causal_history_authority_registry():
     def require_candidate(source_book: object, candidate_book: object) -> None:
         candidate = _paperbook_causal_history_snapshot(candidate_book)
         with guard:
-            entry = _entry(source_book)
-            expected = None if entry is None else entry[1]
+            expected = authorities.get(source_book)
         if expected is None:
             raise ValueError(
                 "PaperBook byte-loaded snapshot lacks product-issued causal history authority"
@@ -327,18 +260,15 @@ def _make_paperbook_causal_history_authority_registry():
 
     def advance_open(book: object, ticket_id: str) -> None:
         with guard:
-            entry = _entry(book)
-            if entry is None:
+            expected = authorities.get(book)
+            if expected is None:
                 raise ValueError(
                     "PaperBook byte-loaded snapshot lacks product-issued causal history authority"
                 )
-            lifecycle, settlement_times = entry[1]
-            authorities[id(book)] = (
-                entry[0],
-                (
-                    lifecycle + (("open", ticket_id, (), ()),),
-                    settlement_times,
-                ),
+            lifecycle, settlement_times = expected
+            authorities[book] = (
+                lifecycle + (("open", ticket_id, (), ()),),
+                settlement_times,
             )
 
     def advance_settle(
@@ -349,24 +279,21 @@ def _make_paperbook_causal_history_authority_registry():
         settled_at: str | None,
     ) -> None:
         with guard:
-            entry = _entry(book)
-            if entry is None:
+            expected = authorities.get(book)
+            if expected is None:
                 raise ValueError(
                     "PaperBook byte-loaded snapshot lacks product-issued causal history authority"
                 )
-            lifecycle, settlement_times = entry[1]
+            lifecycle, settlement_times = expected
             settlement_mapping = dict(settlement_times)
             if ticket_id in settlement_mapping:
                 raise ValueError(
                     "PaperBook causal history settlement authority cannot be rebound"
                 )
             settlement_mapping[ticket_id] = settled_at
-            authorities[id(book)] = (
-                entry[0],
-                (
-                    lifecycle + (("settle", ticket_id, winners, voids),),
-                    tuple(sorted(settlement_mapping.items())),
-                ),
+            authorities[book] = (
+                lifecycle + (("settle", ticket_id, winners, voids),),
+                tuple(sorted(settlement_mapping.items())),
             )
 
     return (
@@ -394,40 +321,19 @@ def _make_paperbook_causal_history_authority_registry():
 def _make_paperbook_operation_lock_registry():
     # Economic transitions must be linearizable per book. Keep synchronization
     # authority outside caller-visible state so snapshots cannot mint/replace it.
-    # Key by builtin object identity rather than object hashing/equality so a
-    # PaperBook subtype or runtime class swap cannot execute caller hooks while
-    # selecting the economic serialization lock.
-    locks: dict[
-        int,
-        tuple[weakref.ReferenceType[object], threading.RLock],
-    ] = {}
+    locks = _IdentityWeakKeyDictionary()
     guard = threading.RLock()
 
     def register_book(book: object) -> None:
-        identity = id(book)
-
-        def cleanup(reference: weakref.ReferenceType[object]) -> None:
-            with guard:
-                current = locks.get(identity)
-                if current is not None and current[0] is reference:
-                    locks.pop(identity, None)
-
-        reference = weakref.ref(book, cleanup)
         with guard:
-            current = locks.get(identity)
-            if current is not None and current[0]() is book:
-                raise RuntimeError(
-                    "PaperBook operation lock registry is already registered"
-                )
-            locks[identity] = (reference, threading.RLock())
+            locks[book] = threading.RLock()
 
     def require_lock(book: object):
-        identity = id(book)
         with guard:
-            entry = locks.get(identity)
-        if entry is None or entry[0]() is not book:
+            lock = locks.get(book)
+        if lock is None:
             raise RuntimeError("PaperBook operation lock registry is unavailable")
-        return entry[1]
+        return lock
 
     return register_book, require_lock
 
@@ -437,62 +343,28 @@ def _make_paperbook_operation_lock_registry():
     _require_paperbook_operation_lock,
 ) = _make_paperbook_operation_lock_registry()
 
-# Freeze the product-issued PAPER authority dispatchers used by the canonical
-# PaperBook implementation. Public/private module-name rebinding must not be able
-# to disable serialization, admission witnesses, snapshot candidate checks, or
-# the load_bytes fail-closed revocation boundary.
-_CANONICAL_REGISTER_OPERATION_LOCK = _register_paperbook_operation_lock
-_CANONICAL_REQUIRE_OPERATION_LOCK = _require_paperbook_operation_lock
-_CANONICAL_REGISTER_OPENING_AUTHORITY = _register_ticket_opening_authority_book
-_CANONICAL_RECORD_OPENING_AUTHORITY = _record_ticket_opening_authority
-_CANONICAL_REVOKE_OPENING_AUTHORITY = _revoke_ticket_opening_authority
-_CANONICAL_INSTALL_OPENING_AUTHORITY = _install_validated_ticket_opening_authority
-_CANONICAL_REQUIRE_OPENING_AUTHORITY = _require_ticket_opening_authority
-_CANONICAL_REQUIRE_CANDIDATE_OPENING_AUTHORITY = (
-    _require_snapshot_candidate_opening_authority
-)
-_CANONICAL_REGISTER_CAUSAL_AUTHORITY = (
-    _register_paperbook_causal_history_authority_book
-)
-_CANONICAL_REVOKE_CAUSAL_AUTHORITY = _revoke_paperbook_causal_history_authority
-_CANONICAL_INSTALL_CAUSAL_AUTHORITY = (
-    _install_validated_paperbook_causal_history_authority
-)
-_CANONICAL_REQUIRE_CAUSAL_AUTHORITY = _require_paperbook_causal_history_authority
-_CANONICAL_REQUIRE_CANDIDATE_CAUSAL_AUTHORITY = (
-    _require_snapshot_candidate_causal_history_authority
-)
-_CANONICAL_ADVANCE_CAUSAL_OPEN = _advance_paperbook_causal_history_open
-_CANONICAL_ADVANCE_CAUSAL_SETTLE = _advance_paperbook_causal_history_settle
-
 
 def _serialized_paperbook_operation(method):
     @wraps(method)
     def serialized(self, *args, **kwargs):
-        with _CANONICAL_REQUIRE_OPERATION_LOCK(self):
+        with _require_paperbook_operation_lock(self):
             return method(self, *args, **kwargs)
 
     return serialized
 
 
 def _paper_decimal_context() -> Context:
-    context = _CANONICAL_DECIMAL_CONTEXT_TYPE(
-        prec=_CANONICAL_PAPER_DECIMAL_PRECISION,
-        rounding=_CANONICAL_ROUND_HALF_EVEN,
-        Emin=_CANONICAL_PAPER_DECIMAL_EMIN,
-        Emax=_CANONICAL_PAPER_DECIMAL_EMAX,
+    context = Context(
+        prec=_PAPER_DECIMAL_PRECISION,
+        rounding=ROUND_HALF_EVEN,
+        Emin=_PAPER_DECIMAL_EMIN,
+        Emax=_PAPER_DECIMAL_EMAX,
     )
-    context.traps[_CANONICAL_INVALID_OPERATION_SIGNAL] = True
-    context.traps[_CANONICAL_OVERFLOW_SIGNAL] = True
-    context.traps[_CANONICAL_UNDERFLOW_SIGNAL] = True
+    context.traps[InvalidOperation] = True
+    context.traps[Overflow] = True
+    context.traps[Underflow] = True
     context.clear_flags()
     return context
-
-
-_CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY = _paper_decimal_context
-
-
-_CANONICAL_PAPER_DECIMAL_CONTEXT = _paper_decimal_context
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -508,26 +380,14 @@ def _reject_nonfinite_json_constant(value: str) -> None:
     raise ValueError(f"PaperBook snapshot contains non-finite JSON constant: {value}")
 
 
-_CANONICAL_JSON_LOADS = json.loads
-_CANONICAL_JSON_DUMP = json.dump
-_CANONICAL_JSON_DUMPS = json.dumps
-_CANONICAL_REJECT_DUPLICATE_JSON_KEYS = _reject_duplicate_json_keys
-_CANONICAL_REJECT_NONFINITE_JSON_CONSTANT = _reject_nonfinite_json_constant
-_CANONICAL_NAMED_TEMPORARY_FILE = tempfile.NamedTemporaryFile
-_CANONICAL_OS_FSYNC = os.fsync
-_CANONICAL_OS_REPLACE = os.replace
-
-
 class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
-        if type(self) is not __class__:
-            raise TypeError("PaperBook economic authority requires the exact book type")
-        _CANONICAL_REGISTER_OPERATION_LOCK(self)
-        _CANONICAL_REGISTER_OPENING_AUTHORITY(self)
-        _CANONICAL_REGISTER_CAUSAL_AUTHORITY(self)
-        initial = _CANONICAL_DECIMAL_INPUT(
+        _register_paperbook_operation_lock(self)
+        _register_ticket_opening_authority_book(self)
+        _register_paperbook_causal_history_authority_book(self)
+        initial = self._canonical_decimal_input(
             initial_bankroll,
             "initial_bankroll",
         )
@@ -548,47 +408,58 @@ class PaperBook:
     @property
     @_serialized_paperbook_operation
     def committed_stake(self) -> Decimal:
-        if type(self) is not __class__:
-            raise TypeError("PaperBook economic authority requires the exact book type")
-        _CANONICAL_VALIDATE_LOADED_STATE(self)
-        _CANONICAL_REQUIRE_OPENING_AUTHORITY(self)
-        _CANONICAL_REQUIRE_CAUSAL_AUTHORITY(self)
-        return sum((t.stake for t in self.tickets.values() if t.status is _CANONICAL_TICKET_STATUS_OPEN), _CANONICAL_PAPER_DECIMAL_TYPE("0"))
+        self._validate_loaded_state(self)
+        _require_ticket_opening_authority(self)
+        _require_paperbook_causal_history_authority(self)
+        try:
+            with localcontext(_paper_decimal_context()) as context:
+                total = Decimal("0")
+                for ticket in self.tickets.values():
+                    if ticket.status is TicketStatus.OPEN:
+                        total += ticket.stake
+                if context.flags[Inexact]:
+                    raise ValueError("PaperBook committed stake loses Decimal precision")
+        except DecimalException as exc:
+            raise ValueError(
+                "PaperBook committed stake arithmetic is not representable"
+            ) from exc
+        self._require_finite(total, "committed_stake")
+        return total
 
     @classmethod
     def _canonical_decimal_input(cls, value: object, label: str) -> Decimal:
-        if type(value) not in {_CANONICAL_PAPER_DECIMAL_TYPE, str, int, float}:
+        if type(value) not in {Decimal, str, int, float}:
             raise ValueError(
                 f"PaperBook {label} must be an exact built-in Decimal, string, integer or float"
             )
-        if type(value) is _CANONICAL_PAPER_DECIMAL_TYPE:
+        if type(value) is Decimal:
             parsed = value
         else:
-            if type(value) is str and len(value) > _CANONICAL_MAX_PAPER_DECIMAL_TEXT_CHARS:
+            if type(value) is str and len(value) > _MAX_PAPER_DECIMAL_TEXT_CHARS:
                 raise ValueError(
                     f"PaperBook {label} decimal text exceeds the canonical size limit"
                 )
             try:
-                parsed = _CANONICAL_PAPER_DECIMAL_TYPE(str(value))
-            except (_CANONICAL_DECIMAL_EXCEPTION_TYPE, ValueError) as exc:
+                parsed = Decimal(str(value))
+            except (DecimalException, ValueError) as exc:
                 raise ValueError(f"PaperBook {label} is not a valid Decimal value") from exc
-        _CANONICAL_REQUIRE_FINITE(parsed, label)
+        cls._require_finite(parsed, label)
         return parsed
 
     @classmethod
     def _debit_balance(cls, balance: Decimal, amount: Decimal) -> Decimal:
-        _CANONICAL_REQUIRE_FINITE(balance, "balance")
-        _CANONICAL_REQUIRE_FINITE(amount, "stake")
+        cls._require_finite(balance, "balance")
+        cls._require_finite(amount, "stake")
         if amount <= 0:
             raise ValueError("stake must be positive")
         if amount > balance:
             raise ValueError("insufficient virtual bankroll")
         try:
-            with _CANONICAL_LOCALCONTEXT(_CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()) as context:
+            with localcontext(_paper_decimal_context()) as context:
                 new_balance = balance - amount
-                if context.flags[_CANONICAL_INEXACT_SIGNAL]:
+                if context.flags[Inexact]:
                     raise ValueError("PaperBook stake debit loses Decimal precision")
-        except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+        except DecimalException as exc:
             raise ValueError("PaperBook stake debit arithmetic is not representable") from exc
         return new_balance
 
@@ -605,24 +476,22 @@ class PaperBook:
         bankroll_id: str | None = None,
         currency: str | None = None,
     ) -> PaperTicket:
-        if type(self) is not __class__:
-            raise TypeError("PaperBook economic authority requires the exact book type")
-        _CANONICAL_VALIDATE_LOADED_STATE(self)
-        _CANONICAL_REQUIRE_OPENING_AUTHORITY(self)
-        _CANONICAL_REQUIRE_CAUSAL_AUTHORITY(self)
-        amount = _CANONICAL_DECIMAL_INPUT(stake, "stake")
-        new_balance = _CANONICAL_DEBIT_BALANCE(self.balance, amount)
+        self._validate_loaded_state(self)
+        _require_ticket_opening_authority(self)
+        _require_paperbook_causal_history_authority(self)
+        amount = self._canonical_decimal_input(stake, "stake")
+        new_balance = self._debit_balance(self.balance, amount)
 
-        ticket_placed_at = _CANONICAL_VALIDATE_PLACED_AT(
-            placed_at if placed_at is not None else _CANONICAL_UTC_NOW_ISO()
+        ticket_placed_at = self._validate_placed_at(
+            placed_at if placed_at is not None else utc_now_iso()
         )
-        _CANONICAL_REQUIRE_UTF8_STRING(reason, "strategy_reason")
+        self._require_utf8_string(reason, "strategy_reason")
         (
             provider_source_ids,
             provider_accounts,
             bankroll_id,
             currency,
-        ) = _CANONICAL_VALIDATE_TICKET_PROVENANCE(
+        ) = self._validate_ticket_provenance(
             provider_source_ids,
             provider_accounts,
             bankroll_id,
@@ -634,12 +503,12 @@ class PaperBook:
         if not ticket_legs:
             raise ValueError("ticket requires at least one leg")
         for leg in ticket_legs:
-            _CANONICAL_VALIDATE_TICKET_LEG(leg)
+            self._validate_ticket_leg(leg)
         quote_keys = [leg.quote_key for leg in ticket_legs]
         if len(quote_keys) != len(set(quote_keys)):
             raise ValueError("ticket contains duplicate quote_key leg")
-        ticket = _CANONICAL_PAPER_TICKET_CONSTRUCTOR(
-            ticket_id=str(_CANONICAL_UUID4()),
+        ticket = PaperTicket(
+            ticket_id=str(uuid.uuid4()),
             stake=amount,
             legs=ticket_legs,
             placed_at=ticket_placed_at,
@@ -649,11 +518,11 @@ class PaperBook:
             bankroll_id=bankroll_id,
             currency=currency,
         )
-        _CANONICAL_RECORD_OPENING_AUTHORITY(self, ticket)
+        _record_ticket_opening_authority(self, ticket)
         self.balance = new_balance
         self.tickets[ticket.ticket_id] = ticket
         self._lifecycle.append(("open", ticket.ticket_id, (), ()))
-        _CANONICAL_ADVANCE_CAUSAL_OPEN(self, ticket.ticket_id)
+        _advance_paperbook_causal_history_open(self, ticket.ticket_id)
         return ticket
 
     @staticmethod
@@ -676,9 +545,9 @@ class PaperBook:
         winning_quote_keys: set[str],
         void_quote_keys: set[str],
     ) -> tuple[TicketStatus, Decimal, Decimal]:
-        _CANONICAL_REQUIRE_FINITE(balance, "balance")
+        cls._require_finite(balance, "balance")
         for leg in ticket.legs:
-            _CANONICAL_VALIDATE_TICKET_LEG(leg, ticket_id=ticket.ticket_id)
+            cls._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
         leg_settlement_keys = {leg.settlement_key for leg in ticket.legs}
         unknown_winners = winning_quote_keys - leg_settlement_keys
         unknown_voids = void_quote_keys - leg_settlement_keys
@@ -693,25 +562,27 @@ class PaperBook:
             leg for leg in ticket.legs if leg.settlement_key not in void_quote_keys
         )
         if any(leg.settlement_key not in winning_quote_keys for leg in effective_legs):
-            return _CANONICAL_TICKET_STATUS_LOST, _CANONICAL_PAPER_DECIMAL_TYPE("0"), balance
+            return TicketStatus.LOST, Decimal("0"), balance
 
-        status = _CANONICAL_TICKET_STATUS_VOID if not effective_legs else _CANONICAL_TICKET_STATUS_WON
+        status = TicketStatus.VOID if not effective_legs else TicketStatus.WON
         try:
-            with _CANONICAL_LOCALCONTEXT(_CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()):
-                effective_odds = _CANONICAL_PAPER_DECIMAL_TYPE("1")
+            with localcontext(_paper_decimal_context()) as context:
+                effective_odds = Decimal("1")
                 for leg in effective_legs:
                     effective_odds *= leg.locked_odds
-                payout = ticket.stake if status is _CANONICAL_TICKET_STATUS_VOID else ticket.stake * effective_odds
-                _CANONICAL_REQUIRE_FINITE(payout, f"settlement payout for ticket {ticket.ticket_id}")
-                if status is _CANONICAL_TICKET_STATUS_WON and payout <= ticket.stake:
+                payout = ticket.stake if status is TicketStatus.VOID else ticket.stake * effective_odds
+                cls._require_finite(payout, f"settlement payout for ticket {ticket.ticket_id}")
+                if status is TicketStatus.WON and payout <= ticket.stake:
                     raise ValueError(
                         "PaperBook winning settlement payout must exceed stake after canonical Decimal rounding"
                     )
                 new_balance = balance + payout
-                _CANONICAL_REQUIRE_FINITE(new_balance, f"balance after settling ticket {ticket.ticket_id}")
+                cls._require_finite(new_balance, f"balance after settling ticket {ticket.ticket_id}")
+                if context.flags[Inexact]:
+                    raise ValueError("PaperBook settlement arithmetic loses Decimal precision")
                 if payout != 0 and new_balance == balance:
                     raise ValueError("PaperBook settlement payout loses all Decimal balance effect")
-        except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+        except DecimalException as exc:
             raise ValueError("PaperBook settlement arithmetic is not representable") from exc
         return status, payout, new_balance
 
@@ -724,28 +595,26 @@ class PaperBook:
         *,
         settled_at: str | None = None,
     ) -> PaperTicket:
-        if type(self) is not __class__:
-            raise TypeError("PaperBook economic authority requires the exact book type")
-        _CANONICAL_VALIDATE_LOADED_STATE(self)
-        _CANONICAL_REQUIRE_OPENING_AUTHORITY(self)
-        _CANONICAL_REQUIRE_CAUSAL_AUTHORITY(self)
-        canonical_ticket_id = _CANONICAL_REQUIRE_CANONICAL_TEXT(ticket_id, "ticket_id")
+        self._validate_loaded_state(self)
+        _require_ticket_opening_authority(self)
+        _require_paperbook_causal_history_authority(self)
+        canonical_ticket_id = self._require_canonical_text(ticket_id, "ticket_id")
         ticket = self.tickets[canonical_ticket_id]
-        if ticket.status is not _CANONICAL_TICKET_STATUS_OPEN:
+        if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
 
-        winners = _CANONICAL_NORMALIZE_RESOLUTION_KEYS(winning_quote_keys, "winning_quote_keys")
+        winners = self._normalize_resolution_keys(winning_quote_keys, "winning_quote_keys")
         voids = (
             set()
             if void_quote_keys is None
-            else _CANONICAL_NORMALIZE_RESOLUTION_KEYS(void_quote_keys, "void_quote_keys")
+            else self._normalize_resolution_keys(void_quote_keys, "void_quote_keys")
         )
         settlement_time = (
             None
             if settled_at is None
-            else _CANONICAL_VALIDATE_SETTLED_AT(settled_at, ticket.placed_at)
+            else self._validate_settled_at(settled_at, ticket.placed_at)
         )
-        status, payout, new_balance = _CANONICAL_SETTLEMENT_RESULT(
+        status, payout, new_balance = self._settlement_result(
             ticket,
             self.balance,
             winners,
@@ -765,7 +634,7 @@ class PaperBook:
             )
         )
         self._settlement_times[ticket.ticket_id] = settlement_time
-        _CANONICAL_ADVANCE_CAUSAL_SETTLE(
+        _advance_paperbook_causal_history_settle(
             self,
             ticket.ticket_id,
             tuple(sorted(winners)),
@@ -793,34 +662,56 @@ class PaperBook:
 
     @staticmethod
     def _canonical_snapshot_path(path: object) -> Path:
-        if type(path) not in {str, _CANONICAL_PAPER_PATH_TYPE}:
+        if type(path) not in {str, type(Path("."))}:
             raise TypeError(
                 "PaperBook snapshot path must be exact str or exact Path"
             )
+        return Path(path)
+
+    @staticmethod
+    def _fsync_snapshot_directory(directory: Path) -> None:
+        """Persist an atomic snapshot rename on filesystems with directory fsync."""
+        directory_flag = getattr(os, "O_DIRECTORY", None)
+        if directory_flag is None:
+            return
+        descriptor = os.open(directory, os.O_RDONLY | directory_flag)
         try:
-            raw = _CANONICAL_PAPER_PATH_CONSTRUCTOR(path)
-            parent = _CANONICAL_PAPER_PATH_RESOLVE(raw.parent, strict=False)
-            return parent / raw.name
-        except (OSError, RuntimeError) as exc:
-            raise ValueError(
-                "PaperBook snapshot path cannot be canonically resolved"
-            ) from exc
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _ensure_snapshot_parent_durable(cls, directory: Path) -> None:
+        """Create missing snapshot directories and durably publish each entry."""
+        missing: list[Path] = []
+        cursor = directory
+        while not cursor.exists():
+            missing.append(cursor)
+            parent = cursor.parent
+            if parent == cursor:
+                break
+            cursor = parent
+
+        directory.mkdir(parents=True, exist_ok=True)
+
+        # mkdir(parents=True) can publish several directory entries. Persist every
+        # newly published child name in its parent before a successful save can be
+        # reported; the final snapshot rename gets its own directory fsync later.
+        for created in reversed(missing):
+            cls._fsync_snapshot_directory(created.parent)
 
     @_serialized_paperbook_operation
     def save(self, path: str | Path) -> None:
-        if type(self) is not __class__:
-            raise TypeError("PaperBook economic authority requires the exact book type")
         # PaperBook and PaperTicket are intentionally mutable during a paper run.
         # Validate caller-visible state before consulting hidden authorities so a
         # hostile subclass cannot execute comparison hooks during fail-closed
         # authority checks, and do so before any durable replacement.
-        _CANONICAL_VALIDATE_LOADED_STATE(self)
-        _CANONICAL_REQUIRE_OPENING_AUTHORITY(self)
-        _CANONICAL_REQUIRE_CAUSAL_AUTHORITY(self)
-        destination = _CANONICAL_SNAPSHOT_PATH(path)
-        _CANONICAL_PAPER_PATH_MKDIR(destination.parent, parents=True, exist_ok=True)
+        self._validate_loaded_state(self)
+        _require_ticket_opening_authority(self)
+        _require_paperbook_causal_history_authority(self)
+        destination = self._canonical_snapshot_path(path)
         raw = {
-            "schema_version": _CANONICAL_PAPER_SNAPSHOT_SCHEMA_VERSION,
+            "schema_version": _PAPER_SNAPSHOT_SCHEMA_VERSION,
             "initial_bankroll": str(self.initial_bankroll),
             "balance": str(self.balance),
             "tickets": [
@@ -854,36 +745,23 @@ class PaperBook:
                 }
                 for t in self.tickets.values()
             ],
-            "lifecycle": _CANONICAL_LIFECYCLE_TO_JSON(self),
+            "lifecycle": self._lifecycle_to_json(),
         }
 
         # The raw snapshot is detached from the mutable live object. Validate
         # that exact candidate against product-issued opening commitments before
         # any durable replacement, closing coherent mutation during collection.
-        candidate = _CANONICAL_FROM_RAW_SNAPSHOT(raw)
-        _CANONICAL_REQUIRE_CANDIDATE_OPENING_AUTHORITY(self, candidate)
-        _CANONICAL_REQUIRE_CANDIDATE_CAUSAL_AUTHORITY(self, candidate)
+        candidate = self._from_raw_snapshot(raw)
+        _require_snapshot_candidate_opening_authority(self, candidate)
+        _require_snapshot_candidate_causal_history_authority(self, candidate)
 
-        try:
-            serialized = _CANONICAL_JSON_DUMPS(
-                raw,
-                ensure_ascii=False,
-                indent=2,
-                allow_nan=False,
-            )
-            serialized_bytes = serialized.encode("utf-8", errors="strict")
-        except (TypeError, ValueError, UnicodeEncodeError) as exc:
-            raise ValueError(
-                "PaperBook snapshot is not canonically serializable"
-            ) from exc
-        if len(serialized_bytes) > _CANONICAL_MAX_PAPER_SNAPSHOT_BYTES:
-            raise ValueError(
-                "PaperBook snapshot exceeds the canonical byte-size limit"
-            )
+        # Do not publish filesystem state for a candidate that failed any
+        # structural/economic/authority check above.
+        self._ensure_snapshot_parent_durable(destination.parent)
 
         temporary: Path | None = None
         try:
-            with _CANONICAL_NAMED_TEMPORARY_FILE(
+            with tempfile.NamedTemporaryFile(
                 "w",
                 encoding="utf-8",
                 newline="\n",
@@ -892,44 +770,23 @@ class PaperBook:
                 suffix=".tmp",
                 delete=False,
             ) as handle:
-                temporary = _CANONICAL_PAPER_PATH_CONSTRUCTOR(handle.name)
-                handle.write(serialized)
+                temporary = Path(handle.name)
+                json.dump(raw, handle, ensure_ascii=False, indent=2)
                 handle.flush()
-                _CANONICAL_OS_FSYNC(handle.fileno())
-            _CANONICAL_OS_REPLACE(temporary, destination)
-
-            published_descriptor: int | None = None
-            directory_descriptor: int | None = None
-            try:
-                published_descriptor = _CANONICAL_OS_OPEN(
-                    destination,
-                    _CANONICAL_OS_RDONLY,
-                )
-                _CANONICAL_OS_FSYNC(published_descriptor)
-                if _CANONICAL_OS_NAME != "nt":
-                    directory_descriptor = _CANONICAL_OS_OPEN(
-                        destination.parent,
-                        _CANONICAL_OS_RDONLY | _CANONICAL_OS_DIRECTORY,
-                    )
-                    _CANONICAL_OS_FSYNC(directory_descriptor)
-            finally:
-                for descriptor in (directory_descriptor, published_descriptor):
-                    if descriptor is None:
-                        continue
-                    try:
-                        _CANONICAL_OS_CLOSE(descriptor)
-                    except OSError:
-                        pass
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+            temporary = None
+            self._fsync_snapshot_directory(destination.parent)
         finally:
             if temporary is not None:
                 try:
-                    _CANONICAL_PAPER_PATH_UNLINK(temporary)
+                    temporary.unlink()
                 except FileNotFoundError:
                     pass
 
     @staticmethod
     def _require_finite(value: object, label: str) -> None:
-        if type(value) is not _CANONICAL_PAPER_DECIMAL_TYPE or not value.is_finite():
+        if type(value) is not Decimal or not value.is_finite():
             raise ValueError(f"PaperBook snapshot contains non-finite {label}")
 
     @staticmethod
@@ -950,7 +807,7 @@ class PaperBook:
         *,
         forbid_quote_key_delimiter: bool = False,
     ) -> str:
-        text = _CANONICAL_REQUIRE_UTF8_STRING(value, label)
+        text = cls._require_utf8_string(value, label)
         if not text or text.strip() != text:
             raise ValueError(f"PaperBook {label} must be a non-empty trimmed string")
         if forbid_quote_key_delimiter and "|" in text:
@@ -973,7 +830,7 @@ class PaperBook:
         if type(provider_source_ids) is not tuple:
             raise ValueError("PaperBook provider_source_ids must be a canonical tuple")
         canonical_sources = tuple(
-            _CANONICAL_REQUIRE_CANONICAL_TEXT(source_id, "provider_source_id")
+            cls._require_canonical_text(source_id, "provider_source_id")
             for source_id in provider_source_ids
         )
         if (
@@ -993,8 +850,8 @@ class PaperBook:
             source_id, account_id = binding
             account_bindings.append(
                 (
-                    _CANONICAL_REQUIRE_CANONICAL_TEXT(source_id, "provider account source_id"),
-                    _CANONICAL_REQUIRE_CANONICAL_TEXT(account_id, "provider account_id"),
+                    cls._require_canonical_text(source_id, "provider account source_id"),
+                    cls._require_canonical_text(account_id, "provider account_id"),
                 )
             )
         canonical_accounts = tuple(account_bindings)
@@ -1020,8 +877,8 @@ class PaperBook:
         if bankroll_id is None:
             return canonical_sources, canonical_accounts, None, None
 
-        canonical_bankroll = _CANONICAL_REQUIRE_CANONICAL_TEXT(bankroll_id, "bankroll_id")
-        canonical_currency = _CANONICAL_REQUIRE_CANONICAL_TEXT(currency, "currency")
+        canonical_bankroll = cls._require_canonical_text(bankroll_id, "bankroll_id")
+        canonical_currency = cls._require_canonical_text(currency, "currency")
         if (
             len(canonical_currency) != 3
             or not canonical_currency.isascii()
@@ -1037,13 +894,13 @@ class PaperBook:
     def _validate_timestamp(cls, value: object, label: str) -> str:
         message = f"PaperBook {label} must be a non-empty trimmed timezone-aware ISO timestamp"
         try:
-            text = _CANONICAL_REQUIRE_UTF8_STRING(value, label)
+            text = cls._require_utf8_string(value, label)
         except ValueError as exc:
             raise ValueError(message) from exc
         if not text or text.strip() != text:
             raise ValueError(message)
         try:
-            _CANONICAL_PARSE_ISO_TIMESTAMP(text)
+            parse_iso_timestamp(text)
         except ValueError as exc:
             raise ValueError(message) from exc
         return text
@@ -1051,7 +908,7 @@ class PaperBook:
     @classmethod
     def _validate_placed_at(cls, value: object, *, snapshot: bool = False) -> str:
         label = "snapshot placed_at" if snapshot else "placed_at"
-        return _CANONICAL_VALIDATE_TIMESTAMP(value, label)
+        return cls._validate_timestamp(value, label)
 
     @classmethod
     def _validate_settled_at(
@@ -1062,34 +919,34 @@ class PaperBook:
         snapshot: bool = False,
     ) -> str:
         label = "snapshot settled_at" if snapshot else "settled_at"
-        settled_text = _CANONICAL_VALIDATE_TIMESTAMP(value, label)
-        placed_text = _CANONICAL_VALIDATE_PLACED_AT(placed_at, snapshot=snapshot)
-        if _CANONICAL_PARSE_ISO_TIMESTAMP(settled_text) < _CANONICAL_PARSE_ISO_TIMESTAMP(placed_text):
+        settled_text = cls._validate_timestamp(value, label)
+        placed_text = cls._validate_placed_at(placed_at, snapshot=snapshot)
+        if parse_iso_timestamp(settled_text) < parse_iso_timestamp(placed_text):
             raise ValueError("PaperBook settled_at must not precede placed_at")
         return settled_text
 
     @classmethod
     def _validate_ticket_leg(cls, leg: object, *, ticket_id: str | None = None) -> TicketLeg:
-        if type(leg) is not _CANONICAL_TICKET_LEG_TYPE:
+        if type(leg) is not TicketLeg:
             raise ValueError("PaperBook ticket legs must be canonical TicketLeg values")
         suffix = f" for ticket {ticket_id}" if ticket_id is not None else ""
-        _CANONICAL_REQUIRE_CANONICAL_TEXT(
+        cls._require_canonical_text(
             leg.event_id,
             f"event_id{suffix}",
             forbid_quote_key_delimiter=True,
         )
-        _CANONICAL_REQUIRE_CANONICAL_TEXT(
+        cls._require_canonical_text(
             leg.market_id,
             f"market_id{suffix}",
             forbid_quote_key_delimiter=True,
         )
-        _CANONICAL_REQUIRE_CANONICAL_TEXT(
+        cls._require_canonical_text(
             leg.selection_id,
             f"selection_id{suffix}",
             forbid_quote_key_delimiter=True,
         )
         if leg.sport is not None:
-            sport = _CANONICAL_REQUIRE_CANONICAL_TEXT(
+            sport = cls._require_canonical_text(
                 leg.sport,
                 f"sport{suffix}",
                 forbid_quote_key_delimiter=True,
@@ -1102,7 +959,7 @@ class PaperBook:
                     "PaperBook ticket sport must be a lowercase canonical sport identity"
                 )
         if leg.exchange_side is not None:
-            exchange_side = _CANONICAL_REQUIRE_CANONICAL_TEXT(
+            exchange_side = cls._require_canonical_text(
                 leg.exchange_side,
                 f"exchange_side{suffix}",
                 forbid_quote_key_delimiter=True,
@@ -1117,7 +974,7 @@ class PaperBook:
                 )
         if leg.market_semantics_id is not None:
             try:
-                _CANONICAL_SEMANTIC_IDENTITY(
+                _canonical_semantic_identity(
                     leg.market_semantics_id,
                     f"market_semantics_id{suffix}",
                 )
@@ -1125,7 +982,7 @@ class PaperBook:
                 raise ValueError(
                     "PaperBook ticket market_semantics_id must be canonical"
                 ) from exc
-        _CANONICAL_REQUIRE_FINITE(leg.locked_odds, f"locked_odds{suffix}")
+        cls._require_finite(leg.locked_odds, f"locked_odds{suffix}")
         if leg.locked_odds <= 1:
             raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
         return leg
@@ -1137,12 +994,12 @@ class PaperBook:
         action, ticket_id, winners, voids = entry
         if type(action) is not str or action not in {"open", "settle"}:
             raise ValueError("PaperBook lifecycle action must be canonical open or settle text")
-        _CANONICAL_REQUIRE_CANONICAL_TEXT(ticket_id, "lifecycle ticket_id")
+        cls._require_canonical_text(ticket_id, "lifecycle ticket_id")
         if type(winners) is not tuple or type(voids) is not tuple:
             raise ValueError("PaperBook lifecycle settlement keys must be canonical tuples")
         for values, label in ((winners, "winning_quote_keys"), (voids, "void_quote_keys")):
             for value in values:
-                _CANONICAL_REQUIRE_CANONICAL_TEXT(value, f"lifecycle {label}")
+                cls._require_canonical_text(value, f"lifecycle {label}")
             if values != tuple(sorted(values)) or len(values) != len(set(values)):
                 raise ValueError(f"PaperBook lifecycle {label} must be sorted and unique")
         if action == "open" and (winners or voids):
@@ -1166,7 +1023,7 @@ class PaperBook:
         open_order: list[str] = []
 
         for raw_entry in book._lifecycle:
-            action, ticket_id, winners_raw, voids_raw = _CANONICAL_VALIDATE_LIFECYCLE_ENTRY(
+            action, ticket_id, winners_raw, voids_raw = cls._validate_lifecycle_entry(
                 raw_entry
             )
             ticket = book.tickets.get(ticket_id)
@@ -1177,7 +1034,7 @@ class PaperBook:
                 if ticket_id in opened:
                     raise ValueError("PaperBook lifecycle opens a ticket more than once")
                 try:
-                    replay_balance = _CANONICAL_DEBIT_BALANCE(replay_balance, ticket.stake)
+                    replay_balance = cls._debit_balance(replay_balance, ticket.stake)
                 except ValueError as exc:
                     raise ValueError(
                         f"PaperBook lifecycle stake for ticket {ticket_id} was not affordable"
@@ -1200,14 +1057,14 @@ class PaperBook:
                     f"PaperBook ticket {ticket_id} settled_at is inconsistent with lifecycle provenance"
                 )
             if settlement_time is not None:
-                _CANONICAL_VALIDATE_SETTLED_AT(
+                cls._validate_settled_at(
                     settlement_time,
                     ticket.placed_at,
                     snapshot=True,
                 )
             winners = set(winners_raw)
             voids = set(voids_raw)
-            status, payout, replay_balance = _CANONICAL_SETTLEMENT_RESULT(
+            status, payout, replay_balance = cls._settlement_result(
                 ticket,
                 replay_balance,
                 winners,
@@ -1224,11 +1081,11 @@ class PaperBook:
         for ticket_id, ticket in book.tickets.items():
             if ticket_id not in opened:
                 raise ValueError("PaperBook lifecycle is missing ticket open action")
-            if ticket_id not in settled and ticket.status is not _CANONICAL_TICKET_STATUS_OPEN:
+            if ticket_id not in settled and ticket.status is not TicketStatus.OPEN:
                 raise ValueError(
                     f"PaperBook ticket {ticket_id} settled state is missing lifecycle provenance"
                 )
-            if ticket_id in settled and ticket.status is _CANONICAL_TICKET_STATUS_OPEN:
+            if ticket_id in settled and ticket.status is TicketStatus.OPEN:
                 raise ValueError(
                     f"PaperBook ticket {ticket_id} open state conflicts with lifecycle settlement witness"
                 )
@@ -1243,8 +1100,8 @@ class PaperBook:
 
     @classmethod
     def _validate_loaded_state(cls, book: "PaperBook") -> None:
-        _CANONICAL_REQUIRE_FINITE(book.initial_bankroll, "initial_bankroll")
-        _CANONICAL_REQUIRE_FINITE(book.balance, "balance")
+        cls._require_finite(book.initial_bankroll, "initial_bankroll")
+        cls._require_finite(book.balance, "balance")
         if book.initial_bankroll <= 0:
             raise ValueError("PaperBook snapshot initial_bankroll must be positive")
         if book.balance < 0:
@@ -1253,32 +1110,32 @@ class PaperBook:
             raise ValueError("PaperBook tickets must be a canonical ticket mapping")
 
         for ticket_key, ticket in book.tickets.items():
-            _CANONICAL_REQUIRE_CANONICAL_TEXT(ticket_key, "ticket mapping key")
-            if type(ticket) is not _CANONICAL_PAPER_TICKET_TYPE:
+            cls._require_canonical_text(ticket_key, "ticket mapping key")
+            if type(ticket) is not PaperTicket:
                 raise ValueError("PaperBook tickets must contain canonical PaperTicket values")
-            _CANONICAL_REQUIRE_CANONICAL_TEXT(ticket.ticket_id, "ticket_id")
+            cls._require_canonical_text(ticket.ticket_id, "ticket_id")
             if ticket_key != ticket.ticket_id:
                 raise ValueError("PaperBook ticket mapping key must match ticket_id")
-            _CANONICAL_VALIDATE_PLACED_AT(ticket.placed_at, snapshot=True)
+            cls._validate_placed_at(ticket.placed_at, snapshot=True)
             if ticket.settled_at is not None:
-                _CANONICAL_VALIDATE_SETTLED_AT(
+                cls._validate_settled_at(
                     ticket.settled_at,
                     ticket.placed_at,
                     snapshot=True,
                 )
-            if ticket.status is _CANONICAL_TICKET_STATUS_OPEN and ticket.settled_at is not None:
+            if ticket.status is TicketStatus.OPEN and ticket.settled_at is not None:
                 raise ValueError("PaperBook snapshot open ticket cannot have settled_at")
-            _CANONICAL_REQUIRE_UTF8_STRING(ticket.strategy_reason, "snapshot strategy_reason")
-            _CANONICAL_VALIDATE_TICKET_PROVENANCE(
+            cls._require_utf8_string(ticket.strategy_reason, "snapshot strategy_reason")
+            cls._validate_ticket_provenance(
                 ticket.provider_source_ids,
                 ticket.provider_accounts,
                 ticket.bankroll_id,
                 ticket.currency,
             )
-            if type(ticket.status) is not _CANONICAL_TICKET_STATUS_TYPE:
+            if type(ticket.status) is not TicketStatus:
                 raise ValueError("PaperBook snapshot ticket status must be canonical TicketStatus")
-            _CANONICAL_REQUIRE_FINITE(ticket.stake, f"stake for ticket {ticket.ticket_id}")
-            _CANONICAL_REQUIRE_FINITE(ticket.payout, f"payout for ticket {ticket.ticket_id}")
+            cls._require_finite(ticket.stake, f"stake for ticket {ticket.ticket_id}")
+            cls._require_finite(ticket.payout, f"payout for ticket {ticket.ticket_id}")
             if ticket.stake <= 0:
                 raise ValueError("PaperBook snapshot ticket stake must be positive")
             if ticket.payout < 0:
@@ -1286,26 +1143,26 @@ class PaperBook:
             if type(ticket.legs) is not tuple or not ticket.legs:
                 raise ValueError("PaperBook snapshot ticket requires a canonical non-empty leg tuple")
             for leg in ticket.legs:
-                _CANONICAL_VALIDATE_TICKET_LEG(leg, ticket_id=ticket.ticket_id)
+                cls._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
             quote_keys = [leg.quote_key for leg in ticket.legs]
             if len(quote_keys) != len(set(quote_keys)):
                 raise ValueError("PaperBook snapshot ticket contains duplicate quote_key leg")
 
-            if ticket.status in {_CANONICAL_TICKET_STATUS_OPEN, _CANONICAL_TICKET_STATUS_LOST} and ticket.payout != 0:
+            if ticket.status in {TicketStatus.OPEN, TicketStatus.LOST} and ticket.payout != 0:
                 raise ValueError("PaperBook snapshot open/lost ticket payout must be zero")
-            if ticket.status is _CANONICAL_TICKET_STATUS_VOID and ticket.payout != ticket.stake:
+            if ticket.status is TicketStatus.VOID and ticket.payout != ticket.stake:
                 raise ValueError("PaperBook snapshot void ticket payout must equal stake")
-            if ticket.status is _CANONICAL_TICKET_STATUS_WON and ticket.payout <= ticket.stake:
+            if ticket.status is TicketStatus.WON and ticket.payout <= ticket.stake:
                 raise ValueError("PaperBook snapshot won ticket payout must exceed stake")
 
-        _CANONICAL_VALIDATE_LIFECYCLE_REACHABILITY(book)
+        cls._validate_lifecycle_reachability(book)
 
     @classmethod
     def _parse_lifecycle_key_list(cls, value: object, label: str) -> tuple[str, ...]:
         if type(value) is not list:
             raise ValueError(f"PaperBook snapshot lifecycle {label} must be a list")
         for item in value:
-            _CANONICAL_REQUIRE_CANONICAL_TEXT(item, f"snapshot lifecycle {label}")
+            cls._require_canonical_text(item, f"snapshot lifecycle {label}")
         normalized = tuple(value)
         if normalized != tuple(sorted(normalized)) or len(normalized) != len(set(normalized)):
             raise ValueError(
@@ -1345,23 +1202,23 @@ class PaperBook:
                     raise ValueError("PaperBook snapshot settle lifecycle entry has unexpected fields")
                 settled_at = item.get("settled_at") if schema_version >= 5 else None
                 if settled_at is not None:
-                    _CANONICAL_VALIDATE_TIMESTAMP(
+                    cls._validate_timestamp(
                         settled_at,
                         "snapshot lifecycle settled_at",
                     )
                 entry = (
                     "settle",
                     ticket_id,
-                    _CANONICAL_PARSE_LIFECYCLE_KEY_LIST(
+                    cls._parse_lifecycle_key_list(
                         item["winning_quote_keys"], "winning_quote_keys"
                     ),
-                    _CANONICAL_PARSE_LIFECYCLE_KEY_LIST(
+                    cls._parse_lifecycle_key_list(
                         item["void_quote_keys"], "void_quote_keys"
                     ),
                 )
             else:
                 raise ValueError("PaperBook snapshot lifecycle action must be open or settle")
-            canonical_entry = _CANONICAL_VALIDATE_LIFECYCLE_ENTRY(entry)
+            canonical_entry = cls._validate_lifecycle_entry(entry)
             entries.append(canonical_entry)
             if action == "settle":
                 settlement_times[canonical_entry[1]] = settled_at
@@ -1373,15 +1230,15 @@ class PaperBook:
             raise ValueError(
                 f"PaperBook snapshot {label} must be a non-empty trimmed decimal string"
             )
-        if len(value) > _CANONICAL_MAX_PAPER_DECIMAL_TEXT_CHARS:
+        if len(value) > _MAX_PAPER_DECIMAL_TEXT_CHARS:
             raise ValueError(
                 f"PaperBook snapshot {label} decimal text exceeds the canonical size limit"
             )
         try:
-            parsed = _CANONICAL_PAPER_DECIMAL_TYPE(value)
-        except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+            parsed = Decimal(value)
+        except DecimalException as exc:
             raise ValueError(f"PaperBook snapshot {label} is not a valid Decimal string") from exc
-        _CANONICAL_REQUIRE_FINITE(parsed, label)
+        cls._require_finite(parsed, label)
         return parsed
 
     @staticmethod
@@ -1410,45 +1267,54 @@ class PaperBook:
                 raise ValueError(
                     f"PaperBook snapshot leg {index} for ticket {ticket_id} must be an object"
                 )
+            expected_leg_fields = {
+                "event_id",
+                "market_id",
+                "selection_id",
+                "locked_odds",
+            }
+            if schema_version is not None and schema_version >= 6:
+                expected_leg_fields.add("sport")
+            if schema_version is not None and schema_version >= 7:
+                expected_leg_fields.add("exchange_side")
+            if schema_version is not None and schema_version >= 8:
+                expected_leg_fields.add("market_semantics_id")
+            unexpected_leg_fields = set(raw_leg) - expected_leg_fields
+            if unexpected_leg_fields:
+                version_label = (
+                    "legacy" if schema_version is None else f"schema {schema_version}"
+                )
+                raise ValueError(
+                    f"PaperBook snapshot {version_label} ticket leg contains unexpected fields"
+                )
             sport = (
-                _CANONICAL_REQUIRED_SNAPSHOT_FIELD(raw_leg, "sport", "ticket leg")
+                cls._required_snapshot_field(raw_leg, "sport", "ticket leg")
                 if schema_version is not None and schema_version >= 6
                 else None
             )
             exchange_side = (
-                _CANONICAL_REQUIRED_SNAPSHOT_FIELD(raw_leg, "exchange_side", "ticket leg")
+                cls._required_snapshot_field(raw_leg, "exchange_side", "ticket leg")
                 if schema_version is not None and schema_version >= 7
                 else None
             )
-            if (
-                (schema_version is None or schema_version < 8)
-                and "market_semantics_id" in raw_leg
-            ):
-                raise ValueError(
-                    "ticket leg market_semantics_id is unsupported before schema 8"
-                )
             market_semantics_id = (
-                _CANONICAL_REQUIRED_SNAPSHOT_FIELD(
-                    raw_leg,
-                    "market_semantics_id",
-                    "ticket leg",
-                )
+                cls._required_snapshot_field(raw_leg, "market_semantics_id", "ticket leg")
                 if schema_version is not None and schema_version >= 8
                 else None
             )
             if sport is not None:
-                _CANONICAL_REQUIRE_CANONICAL_TEXT(
+                cls._require_canonical_text(
                     sport,
                     f"sport for ticket {ticket_id}",
                     forbid_quote_key_delimiter=True,
                 )
             legs.append(
-                _CANONICAL_TICKET_LEG_CONSTRUCTOR(
-                    _CANONICAL_REQUIRED_SNAPSHOT_FIELD(raw_leg, "event_id", "ticket leg"),
-                    _CANONICAL_REQUIRED_SNAPSHOT_FIELD(raw_leg, "market_id", "ticket leg"),
-                    _CANONICAL_REQUIRED_SNAPSHOT_FIELD(raw_leg, "selection_id", "ticket leg"),
-                    _CANONICAL_PARSE_SNAPSHOT_DECIMAL(
-                        _CANONICAL_REQUIRED_SNAPSHOT_FIELD(raw_leg, "locked_odds", "ticket leg"),
+                TicketLeg(
+                    cls._required_snapshot_field(raw_leg, "event_id", "ticket leg"),
+                    cls._required_snapshot_field(raw_leg, "market_id", "ticket leg"),
+                    cls._required_snapshot_field(raw_leg, "selection_id", "ticket leg"),
+                    cls._parse_snapshot_decimal(
+                        cls._required_snapshot_field(raw_leg, "locked_odds", "ticket leg"),
                         f"locked_odds for ticket {ticket_id}",
                     ),
                     sport=sport,
@@ -1475,10 +1341,10 @@ class PaperBook:
                 )
             bindings.append(
                 (
-                    _CANONICAL_REQUIRE_CANONICAL_TEXT(
+                    cls._require_canonical_text(
                         raw_binding["source_id"], "snapshot provider account source_id"
                     ),
-                    _CANONICAL_REQUIRE_CANONICAL_TEXT(
+                    cls._require_canonical_text(
                         raw_binding["account_id"], "snapshot provider account_id"
                     ),
                 )
@@ -1492,7 +1358,7 @@ class PaperBook:
                 f"PaperBook snapshot status for ticket {ticket_id} must be a string"
             )
         try:
-            return _CANONICAL_TICKET_STATUS_TYPE(value)
+            return TicketStatus(value)
         except ValueError as exc:
             raise ValueError(
                 f"PaperBook snapshot status for ticket {ticket_id} is invalid"
@@ -1502,39 +1368,79 @@ class PaperBook:
     def _from_raw_snapshot(cls, raw: object) -> "PaperBook":
         if type(raw) is not dict:
             raise ValueError("PaperBook snapshot root must be an object")
-        schema_version = raw.get("schema_version", _CANONICAL_SCHEMA_MISSING)
-        is_legacy = schema_version is _CANONICAL_SCHEMA_MISSING
+        schema_version = raw.get("schema_version", _SCHEMA_MISSING)
+        is_legacy = schema_version is _SCHEMA_MISSING
         if not is_legacy and (
             type(schema_version) is not int
-            or schema_version not in _CANONICAL_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS
+            or schema_version not in _SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS
         ):
             raise ValueError("unsupported PaperBook snapshot schema_version")
+        expected_root_fields = (
+            {"initial_bankroll", "balance", "tickets"}
+            if is_legacy
+            else {
+                "schema_version",
+                "initial_bankroll",
+                "balance",
+                "tickets",
+                "lifecycle",
+            }
+        )
+        unexpected_root_fields = set(raw) - expected_root_fields
+        if unexpected_root_fields:
+            version_label = "legacy" if is_legacy else f"schema {schema_version}"
+            raise ValueError(
+                f"PaperBook snapshot {version_label} root contains unexpected fields"
+            )
 
-        initial_bankroll = _CANONICAL_PARSE_SNAPSHOT_DECIMAL(
-            _CANONICAL_REQUIRED_SNAPSHOT_FIELD(raw, "initial_bankroll", "root"),
+        initial_bankroll = cls._parse_snapshot_decimal(
+            cls._required_snapshot_field(raw, "initial_bankroll", "root"),
             "initial_bankroll",
         )
         book = cls(initial_bankroll)
-        book.balance = _CANONICAL_PARSE_SNAPSHOT_DECIMAL(
-            _CANONICAL_REQUIRED_SNAPSHOT_FIELD(raw, "balance", "root"),
+        book.balance = cls._parse_snapshot_decimal(
+            cls._required_snapshot_field(raw, "balance", "root"),
             "balance",
         )
-        tickets_raw = _CANONICAL_REQUIRED_SNAPSHOT_FIELD(raw, "tickets", "root")
+        tickets_raw = cls._required_snapshot_field(raw, "tickets", "root")
         if type(tickets_raw) is not list:
             raise ValueError("PaperBook snapshot tickets must be a list")
         seen_ticket_ids: set[str] = set()
         for item in tickets_raw:
             if type(item) is not dict:
                 raise ValueError("PaperBook snapshot ticket must be an object")
-            ticket_id = _CANONICAL_REQUIRE_CANONICAL_TEXT(
-                _CANONICAL_REQUIRED_SNAPSHOT_FIELD(item, "ticket_id", "ticket"),
+            expected_ticket_fields = {
+                "ticket_id",
+                "stake",
+                "legs",
+                "placed_at",
+                "status",
+                "payout",
+                "strategy_reason",
+            }
+            if not is_legacy and schema_version >= 3:
+                expected_ticket_fields.update(
+                    {"provider_source_ids", "bankroll_id", "currency"}
+                )
+            if not is_legacy and schema_version >= 4:
+                expected_ticket_fields.add("provider_accounts")
+            if not is_legacy and schema_version >= 5:
+                expected_ticket_fields.add("settled_at")
+            unexpected_ticket_fields = set(item) - expected_ticket_fields
+            if unexpected_ticket_fields:
+                version_label = "legacy" if is_legacy else f"schema {schema_version}"
+                raise ValueError(
+                    f"PaperBook snapshot {version_label} ticket contains unexpected fields"
+                )
+            ticket_id = cls._require_canonical_text(
+                cls._required_snapshot_field(item, "ticket_id", "ticket"),
                 "snapshot ticket_id",
             )
             if ticket_id in seen_ticket_ids:
                 raise ValueError("PaperBook snapshot contains duplicate ticket_id")
             seen_ticket_ids.add(ticket_id)
             if schema_version in {3, 4, 5, 6, 7, 8}:
-                provider_source_ids_raw = _CANONICAL_REQUIRED_SNAPSHOT_FIELD(
+                provider_source_ids_raw = cls._required_snapshot_field(
                     item, "provider_source_ids", f"ticket {ticket_id}"
                 )
                 if type(provider_source_ids_raw) is not list:
@@ -1543,8 +1449,8 @@ class PaperBook:
                     )
                 provider_source_ids = tuple(provider_source_ids_raw)
                 provider_accounts = (
-                    _CANONICAL_PARSE_SNAPSHOT_PROVIDER_ACCOUNTS(
-                        _CANONICAL_REQUIRED_SNAPSHOT_FIELD(
+                    cls._parse_snapshot_provider_accounts(
+                        cls._required_snapshot_field(
                             item, "provider_accounts", f"ticket {ticket_id}"
                         ),
                         ticket_id,
@@ -1552,10 +1458,10 @@ class PaperBook:
                     if schema_version in {4, 5, 6, 7, 8}
                     else ()
                 )
-                bankroll_id = _CANONICAL_REQUIRED_SNAPSHOT_FIELD(
+                bankroll_id = cls._required_snapshot_field(
                     item, "bankroll_id", f"ticket {ticket_id}"
                 )
-                currency = _CANONICAL_REQUIRED_SNAPSHOT_FIELD(
+                currency = cls._required_snapshot_field(
                     item, "currency", f"ticket {ticket_id}"
                 )
             else:
@@ -1564,33 +1470,33 @@ class PaperBook:
                 bankroll_id = None
                 currency = None
 
-            ticket = _CANONICAL_PAPER_TICKET_CONSTRUCTOR(
+            ticket = PaperTicket(
                 ticket_id=ticket_id,
-                stake=_CANONICAL_PARSE_SNAPSHOT_DECIMAL(
-                    _CANONICAL_REQUIRED_SNAPSHOT_FIELD(item, "stake", f"ticket {ticket_id}"),
+                stake=cls._parse_snapshot_decimal(
+                    cls._required_snapshot_field(item, "stake", f"ticket {ticket_id}"),
                     f"stake for ticket {ticket_id}",
                 ),
-                legs=_CANONICAL_PARSE_SNAPSHOT_LEGS(
-                    _CANONICAL_REQUIRED_SNAPSHOT_FIELD(item, "legs", f"ticket {ticket_id}"),
+                legs=cls._parse_snapshot_legs(
+                    cls._required_snapshot_field(item, "legs", f"ticket {ticket_id}"),
                     ticket_id,
                     schema_version=None if is_legacy else schema_version,
                 ),
-                placed_at=_CANONICAL_REQUIRED_SNAPSHOT_FIELD(
+                placed_at=cls._required_snapshot_field(
                     item, "placed_at", f"ticket {ticket_id}"
                 ),
                 settled_at=(
-                    _CANONICAL_REQUIRED_SNAPSHOT_FIELD(
+                    cls._required_snapshot_field(
                         item, "settled_at", f"ticket {ticket_id}"
                     )
                     if schema_version in {5, 6, 7, 8}
                     else None
                 ),
-                status=_CANONICAL_PARSE_SNAPSHOT_STATUS(
-                    _CANONICAL_REQUIRED_SNAPSHOT_FIELD(item, "status", f"ticket {ticket_id}"),
+                status=cls._parse_snapshot_status(
+                    cls._required_snapshot_field(item, "status", f"ticket {ticket_id}"),
                     ticket_id,
                 ),
-                payout=_CANONICAL_PARSE_SNAPSHOT_DECIMAL(
-                    _CANONICAL_REQUIRED_SNAPSHOT_FIELD(item, "payout", f"ticket {ticket_id}"),
+                payout=cls._parse_snapshot_decimal(
+                    cls._required_snapshot_field(item, "payout", f"ticket {ticket_id}"),
                     f"payout for ticket {ticket_id}",
                 ),
                 strategy_reason=item.get("strategy_reason", ""),
@@ -1616,141 +1522,40 @@ class PaperBook:
                 raise ValueError(
                     f"PaperBook snapshot schema {schema_version} requires lifecycle provenance"
                 )
-            book._lifecycle, book._settlement_times = _CANONICAL_PARSE_LIFECYCLE(
+            book._lifecycle, book._settlement_times = cls._parse_lifecycle(
                 raw["lifecycle"],
                 schema_version,
             )
 
-        _CANONICAL_VALIDATE_LOADED_STATE(book)
+        cls._validate_loaded_state(book)
         # Decoding arbitrary bytes proves structure only. It must not mint the
         # product-issued opening authority needed for economic mutation/readout.
-        _CANONICAL_REVOKE_OPENING_AUTHORITY(book)
-        _CANONICAL_REVOKE_CAUSAL_AUTHORITY(book)
+        _revoke_ticket_opening_authority(book)
+        _revoke_paperbook_causal_history_authority(book)
         return book
 
     @classmethod
     def load_bytes(cls, payload: bytes) -> "PaperBook":
-        if cls is not __class__:
-            raise TypeError("PaperBook economic authority requires the exact book type")
         if type(payload) is not bytes:
             raise TypeError("PaperBook.load_bytes payload must be exact bytes")
-        if len(payload) > _CANONICAL_MAX_PAPER_SNAPSHOT_BYTES:
-            raise ValueError("PaperBook snapshot exceeds the canonical byte-size limit")
         try:
             text = payload.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("PaperBook snapshot must be valid UTF-8") from exc
         try:
-            raw = _CANONICAL_JSON_LOADS(
+            raw = json.loads(
                 text,
-                object_pairs_hook=_CANONICAL_REJECT_DUPLICATE_JSON_KEYS,
-                parse_constant=_CANONICAL_REJECT_NONFINITE_JSON_CONSTANT,
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_nonfinite_json_constant,
             )
         except RecursionError as exc:
             raise ValueError("PaperBook snapshot JSON nesting is too deep") from exc
-        return _CANONICAL_FROM_RAW_SNAPSHOT(raw)
+        return cls._from_raw_snapshot(raw)
 
     @classmethod
     def load(cls, path: str | Path) -> "PaperBook":
-        if cls is not __class__:
-            raise TypeError("PaperBook economic authority requires the exact book type")
-        snapshot_path = _CANONICAL_SNAPSHOT_PATH(path)
-        descriptor: int | None = None
-        verification_descriptor: int | None = None
-        post_read_descriptor: int | None = None
-        try:
-            descriptor = _CANONICAL_OS_OPEN(snapshot_path, _CANONICAL_OS_RDONLY)
-            opened = _CANONICAL_OS_FSTAT(descriptor)
-            path_stat = _CANONICAL_OS_STAT(snapshot_path, follow_symlinks=False)
-            if not _CANONICAL_STAT_ISREG(opened.st_mode) or not _CANONICAL_STAT_ISREG(path_stat.st_mode):
-                raise ValueError(
-                    "PaperBook snapshot must be a regular non-symlink file"
-                )
-            if opened.st_nlink != 1 or path_stat.st_nlink != 1:
-                raise ValueError("PaperBook snapshot must not have hard-link aliases")
-            with _CANONICAL_OS_FDOPEN(descriptor, "rb", closefd=False) as handle:
-                payload = handle.read(_CANONICAL_MAX_PAPER_SNAPSHOT_BYTES + 1)
-
-            verification_descriptor = _CANONICAL_OS_OPEN(snapshot_path, _CANONICAL_OS_RDONLY)
-            verification = _CANONICAL_OS_FSTAT(verification_descriptor)
-            if (
-                not _CANONICAL_STAT_ISREG(verification.st_mode)
-                or verification.st_nlink != 1
-                or not _CANONICAL_OS_SAMEOPENFILE(descriptor, verification_descriptor)
-            ):
-                raise ValueError("PaperBook snapshot changed during verified read")
-            with _CANONICAL_OS_FDOPEN(
-                verification_descriptor,
-                "rb",
-                closefd=False,
-            ) as verification_handle:
-                verification_payload = verification_handle.read(
-                    _CANONICAL_MAX_PAPER_SNAPSHOT_BYTES + 1
-                )
-            if payload != verification_payload:
-                raise ValueError(
-                    "PaperBook snapshot bytes changed during verified read"
-                )
-
-            post_read_descriptor = _CANONICAL_OS_OPEN(snapshot_path, _CANONICAL_OS_RDONLY)
-            post_read = _CANONICAL_OS_FSTAT(post_read_descriptor)
-            if (
-                not _CANONICAL_STAT_ISREG(post_read.st_mode)
-                or post_read.st_nlink != 1
-                or not _CANONICAL_OS_SAMEOPENFILE(descriptor, post_read_descriptor)
-            ):
-                raise ValueError(
-                    "PaperBook snapshot changed after verified read"
-                )
-        except ValueError:
-            raise
-        except OSError as exc:
-            raise ValueError(f"PaperBook snapshot cannot be safely read: {exc}") from exc
-        finally:
-            for candidate in (
-                post_read_descriptor,
-                verification_descriptor,
-                descriptor,
-            ):
-                if candidate is None:
-                    continue
-                try:
-                    _CANONICAL_OS_CLOSE(candidate)
-                except OSError:
-                    pass
-        if len(payload) > _CANONICAL_MAX_PAPER_SNAPSHOT_BYTES:
-            raise ValueError("PaperBook snapshot exceeds the canonical byte-size limit")
-        book = _CANONICAL_LOAD_BYTES(payload)
-        _CANONICAL_INSTALL_OPENING_AUTHORITY(book)
-        _CANONICAL_INSTALL_CAUSAL_AUTHORITY(book)
+        snapshot_path = cls._canonical_snapshot_path(path)
+        book = cls.load_bytes(snapshot_path.read_bytes())
+        _install_validated_ticket_opening_authority(book)
+        _install_validated_paperbook_causal_history_authority(book)
         return book
-
-
-# Stable method witnesses: exact-type checks alone do not prevent caller shadowing
-# or class-attribute rebinding of economic validation and replay methods.
-_CANONICAL_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
-_CANONICAL_DECIMAL_INPUT = PaperBook._canonical_decimal_input
-_CANONICAL_DEBIT_BALANCE = PaperBook._debit_balance
-_CANONICAL_VALIDATE_PLACED_AT = PaperBook._validate_placed_at
-_CANONICAL_REQUIRE_UTF8_STRING = PaperBook._require_utf8_string
-_CANONICAL_REQUIRE_FINITE = PaperBook._require_finite
-_CANONICAL_VALIDATE_TIMESTAMP = PaperBook._validate_timestamp
-_CANONICAL_REQUIRE_CANONICAL_TEXT = PaperBook._require_canonical_text
-_CANONICAL_VALIDATE_TICKET_PROVENANCE = PaperBook._validate_ticket_provenance
-_CANONICAL_VALIDATE_TICKET_LEG = PaperBook._validate_ticket_leg
-_CANONICAL_NORMALIZE_RESOLUTION_KEYS = PaperBook._normalize_resolution_keys
-_CANONICAL_VALIDATE_SETTLED_AT = PaperBook._validate_settled_at
-_CANONICAL_SETTLEMENT_RESULT = PaperBook._settlement_result
-_CANONICAL_SNAPSHOT_PATH = PaperBook._canonical_snapshot_path
-_CANONICAL_FROM_RAW_SNAPSHOT = PaperBook._from_raw_snapshot
-_CANONICAL_LIFECYCLE_TO_JSON = PaperBook._lifecycle_to_json
-_CANONICAL_PARSE_SNAPSHOT_DECIMAL = PaperBook._parse_snapshot_decimal
-_CANONICAL_PARSE_SNAPSHOT_STATUS = PaperBook._parse_snapshot_status
-_CANONICAL_PARSE_SNAPSHOT_LEGS = PaperBook._parse_snapshot_legs
-_CANONICAL_PARSE_SNAPSHOT_PROVIDER_ACCOUNTS = PaperBook._parse_snapshot_provider_accounts
-_CANONICAL_REQUIRED_SNAPSHOT_FIELD = PaperBook._required_snapshot_field
-_CANONICAL_PARSE_LIFECYCLE = PaperBook._parse_lifecycle
-_CANONICAL_PARSE_LIFECYCLE_KEY_LIST = PaperBook._parse_lifecycle_key_list
-_CANONICAL_VALIDATE_LIFECYCLE_ENTRY = PaperBook._validate_lifecycle_entry
-_CANONICAL_VALIDATE_LIFECYCLE_REACHABILITY = PaperBook._validate_lifecycle_reachability
-_CANONICAL_LOAD_BYTES = PaperBook.load_bytes

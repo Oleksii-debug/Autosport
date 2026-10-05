@@ -18,7 +18,6 @@ from .economic_goal_store import economic_goal_to_payload
 
 PROVENANCE_SCHEMA: Final = "autosport.economic_goal_provenance"
 PROVENANCE_SCHEMA_VERSION: Final = 1
-_MAX_PROVENANCE_IDENTITY_CHARS: Final = 512
 
 
 class EconomicGoalProvenanceError(ValueError):
@@ -37,57 +36,33 @@ class EconomicGoalProvenance:
     contract_sha256: str
 
     def __post_init__(self) -> None:
-        error_type = EconomicGoalProvenanceError
-
-        def canonical_identity_text(name: str, value: object) -> None:
-            if type(value) is not str or not value:
-                raise error_type(f"{name} must be a non-empty string")
-            if value != value.strip():
-                raise error_type(f"{name} must be canonical text")
-            if len(value) > 512:
-                raise error_type(f"{name} exceeds the identity size limit")
-            if "\x00" in value:
-                raise error_type(f"{name} must not contain NUL")
-            try:
-                value.encode("utf-8", errors="strict")
-            except UnicodeEncodeError as exc:
-                raise error_type(f"{name} must be valid UTF-8 text") from exc
-
-        if type(self.schema) is not str or self.schema != "autosport.economic_goal_provenance":
-            raise error_type("unsupported provenance schema")
-        if type(self.schema_version) is not int or self.schema_version != 1:
-            raise error_type("unsupported provenance schema version")
-        canonical_identity_text("goal_id", self.goal_id)
-        if type(self.revision) is not int or self.revision <= 0:
-            raise error_type("revision must be a positive integer")
-        canonical_identity_text("bankroll_id", self.bankroll_id)
+        if self.schema != PROVENANCE_SCHEMA:
+            raise EconomicGoalProvenanceError("unsupported provenance schema")
+        if self.schema_version != PROVENANCE_SCHEMA_VERSION:
+            raise EconomicGoalProvenanceError("unsupported provenance schema version")
+        if not isinstance(self.goal_id, str) or not self.goal_id:
+            raise EconomicGoalProvenanceError("goal_id must be a non-empty string")
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision <= 0:
+            raise EconomicGoalProvenanceError("revision must be a positive integer")
+        if not isinstance(self.bankroll_id, str) or not self.bankroll_id:
+            raise EconomicGoalProvenanceError("bankroll_id must be a non-empty string")
         if (
-            type(self.contract_sha256) is not str
+            not isinstance(self.contract_sha256, str)
             or len(self.contract_sha256) != 64
             or any(ch not in "0123456789abcdef" for ch in self.contract_sha256)
         ):
-            raise error_type("contract_sha256 must be lowercase SHA-256 hex")
+            raise EconomicGoalProvenanceError("contract_sha256 must be lowercase SHA-256 hex")
 
     @property
     def decision_identity(self) -> str:
         """Return an immutable, revision-specific identity suitable for evidence binding."""
 
-        __class__.__post_init__(self)
         return f"{self.goal_id}@{self.revision}:{self.contract_sha256}"
-
-
-_CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
-_CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
-_CANONICAL_PROVENANCE_TYPE: Final = EconomicGoalProvenance
-_CANONICAL_PROVENANCE_VALIDATOR: Final = EconomicGoalProvenance.__post_init__
-_CANONICAL_GOAL_SERIALIZER: Final = economic_goal_to_payload
-_CANONICAL_JSON_DUMPS: Final = json.dumps
-_CANONICAL_SHA256: Final = hashlib.sha256
 
 
 def _canonical_json(payload: object) -> bytes:
     try:
-        return _CANONICAL_JSON_DUMPS(
+        return json.dumps(
             payload,
             ensure_ascii=False,
             sort_keys=True,
@@ -97,38 +72,26 @@ def _canonical_json(payload: object) -> bytes:
         raise EconomicGoalProvenanceError("economic-goal payload is not canonically serializable") from exc
 
 
-_CANONICAL_JSON_ENCODER: Final = _canonical_json
-
-
 def contract_sha256(contract: EconomicGoalContract) -> str:
     """Hash the exact canonical persisted representation of ``contract``."""
 
-    if type(contract) is not _CANONICAL_GOAL_TYPE:
-        raise EconomicGoalContractError(
-            "provenance hashing requires a canonical EconomicGoalContract"
-        )
-    _CANONICAL_GOAL_VALIDATOR(contract)
-    return _CANONICAL_SHA256(_CANONICAL_JSON_ENCODER(_CANONICAL_GOAL_SERIALIZER(contract))).hexdigest()
-
-
-_CANONICAL_CONTRACT_HASHER: Final = contract_sha256
+    if not isinstance(contract, EconomicGoalContract):
+        raise EconomicGoalContractError("provenance hashing requires an EconomicGoalContract")
+    return hashlib.sha256(_canonical_json(economic_goal_to_payload(contract))).hexdigest()
 
 
 def provenance_for(contract: EconomicGoalContract) -> EconomicGoalProvenance:
     """Derive immutable provenance identity without introducing another authority."""
 
-    if type(contract) is not _CANONICAL_GOAL_TYPE:
-        raise EconomicGoalContractError(
-            "provenance requires a canonical EconomicGoalContract"
-        )
-    _CANONICAL_GOAL_VALIDATOR(contract)
-    return _CANONICAL_PROVENANCE_TYPE(
-        schema="autosport.economic_goal_provenance",
-        schema_version=1,
+    if not isinstance(contract, EconomicGoalContract):
+        raise EconomicGoalContractError("provenance requires an EconomicGoalContract")
+    return EconomicGoalProvenance(
+        schema=PROVENANCE_SCHEMA,
+        schema_version=PROVENANCE_SCHEMA_VERSION,
         goal_id=contract.goal_id,
         revision=contract.revision,
         bankroll_id=contract.bankroll_id,
-        contract_sha256=_CANONICAL_CONTRACT_HASHER(contract),
+        contract_sha256=contract_sha256(contract),
     )
 
 
@@ -138,22 +101,14 @@ def verify_provenance(
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
-    if type(contract) is not _CANONICAL_GOAL_TYPE:
-        raise EconomicGoalProvenanceError(
-            "contract must be canonical EconomicGoalContract"
-        )
-    _CANONICAL_GOAL_VALIDATOR(contract)
-    if type(provenance) is not _CANONICAL_PROVENANCE_TYPE:
-        raise EconomicGoalProvenanceError(
-            "provenance must be canonical EconomicGoalProvenance"
-        )
-    _CANONICAL_PROVENANCE_VALIDATOR(provenance)
+    if not isinstance(provenance, EconomicGoalProvenance):
+        raise EconomicGoalProvenanceError("provenance must be EconomicGoalProvenance")
     if provenance.goal_id != contract.goal_id:
         raise EconomicGoalProvenanceError("provenance goal_id mismatch")
     if provenance.revision != contract.revision:
         raise EconomicGoalProvenanceError("provenance revision mismatch")
     if provenance.bankroll_id != contract.bankroll_id:
         raise EconomicGoalProvenanceError("provenance bankroll_id mismatch")
-    actual = _CANONICAL_CONTRACT_HASHER(contract)
+    actual = contract_sha256(contract)
     if provenance.contract_sha256 != actual:
         raise EconomicGoalProvenanceError("provenance contract_sha256 mismatch")

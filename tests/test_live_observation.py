@@ -18,7 +18,7 @@ from autosport.live_observation import (
 )
 from autosport.market_mirror import MarketMirror
 from autosport.market_mirror_runtime import BoundedMirrorInvalidationBuffer
-from autosport.providers import InMemoryProvider, ProviderQuote
+from autosport.providers import InMemoryProvider, ProviderBatch, ProviderQuote
 from autosport.storage import SQLiteMarketStore
 from autosport.ui_model import observation_quote_lines, observation_summary
 
@@ -98,6 +98,94 @@ class LiveObservationTests(unittest.TestCase):
                         )
 
             store_type.return_value.close.assert_called_once_with()
+
+    def test_open_store_poll_rejects_batch_source_identity_mismatch_before_persistence(self):
+        class MismatchedBatchProvider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return ProviderBatch(
+                    source_id="foreign-source",
+                    quotes=(
+                        ProviderQuote(
+                            provider_event_id="match-1",
+                            provider_market_id="winner",
+                            provider_selection_id="player-a",
+                            decimal_odds=Decimal("1.80"),
+                            observed_ts="2026-09-12T20:00:00+00:00",
+                            sequence=1,
+                            source_ts="2026-09-12T19:59:59+00:00",
+                        ),
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "batch source identity conflicts",
+                ):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        MismatchedBatchProvider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.events, ())
+            finally:
+                store.close()
+
+    def test_open_store_poll_rejects_provider_source_mutation_during_read_before_persistence(self):
+        class MutatingProvider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.source_id = "mutated-source"
+                return ProviderBatch(
+                    source_id="live-fixture",
+                    quotes=(
+                        ProviderQuote(
+                            provider_event_id="match-1",
+                            provider_market_id="winner",
+                            provider_selection_id="player-a",
+                            decimal_odds=Decimal("1.80"),
+                            observed_ts="2026-09-12T20:00:00+00:00",
+                            sequence=1,
+                            source_ts="2026-09-12T19:59:59+00:00",
+                        ),
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "source identity changed during live batch read",
+                ):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        MutatingProvider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.events, ())
+            finally:
+                store.close()
 
     def test_open_store_poll_does_not_rescan_append_only_history(self):
         with tempfile.TemporaryDirectory() as tmp:

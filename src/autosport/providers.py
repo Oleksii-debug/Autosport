@@ -237,8 +237,8 @@ class CanonicalNormalizer:
 
     def normalize(self, source_id: str, quote: ProviderQuote) -> MarketEvent:
         source_id = _validate_source_id(source_id)
-        if not isinstance(quote.decimal_odds, Decimal):
-            raise TypeError("decimal odds must be Decimal")
+        if type(quote.decimal_odds) is not Decimal:
+            raise TypeError("decimal odds must be an exact Decimal")
         if not quote.decimal_odds.is_finite():
             raise ValueError("decimal odds must be finite")
         if quote.decimal_odds <= 1:

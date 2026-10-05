@@ -661,3 +661,52 @@ def test_product_verifier_rejects_runtime_profile_descriptor_rebinding_before_ex
                 )
 
     assert attacker_called is False
+
+
+def test_product_verifier_rejects_path_handle_class_shadow_before_getter_execution(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    attacker_called = False
+
+    def attacker_workspace(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("store workspace descriptor must never execute")
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        with monkeypatch.context() as local_patch:
+            local_patch.setattr(
+                SupervisedPlanIssuanceStore,
+                "workspace",
+                property(attacker_workspace),
+                raising=False,
+            )
+            with pytest.raises(
+                BetfairStandardLimitPriceBoundError,
+                match="reopen authority changed",
+            ):
+                verify_product_betfair_standard_limit_price_bound(
+                    evidence=evidence,
+                    ledger=ledger,
+                    issuance_store=store,
+                    runtime_profile=runtime_profile,
+                    execution_plan_id=bound.execution_plan.plan_id,
+                    action_id=action.action_id,
+                )
+
+    assert attacker_called is False

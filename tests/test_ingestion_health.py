@@ -947,5 +947,97 @@ class IngestionHealthTests(unittest.TestCase):
                 store.close()
 
 
+    def test_source_health_rejects_nonzero_submicrosecond_transition_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            health = SourceHealthStore(Path(tmp) / "source-health.json")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "precision finer than microseconds is unsupported",
+            ):
+                health.record_success(
+                    "source",
+                    now="2026-09-12T12:00:00.0000001+00:00",
+                    received=0,
+                    accepted=0,
+                    rejected=0,
+                    cursor="submicro-now",
+                    latest_source_ts=None,
+                    quality_flags=(),
+                )
+
+            state = health.get("source")
+            self.assertEqual(state.status, "unknown")
+            self.assertEqual(state.poll_count, 0)
+
+    def test_source_health_accepts_zero_only_precision_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            health = SourceHealthStore(Path(tmp) / "source-health.json")
+
+            state = health.record_success(
+                "source",
+                now="2026-09-12T12:00:00.123456000+00:00",
+                received=0,
+                accepted=0,
+                rejected=0,
+                cursor="zero-tail-now",
+                latest_source_ts=None,
+                quality_flags=(),
+            )
+
+            self.assertEqual(
+                state.last_success_at,
+                "2026-09-12T12:00:00.123456000+00:00",
+            )
+            as_of = health.get_as_of(
+                "source",
+                as_of=datetime.fromisoformat(
+                    "2026-09-12T12:00:00.123456+00:00"
+                ),
+            )
+            self.assertEqual(as_of.poll_count, 1)
+
+    def test_ingestion_clock_submicrosecond_precision_fails_before_market_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00.0000001+00:00",
+                )
+                provider = StaticProvider(
+                    "source",
+                    [
+                        ProviderBatch(
+                            "source",
+                            (
+                                ProviderQuote(
+                                    provider_event_id="event-1",
+                                    provider_market_id="winner",
+                                    provider_selection_id="selection",
+                                    decimal_odds=Decimal("2.0"),
+                                    observed_ts="2026-09-12T12:00:00+00:00",
+                                    sequence=1,
+                                ),
+                            ),
+                        )
+                    ],
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "precision finer than microseconds is unsupported",
+                ):
+                    engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(store.events(), [])
+                self.assertEqual(health.get("source").poll_count, 0)
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -336,16 +336,15 @@ def test_old_evidence_fails_current_reresolution_after_new_settlement(tmp_path):
 def test_caller_modified_scalar_cannot_pass_current_reresolution(tmp_path):
     _initialize(tmp_path)
     evidence = resolve_paper_drawdown_evidence(tmp_path)
-    forged = replace(
-        evidence,
-        historical_max_drawdown_amount=Decimal("1"),
-    )
 
     with pytest.raises(
         PaperDrawdownEvidenceError,
         match="positive historical drawdown requires fraction and episode identity",
     ):
-        require_current_paper_drawdown_evidence(tmp_path, forged)
+        replace(
+            evidence,
+            historical_max_drawdown_amount=Decimal("1"),
+        )
 
 
 def test_missing_settlement_time_is_explicitly_not_as_known_authority(tmp_path):
@@ -595,6 +594,7 @@ def test_evidence_shape_rejects_lifecycle_and_path_claim_drift(tmp_path):
         replace(
             loss_evidence,
             points=(loss_evidence.points[0], forged_settle),
+            path_point_count=2,
             open_position_count=0,
         )
 

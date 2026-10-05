@@ -627,7 +627,7 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     ValueError,
-                    "release example tree must not be a symbolic link",
+                    r"release example tree directory changed during traversal: \.",
                 ):
                     self._build(paths)
 
@@ -787,7 +787,7 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             with patch.object(Path, "lstat", new=lstat_with_reparse):
                 with self.assertRaisesRegex(
                     ValueError,
-                    "release example tree contains a Windows reparse point: market.jsonl",
+                    "release example tree file market.jsonl must not be a Windows reparse point",
                 ):
                     self._build(paths)
 
@@ -1004,13 +1004,22 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             real_read = release_package._read_regular_source_bytes
             swapped = False
 
-            def swap_then_read(path: Path, *, label: str) -> bytes:
+            def swap_then_read(
+                path: Path,
+                *,
+                label: str,
+                expected_snapshot: os.stat_result | None = None,
+            ) -> bytes:
                 nonlocal swapped
                 if path == executable and not swapped:
                     swapped = True
                     executable.unlink()
                     self._symlink_or_skip(secret, executable)
-                return real_read(path, label=label)
+                return real_read(
+                    path,
+                    label=label,
+                    expected_snapshot=expected_snapshot,
+                )
 
             with patch.object(
                 release_package,

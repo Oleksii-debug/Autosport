@@ -2321,3 +2321,68 @@ def test_load_bytes_rejects_in_place_snapshot_helper_code_mutation(
             PaperBook.load_bytes(payload)
     finally:
         authority.__code__ = original_code
+
+def test_open_ticket_rejects_rebound_decimal_helper_before_execution(
+    monkeypatch,
+) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile(cls, value, label):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound open decimal helper executed")
+
+    monkeypatch.setattr(PaperBook, "_canonical_decimal_input", classmethod(hostile))
+
+    with pytest.raises(ValueError, match="decimal helper dispatch changed"):
+        book.open_ticket([_leg()], "10", placed_at=_TS)
+
+    assert attacker_calls == 0
+    assert book.balance == Decimal("100")
+    assert book.tickets == {}
+
+
+def test_open_ticket_rejects_rebound_debit_helper_before_execution(
+    monkeypatch,
+) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile(cls, balance, amount):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound debit helper executed")
+
+    monkeypatch.setattr(PaperBook, "_debit_balance", classmethod(hostile))
+
+    with pytest.raises(ValueError, match="debit helper dispatch changed"):
+        book.open_ticket([_leg()], "10", placed_at=_TS)
+
+    assert attacker_calls == 0
+    assert book.balance == Decimal("100")
+    assert book.tickets == {}
+
+
+def test_settle_rejects_rebound_settlement_helper_before_execution(
+    monkeypatch,
+) -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(cls, current_ticket, balance, winners, voids):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound settlement helper executed")
+
+    monkeypatch.setattr(PaperBook, "_settlement_result", classmethod(hostile))
+
+    with pytest.raises(ValueError, match="settlement helper dispatch changed"):
+        book.settle(ticket.ticket_id, {ticket.legs[0].quote_key})
+
+    assert attacker_calls == 0
+    assert ticket.status is paper_module.TicketStatus.OPEN
+    assert ticket.payout == Decimal("0")
+    assert book.balance == Decimal("90")
+

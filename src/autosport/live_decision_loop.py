@@ -2589,7 +2589,11 @@ class PersistentLiveDecisionLoop:
             if self.paper_execution is None
             else self.paper_execution.execution_guard()
         )
-        with WorkspaceEconomicLock(self.workspace), execution_guard:
+        with (
+            WorkspaceEconomicLock(self.workspace),
+            execution_guard,
+            self.dependencies.registry_state_guard() as focused_dependency_state,
+        ):
             if (
                 decision_context_sha256_override is None
                 and self._decision_context_sha256() != decision_context_sha256
@@ -2600,7 +2604,6 @@ class PersistentLiveDecisionLoop:
             durable_progress = self._load_progress()
             durable_input_specs = self._load_input_registry() or ()
             current_input_specs = tuple(self._input_specs.values())
-            focused_dependency_state = self.dependencies.registry_state_snapshot()
             focused_input_specs = tuple(
                 _InputSpec.from_dependency(dependency)
                 for dependency, _revision in focused_dependency_state
@@ -2743,6 +2746,10 @@ class PersistentLiveDecisionLoop:
                 self.decision_ledger.append_economic(record, self.authority)
                 if self.post_append_hook is not None:
                     self.post_append_hook()
+                if self.dependencies.registry_state_snapshot() != focused_dependency_state:
+                    raise LiveDecisionProgressError(
+                        "focused dependency registry changed during durable ledger publication"
+                    )
 
             # Execution attempts are durable before progress becomes COMMITTED.
             # A crash after the #623 attempt but before PaperBook materialization
@@ -2760,6 +2767,11 @@ class PersistentLiveDecisionLoop:
                     raise DecisionLedgerIntegrityError(
                         "durable PAPER execution run identity drifted after decision publication"
                     )
+
+            if self.dependencies.registry_state_snapshot() != focused_dependency_state:
+                raise LiveDecisionProgressError(
+                    "focused dependency registry changed before committed publication"
+                )
 
             committed = _Progress(
                 loop_id=self.loop_id,

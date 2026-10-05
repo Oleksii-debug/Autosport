@@ -162,6 +162,35 @@ def test_resolution_cannot_be_directly_constructed_or_replaced(tmp_path):
         replace(resolution, accepted_manual_decision=False)
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "record",
+        "accepted_manual_decision",
+        "reviewer_identity_verified",
+        "human_tested",
+        "nvda_verified",
+        "manual_truth_promotion_required",
+        "real_money_execution",
+        "whole_product_complete",
+    ),
+)
+def test_resolution_authority_field_descriptor_rebinding_is_rejected(
+    field_name,
+):
+    with pytest.raises(
+        TypeError,
+        match="manual NVDA resolution authority surface is sealed",
+    ):
+        setattr(ManualNvdaAcceptanceResolution, field_name, object())
+
+    with pytest.raises(
+        TypeError,
+        match="manual NVDA resolution authority surface is sealed",
+    ):
+        delattr(ManualNvdaAcceptanceResolution, field_name)
+
+
 def test_resolution_verifier_rejects_copy_and_tamper(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

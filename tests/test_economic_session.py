@@ -424,6 +424,52 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertFalse(store.state_path.exists())
 
+    def test_session_evidence_validation_is_detached_from_live_helpers(self) -> None:
+        import autosport.economic_session as economic_session
+
+        store = self._store()
+        evidence = store.current()
+
+        original_sha = economic_session._is_sha256
+        original_parse = economic_session._parse_instant
+        sha_calls = 0
+        parse_calls = 0
+
+        def forbidden_sha(*_args, **_kwargs):
+            nonlocal sha_calls
+            sha_calls += 1
+            raise AssertionError("hostile session SHA validator executed")
+
+        def forbidden_parse(*_args, **_kwargs):
+            nonlocal parse_calls
+            parse_calls += 1
+            raise AssertionError("hostile session instant parser executed")
+
+        economic_session._is_sha256 = forbidden_sha
+        economic_session._parse_instant = forbidden_parse
+        try:
+            rebuilt = ProductEconomicSession(
+                workspace_instance_id=evidence.workspace_instance_id,
+                session_id=evidence.session_id,
+                goal_id=evidence.goal_id,
+                goal_revision=evidence.goal_revision,
+                bankroll_id=evidence.bankroll_id,
+                currency=evidence.currency,
+                goal_contract_sha256=evidence.goal_contract_sha256,
+                started_at=evidence.started_at,
+                opening_paperbook_sha256=evidence.opening_paperbook_sha256,
+                state_sha256=evidence.state_sha256,
+                authority_generation=evidence.authority_generation,
+                product_clock_authoritative=evidence.product_clock_authoritative,
+            )
+        finally:
+            economic_session._is_sha256 = original_sha
+            economic_session._parse_instant = original_parse
+
+        self.assertEqual(rebuilt, evidence)
+        self.assertEqual(sha_calls, 0)
+        self.assertEqual(parse_calls, 0)
+
     def test_captured_dependency_rebinding_does_not_reach_hostile_code(self) -> None:
         import autosport.economic_session as economic_session
         import hashlib

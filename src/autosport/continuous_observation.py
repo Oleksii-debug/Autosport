@@ -21,6 +21,7 @@ from .integrity import atomic_write_json
 from .live_observation import poll_open_market_store_once
 from .market_mirror import MarketMirror
 from .market_mirror_runtime import BoundedMirrorInvalidationBuffer
+from .monotonic_workspace_authority import resolve_monotonic_authority_root
 from .parlayapi_provider import ParlayApiTableTennisProvider, ProviderPayloadError
 from .providers import MarketProvider, ProviderUnavailableError
 from .storage import SQLiteMarketStore
@@ -359,12 +360,32 @@ def run_continuous_observation(
         return os.path.normcase(os.path.realpath(os.path.abspath(os.fspath(path))))
 
     status_key = canonical_path_key(status_path)
+    market_path = root / "market.db"
+    health_path = root / "source_health.json"
     protected_paths = (
-        root / "market.db",
-        root / "source_health.json",
+        market_path,
+        Path(os.fspath(market_path) + "-wal"),
+        Path(os.fspath(market_path) + "-shm"),
+        Path(os.fspath(market_path) + "-journal"),
+        health_path,
+        health_path.with_name(health_path.name + ".lock"),
+        health_path.with_suffix(health_path.suffix + ".tmp"),
     )
     if any(status_key == canonical_path_key(path) for path in protected_paths):
         raise ValueError("status_path must not collide with authoritative storage")
+
+    authority_root = resolve_monotonic_authority_root(
+        Path(canonical_path_key(root))
+    )
+    authority_root_key = canonical_path_key(authority_root)
+    try:
+        status_in_authority_root = Path(status_key).is_relative_to(
+            Path(authority_root_key)
+        )
+    except ValueError:
+        status_in_authority_root = False
+    if status_in_authority_root:
+        raise ValueError("status_path must not enter monotonic authority root")
 
     state = _LoopState(current_run_id, provider_source_id, started_at)
     stopper = stop_event if stop_event is not None else threading.Event()

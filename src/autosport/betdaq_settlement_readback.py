@@ -307,6 +307,10 @@ class BetdaqEconomicEvidence:
     physical_account_identity_proven: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.method) is not str:
+            raise BetdaqEconomicReadbackError(
+                "economic evidence method must be exact text"
+            )
         if self.method not in ("GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"):
             raise BetdaqEconomicReadbackError("economic evidence method is not read-only")
         _sha256_hex(self.request_identity_sha256, "request_identity_sha256")

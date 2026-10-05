@@ -16,7 +16,10 @@ from autosport.economic_session import (
     ProductEconomicSession,
     ProductEconomicSessionStore,
 )
-from autosport.monotonic_workspace_authority import MonotonicAuthorityRollbackError
+from autosport.monotonic_workspace_authority import (
+    MonotonicAuthorityConfigurationError,
+    MonotonicAuthorityRollbackError,
+)
 from autosport.paper import PaperBook
 
 
@@ -139,6 +142,20 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         )
         second = self._store().current()
         self.assertEqual(second.opening_paperbook_sha256, first.opening_paperbook_sha256)
+
+    def test_alternative_authority_root_cannot_mint_second_session(self) -> None:
+        primary = self._store()
+        first = primary.current()
+
+        alternate_root = self.authority_root.parent / "alternate-machine-authority"
+        with self.assertRaises(MonotonicAuthorityConfigurationError):
+            ProductEconomicSessionStore(
+                self.workspace,
+                authority_root=alternate_root,
+                _test_clock=self.clock,
+            ).current()
+
+        self.assertEqual(self._store().current(), first)
 
     def test_committed_state_deletion_cannot_rebootstrap_session(self) -> None:
         store = self._store()

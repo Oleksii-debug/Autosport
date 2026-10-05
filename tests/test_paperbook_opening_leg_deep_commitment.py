@@ -2125,3 +2125,49 @@ def test_constructor_rejects_in_place_canonical_decimal_helper_code_mutation() -
             PaperBook("100")
     finally:
         authority.__code__ = original_code
+
+def test_save_rejects_rebound_raw_snapshot_decoder_before_execution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(cls, raw):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound raw snapshot decoder executed")
+
+    monkeypatch.setattr(PaperBook, "_from_raw_snapshot", classmethod(hostile))
+
+    with pytest.raises(ValueError, match="raw snapshot decoder dispatch changed"):
+        book.save(tmp_path / "never-published.json")
+
+    assert attacker_calls == 0
+
+
+def test_save_rejects_rebound_snapshot_path_helper_before_execution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(path_value):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound snapshot path helper executed")
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_canonical_snapshot_path",
+        staticmethod(hostile),
+    )
+
+    with pytest.raises(ValueError, match="snapshot path dispatch changed"):
+        book.save(tmp_path / "never-published.json")
+
+    assert attacker_calls == 0
+

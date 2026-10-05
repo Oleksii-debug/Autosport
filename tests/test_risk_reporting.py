@@ -715,6 +715,8 @@ class PaperRiskReportingTests(unittest.TestCase):
             (self._leg(65),),
             Decimal("35"),
             placed_at="2026-09-21T13:20:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
         )
         settled.settle(
             loser.ticket_id,
@@ -905,6 +907,8 @@ class PaperRiskReportingTests(unittest.TestCase):
             (self._leg(72),),
             Decimal("40"),
             placed_at="2026-09-21T14:40:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
         )
         book.settle(
             ticket.ticket_id,
@@ -983,6 +987,83 @@ class PaperRiskReportingTests(unittest.TestCase):
                 goal,
                 drawdown_subclass,
             )
+
+    def test_money_scope_incompleteness_is_visible_on_legacy_unscoped_tickets(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(74),),
+            Decimal("10"),
+            placed_at="2026-09-21T15:00:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T15:05:00+00:00",
+        )
+        goal = self._goal()
+
+        path = build_product_issued_paper_equity_path(book, goal)
+        drawdown = build_product_issued_paper_drawdown_evidence(book, goal)
+        report = build_paper_risk_report(book, goal)
+
+        self.assertFalse(path.money_scope_complete)
+        self.assertFalse(drawdown.money_scope_complete)
+        self.assertFalse(report.money_scope_complete)
+
+    def test_verified_minimum_equity_rejects_wrong_bankroll_or_currency_scope(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(75),),
+            Decimal("10"),
+            placed_at="2026-09-21T15:10:00+00:00",
+            bankroll_id="different-bankroll",
+            currency="EUR",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T15:15:00+00:00",
+        )
+        goal = self._goal()
+        evidence = build_product_issued_paper_equity_path(book, goal)
+
+        self.assertFalse(evidence.money_scope_complete)
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact bankroll and currency provenance",
+        ):
+            verified_settled_minimum_equity(book, goal, evidence)
+
+    def test_durable_minimum_equity_rejects_wrong_money_scope(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(76),),
+            Decimal("10"),
+            placed_at="2026-09-21T15:20:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="EUR",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T15:25:00+00:00",
+        )
+        goal = self._goal()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper-book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "exact bankroll and currency provenance",
+            ):
+                resolve_durable_verified_settled_minimum_equity(
+                    paper_book_path=str(paper_path),
+                    workspace=str(workspace),
+                )
 
     def test_restart_preserves_exact_report_identity_and_values(self) -> None:
         book = PaperBook("100")

@@ -54,6 +54,8 @@ def _build_guard():
     canonical_slippage_resolver_code = canonical_slippage_resolver.__code__
     validate_component = _cost_source._SEALED_COMPONENT_VALIDATOR
     validate_resolution = _cost_source._SEALED_RESOLUTION_VALIDATOR
+    validate_component_code = validate_component.__code__
+    validate_resolution_code = validate_resolution.__code__
     (
         error_cls,
         component_cls,
@@ -64,6 +66,20 @@ def _build_guard():
     ) = _cost_source._SEALED_CANONICAL_TYPES
     component_fields = tuple(_COMPONENT_FIELDS)
     resolution_fields = tuple(_RESOLUTION_FIELDS)
+
+    def sealed_validate_component(value: object) -> None:
+        if validate_component.__code__ is not validate_component_code:
+            raise error_cls("canonical applicable-cost component validator authority changed")
+        validate_component(value)
+        if validate_component.__code__ is not validate_component_code:
+            raise error_cls("canonical applicable-cost component validator authority changed")
+
+    def sealed_validate_resolution(value: object) -> None:
+        if validate_resolution.__code__ is not validate_resolution_code:
+            raise error_cls("canonical applicable-cost resolution validator authority changed")
+        validate_resolution(value)
+        if validate_resolution.__code__ is not validate_resolution_code:
+            raise error_cls("canonical applicable-cost resolution validator authority changed")
 
     def slot_value(value: object, name: str) -> object:
         try:
@@ -89,8 +105,8 @@ def _build_guard():
             )
         # Both sides are independently shape/semantic validated with the sealed
         # validator before equality is used as an assertion check.
-        validate_component(asserted)
-        validate_component(canonical)
+        sealed_validate_component(asserted)
+        sealed_validate_component(canonical)
         for field in component_fields:
             if slot_value(asserted, field) != slot_value(canonical, field):
                 raise error_cls(
@@ -115,7 +131,7 @@ def _build_guard():
             )
         # Reject object.__new__ forgeries, including exact-class positive/non-schema
         # objects, before any authority-bearing source read.
-        validate_resolution(asserted)
+        sealed_validate_resolution(asserted)
 
         if type(intent) is not intent_cls:
             raise error_cls("intent must be the exact canonical OpportunityIntent type")
@@ -143,7 +159,7 @@ def _build_guard():
             )
         # Do not trust the resolver return merely because it has the exact class.
         # Re-run the independently captured schema-v2 validator before returning it.
-        validate_resolution(canonical)
+        sealed_validate_resolution(canonical)
 
         for field in resolution_fields:
             if slot_value(asserted, field) != slot_value(canonical, field):
@@ -195,7 +211,7 @@ def _build_guard():
             raise error_cls(
                 "prospective applicable-cost assertion must use the exact canonical type"
             )
-        validate_resolution(asserted)
+        sealed_validate_resolution(asserted)
         if type(intent) is not intent_cls:
             raise error_cls("intent must be the exact canonical OpportunityIntent type")
         if type(plan) is not plan_cls:
@@ -226,7 +242,7 @@ def _build_guard():
             raise error_cls(
                 "canonical applicable-cost resolver returned a non-canonical resolution type"
             )
-        validate_resolution(canonical)
+        sealed_validate_resolution(canonical)
         for field in resolution_fields:
             if slot_value(asserted, field) != slot_value(canonical, field):
                 raise error_cls(

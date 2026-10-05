@@ -314,6 +314,31 @@ class DecisionLedgerTests(unittest.TestCase):
                 ["duplicate-id"],
             )
 
+    def test_symlinked_parent_aliases_share_one_writer_lock_namespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = root / "real"
+            alias = root / "alias"
+            real.mkdir()
+            try:
+                alias.symlink_to(real, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks are unavailable")
+
+            first = JsonlDecisionLedger(real / "decisions.jsonl")
+            second = JsonlDecisionLedger(alias / "decisions.jsonl")
+            self.assertEqual(
+                first._writer_lock_path_authority,
+                second._writer_lock_path_authority,
+            )
+            first._writer_lock_path_authority.write_text("owned", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "transaction authority is unavailable",
+            ):
+                second.assert_transaction_authority()
+
     def test_append_fails_closed_when_writer_lock_is_owned(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"

@@ -385,3 +385,33 @@ def test_exact_input_subclasses_are_rejected_before_product_authority_read():
                     model_request_id=request.request_id,
                     decision_at=decision_at,
                 )
+
+
+def test_betfair_cost_resolver_rejects_in_place_base_resolver_code_mutation():
+    resolver = subject.resolve_prospective_applicable_costs
+    original_code = resolver.__code__
+
+    def attacker_resolver(**_kwargs):
+        raise AssertionError("mutated base resolver body must never execute")
+
+    try:
+        resolver.__code__ = attacker_resolver.__code__
+        with pytest.raises(
+            subject.ProspectiveApplicableCostError,
+            match="base applicable-cost resolver authority changed",
+        ):
+            subject.resolve_prospective_applicable_costs_with_betfair_standard_limit(
+                intent=None,
+                plan=None,
+                router_store=None,
+                model_request_id="blocked-before-validation",
+                decision_at=None,
+                slippage_evidence=None,
+                ledger=None,
+                issuance_store=None,
+                runtime_profile=None,
+                execution_plan_id="blocked-before-validation",
+                action_id="blocked-before-validation",
+            )
+    finally:
+        resolver.__code__ = original_code

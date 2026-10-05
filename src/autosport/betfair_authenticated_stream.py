@@ -452,7 +452,9 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         # Every later market frame must therefore be consumed by this runtime without
         # gaps; otherwise an unseen delta could make the local market image false.
         self._next_frame_sequence = 2
-        self._transport._claim_authenticated_reader(self)  # noqa: SLF001 - canonical composition ownership
+        self._transport._claim_authenticated_reader(  # noqa: SLF001 - canonical composition ownership
+            self
+        )
 
     @property
     def subscription(self) -> BetfairAuthenticatedMarketSubscription:

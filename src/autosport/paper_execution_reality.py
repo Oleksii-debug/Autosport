@@ -857,9 +857,17 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 key=lambda item: item.sequence,
             )
         )
+        evidence_events = (
+            self.events()
+            if any(
+                attempt.evidence_grade is not EvidenceGrade.SYNTHETIC
+                for attempt in attempts
+            )
+            else events
+        )
         for durable_attempt in attempts:
             _require_durable_attempt_evidence_binding(
-                events=events,
+                events=evidence_events,
                 reservation_payload=durable_reserve,
                 attempt=durable_attempt,
             )

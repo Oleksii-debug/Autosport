@@ -1190,55 +1190,11 @@ def _install_account_snapshot_acquisition_authority() -> None:
     state_lock = RLock()
 
     class _AccountSnapshotAuthorityBoundary:
-        """Own live provider-origin authority without an independently callable mint."""
+        """Own canonical acquisition I/O without retaining reusable live authority."""
 
-        # The caller can recover this boundary from the public acquire closure. Keep
-        # authority-bearing state out of replaceable instance attributes entirely.
+        # Durable provider evidence is replay-verifiable but deliberately never becomes
+        # a reusable same-process provider-origin capability.
         __slots__ = ()
-
-        @staticmethod
-        def _fingerprint(acquired: AuthoritativeAccountSnapshot) -> str:
-            receipt = acquired.receipt
-            current_snapshot_sha256 = _canonical_sha256(
-                _snapshot_payload(
-                    acquired.snapshot,
-                    include_local_times=True,
-                )
-            )
-            receipt_payload = {
-                "acquisition_id": receipt.acquisition_id,
-                "acquisition_request_id_sha256": receipt.acquisition_request_id_sha256,
-                "source_observation_id": receipt.source_observation_id,
-                "venue_id": receipt.venue_id,
-                "account_id": receipt.account_id,
-                "authenticated_account_identity_sha256": (
-                    receipt.authenticated_account_identity_sha256
-                ),
-                "account_identity_observed_at": receipt.account_identity_observed_at,
-                "adapter_id": receipt.adapter_id,
-                "adapter_version": receipt.adapter_version,
-                "integration_evidence_id": receipt.integration_evidence_id,
-                "integration_kind": receipt.integration_kind,
-                "requested_capabilities": list(receipt.requested_capabilities),
-                "snapshot_sha256": receipt.snapshot_sha256,
-                "snapshot_content_sha256": receipt.snapshot_content_sha256,
-                "source_payload_sha256": receipt.source_payload_sha256,
-                "acquired_at": receipt.acquired_at,
-                "provider_observed_at": receipt.provider_observed_at,
-                "source_authority_proven": receipt.source_authority_proven,
-                "provider_account_identity_proven": (
-                    receipt.provider_account_identity_proven
-                ),
-                "grants_execution_authority": receipt.grants_execution_authority,
-                "grants_settlement_authority": receipt.grants_settlement_authority,
-                "schema_version": receipt.schema_version,
-            }
-            return _canonical_sha256(
-                {
-                    "receipt": receipt_payload,
-                    "current_snapshot_sha256": current_snapshot_sha256,
-                }
-            )
 
         def initialize(
             self,

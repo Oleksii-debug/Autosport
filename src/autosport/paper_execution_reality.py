@@ -476,7 +476,8 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         prior = by_key.get(key)
         sequence = len(events)
         previous_sha256 = None if not events else events[-1]["event_sha256"]
-        event = self._event(
+        event = _CANONICAL_LEDGER_EVENT(
+            self,
             event_type="ATTEMPT_RECORDED",
             run_id=attempt.run_id,
             key=key,
@@ -507,8 +508,8 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 handle.flush()
                 os.fsync(handle.fileno())
             if not path_existed_before or not self._path_durable:
-                self._sync_parent_directory()
-            self._write_anchor_unlocked(events + [event])
+                _CANONICAL_LEDGER_SYNC_PARENT_DIRECTORY(self)
+            _CANONICAL_LEDGER_WRITE_ANCHOR_UNLOCKED(self, events + [event])
         except OSError as exc:
             self._path_durable = False
             raise PaperExecutionIntegrityError(
@@ -624,7 +625,8 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         prior = by_key.get(key)
         sequence = len(events)
         previous_sha256 = None if not events else events[-1]["event_sha256"]
-        event = self._event(
+        event = _CANONICAL_LEDGER_EVENT(
+            self,
             event_type="RUN_COMPLETED",
             run_id=run_id,
             key=key,
@@ -655,8 +657,8 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 handle.flush()
                 os.fsync(handle.fileno())
             if not path_existed_before or not self._path_durable:
-                self._sync_parent_directory()
-            self._write_anchor_unlocked(events + [event])
+                _CANONICAL_LEDGER_SYNC_PARENT_DIRECTORY(self)
+            _CANONICAL_LEDGER_WRITE_ANCHOR_UNLOCKED(self, events + [event])
         except OSError as exc:
             self._path_durable = False
             raise PaperExecutionIntegrityError(
@@ -1362,6 +1364,9 @@ _CANONICAL_LEDGER_RECORD_ATTEMPT = PaperExecutionLedger.record_attempt
 _CANONICAL_LEDGER_COMPLETE_RUN = PaperExecutionLedger.complete_run
 _CANONICAL_LEDGER_EVENTS = PaperExecutionLedger.events
 _CANONICAL_LEDGER_APPEND_EVENT = PaperExecutionLedger._append_event
+_CANONICAL_LEDGER_EVENT = PaperExecutionLedger._event
+_CANONICAL_LEDGER_SYNC_PARENT_DIRECTORY = PaperExecutionLedger._sync_parent_directory
+_CANONICAL_LEDGER_WRITE_ANCHOR_UNLOCKED = PaperExecutionLedger._write_anchor_unlocked
 _CANONICAL_LEDGER_WITH_WRITER_LOCK = PaperExecutionLedger._with_writer_lock
 _CANONICAL_LEDGER_LOAD_UNLOCKED = PaperExecutionLedger._load_unlocked
 _CANONICAL_LEDGER_ENSURE_EXISTING_PATH_DURABLE = PaperExecutionLedger._ensure_existing_path_durable

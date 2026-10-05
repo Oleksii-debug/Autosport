@@ -98,9 +98,15 @@ def _text(value: object, name: str, *, max_length: int = 512) -> str:
 
 
 def _sha256(value: object, name: str) -> str:
-    text = _text(value, name).lower()
-    if len(text) != 64 or any(ch not in _HEX for ch in text):
-        raise RiskOfRuinEvaluationError(f"{name} must be a canonical SHA-256 digest")
+    text = _text(value, name)
+    if (
+        len(text) != 64
+        or text != text.lower()
+        or any(ch not in _HEX for ch in text)
+    ):
+        raise RiskOfRuinEvaluationError(
+            f"{name} must be a canonical lowercase SHA-256 digest"
+        )
     return text
 
 

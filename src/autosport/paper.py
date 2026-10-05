@@ -395,6 +395,37 @@ def _make_paperbook_operation_lock_registry():
 ) = _make_paperbook_operation_lock_registry()
 
 
+def _make_paperbook_visible_state_authority():
+    validator = None
+    validator_code = None
+
+    def install(candidate) -> None:
+        nonlocal validator, validator_code
+        if validator is not None:
+            raise RuntimeError("PaperBook visible-state validator authority already installed")
+        if not callable(candidate) or not hasattr(candidate, "__code__"):
+            raise TypeError("PaperBook visible-state validator authority must be a function")
+        validator = candidate
+        validator_code = candidate.__code__
+
+    def require(book: object) -> None:
+        if validator is None or validator_code is None:
+            raise RuntimeError("PaperBook visible-state validator authority is unavailable")
+        if validator.__code__ is not validator_code:
+            raise ValueError("PaperBook visible-state validator authority changed")
+        validator(type(book), book)
+        if validator.__code__ is not validator_code:
+            raise ValueError("PaperBook visible-state validator authority changed")
+
+    return install, require
+
+
+(
+    _install_paperbook_visible_state_authority,
+    _require_paperbook_visible_state_authority,
+) = _make_paperbook_visible_state_authority()
+
+
 def _serialized_paperbook_operation(method):
     require_lock = _require_paperbook_operation_lock
     require_lock_code = require_lock.__code__
@@ -426,6 +457,8 @@ def _serialized_paperbook_operation(method):
 def _guard_paperbook_runtime_authority(method):
     """Seal public PaperBook authority checks against module-level rebinding."""
     method_code = method.__code__
+    visible_authority = _require_paperbook_visible_state_authority
+    visible_authority_code = visible_authority.__code__
     opening_authority = _require_ticket_opening_authority
     opening_authority_code = opening_authority.__code__
     causal_authority = _require_paperbook_causal_history_authority
@@ -437,9 +470,13 @@ def _guard_paperbook_runtime_authority(method):
             raise ValueError("PaperBook runtime callable authority changed")
         # Preserve the existing safety order: canonical visible state must be
         # validated before hidden registries compare or hash caller-controlled
-        # values. Then invoke closure-captured authorities so rebinding their
-        # module globals cannot launder coherent economic/history mutation.
-        self._validate_loaded_state(self)
+        # values. Invoke the closure-captured visible-state authority too, so
+        # class/module rebinding cannot suppress canonical validation.
+        if visible_authority.__code__ is not visible_authority_code:
+            raise ValueError("PaperBook visible-state validator dispatch changed")
+        visible_authority(self)
+        if visible_authority.__code__ is not visible_authority_code:
+            raise ValueError("PaperBook visible-state validator dispatch changed")
         if opening_authority.__code__ is not opening_authority_code:
             raise ValueError("PaperBook opening authority dispatch changed")
         opening_authority(self)
@@ -1984,3 +2021,12 @@ class PaperBook:
         book = cls.load_bytes(cls._canonical_snapshot_path(path).read_bytes())
         _snapshot_authority_install(book)
         return book
+
+
+# Install the exact classmethod implementation only after PaperBook exists.
+# Public runtime guards already capture the require-function closure above;
+# later class/module rebinding therefore cannot replace visible-state validation.
+_install_paperbook_visible_state_authority(
+    PaperBook.__dict__["_validate_loaded_state"].__func__
+)
+del _install_paperbook_visible_state_authority

@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.domain as domain_module
 from autosport import _risk_market_semantics_identity as semantics_identity
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
@@ -94,6 +95,21 @@ def test_candidate_digest_rejects_captured_payload_code_mutation(
         semantics_identity._candidate_payload,
         "__code__",
         forged_payload.__code__,
+    )
+
+    assert PaperRiskPolicy.risk_of_ruin_candidate_sha256(context) is None
+
+
+def test_candidate_digest_rejects_canonical_domain_global_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context("rules:s1")
+    assert PaperRiskPolicy.risk_of_ruin_candidate_sha256(context) is not None
+
+    monkeypatch.setattr(
+        domain_module,
+        "_CANONICAL_STRING_VALUE",
+        lambda value, field_name: value,
     )
 
     assert PaperRiskPolicy.risk_of_ruin_candidate_sha256(context) is None

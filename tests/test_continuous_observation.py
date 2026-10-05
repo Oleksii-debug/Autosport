@@ -96,6 +96,44 @@ class ContinuousObservationTests(unittest.TestCase):
 
             self.assertFalse(workspace.exists())
 
+    def test_string_redaction_config_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "redact_values must be a sequence"):
+                self._run(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    redact_values="secret",
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
+    def test_redaction_values_are_frozen_before_provider_failure(self):
+        secrets = ["first-secret"]
+
+        class MutatingProvider:
+            source_id = "continuous-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                secrets[0] = "replacement-secret"
+                raise ProviderUnavailableError("token=first-secret")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            result = self._run(
+                MutatingProvider(),
+                self._config(workspace, max_cycles=1),
+                redact_values=secrets,
+            )
+
+            self.assertEqual(result.exit_code, 4)
+            raw = (workspace / "continuous_observation_status.json").read_text("utf-8")
+            self.assertNotIn("first-secret", raw)
+            self.assertIn("[REDACTED]", raw)
+
     def test_invalid_run_id_fails_before_workspace_creation(self):
         provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
 

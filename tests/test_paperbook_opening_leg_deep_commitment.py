@@ -1710,3 +1710,44 @@ def test_load_bytes_rejects_in_place_raw_decode_callable_code_mutation() -> None
     finally:
         raw_decode.__code__ = original_code
 
+def test_public_operation_ignores_rebound_visible_state_validator(monkeypatch) -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    ticket.status = paper_module.TicketStatus.LOST
+    attacker_calls = 0
+
+    def hostile_validator(_cls, _book):
+        nonlocal attacker_calls
+        attacker_calls += 1
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_validate_loaded_state",
+        classmethod(hostile_validator),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="settled state is missing lifecycle provenance",
+    ):
+        _ = book.committed_stake
+
+    assert attacker_calls == 0
+
+
+def test_public_operation_rejects_in_place_visible_state_validator_code_mutation_before_execution() -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    validator = PaperBook.__dict__["_validate_loaded_state"].__func__
+    original_code = validator.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        validator.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="visible-state validator authority changed"):
+            _ = book.committed_stake
+    finally:
+        validator.__code__ = original_code
+
+    assert book.balance == Decimal("90")
+

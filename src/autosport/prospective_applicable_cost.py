@@ -1049,6 +1049,14 @@ def _build_canonical_authority():
             "model router_decision_sha256",
         ):
             raise error_cls("model-compute evidence decision digest disagrees with durable router state")
+        if instant(
+            object.__getattribute__(durable_decision, "decided_at"),
+            "durable router decided_at",
+        ) != instant(
+            object.__getattribute__(model_evidence, "router_decided_at"),
+            "model router_decided_at",
+        ):
+            raise error_cls("model-compute evidence decision time disagrees with durable router state")
 
         if sha256(
             object.__getattribute__(model_evidence, "intent_sha256"),

@@ -1299,10 +1299,15 @@ class RealExecutionLedger:
                             "submitted_request_sha256"
                         )
                         if submitted_request_sha256 is not None:
-                            _sha256_text(
-                                submitted_request_sha256,
-                                "submitted_request_sha256",
-                            )
+                            try:
+                                _sha256_text(
+                                    submitted_request_sha256,
+                                    "submitted_request_sha256",
+                                )
+                            except ValueError as exc:
+                                raise ExecutionLedgerIntegrityError(
+                                    "ATTEMPT_SUBMITTED request digest is invalid"
+                                ) from exc
                         if submitted_time < reserved_time:
                             raise ExecutionLedgerIntegrityError(
                                 "attempt submission precedes reservation"

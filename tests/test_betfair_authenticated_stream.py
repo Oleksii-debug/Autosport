@@ -101,6 +101,8 @@ def _mcm(
     pt: int | None = None,
     runners: list[dict[str, object]] | None = None,
     conflate_ms: int = 0,
+    betting_type: str = "ODDS",
+    ladder_type: str | None = "CLASSIC",
 ) -> bytes:
     if pt is None:
         pt = time.time_ns() // 1_000_000
@@ -113,6 +115,13 @@ def _mcm(
         }
         for item in runner_changes
     ]
+    market_definition: dict[str, object] = {
+        "status": "OPEN",
+        "bettingType": betting_type,
+        "runners": runner_definitions,
+    }
+    if ladder_type is not None:
+        market_definition["priceLadderDefinition"] = {"type": ladder_type}
     payload = {
         "op": "mcm",
         "id": request_id,
@@ -127,11 +136,7 @@ def _mcm(
                 "id": "1.A",
                 "img": True,
                 "con": False,
-                "marketDefinition": {
-                    "status": "OPEN",
-                    "bettingType": "ODDS",
-                    "runners": runner_definitions,
-                },
+                "marketDefinition": market_definition,
                 "rc": runner_changes,
             }
         ],
@@ -158,7 +163,11 @@ def _delta_mcm(
                 "id": "1.A",
                 "img": False,
                 "con": False,
-                "marketDefinition": {"status": "OPEN", "bettingType": "ODDS"},
+                "marketDefinition": {
+                    "status": "OPEN",
+                    "bettingType": "ODDS",
+                    "priceLadderDefinition": {"type": "CLASSIC"},
+                },
                 "rc": [{"id": 1, "hc": 0, "ltp": price}],
             }
         ],
@@ -184,7 +193,11 @@ def _market_status_mcm(
                 "id": "1.A",
                 "img": False,
                 "con": False,
-                "marketDefinition": {"status": status, "bettingType": "ODDS"},
+                "marketDefinition": {
+                    "status": status,
+                    "bettingType": "ODDS",
+                    "priceLadderDefinition": {"type": "CLASSIC"},
+                },
                 "rc": [],
             }
         ],
@@ -213,6 +226,7 @@ def _runner_status_mcm(
                 "marketDefinition": {
                     "status": "OPEN",
                     "bettingType": "ODDS",
+                    "priceLadderDefinition": {"type": "CLASSIC"},
                     "runners": [
                         {
                             "id": 1,
@@ -1403,6 +1417,7 @@ def test_duplicate_runner_definition_poison_closes_generation(
                 "marketDefinition": {
                     "status": "OPEN",
                     "bettingType": "ODDS",
+                    "priceLadderDefinition": {"type": "CLASSIC"},
                     "runners": [
                         {"id": 1, "hc": 0, "status": "ACTIVE"},
                         {"id": 1, "hc": 0, "status": "REMOVED"},
@@ -1454,6 +1469,7 @@ def test_market_authority_state_bound_overflow_closes_generation(
                 "marketDefinition": {
                     "status": "OPEN",
                     "bettingType": "ODDS",
+                    "priceLadderDefinition": {"type": "CLASSIC"},
                     "runners": [{"id": 1, "hc": 0, "status": "ACTIVE"}],
                 },
                 "rc": [{"id": 1, "hc": 0, "ltp": 2.0}],
@@ -1555,6 +1571,7 @@ def test_provider_conflation_change_revokes_existing_live_decision(
                 "marketDefinition": {
                     "status": "OPEN",
                     "bettingType": "ODDS",
+                    "priceLadderDefinition": {"type": "CLASSIC"},
                     "runners": [
                         {"id": 1, "hc": 0, "status": "ACTIVE"},
                     ],
@@ -1775,6 +1792,7 @@ def test_line_market_never_becomes_odds_live_decision_authority(
                 "marketDefinition": {
                     "status": "OPEN",
                     "bettingType": "LINE",
+                    "priceLadderDefinition": {"type": "LINE_RANGE"},
                     "lineMinUnit": 10.0,
                     "lineMaxUnit": 20.0,
                     "lineInterval": 0.5,
@@ -1874,6 +1892,7 @@ def test_non_odds_price_models_do_not_gain_live_decision_authority(
                 "marketDefinition": {
                     "status": "OPEN",
                     "bettingType": betting_type,
+                    "priceLadderDefinition": {"type": "LINE_RANGE"},
                     "runners": [
                         {"id": 1, "hc": 0, "status": "ACTIVE"},
                     ],
@@ -2055,3 +2074,110 @@ def test_duplicate_market_ids_in_delta_are_not_silently_normalized(
 
     assert fake.closed
     assert not transport.is_authenticated
+
+
+def test_classic_price_ladder_valid_tick_remains_live_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(
+            pt=publish_time_ms,
+            runners=[{"id": 1, "hc": 0, "ltp": 2.02}],
+            ladder_type="CLASSIC",
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+
+    assert decision.decision_eligible
+
+
+def test_classic_price_ladder_invalid_tick_is_not_live_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(
+            pt=publish_time_ms,
+            runners=[{"id": 1, "hc": 0, "ltp": 2.01}],
+            ladder_type="CLASSIC",
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+
+    assert decision.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert "invalid for the authoritative price ladder" in decision.reason
+    assert not decision.decision_eligible
+    assert transport.is_authenticated
+    assert not fake.closed
+
+
+def test_finest_price_ladder_accepts_cent_tick_rejected_by_classic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(
+            pt=publish_time_ms,
+            runners=[{"id": 1, "hc": 0, "ltp": 2.01}],
+            ladder_type="FINEST",
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+
+    assert decision.decision_eligible
+
+
+def test_missing_price_ladder_definition_never_becomes_live_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(
+            pt=publish_time_ms,
+            ladder_type=None,
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+
+    assert decision.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert "price ladder is not authoritative" in decision.reason
+    assert not decision.decision_eligible
+    assert transport.is_authenticated
+    assert not fake.closed

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import autosport.risk_reporting as risk_reporting
 
-from autosport.domain import TicketLeg, TicketStatus
+from autosport.domain import PaperTicket, TicketLeg, TicketStatus
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.paper import PaperBook
@@ -67,6 +67,46 @@ class PaperRiskReportingTests(unittest.TestCase):
             locked_odds=Decimal(odds),
             sport=sport,
         )
+
+    def test_equity_locked_capital_fails_closed_for_lay_until_liability_authority_is_consumed(self) -> None:
+        back = PaperTicket(
+            ticket_id="back-ticket",
+            stake=Decimal("10"),
+            legs=(
+                TicketLeg(
+                    event_id="event-back",
+                    market_id="market-back",
+                    selection_id="selection-back",
+                    locked_odds=Decimal("5"),
+                    exchange_side="back",
+                ),
+            ),
+            placed_at="2026-09-21T12:00:00+00:00",
+        )
+        lay = PaperTicket(
+            ticket_id="lay-ticket",
+            stake=Decimal("10"),
+            legs=(
+                TicketLeg(
+                    event_id="event-lay",
+                    market_id="market-lay",
+                    selection_id="selection-lay",
+                    locked_odds=Decimal("5"),
+                    exchange_side="lay",
+                ),
+            ),
+            placed_at="2026-09-21T12:00:00+00:00",
+        )
+
+        self.assertEqual(
+            risk_reporting._paper_ticket_equity_locked_capital(back),
+            Decimal("10"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "LAY locked capital requires canonical liability authority",
+        ):
+            risk_reporting._paper_ticket_equity_locked_capital(lay)
 
     def test_pristine_report_uses_canonical_risk_replay_and_keeps_ruin_unknown(self) -> None:
         book = PaperBook("100")

@@ -327,7 +327,8 @@ class FocusedMirrorDependencyIndex:
                 and batch.mirror_revision is not None
                 and captured.revision == batch.mirror_revision
             ):
-                for dependency in dependencies:                    if self._dependencies.get(dependency.input_id) == dependency:
+                for dependency in dependencies:
+                    if self._dependencies.get(dependency.input_id) == dependency:
                         self._matched_revisions[dependency.input_id] = captured.revision
         return tuple(affected)
 

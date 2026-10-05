@@ -229,6 +229,99 @@ def test_authenticated_subscription_to_freshness_is_product_issued_and_read_only
     assert not subscription.real_money_authorized
 
 
+def test_authenticated_freshness_rejects_local_consumer_lag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    identity = _identity()
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status() + _mcm(),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    received_ns = runtime._transport_by_identity[identity][2]
+    monkeypatch.setattr(
+        auth.time,
+        "monotonic_ns",
+        lambda: received_ns + 10_001_000_000,
+    )
+
+    decision = runtime.evaluate(
+        identity,
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+
+    assert (
+        decision.verdict
+        is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    )
+    assert "consumer lag exceeds max_age_ms" in decision.reason
+    assert not decision.decision_eligible
+
+
+def test_positive_decision_is_revoked_when_local_consumer_age_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    identity = _identity()
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status() + _mcm(),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    received_ns = runtime._transport_by_identity[identity][2]
+    now_ns = [received_ns + 1_000_000]
+    monkeypatch.setattr(auth.time, "monotonic_ns", lambda: now_ns[0])
+
+    decision = runtime.evaluate(
+        identity,
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert decision.decision_eligible
+
+    now_ns[0] = received_ns + 10_001_000_000
+    assert not decision.decision_eligible
+
+
+def test_authenticated_freshness_rejects_monotonic_clock_regression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    identity = _identity()
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status() + _mcm(),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    received_ns = runtime._transport_by_identity[identity][2]
+    monkeypatch.setattr(
+        auth.time,
+        "monotonic_ns",
+        lambda: received_ns - 1,
+    )
+
+    decision = runtime.evaluate(
+        identity,
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+
+    assert (
+        decision.verdict
+        is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    )
+    assert "monotonic clock regressed" in decision.reason
+    assert not decision.decision_eligible
+
+
 def test_caller_policy_mutation_cannot_extend_issued_freshness_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

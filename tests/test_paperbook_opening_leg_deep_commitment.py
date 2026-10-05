@@ -1156,6 +1156,70 @@ def test_snapshot_decimal_text_size_limit_applies_to_serialized_ingress() -> Non
         PaperBook._parse_snapshot_decimal(oversized, "stake")
 
 
+def test_open_ticket_never_executes_rebound_ticket_id_factory(monkeypatch) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile_uuid4():
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound ticket id factory executed")
+
+    monkeypatch.setattr(paper_module.uuid, "uuid4", hostile_uuid4)
+
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+
+    assert ticket.ticket_id
+    assert attacker_calls == 0
+    assert book.balance == Decimal("90")
+
+
+def test_open_ticket_never_executes_rebound_placed_at_clock(monkeypatch) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile_clock():
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound placed_at clock executed")
+
+    monkeypatch.setattr(paper_module, "utc_now_iso", hostile_clock)
+
+    ticket = book.open_ticket([_leg()], "10")
+
+    assert ticket.placed_at
+    assert attacker_calls == 0
+    assert book.balance == Decimal("90")
+
+
+@pytest.mark.parametrize(
+    ("authority", "message", "use_explicit_placed_at"),
+    (
+        (paper_module.uuid.uuid4, "ticket id authority changed", True),
+        (paper_module.utc_now_iso, "placed_at clock authority changed", False),
+    ),
+)
+def test_open_ticket_rejects_in_place_identity_or_clock_code_mutation_before_execution(
+    authority, message: str, use_explicit_placed_at: bool
+) -> None:
+    book = PaperBook("100")
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match=message):
+            if use_explicit_placed_at:
+                book.open_ticket([_leg()], "10", placed_at=_TS)
+            else:
+                book.open_ticket([_leg()], "10")
+    finally:
+        authority.__code__ = original_code
+
+    assert book.balance == Decimal("100")
+    assert book.tickets == {}
+
+
 def test_open_ticket_never_executes_rebound_opening_write_authority(monkeypatch) -> None:
     book = PaperBook("100")
     attacker_calls = 0

@@ -815,6 +815,12 @@ class PersistentLiveDecisionLoop:
         self._intent_provenance_authority = intent_provenance
         self._intent_provenance_sha256_authority = intent_provenance.provenance_sha256
         self.provider = provider
+        self._provider_authority = provider if observation_runner is None else None
+        self._provider_source_id_authority = (
+            None
+            if self._provider_authority is None
+            else _canonical_text("provider source_id", self._provider_authority.source_id)
+        )
         self.decision_ledger = decision_ledger or JsonlDecisionLedger(
             self._workspace_authority / "decisions.jsonl"
         )
@@ -2682,6 +2688,18 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "live observation authority changed after construction"
             )
+        if self._provider_authority is not None:
+            if self.provider is not self._provider_authority:
+                raise LiveDecisionProgressError(
+                    "live market provider authority changed after construction"
+                )
+            if (
+                getattr(self.provider, "source_id", None)
+                != self._provider_source_id_authority
+            ):
+                raise LiveDecisionProgressError(
+                    "live market provider source identity changed after construction"
+                )
         if self.max_quote_age != self._max_quote_age_authority:
             raise LiveDecisionProgressError(
                 "live quote-age authority changed after construction"

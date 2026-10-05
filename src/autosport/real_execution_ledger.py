@@ -476,12 +476,15 @@ class ProviderEvidenceBindingView:
     evidence_id: str
     observed_at: str
     source: str
+    request_sha256: str | None = None
     acknowledgement_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _sha256_text(self.evidence_id, "evidence_id")
         _timestamp(self.observed_at, "observed_at")
         _text(self.source, "source")
+        if self.request_sha256 is not None:
+            _sha256_text(self.request_sha256, "request_sha256")
         if self.acknowledgement_sha256 is not None:
             _sha256_text(
                 self.acknowledgement_sha256,
@@ -1450,11 +1453,16 @@ class RealExecutionLedger:
                         followup["event_type"]
                         == EventType.PROVIDER_EVIDENCE_BOUND.value
                     ):
-                        if set(followup["payload"]) != {
-                            "evidence_id",
-                            "observed_at",
-                            "source",
-                        }:
+                        provider_payload_keys = set(followup["payload"])
+                        if provider_payload_keys not in (
+                            {"evidence_id", "observed_at", "source"},
+                            {
+                                "evidence_id",
+                                "observed_at",
+                                "source",
+                                "request_sha256",
+                            },
+                        ):
                             raise ExecutionLedgerIntegrityError(
                                 "provider evidence binding schema is invalid"
                             )
@@ -1462,6 +1470,31 @@ class RealExecutionLedger:
                             followup["payload"]["evidence_id"], "evidence_id"
                         )
                         _text(followup["payload"]["source"], "source")
+                        provider_request_sha256 = followup["payload"].get(
+                            "request_sha256"
+                        )
+                        if provider_request_sha256 is not None:
+                            _sha256_text(
+                                provider_request_sha256,
+                                "request_sha256",
+                            )
+                            if submitted_time is None:
+                                raise ExecutionLedgerIntegrityError(
+                                    "provider request evidence lacks durable submission"
+                                )
+                            submitted_event = next(
+                                event
+                                for event in attempt_events
+                                if event["event_type"]
+                                == EventType.ATTEMPT_SUBMITTED.value
+                            )
+                            if (
+                                submitted_event["payload"].get("request_sha256")
+                                != provider_request_sha256
+                            ):
+                                raise ExecutionLedgerIntegrityError(
+                                    "provider request evidence mismatches durable submission"
+                                )
                         if provider_evidence_time is not None:
                             raise ExecutionLedgerIntegrityError(
                                 "attempt has multiple provider evidence bindings"
@@ -1886,11 +1919,14 @@ class RealExecutionLedger:
         evidence_id: str,
         observed_at: str,
         source: str,
+        request_sha256: str | None = None,
     ) -> None:
         _text(attempt_id, "attempt_id")
         _sha256_text(evidence_id, "evidence_id")
         _timestamp(observed_at, "observed_at")
         _text(source, "source")
+        if request_sha256 is not None:
+            _sha256_text(request_sha256, "request_sha256")
 
         def operation() -> None:
             events = self._events()
@@ -1904,6 +1940,24 @@ class RealExecutionLedger:
                 "observed_at": observed_at,
                 "source": source,
             }
+            if request_sha256 is not None:
+                submitted_events = [
+                    event
+                    for event in attempt_events
+                    if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value
+                ]
+                if len(submitted_events) != 1:
+                    raise ExecutionStateError(
+                        "provider request evidence requires one durable submission"
+                    )
+                if (
+                    submitted_events[0]["payload"].get("request_sha256")
+                    != request_sha256
+                ):
+                    raise ExecutionIdentityConflict(
+                        "provider request evidence mismatches durable submission"
+                    )
+                payload["request_sha256"] = request_sha256
             existing = [
                 event
                 for event in attempt_events
@@ -2751,6 +2805,7 @@ class RealExecutionLedger:
                     evidence_id=payload["evidence_id"],
                     observed_at=payload["observed_at"],
                     source=payload["source"],
+                    request_sha256=payload.get("request_sha256"),
                     acknowledgement_sha256=payload.get(
                         "acknowledgement_sha256"
                     ),

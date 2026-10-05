@@ -1522,6 +1522,46 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(len(committed_book.tickets), 1)
             self.assertEqual(PaperBook.load(book_path).tickets, committed_book.tickets)
 
+    def test_materialization_reloads_durable_attempt_economics_after_execution_callback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("durable-return-reload", odds="2.50", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+
+            def execute_then_mutate_returned_attempt(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(
+                    run.attempts[0],
+                    "execution_stake",
+                    Decimal("1.00"),
+                )
+                object.__setattr__(
+                    run.attempts[0],
+                    "execution_odds",
+                    Decimal("9.00"),
+                )
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                execute_then_mutate_returned_attempt,
+            ):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-durable-return-reload",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(result.run.attempts[0].execution_stake, Decimal("10.00"))
+            self.assertEqual(result.run.attempts[0].execution_odds, Decimal("2.50"))
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("2.50"))
+            self.assertEqual(book.balance, Decimal("90.00"))
+
     def test_single_live_materialization_corruption_rolls_back_economic_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)

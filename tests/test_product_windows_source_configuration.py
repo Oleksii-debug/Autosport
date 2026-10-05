@@ -515,3 +515,39 @@ def test_restore_rejects_session_workspace_identity_drift(tmp_path: Path) -> Non
     assert surface.session is None
     assert blocked == [expected_workspace]
     assert "не вдалося" in surface.product_status.value
+
+
+def test_source_mismatch_quarantine_prevents_baseline_reopen(
+    tmp_path: Path,
+) -> None:
+    surface = _start_surface(tmp_path)
+    root = Path(surface.workspace)
+    surface._product_restore_workspace = root
+    quarantined: set[Path] = set()
+    open_calls: list[str] = []
+    surface._block_workspace_for_recovery = lambda workspace: quarantined.add(
+        Path(workspace)
+    )
+    surface._workspace_requires_recovery = lambda workspace: (
+        Path(workspace) in quarantined
+    )
+    surface._open_session = lambda _strategy_id, _plan: (
+        open_calls.append("open") or SimpleNamespace(workspace=root)
+    )
+    surface._active_strategy_id = "baseline-v1"
+    surface._active_research_plan = None
+    surface.session = None
+    surface.bank = _Value()
+    surface._bank_text = lambda: "bank"
+    surface._refresh_tickets = lambda: None
+
+    ProductWindowsAutosportApp._apply_product_message(
+        surface,
+        _started_message("unexpected:provider"),
+    )
+
+    assert root in quarantined
+    assert not ProductWindowsAutosportApp._restore_base_session_after_product(surface)
+    assert open_calls == []
+    assert surface.session is None
+    assert surface._active_workspace == root

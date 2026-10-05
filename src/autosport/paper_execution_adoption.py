@@ -528,6 +528,7 @@ class PaperExecutionAdoptionRuntime:
         authorized single-leg stake into the same immutable execution plan/run
         authority used by the persistent live loop.
         """
+        self._assert_runtime_authority()
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be MarketEvent")
         if not isinstance(stake, Decimal) or not stake.is_finite() or stake <= 0:
@@ -620,6 +621,7 @@ class PaperExecutionAdoptionRuntime:
         prepared: PreparedPaperExecution,
         trigger_id: str,
     ) -> str:
+        self._assert_runtime_authority()
         if not isinstance(prepared, PreparedPaperExecution):
             raise TypeError("prepared must be PreparedPaperExecution")
         self._require_minted(prepared)
@@ -794,6 +796,7 @@ class PaperExecutionAdoptionRuntime:
         materialize_exposure: bool,
     ) -> None:
         """Reject restart state not explained by the exact durable #623 run."""
+        self._assert_runtime_authority()
         if not isinstance(pre_action_book, PaperBook):
             raise TypeError("pre_action_book must be PaperBook")
         if not isinstance(prepared, PreparedPaperExecution):

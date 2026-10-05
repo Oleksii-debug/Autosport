@@ -202,6 +202,41 @@ class BetfairAuthenticatedMarketProvider:
         self._open_by_identity = restored
         self._bound = True
 
+    def assert_durable_current(
+        self,
+        current: Mapping[tuple[str, str], MarketEvent],
+    ) -> None:
+        """Fail closed if durable state diverged from this consumed stream state."""
+
+        if not self._bound:
+            raise RuntimeError("Betfair authenticated provider is not durably bound")
+        if not isinstance(current, Mapping):
+            raise TypeError("current must be a mapping of canonical market events")
+
+        max_sequence = 0
+        durable_open: dict[BetfairQuoteIdentity, int] = {}
+        for key, event in current.items():
+            if type(key) is not tuple or len(key) != 2:
+                raise ValueError("durable current key must be (source_id, quote_key)")
+            if type(event) is not MarketEvent:
+                raise TypeError("durable current values must be exact MarketEvent")
+            if event.source_id != BETFAIR_STREAM_SOURCE_ID:
+                continue
+            identity = _identity_from_metadata(event.metadata)
+            max_sequence = max(max_sequence, event.sequence)
+            if event.status == "open":
+                durable_open[identity] = event.sequence
+
+        memory_open = {
+            identity: quote.sequence
+            for identity, quote in self._open_by_identity.items()
+        }
+        if max_sequence != self._sequence or durable_open != memory_open:
+            raise RuntimeError(
+                "durable Betfair current projection diverged from consumed stream state; "
+                "reconnect and rebuild the authenticated provider from SQLite"
+            )
+
     def _next_sequence(self) -> int:
         if self._sequence >= _MAX_SQLITE_SEQUENCE:
             raise OverflowError("Betfair bridge exhausted signed 64-bit provider sequence")

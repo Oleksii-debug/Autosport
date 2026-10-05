@@ -9,6 +9,8 @@ shape. A historical PAPER lifecycle is not a probability model, so
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from decimal import Decimal, DecimalException, Inexact, localcontext
 
@@ -20,7 +22,8 @@ from .paper import PaperBook
 from .risk import PaperRiskPolicy
 
 
-RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v4"
+RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v5"
+EQUITY_PATH_SCHEMA = "autosport.paper-equity-path.v1"
 RISK_REPORT_SCOPE_PAPER_ONLY = "PAPER_ONLY"
 DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY = "REALIZED_SETTLED_EQUITY_DRAWDOWN"
 RISK_OF_RUIN_STATUS_UNKNOWN = "UNKNOWN_REQUIRES_PROVENANCE_BOUND_EVIDENCE"
@@ -35,6 +38,39 @@ class _HistoricalMaxDrawdown:
     trough_id: str | None
     current_equity: Decimal
     peak_equity: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class PaperEquityPathPoint:
+    sequence: int
+    point_id: str
+    action: str
+    ticket_id: str | None
+    available_at: str | None
+    winning_quote_keys: tuple[str, ...]
+    void_quote_keys: tuple[str, ...]
+    equity: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class ProductIssuedPaperEquityPath:
+    schema: str
+    scope: str
+    goal_id: str
+    goal_revision: int
+    bankroll_id: str
+    currency: str
+    goal_contract_sha256: str
+    portfolio_risk_state_sha256: str
+    initial_equity: Decimal
+    points: tuple[PaperEquityPathPoint, ...]
+    point_count: int
+    path_sha256: str
+    current_equity: Decimal
+    minimum_equity: Decimal
+    minimum_equity_point_id: str
+    availability_complete: bool
+    settled_history_complete: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +93,10 @@ class PaperRiskReport:
     includes_live_execution_exposure: bool
     live_execution_headroom_authoritative: bool
     portfolio_risk_state_sha256: str
+    equity_path_sha256: str
+    equity_path_point_count: int
+    equity_path_availability_complete: bool
+    settled_history_complete: bool
     goal_id: str
     goal_revision: int
     bankroll_id: str
@@ -83,6 +123,249 @@ class PaperRiskReport:
 def _lifecycle_point_id(index: int, action: str, ticket_id: str) -> str:
     """Return a re-resolvable identity for one durable PaperBook lifecycle point."""
     return f"paper-lifecycle:{index}:{action}:{ticket_id}"
+
+
+def _decimal_text(value: Decimal, label: str) -> str:
+    if type(value) is not Decimal or not value.is_finite():
+        raise ValueError(f"{label} must be an exact finite Decimal")
+    return str(value)
+
+
+def _equity_path_payload(
+    *,
+    goal_snapshot: EconomicGoalContract,
+    goal_contract_sha256: str,
+    portfolio_risk_state_sha256: str,
+    initial_equity: Decimal,
+    points: tuple[PaperEquityPathPoint, ...],
+    availability_complete: bool,
+    settled_history_complete: bool,
+) -> dict[str, object]:
+    return {
+        "schema": EQUITY_PATH_SCHEMA,
+        "scope": RISK_REPORT_SCOPE_PAPER_ONLY,
+        "goal_id": goal_snapshot.goal_id,
+        "goal_revision": goal_snapshot.revision,
+        "bankroll_id": goal_snapshot.bankroll_id,
+        "currency": goal_snapshot.currency,
+        "goal_contract_sha256": goal_contract_sha256,
+        "portfolio_risk_state_sha256": portfolio_risk_state_sha256,
+        "initial_equity": _decimal_text(initial_equity, "initial_equity"),
+        "availability_complete": availability_complete,
+        "settled_history_complete": settled_history_complete,
+        "points": [
+            {
+                "sequence": point.sequence,
+                "point_id": point.point_id,
+                "action": point.action,
+                "ticket_id": point.ticket_id,
+                "available_at": point.available_at,
+                "winning_quote_keys": list(point.winning_quote_keys),
+                "void_quote_keys": list(point.void_quote_keys),
+                "equity": _decimal_text(point.equity, "point equity"),
+            }
+            for point in points
+        ],
+    }
+
+
+def build_product_issued_paper_equity_path(
+    book: PaperBook,
+    goal: EconomicGoalContract,
+) -> ProductIssuedPaperEquityPath:
+    """Derive one immutable, re-resolvable current PAPER equity path.
+
+    The returned object is evidence, not staking authority. Its identity is
+    derived only from canonical PaperBook lifecycle state and the canonical
+    owner EconomicGoal snapshot; no caller-provided drawdown, minimum-equity or
+    risk-of-ruin scalar participates in issuance.
+    """
+
+    if type(book) is not PaperBook:
+        raise TypeError("book must be canonical PaperBook")
+    if type(goal) is not EconomicGoalContract:
+        raise TypeError("goal must be canonical EconomicGoalContract")
+
+    goal_provenance_before = provenance_for(goal)
+    goal_snapshot = economic_goal_from_payload(economic_goal_to_payload(goal))
+    goal_snapshot_provenance = provenance_for(goal_snapshot)
+    if (
+        goal_provenance_before != goal_snapshot_provenance
+        or provenance_for(goal) != goal_snapshot_provenance
+    ):
+        raise ValueError("canonical economic goal changed during equity-path issuance")
+
+    before_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    if before_sha256 is None:
+        raise ValueError("canonical PAPER risk state cannot issue an equity path")
+
+    try:
+        PaperBook._validate_loaded_state(book)
+        replay_balance = book.initial_bankroll
+        replay_committed = Decimal("0")
+        points: list[PaperEquityPathPoint] = [
+            PaperEquityPathPoint(
+                sequence=0,
+                point_id=_INITIAL_EQUITY_POINT_ID,
+                action="initial",
+                ticket_id=None,
+                available_at=None,
+                winning_quote_keys=(),
+                void_quote_keys=(),
+                equity=book.initial_bankroll,
+            )
+        ]
+        availability_complete = True
+        for index, raw_entry in enumerate(book._lifecycle):
+            action, ticket_id, winners_raw, voids_raw = (
+                PaperBook._validate_lifecycle_entry(raw_entry)
+            )
+            ticket = book.tickets.get(ticket_id)
+            if ticket is None:
+                raise ValueError("PAPER lifecycle references missing ticket")
+            if action == "open":
+                replay_balance = PaperBook._debit_balance(
+                    replay_balance,
+                    ticket.stake,
+                )
+                replay_committed = PaperRiskPolicy._exact_positive_sum(
+                    (replay_committed, ticket.stake)
+                )
+                available_at = ticket.placed_at
+            else:
+                _, _, replay_balance = PaperBook._settlement_result(
+                    ticket,
+                    replay_balance,
+                    set(winners_raw),
+                    set(voids_raw),
+                )
+                with localcontext(PaperRiskPolicy._decimal_context()):
+                    replay_committed = replay_committed - ticket.stake
+                if replay_committed < 0:
+                    raise ValueError("PAPER lifecycle committed stake became negative")
+                available_at = ticket.settled_at
+                if available_at is None:
+                    availability_complete = False
+            equity = PaperRiskPolicy._exact_positive_sum(
+                (replay_balance, replay_committed)
+            )
+            points.append(
+                PaperEquityPathPoint(
+                    sequence=index + 1,
+                    point_id=_lifecycle_point_id(index, action, ticket_id),
+                    action=action,
+                    ticket_id=ticket_id,
+                    available_at=available_at,
+                    winning_quote_keys=tuple(winners_raw),
+                    void_quote_keys=tuple(voids_raw),
+                    equity=equity,
+                )
+            )
+    except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("canonical PAPER equity path cannot be resolved") from exc
+
+    current_committed = PaperRiskPolicy._exact_positive_sum(
+        tuple(
+            ticket.stake
+            for ticket in book.tickets.values()
+            if ticket.status is TicketStatus.OPEN
+        )
+    )
+    current_equity = PaperRiskPolicy._exact_positive_sum(
+        (book.balance, current_committed)
+    )
+    if replay_balance != book.balance or replay_committed != current_committed:
+        raise ValueError("canonical PAPER equity path does not replay exact current state")
+    if points[-1].equity != current_equity:
+        raise ValueError("canonical PAPER equity path current equity is inconsistent")
+
+    after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    if after_sha256 is None or after_sha256 != before_sha256:
+        raise ValueError("canonical PAPER risk state changed during equity-path issuance")
+    if provenance_for(goal) != goal_snapshot_provenance:
+        raise ValueError("canonical economic goal changed during equity-path issuance")
+
+    point_tuple = tuple(points)
+    settled_history_complete = all(
+        ticket.status is not TicketStatus.OPEN for ticket in book.tickets.values()
+    )
+    payload = _equity_path_payload(
+        goal_snapshot=goal_snapshot,
+        goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
+        portfolio_risk_state_sha256=after_sha256,
+        initial_equity=book.initial_bankroll,
+        points=point_tuple,
+        availability_complete=availability_complete,
+        settled_history_complete=settled_history_complete,
+    )
+    path_sha256 = hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    minimum_point = min(point_tuple, key=lambda point: (point.equity, point.sequence))
+    return ProductIssuedPaperEquityPath(
+        schema=EQUITY_PATH_SCHEMA,
+        scope=RISK_REPORT_SCOPE_PAPER_ONLY,
+        goal_id=goal_snapshot.goal_id,
+        goal_revision=goal_snapshot.revision,
+        bankroll_id=goal_snapshot.bankroll_id,
+        currency=goal_snapshot.currency,
+        goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
+        portfolio_risk_state_sha256=after_sha256,
+        initial_equity=book.initial_bankroll,
+        points=point_tuple,
+        point_count=len(point_tuple),
+        path_sha256=path_sha256,
+        current_equity=current_equity,
+        minimum_equity=minimum_point.equity,
+        minimum_equity_point_id=minimum_point.point_id,
+        availability_complete=availability_complete,
+        settled_history_complete=settled_history_complete,
+    )
+
+
+def _historical_max_drawdown_from_path(
+    path: ProductIssuedPaperEquityPath,
+) -> _HistoricalMaxDrawdown:
+    running_peak = path.initial_equity
+    running_peak_id = _INITIAL_EQUITY_POINT_ID
+    maximum = Decimal("0")
+    maximum_fraction: Decimal | None = Decimal("0") if running_peak > 0 else None
+    maximum_peak_id: str | None = None
+    maximum_trough_id: str | None = None
+    for point in path.points[1:]:
+        equity = point.equity
+        if equity > running_peak:
+            running_peak = equity
+            running_peak_id = point.point_id
+            continue
+        with localcontext(PaperRiskPolicy._decimal_context()):
+            drawdown = running_peak - equity
+        if drawdown < 0:
+            raise ValueError("canonical PAPER equity path has negative drawdown")
+        if drawdown > maximum:
+            maximum = drawdown
+            if running_peak > 0:
+                ratio_context = PaperRiskPolicy._decimal_context()
+                ratio_context.traps[Inexact] = False
+                with localcontext(ratio_context):
+                    maximum_fraction = drawdown / running_peak
+            else:
+                maximum_fraction = None
+            maximum_peak_id = running_peak_id
+            maximum_trough_id = point.point_id
+    return _HistoricalMaxDrawdown(
+        amount=maximum,
+        fraction=maximum_fraction,
+        peak_id=maximum_peak_id,
+        trough_id=maximum_trough_id,
+        current_equity=path.current_equity,
+        peak_equity=running_peak,
+    )
 
 
 def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
@@ -254,7 +537,8 @@ def build_paper_risk_report(
 
     metrics = PaperRiskPolicy._historical_risk_metrics(book)
     rooms = PaperRiskPolicy._goal_history_rooms(book, goal_snapshot)
-    maximum_drawdown = _historical_max_drawdown(book)
+    equity_path = build_product_issued_paper_equity_path(book, goal_snapshot)
+    maximum_drawdown = _historical_max_drawdown_from_path(equity_path)
     after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
     if (
         metrics is None
@@ -287,6 +571,10 @@ def build_paper_risk_report(
         includes_live_execution_exposure=False,
         live_execution_headroom_authoritative=False,
         portfolio_risk_state_sha256=after_sha256,
+        equity_path_sha256=equity_path.path_sha256,
+        equity_path_point_count=equity_path.point_count,
+        equity_path_availability_complete=equity_path.availability_complete,
+        settled_history_complete=equity_path.settled_history_complete,
         goal_id=goal_snapshot.goal_id,
         goal_revision=goal_snapshot.revision,
         bankroll_id=goal_snapshot.bankroll_id,

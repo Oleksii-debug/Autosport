@@ -412,12 +412,9 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.bell()
             return
 
-        self._active_workspace = workspace
-        self._recovery_view = None
         if not self._hide_uncertain_economic_state(
             product_text("ui.product_runtime.status.starting")
         ):
-            self._block_workspace_for_recovery(workspace)
             message = product_text(
                 "ui.product_runtime.status.session_close_failed"
             )
@@ -426,6 +423,11 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.bell()
             return
 
+        # Publish the root product workspace only after the exact prior economic
+        # session closed successfully.  Teardown failure remains bound to the
+        # session workspace quarantined by the base GUI.
+        self._active_workspace = workspace
+        self._recovery_view = None
         self._product_expected_provider_source_id = (
             configured.entry.expected_provider_source_id
         )

@@ -12,10 +12,12 @@ from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
 from autosport.risk_reporting import (
     DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
+    EQUITY_PATH_SCHEMA,
     RISK_OF_RUIN_STATUS_UNKNOWN,
     RISK_REPORT_SCHEMA,
     RISK_REPORT_SCOPE_PAPER_ONLY,
     build_paper_risk_report,
+    build_product_issued_paper_equity_path,
 )
 
 
@@ -349,6 +351,174 @@ class PaperRiskReportingTests(unittest.TestCase):
             actual = build_paper_risk_report(reopened, goal)
 
         self.assertEqual(actual, expected)
+
+    def test_product_issued_equity_path_binds_canonical_goal_and_lifecycle(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(50),),
+            Decimal("25"),
+            placed_at="2026-09-21T11:00:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T11:05:00+00:00",
+        )
+        goal = self._goal()
+
+        path = build_product_issued_paper_equity_path(book, goal)
+
+        self.assertEqual(path.schema, EQUITY_PATH_SCHEMA)
+        self.assertEqual(path.goal_id, goal.goal_id)
+        self.assertEqual(path.goal_revision, goal.revision)
+        self.assertEqual(path.bankroll_id, goal.bankroll_id)
+        self.assertEqual(path.currency, goal.currency)
+        self.assertEqual(path.point_count, 3)
+        self.assertEqual(path.points[0].point_id, "paper-initial-bankroll")
+        self.assertEqual(path.points[0].equity, Decimal("100"))
+        self.assertEqual(path.points[1].action, "open")
+        self.assertEqual(path.points[1].equity, Decimal("100"))
+        self.assertEqual(path.points[2].action, "settle")
+        self.assertEqual(path.points[2].equity, Decimal("75"))
+        self.assertEqual(path.minimum_equity, Decimal("75"))
+        self.assertEqual(path.minimum_equity_point_id, path.points[2].point_id)
+        self.assertTrue(path.availability_complete)
+        self.assertTrue(path.settled_history_complete)
+        self.assertEqual(len(path.path_sha256), 64)
+
+    def test_product_issued_equity_path_restart_reresolves_identically(self) -> None:
+        book = PaperBook("100")
+        winner = book.open_ticket(
+            (self._leg(51, odds="3"),),
+            Decimal("10"),
+            placed_at="2026-09-21T11:10:00+00:00",
+        )
+        book.settle(
+            winner.ticket_id,
+            {winner.legs[0].quote_key},
+            settled_at="2026-09-21T11:15:00+00:00",
+        )
+        loser = book.open_ticket(
+            (self._leg(52),),
+            Decimal("30"),
+            placed_at="2026-09-21T11:20:00+00:00",
+        )
+        book.settle(
+            loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T11:25:00+00:00",
+        )
+        goal = self._goal()
+        expected = build_product_issued_paper_equity_path(book, goal)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-equity-path.json"
+            book.save(path)
+            loaded = PaperBook.load(path)
+            actual = build_product_issued_paper_equity_path(loaded, goal)
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.path_sha256, expected.path_sha256)
+
+    def test_open_position_is_visible_but_not_falsely_called_settled_history(self) -> None:
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg(53),),
+            Decimal("40"),
+            placed_at="2026-09-21T11:30:00+00:00",
+        )
+
+        path = build_product_issued_paper_equity_path(book, self._goal())
+        report = build_paper_risk_report(book, self._goal())
+
+        self.assertEqual(path.current_equity, Decimal("100"))
+        self.assertEqual(path.minimum_equity, Decimal("100"))
+        self.assertFalse(path.settled_history_complete)
+        self.assertFalse(report.settled_history_complete)
+        self.assertEqual(report.current_drawdown_amount, Decimal("0"))
+        self.assertEqual(report.committed_stake, Decimal("40"))
+
+    def test_missing_settlement_availability_keeps_current_path_but_marks_chronology_incomplete(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(54),),
+            Decimal("10"),
+            placed_at="2026-09-21T11:40:00+00:00",
+        )
+        book.settle(ticket.ticket_id, set())
+
+        path = build_product_issued_paper_equity_path(book, self._goal())
+
+        self.assertEqual(path.minimum_equity, Decimal("90"))
+        self.assertFalse(path.availability_complete)
+        self.assertTrue(path.settled_history_complete)
+
+    def test_report_references_exact_re_resolved_equity_path_identity(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(55),),
+            Decimal("15"),
+            placed_at="2026-09-21T11:50:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T11:55:00+00:00",
+        )
+        goal = self._goal()
+
+        path = build_product_issued_paper_equity_path(book, goal)
+        report = build_paper_risk_report(book, goal)
+
+        self.assertEqual(report.equity_path_sha256, path.path_sha256)
+        self.assertEqual(report.equity_path_point_count, path.point_count)
+        self.assertEqual(
+            report.equity_path_availability_complete,
+            path.availability_complete,
+        )
+        self.assertEqual(report.settled_history_complete, path.settled_history_complete)
+
+    def test_equity_path_identity_changes_when_causal_history_changes(self) -> None:
+        baseline = PaperBook("100")
+        baseline_ticket = baseline.open_ticket(
+            (self._leg(56),),
+            Decimal("10"),
+            placed_at="2026-09-21T12:00:00+00:00",
+        )
+        baseline.settle(
+            baseline_ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T12:05:00+00:00",
+        )
+
+        alternative = PaperBook("100")
+        winning_ticket = alternative.open_ticket(
+            (self._leg(57),),
+            Decimal("10"),
+            placed_at="2026-09-21T12:00:00+00:00",
+        )
+        alternative.settle(
+            winning_ticket.ticket_id,
+            {winning_ticket.legs[0].quote_key},
+            settled_at="2026-09-21T12:05:00+00:00",
+        )
+        recovery_ticket = alternative.open_ticket(
+            (self._leg(58),),
+            Decimal("20"),
+            placed_at="2026-09-21T12:10:00+00:00",
+        )
+        alternative.settle(
+            recovery_ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T12:15:00+00:00",
+        )
+        goal = self._goal()
+
+        first = build_product_issued_paper_equity_path(baseline, goal)
+        second = build_product_issued_paper_equity_path(alternative, goal)
+
+        self.assertNotEqual(first.path_sha256, second.path_sha256)
+        self.assertNotEqual(first.points, second.points)
 
     def test_restart_preserves_exact_report_identity_and_values(self) -> None:
         book = PaperBook("100")

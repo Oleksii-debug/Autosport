@@ -276,50 +276,26 @@ def test_direct_complete_rejects_decimal_subclass_before_ledger_read() -> None:
         assert ledger.events() == []
 
 
-def test_direct_attempt_requires_durable_reservation_before_write() -> None:
+def test_direct_attempt_plan_identity_must_match_durable_reservation() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
-        current_action = _action("direct-attempt-no-reserve", side="BACK")
+        source = PaperExecutionLedger(Path(tmp) / "source-plan-id.jsonl")
+        current_action = _action("direct-plan-id", side="BACK")
         current_plan = _plan(current_action)
         current_config = _config()
-        trigger_id = "direct-attempt-no-reserve"
-        run_id = _legacy_reality._run_id(
-            current_plan,
-            trigger_id,
-            current_config,
-        )
-        attempt = _legacy_reality._synthetic_attempt(
-            run_id=run_id,
+        trigger_id = "direct-plan-id"
+        run = execute_paper_plan(
             plan=current_plan,
-            action=current_action,
-            sequence=0,
+            trigger_id=trigger_id,
             config=current_config,
+            ledger=source,
             started_at=STARTED_AT,
-            suspended=False,
         )
+        attempt = run.attempts[0]
+        object.__setattr__(attempt, "plan_id", "other-valid-plan-id")
 
-        with pytest.raises(
-            PaperExecutionStateError,
-            match="requires exactly one durable run reservation",
-        ):
-            ledger.record_attempt(attempt)
-
-        assert ledger.events() == []
-
-
-def test_direct_attempt_must_match_reserved_action_identity() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
-        reserved_action = _action("reserved-action", side="BACK")
-        current_plan = _plan(reserved_action)
-        current_config = _config()
-        trigger_id = "direct-attempt-identity"
-        run_id = _legacy_reality._run_id(
-            current_plan,
-            trigger_id,
-            current_config,
-        )
-        ledger.reserve_run(
+        target = PaperExecutionLedger(Path(tmp) / "target-plan-id.jsonl")
+        run_id = _legacy_reality._run_id(current_plan, trigger_id, current_config)
+        target.reserve_run(
             run_id=run_id,
             trigger_id=trigger_id,
             plan=current_plan,
@@ -327,32 +303,15 @@ def test_direct_attempt_must_match_reserved_action_identity() -> None:
             started_at=STARTED_AT,
             observation_evidence_ids={},
         )
-        forged_action = _action("forged-action", side="BACK")
-        forged_attempt = _legacy_reality._synthetic_attempt(
-            run_id=run_id,
-            plan=ExecutionPlan(
-                plan_id=current_plan.plan_id,
-                bookmaker_profile_version=current_plan.bookmaker_profile_version,
-                decision_id=current_plan.decision_id,
-                approval_id=current_plan.approval_id,
-                created_at=current_plan.created_at,
-                actions=(forged_action,),
-            ),
-            action=forged_action,
-            sequence=0,
-            config=current_config,
-            started_at=STARTED_AT,
-            suspended=False,
-        )
-        events_before = list(ledger.events())
+        events_before = target.events()
 
         with pytest.raises(
             PaperExecutionStateError,
-            match="not authorized by durable run reservation",
+            match="plan/model identity is not authorized",
         ):
-            ledger.record_attempt(forged_attempt)
+            target.record_attempt(attempt)
 
-        assert ledger.events() == events_before
+        assert target.events() == events_before
 
 
 def test_evidence_registry_cannot_be_retargeted_after_construction() -> None:

@@ -666,6 +666,10 @@ class BetdaqPostingsReadback:
     evidence: BetdaqEconomicEvidence
 
     def __post_init__(self) -> None:
+        if type(self.method) is not str:
+            raise BetdaqEconomicReadbackError(
+                "postings readback method must be exact text"
+            )
         if self.method not in {"ListAccountPostings", "ListAccountPostingsById"}:
             raise BetdaqEconomicReadbackError("invalid postings readback method")
         _provider_currency(self.currency, "currency")

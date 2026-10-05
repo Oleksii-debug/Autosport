@@ -2048,7 +2048,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 if envelope["event"]["event_type"]
                 == EventType.ATTEMPT_SUBMITTED.value
             )
-            submitted["event"]["payload"]["submitted_request_sha256"] = "not-a-sha256"
+            submitted["event"]["payload"]["request_sha256"] = "not-a-sha256"
 
             import hashlib
 

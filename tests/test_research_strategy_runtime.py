@@ -1,6 +1,8 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -96,6 +98,79 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
                 }
             ],
         }
+
+
+    def test_research_preflight_rejects_trigger_received_after_decision_cutoff(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        events = list(dataset.load_market_events())
+        trigger_index = next(
+            index for index, event in enumerate(events) if event.sequence == 4
+        )
+        trigger = events[trigger_index]
+        future_ingest = (
+            datetime.fromisoformat(trigger.observed_ts.replace("Z", "+00:00"))
+            + timedelta(microseconds=1)
+        ).isoformat()
+        events[trigger_index] = replace(trigger, ingest_ts=future_ingest)
+        plan = ResearchStrategyPlan.from_dict(self._plan_dict())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "research snapshot missing replay quote",
+        ):
+            plan.preflight(events)
+
+    def test_research_preflight_rejects_provider_clock_after_decision_cutoff(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        events = list(dataset.load_market_events())
+        trigger_index = next(
+            index for index, event in enumerate(events) if event.sequence == 4
+        )
+        trigger = events[trigger_index]
+        future_source = (
+            datetime.fromisoformat(trigger.observed_ts.replace("Z", "+00:00"))
+            + timedelta(microseconds=1)
+        ).isoformat()
+        events[trigger_index] = replace(trigger, source_ts=future_source)
+        plan = ResearchStrategyPlan.from_dict(self._plan_dict())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "research snapshot missing replay quote",
+        ):
+            plan.preflight(events)
+
+    def test_research_evidence_hash_binds_material_local_receipt_delay(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        trigger = next(
+            event for event in dataset.load_market_events() if event.sequence == 4
+        )
+        delayed = replace(
+            trigger,
+            ingest_ts=(
+                datetime.fromisoformat(
+                    trigger.observed_ts.replace("Z", "+00:00")
+                )
+                + timedelta(microseconds=1)
+            ).isoformat(),
+        )
+
+        self.assertNotEqual(
+            market_event_evidence_hash(trigger),
+            market_event_evidence_hash(delayed),
+        )
+
+    def test_research_evidence_hash_preserves_legacy_equal_receipt_identity(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        trigger = next(
+            event for event in dataset.load_market_events() if event.sequence == 4
+        )
+        explicit_equal = replace(trigger, ingest_ts=trigger.observed_ts)
+
+        self.assertEqual(
+            market_event_evidence_hash(trigger),
+            market_event_evidence_hash(explicit_equal),
+        )
 
     def test_research_strategy_runs_full_typed_pipeline_in_dataset_session(self):
         dataset = load_dataset(Path("examples/tt_demo"))

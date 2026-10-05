@@ -299,3 +299,63 @@ def test_in_place_approval_method_mutation_is_rejected_before_execution() -> Non
             )
     finally:
         method.__code__ = original_code
+
+def test_rebound_issuance_load_locked_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_load_locked(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound durable issuance loader must never execute")
+
+    monkeypatch.setattr(
+        SupervisedPlanIssuanceStore,
+        "_load_locked",
+        attacker_load_locked,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_rebound_issuance_authority_factory_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_authority(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound monotonic authority factory must never execute")
+
+    monkeypatch.setattr(
+        SupervisedPlanIssuanceStore,
+        "_authority",
+        attacker_authority,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+

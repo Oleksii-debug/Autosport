@@ -32,13 +32,19 @@ class MarketEventBus:
     """Persist first, then attempt every subscriber once for each accepted event."""
 
     def __init__(self, store: SQLiteMarketStore) -> None:
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
         self.store = store
         self.subscribers: list[Callable[[MarketEvent], None]] = []
 
     def subscribe(self, callback: Callable[[MarketEvent], None]) -> None:
+        if not callable(callback):
+            raise TypeError("callback must be callable")
         self.subscribers.append(callback)
 
     def publish(self, event: MarketEvent) -> bool:
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
         # Snapshot at the bus boundary before persistence. MarketEvent is frozen,
         # but nested metadata is mutable; callers must not be able to rewrite the
         # value that later subscriber delivery/failure evidence says was durable.

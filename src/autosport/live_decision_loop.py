@@ -1921,7 +1921,8 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "unfinished live decision recovery requires pending progress"
             )
-        durable_input_specs = self._load_input_registry() or ()
+        with WorkspaceEconomicLock(self.workspace):
+            durable_input_specs = self._load_input_registry() or ()
         current_input_specs = tuple(self._input_specs.values())
         focused_dependency_state = self.dependencies.registry_state_snapshot()
         focused_input_specs = tuple(

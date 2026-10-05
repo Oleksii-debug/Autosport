@@ -681,8 +681,8 @@ def _materialize_attempt(
     binding: PaperExposureBinding,
     decision_id: str,
 ):
-    _require_materialization_authority(action, binding)
     side = _require_action_side(action)
+    _require_materialization_authority(action, binding)
     self._require_attempt_action_identity(attempt, action)
     if attempt.execution_odds is None or attempt.execution_stake is None:
         raise PaperExecutionAdoptionError(

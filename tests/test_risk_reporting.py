@@ -1714,6 +1714,40 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         self.assertEqual(actual, expected)
 
+    def test_product_source_identity_change_during_reporting_fails_closed(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(87),),
+            Decimal("10"),
+            reason="issued-reason",
+            placed_at="2026-09-21T17:10:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+
+        original_drawdown = risk_reporting._historical_max_drawdown
+        mutated = False
+
+        def mutate_source(current_book):
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                ticket.strategy_reason = "rewritten-reason"
+            return original_drawdown(current_book)
+
+        with patch.object(
+            risk_reporting,
+            "_historical_max_drawdown",
+            side_effect=mutate_source,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "product-issued authority is unavailable",
+            ):
+                build_paper_risk_report(book, self._goal())
+
+        self.assertTrue(mutated)
+
     def test_risk_state_change_during_projection_fails_closed(self) -> None:
         book = PaperBook("100")
 

@@ -45,6 +45,18 @@ def _validate_json_text(value: str) -> None:
         raise ValueError("research strategy plan contains non-UTF-8 JSON text") from exc
 
 
+
+def _canonical_plan_identity(value: object, name: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(ch) < 32 for ch in value)
+    ):
+        raise ValueError(f"{name} must be non-empty canonical text")
+    _validate_json_text(value)
+    return value
+
 def _validate_strict_json_domain(raw: Any) -> None:
     """Fail closed on decoded values that cannot represent bounded strict JSON."""
 
@@ -169,8 +181,11 @@ class ResearchReplayInstruction:
     risk_of_ruin_evidence: RiskOfRuinEvidence | None = None
 
     def __post_init__(self) -> None:
-        if not self.decision_id or not self.trigger_quote_key:
-            raise ValueError("research decision identity fields are required")
+        _canonical_plan_identity(self.decision_id, "research decision_id")
+        _canonical_plan_identity(
+            self.trigger_quote_key,
+            "research trigger_quote_key",
+        )
         parse_iso_timestamp(self.decision_ts)
         amount = Decimal(str(self.stake))
         if amount <= 0:
@@ -723,9 +738,18 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
         else _risk_of_ruin_evidence_from_dict(risk_of_ruin_raw)
     )
     return ResearchReplayInstruction(
-        decision_id=str(raw["decision_id"]),
-        trigger_quote_key=str(raw["trigger_quote_key"]),
-        decision_ts=str(raw["decision_ts"]),
+        decision_id=_canonical_plan_identity(
+            raw["decision_id"],
+            "research decision_id",
+        ),
+        trigger_quote_key=_canonical_plan_identity(
+            raw["trigger_quote_key"],
+            "research trigger_quote_key",
+        ),
+        decision_ts=_canonical_plan_identity(
+            raw["decision_ts"],
+            "research decision_ts",
+        ),
         stake=Decimal(str(raw["stake"])),
         candidate=candidate,
         groups=tuple(groups),

@@ -1857,7 +1857,26 @@ class AutosportWebController:
             return self._fail(
                 "Команду STOP уже прийнято; очікується безпечне завершення."
             )
-        if not self.product_worker.request_stop("operator_stop"):
+        try:
+            accepted = self.product_worker.request_stop("operator_stop")
+        except BaseException as exc:
+            workspace = Path(self._active_workspace)
+            self._recovery_required_workspaces.add(workspace)
+            self._product_runtime_economic_snapshot = None
+            self.bank = text("ui.status.bank.quarantined", workspace=workspace)
+            self.tickets = [text("ui.status.tickets.startup_failure")]
+            self.evaluation = [
+                "Негайне переривання тривалої симуляції не підтверджено; "
+                "потрібне канонічне відновлення робочої області."
+            ]
+            self.product_runtime_status = text(
+                "ui.windows.product_runtime.error.recovery_required"
+            )
+            result = self._fail(self.product_runtime_status)
+            if not isinstance(exc, Exception):
+                raise
+            return result
+        if not accepted:
             return self._fail("Не вдалося передати команду STOP.")
         self.product_runtime_status = (
             "Надіслано команду STOP; очікується безпечне завершення тривалого імітаційного режиму."

@@ -15,6 +15,8 @@ from .real_execution_ledger import (
 )
 
 
+_RESOURCE_BOUND_VALIDATOR = _validate_decimal_text_resource_bound
+
 PaperExecutionRealityError = _impl.PaperExecutionRealityError
 PaperExecutionIntegrityError = _impl.PaperExecutionIntegrityError
 PaperExecutionStateError = _impl.PaperExecutionStateError
@@ -60,7 +62,7 @@ def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
         raise ValueError("Decimal must be an exact canonical Decimal")
     if not value.is_finite():
         raise ValueError("Decimal must be finite")
-    _validate_decimal_text_resource_bound(value)
+    _RESOURCE_BOUND_VALIDATOR(value)
     parts = value.as_tuple()
     coefficient = 0
     for digit in parts.digits:
@@ -74,7 +76,7 @@ def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
     sign = 1 if coefficient < 0 else 0
     digits = tuple(int(ch) for ch in str(abs(coefficient)))
     value = Decimal((sign, digits, exponent))
-    _validate_decimal_text_resource_bound(value)
+    _RESOURCE_BOUND_VALIDATOR(value)
     return value
 
 
@@ -804,7 +806,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         if type(worst_case_exposure) is not Decimal:
             raise TypeError("worst_case_exposure must be exact Decimal")
         try:
-            _validate_decimal_text_resource_bound(worst_case_exposure)
+            _RESOURCE_BOUND_VALIDATOR(worst_case_exposure)
         except ValueError as exc:
             raise PaperExecutionStateError(
                 "worst_case_exposure exceeds canonical Decimal resource bounds"

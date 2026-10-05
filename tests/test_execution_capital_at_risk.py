@@ -1205,6 +1205,33 @@ def test_upstream_verified_view_constructor_alias_substitution_is_rejected(
         resolve_execution_capital_at_risk(ledger, plan.plan_id)
 
 
+def test_upstream_verified_provider_effect_alias_substitution_is_rejected(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    _attempt(ledger, plan)
+
+    ledger_globals = RealExecutionLedger.verified_execution_view.__globals__
+    canonical_type = ledger_globals["VerifiedProviderEffectBindingView"]
+
+    class ForgedVerifiedProviderEffectBindingView:
+        pass
+
+    assert ForgedVerifiedProviderEffectBindingView is not canonical_type
+    monkeypatch.setitem(
+        ledger_globals,
+        "VerifiedProviderEffectBindingView",
+        ForgedVerifiedProviderEffectBindingView,
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+
 def test_upstream_ledger_instance_method_shadow_is_rejected_before_execution(
     tmp_path,
     monkeypatch,

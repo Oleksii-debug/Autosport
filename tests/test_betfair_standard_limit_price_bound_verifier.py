@@ -410,3 +410,84 @@ def test_instance_shadowed_issuance_authority_is_rejected_before_execution() -> 
 
     assert attacker_called is False
 
+def test_rebound_ledger_event_reader_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_events(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound ledger event reader must never execute")
+
+    monkeypatch.setattr(RealExecutionLedger, "_events", attacker_events)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_ledger_event_reader_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    reader = RealExecutionLedger._events
+    original_code = reader.__code__
+    attacker_called = False
+
+    def attacker_events(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated ledger event reader must never execute")
+
+    try:
+        reader.__code__ = attacker_events.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        reader.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_instance_shadowed_ledger_event_reader_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_events():
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("instance-shadowed ledger event reader must never execute")
+
+    ledger._events = attacker_events
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="ledger authority method shadow is not allowed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+

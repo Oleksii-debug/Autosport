@@ -48,7 +48,6 @@ _WORKSPACE_LOCK_TYPE = WorkspaceEconomicLock
 _PAPERBOOK_LOAD = PaperBook.load
 _PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
 _ECONOMIC_GOAL_LOAD = EconomicGoalStore.load
-_OPENING_PAPERBOOK_SHA256 = None
 _AUTHORITY_RECOVER = MonotonicWorkspaceAuthority.recover
 _AUTHORITY_PREPARE = MonotonicWorkspaceAuthority.prepare
 _AUTHORITY_COMMIT = MonotonicWorkspaceAuthority.commit

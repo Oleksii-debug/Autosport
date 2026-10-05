@@ -988,6 +988,18 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(mirror.snapshot(), ())
         self.assertEqual(runtime.pending_count, 0)
 
+    def test_runtime_authorities_reject_market_mirror_subclasses(self) -> None:
+        class HostileMirror(MarketMirror):
+            def view(self):
+                raise AssertionError("hostile mirror view executed")
+
+        hostile = HostileMirror()
+
+        with self.assertRaisesRegex(TypeError, "exact MarketMirror"):
+            FocusedMirrorDependencyIndex(hostile)
+        with self.assertRaisesRegex(TypeError, "exact MarketMirror"):
+            BoundedMirrorInvalidationBuffer(hostile)
+
     def test_registry_mutation_guard_blocks_direct_mutation_but_not_reads(self) -> None:
         mirror = MarketMirror()
         index = FocusedMirrorDependencyIndex(mirror)

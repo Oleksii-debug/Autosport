@@ -690,7 +690,8 @@ def _execute_unlocked(
         run_id=expected_run_id,
         action_ids=action_ids,
     )
-    run = self.ledger.load_run(
+    run = type(self.ledger).load_run(
+        self.ledger,
         run_id=expected_run_id,
         trigger_id=trigger_id,
         plan=prepared.execution_plan,
@@ -1124,9 +1125,13 @@ def _durable_observation_evidence_ids(
     run_id: str,
     action_ids: tuple[str, ...],
 ) -> dict[str, str]:
+    if type(ledger) is not _reality.PaperExecutionLedger:
+        raise PaperExecutionAdoptionError(
+            "durable observation evidence lookup requires exact ledger authority"
+        )
     reservations = [
         event
-        for event in ledger.events(run_id)
+        for event in type(ledger).events(ledger, run_id)
         if event["event_type"] == "RUN_RESERVED"
     ]
     if len(reservations) != 1:

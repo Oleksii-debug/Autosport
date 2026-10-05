@@ -272,6 +272,12 @@ def _paper_ticket_equity_locked_capital(ticket) -> Decimal:
     return stake
 
 
+_CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL = _paper_ticket_equity_locked_capital
+_CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL_CODE = (
+    _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL.__code__
+)
+
+
 def _paper_equity_source_state_sha256(book: PaperBook) -> str:
     """Hash complete canonical PAPER source state used by equity evidence."""
 
@@ -482,7 +488,14 @@ def build_product_issued_paper_equity_path(
             if ticket is None:
                 raise ValueError("PAPER lifecycle references missing ticket")
             if action == "open":
-                locked_capital = _paper_ticket_equity_locked_capital(ticket)
+                if (
+                    _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL.__code__
+                    is not _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL_CODE
+                ):
+                    raise ValueError(
+                        "canonical PAPER equity locked-capital authority changed"
+                    )
+                locked_capital = _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
                 replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(
                     replay_balance,
                     locked_capital,
@@ -501,7 +514,7 @@ def build_product_issued_paper_equity_path(
                 with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
                     replay_committed = (
                         replay_committed
-                        - _paper_ticket_equity_locked_capital(ticket)
+                        - _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
                     )
                 if replay_committed < 0:
                     raise ValueError("PAPER lifecycle committed stake became negative")
@@ -528,7 +541,7 @@ def build_product_issued_paper_equity_path(
 
     current_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
         tuple(
-            _paper_ticket_equity_locked_capital(ticket)
+            _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
             for ticket in book.tickets.values()
             if ticket.status is TicketStatus.OPEN
         )

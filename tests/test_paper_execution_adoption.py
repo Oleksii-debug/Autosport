@@ -1275,5 +1275,40 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.tickets, {})
 
 
+    def test_restart_ticket_matching_rejects_mutated_ticket_before_hostile_comparison(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("restart-hostile-ticket")
+            current_prepared = prepared(runtime, current)
+            first = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-restart-hostile-ticket",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            self.assertEqual(len(first.ticket_ids), 1)
+            ticket = next(iter(book.tickets.values()))
+            object.__setattr__(
+                ticket,
+                "bankroll_id",
+                _HostileExchangeSide(ticket.bankroll_id),
+            )
+            _HostileExchangeSide.comparisons = 0
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "PaperBook state is invalid before execution materialization",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-restart-hostile-ticket",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(len(book.tickets), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

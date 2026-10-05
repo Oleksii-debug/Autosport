@@ -438,3 +438,19 @@ def test_oversized_operator_source_config_read_is_bounded(
 
     assert requested_sizes
     assert max(requested_sizes) <= 4097
+
+
+def test_store_rejects_relative_path_authority() -> None:
+    with pytest.raises(ValueError, match="absolute"):
+        OperatorSourceConfigStore("relative/operator-source.json")
+
+
+def test_store_rejects_path_subclass_before_conversion(tmp_path: Path) -> None:
+    concrete_path_type = type(tmp_path)
+
+    class HostilePath(concrete_path_type):
+        def __str__(self) -> str:
+            raise AssertionError("path subtype conversion must not execute")
+
+    with pytest.raises(TypeError, match="exact"):
+        OperatorSourceConfigStore(HostilePath(tmp_path / "operator-source.json"))

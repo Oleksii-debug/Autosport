@@ -1243,5 +1243,33 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                     self.fail("mutated ledger anchor authority must not be entered")
 
 
+
+    def test_minted_execution_rejects_nested_action_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            nested_action = capability.execution_plan.actions[0]
+            object.__setattr__(nested_action, "requested_stake", Decimal("99.00"))
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution semantics changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
+
+    def test_minted_execution_rejects_nested_exposure_binding_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            nested_binding = capability.exposure_bindings[0]
+            object.__setattr__(nested_binding, "bankroll_id", "other-bankroll")
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution semantics changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -75,8 +75,16 @@ def _build_product_entrypoint():
     canonical_rlock_factory = canonical_threading_module.RLock
     path_factory = Path
     canonical_path_type = type(Path("."))
+    canonical_path_new = path_factory.__new__
+    canonical_path_new_code = canonical_path_new.__code__
     canonical_path_resolve = canonical_path_type.resolve
     canonical_path_resolve_code = canonical_path_resolve.__code__
+    canonical_path_str = canonical_path_type.__str__
+    canonical_path_str_code = canonical_path_str.__code__
+    canonical_path_fspath = canonical_path_type.__fspath__
+    canonical_path_fspath_code = canonical_path_fspath.__code__
+    canonical_path_eq = canonical_path_type.__eq__
+    canonical_path_eq_code = canonical_path_eq.__code__
     canonical_path_mkdir = canonical_path_type.mkdir
     canonical_path_mkdir_code = canonical_path_mkdir.__code__
     canonical_path_with_name = canonical_path_type.with_name
@@ -126,8 +134,16 @@ def _build_product_entrypoint():
             and canonical_ledger_path_factory is path_factory
             and _ledger_module.threading is canonical_threading_module
             and canonical_threading_module.RLock is canonical_rlock_factory
+            and path_factory.__new__ is canonical_path_new
+            and canonical_path_new.__code__ is canonical_path_new_code
             and canonical_path_type.resolve is canonical_path_resolve
             and canonical_path_resolve.__code__ is canonical_path_resolve_code
+            and canonical_path_type.__str__ is canonical_path_str
+            and canonical_path_str.__code__ is canonical_path_str_code
+            and canonical_path_type.__fspath__ is canonical_path_fspath
+            and canonical_path_fspath.__code__ is canonical_path_fspath_code
+            and canonical_path_type.__eq__ is canonical_path_eq
+            and canonical_path_eq.__code__ is canonical_path_eq_code
             and canonical_path_type.mkdir is canonical_path_mkdir
             and canonical_path_mkdir.__code__ is canonical_path_mkdir_code
             and canonical_path_type.with_name is canonical_path_with_name
@@ -221,7 +237,7 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "canonical product runtime workspace is invalid"
             ) from exc
-        if str(workspace) != profile_workspace:
+        if canonical_path_str(workspace) != profile_workspace:
             raise BetfairStandardLimitPriceBoundError(
                 "canonical product runtime workspace is invalid"
             )
@@ -252,7 +268,7 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store is outside the active runtime workspace"
             ) from exc
-        if store_workspace != workspace:
+        if canonical_path_eq(store_workspace, workspace) is not True:
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store is outside the active runtime workspace"
             )
@@ -287,7 +303,10 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "execution ledger is outside the active runtime workspace"
             ) from exc
-        if ledger_path.parent != workspace:
+        if canonical_path_eq(
+            canonical_path_parent_getter(ledger_path),
+            workspace,
+        ) is not True:
             raise BetfairStandardLimitPriceBoundError(
                 "execution ledger is outside the active runtime workspace"
             )
@@ -307,7 +326,10 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "canonical Betfair product verifier reopen authority changed"
             )
-        expected_issuance_directory = workspace / "supervised-plan-issuance"
+        expected_issuance_directory = canonical_path_truediv(
+            workspace,
+            "supervised-plan-issuance",
+        )
         if (
             type(
                 exact_instance_field(
@@ -322,7 +344,7 @@ def _build_product_entrypoint():
                 "workspace",
                 "canonical product issuance store",
             )
-            != workspace
+            is not workspace
             or exact_instance_field(
                 canonical_store,
                 "authority_root",

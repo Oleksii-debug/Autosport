@@ -1039,5 +1039,87 @@ class IngestionHealthTests(unittest.TestCase):
                 store.close()
 
 
+    def test_observed_time_is_freshness_fallback_when_source_time_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    policy=IngestionPolicy(
+                        max_batch_size=10,
+                        stale_after_seconds=60,
+                        max_future_skew_seconds=5,
+                    ),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00+00:00",
+                )
+                stale = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="stale-observed",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T11:58:59+00:00",
+                    sequence=1,
+                    source_ts=None,
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (stale,), cursor="stale-observed")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.rejected, 0)
+                self.assertIn("STALE_SOURCE", stats.quality_flags)
+                state = health.get("source")
+                self.assertEqual(state.status, "degraded")
+                self.assertIn("STALE_SOURCE", state.quality_flags)
+                self.assertIsNone(state.latest_source_ts)
+            finally:
+                store.close()
+
+    def test_fresh_observed_fallback_without_source_time_remains_healthy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    policy=IngestionPolicy(
+                        max_batch_size=10,
+                        stale_after_seconds=60,
+                        max_future_skew_seconds=5,
+                    ),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00+00:00",
+                )
+                fresh = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="fresh-observed",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T11:59:30+00:00",
+                    sequence=1,
+                    source_ts=None,
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (fresh,), cursor="fresh-observed")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.quality_flags, ())
+                self.assertEqual(stats.health_status, "healthy")
+                self.assertEqual(health.get("source").status, "healthy")
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

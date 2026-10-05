@@ -2076,8 +2076,8 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
             restarted = RealExecutionLedger(path)
             with self.assertRaisesRegex(
-                (ExecutionLedgerIntegrityError, ValueError),
-                "submitted_request_sha256",
+                ExecutionLedgerIntegrityError,
+                "ATTEMPT_SUBMITTED request digest is invalid",
             ):
                 restarted.verify_integrity()
 

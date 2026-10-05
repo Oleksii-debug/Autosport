@@ -15,7 +15,7 @@ def test_invalid_workspace_configuration_is_reported_before_gui_import(tmp_path:
     with (
         patch("autosport.paths.default_workspace", side_effect=ValueError(detail)),
         patch.object(windows_entry, "_show_workspace_configuration_error") as show_error,
-        patch.dict(sys.modules, {"autosport.windows_gui": None}),
+        patch.dict(sys.modules, {"autosport.product_windows_gui": None}),
     ):
         exit_code = windows_entry._run_interactive_gui()
 
@@ -27,7 +27,7 @@ def test_real_relative_workspace_override_is_rejected_before_gui_import() -> Non
     with (
         patch.dict(os.environ, {"AUTOSPORT_WORKSPACE": "relative-workspace"}, clear=False),
         patch.object(windows_entry, "_show_workspace_configuration_error") as show_error,
-        patch.dict(sys.modules, {"autosport.windows_gui": None}),
+        patch.dict(sys.modules, {"autosport.product_windows_gui": None}),
     ):
         exit_code = windows_entry._run_interactive_gui()
 
@@ -39,13 +39,13 @@ def test_real_relative_workspace_override_is_rejected_before_gui_import() -> Non
 def test_valid_workspace_configuration_delegates_to_gui(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     gui_main = MagicMock(return_value=7)
-    fake_gui_module = types.ModuleType("autosport.windows_gui")
+    fake_gui_module = types.ModuleType("autosport.product_windows_gui")
     fake_gui_module.main = gui_main
 
     with (
         patch("autosport.paths.default_workspace", return_value=workspace) as validate_workspace,
         patch.object(windows_entry, "_show_workspace_configuration_error") as show_error,
-        patch.dict(sys.modules, {"autosport.windows_gui": fake_gui_module}),
+        patch.dict(sys.modules, {"autosport.product_windows_gui": fake_gui_module}),
     ):
         exit_code = windows_entry._run_interactive_gui()
 

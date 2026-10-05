@@ -812,6 +812,7 @@ class LayExecutionLiabilityTests(unittest.TestCase):
                 (paper_reality, "_verify_observation_authority"),
                 (paper_reality, "_derive_run_economics"),
                 (paper_reality, "_attempt_locked_capital"),
+                (paper_reality, "locked_capital_for_exchange_side"),
                 (paper_reality._impl, "_run_id"),
                 (paper_reality._impl, "_observed_attempt"),
                 (paper_reality._impl, "_require_canonical_action_surface"),

@@ -337,6 +337,33 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(provider.calls, 0)
             store.close()
 
+    def test_provider_source_identity_mutation_during_read_fails_before_market_persistence(self):
+        class MutatingProvider:
+            def __init__(self) -> None:
+                self.source_id = "source"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.source_id = "mutated-source"
+                return ProviderBatch(
+                    "source",
+                    (IngestionHealthTests._quote(None),),
+                    cursor="cursor-1",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            with self.assertRaisesRegex(
+                ValueError,
+                "source_id changed during batch acquisition",
+            ):
+                engine.poll_once(MutatingProvider(), max_items=10)
+
+            self.assertEqual(store.events(), ())
+            state = health.get("source")
+            self.assertEqual(state.status, "failed")
+            self.assertEqual(state.last_failure_kind, "provider_or_validation")
+            store.close()
+
     def test_provider_cannot_return_more_than_requested_batch_bound(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, store, health = self._engine(tmp)

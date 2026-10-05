@@ -569,7 +569,7 @@ def observe_workspace_once(
         current = tuple(
             sorted(
                 mirror.causal_view(source_ids=source_id).events,
-                key=lambda event: (event.event_id, event.market_id, event.selection_id),
+                key=lambda event: event.quote_key,
             )
         )
         return ObservationResult(stats, health_store.get(source_id), current)

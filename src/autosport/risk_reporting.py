@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from decimal import Decimal, DecimalException, Inexact, localcontext
 from pathlib import Path
@@ -630,10 +631,24 @@ def _durable_source_pair(
     if type(workspace) is not str or not workspace:
         raise TypeError("workspace must be an exact non-empty str")
 
-    store = EconomicGoalStore(Path(workspace))
+    workspace_path = Path(workspace)
+    paper_path = Path(paper_book_path)
+    if not workspace_path.is_absolute():
+        raise ValueError("workspace must be an absolute canonical product workspace path")
+    if not paper_path.is_absolute():
+        raise ValueError("paper_book_path must be an absolute canonical product path")
+    expected_paper_path = workspace_path / "paper_book.json"
+    actual_locator = os.path.normcase(os.path.normpath(str(paper_path)))
+    expected_locator = os.path.normcase(os.path.normpath(str(expected_paper_path)))
+    if actual_locator != expected_locator:
+        raise ValueError(
+            "paper_book_path must be the canonical workspace/paper_book.json"
+        )
+
+    store = EconomicGoalStore(workspace_path)
     goal_before = store.load()
     goal_before_provenance = provenance_for(goal_before)
-    book = PaperBook.load(Path(paper_book_path))
+    book = PaperBook.load(paper_path)
     goal_after = store.load()
     if provenance_for(goal_after) != goal_before_provenance:
         raise ValueError("durable economic goal changed during equity-path resolution")
@@ -641,7 +656,7 @@ def _durable_source_pair(
     before_state = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
     if before_state is None:
         raise ValueError("durable PaperBook cannot issue canonical equity-path evidence")
-    book_after = PaperBook.load(Path(paper_book_path))
+    book_after = PaperBook.load(paper_path)
     after_state = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book_after)
     if (
         after_state is None

@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from . import _paper_execution_reality_legacy as _impl
 from .exchange_exposure import locked_capital_for_exchange_side
+_LOCKED_CAPITAL_FOR_EXCHANGE_SIDE = locked_capital_for_exchange_side
 from .real_execution_ledger import (
     ExecutionAction,
     ExecutionPlan,
@@ -114,7 +115,7 @@ def _attempt_locked_capital(attempt: PaperLegAttempt) -> Decimal:
             "accepted/partial attempt is missing execution stake or odds"
         )
     try:
-        return locked_capital_for_exchange_side(
+        return _LOCKED_CAPITAL_FOR_EXCHANGE_SIDE(
             stake=attempt.execution_stake,
             odds=attempt.execution_odds,
             exchange_side=attempt.side,

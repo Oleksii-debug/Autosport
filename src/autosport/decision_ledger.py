@@ -865,55 +865,52 @@ class JsonlDecisionLedger:
 
         return line_count
 
-    def verified_snapshot_if_exists(self) -> VerifiedDecisionLedgerSnapshot:
-        """Return an empty verified snapshot only before this authority has a ledger file."""
-
+    def _verified_snapshot_locked(self) -> VerifiedDecisionLedgerSnapshot:
         self._assert_persistence_authority()
-        if self._writer_lock_path_authority.exists():
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger writer lock exists; verified snapshot is unavailable"
-            )
-        if not self._absolute_path_authority.exists():
-            if self._file_identity_authority is not None:
-                raise DecisionLedgerIntegrityError(
-                    "Decision Ledger bound file is missing"
-                )
-            return VerifiedDecisionLedgerSnapshot(
-                payload=b"",
-                sha256=hashlib.sha256(b"").hexdigest(),
-                record_count=0,
-            )
-        if self._file_identity_authority is None:
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger file appeared outside this persistence authority"
-            )
-        return self.verified_snapshot()
-
-    def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
-        self._assert_persistence_authority()
-        self._assert_file_identity()
-        if self._writer_lock_path_authority.exists():
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger writer lock exists; verified snapshot is unavailable"
-            )
         self._assert_file_identity()
         try:
-            raw = self._absolute_path_authority.read_bytes()
+            with self._absolute_path_authority.open("rb") as handle:
+                self._assert_file_identity(handle.fileno())
+                raw = handle.read()
+                self._assert_file_identity(handle.fileno())
         except OSError as exc:
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger file is missing or unreadable"
             ) from exc
         self._assert_persistence_authority()
-        if self._writer_lock_path_authority.exists():
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger writer lock exists; verified snapshot is unavailable"
-            )
+        self._assert_file_identity()
         record_count = self._verify_bytes(raw)
         return VerifiedDecisionLedgerSnapshot(
             payload=raw,
             sha256=hashlib.sha256(raw).hexdigest(),
             record_count=record_count,
         )
+
+    def verified_snapshot_if_exists(self) -> VerifiedDecisionLedgerSnapshot:
+        """Return an empty verified snapshot only before this authority has a ledger file."""
+
+        self._assert_persistence_authority()
+        with self._writer_guard():
+            if not self._absolute_path_authority.exists():
+                if self._file_identity_authority is not None:
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger bound file is missing"
+                    )
+                return VerifiedDecisionLedgerSnapshot(
+                    payload=b"",
+                    sha256=hashlib.sha256(b"").hexdigest(),
+                    record_count=0,
+                )
+            if self._file_identity_authority is None:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger file appeared outside this persistence authority"
+                )
+            return self._verified_snapshot_locked()
+
+    def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
+        self._assert_persistence_authority()
+        with self._writer_guard():
+            return self._verified_snapshot_locked()
 
     def verified_records(self) -> tuple[DecisionRecord, ...]:
         snapshot = self.verified_snapshot()

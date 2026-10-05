@@ -446,3 +446,62 @@ def test_applicable_cost_resolver_rejects_in_place_model_resolver_code_mutation(
                 )
     finally:
         resolver.__code__ = original_code
+
+
+def test_applicable_cost_resolver_rejects_in_place_json_serializer_code_mutation():
+    serializer = subject.json.dumps
+    original_code = serializer.__code__
+
+    def attacker_serializer(*_args, **_kwargs):
+        return "{}"
+
+    try:
+        serializer.__code__ = attacker_serializer.__code__
+        with canonical_applicable_cost_case() as (
+            intent,
+            plan,
+            router_store,
+            request,
+            decision_at,
+        ):
+            with pytest.raises(
+                subject.ProspectiveApplicableCostError,
+                match="JSON proof serializer authority changed",
+            ):
+                subject.resolve_prospective_applicable_costs(
+                    intent=intent,
+                    plan=plan,
+                    router_store=router_store,
+                    model_request_id=request.request_id,
+                    decision_at=decision_at,
+                )
+    finally:
+        serializer.__code__ = original_code
+
+
+def test_applicable_cost_resolver_ignores_hash_constructor_global_rebinding(monkeypatch):
+    attacker_called = False
+
+    def attacker_sha256(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound hashlib.sha256 must never execute")
+
+    monkeypatch.setattr(subject.hashlib, "sha256", attacker_sha256)
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        result = subject.resolve_prospective_applicable_costs(
+            intent=intent,
+            plan=plan,
+            router_store=router_store,
+            model_request_id=request.request_id,
+            decision_at=decision_at,
+        )
+
+    assert attacker_called is False
+    subject._SEALED_RESOLUTION_VALIDATOR(result)

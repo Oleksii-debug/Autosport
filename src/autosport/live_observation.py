@@ -24,6 +24,35 @@ _MAX_SNAPSHOT_BATCHES = 256
 _MAX_BATCH_ATTEMPTS = 2
 
 
+def _validate_observation_ingress(
+    provider: MarketProvider,
+    *,
+    max_items: int,
+    policy: IngestionPolicy | None,
+    clock: Clock | None,
+) -> IngestionPolicy:
+    """Validate caller-controlled observation inputs before durable side effects."""
+
+    if type(max_items) is not int or max_items <= 0:
+        raise ValueError("max_items must be a positive integer")
+    if policy is not None and type(policy) is not IngestionPolicy:
+        raise TypeError("policy must be an exact IngestionPolicy or None")
+    effective_policy = policy if policy is not None else IngestionPolicy()
+    if max_items > effective_policy.max_batch_size:
+        raise ValueError(
+            f"requested batch {max_items} exceeds backpressure limit "
+            f"{effective_policy.max_batch_size}"
+        )
+    if clock is not None and not callable(clock):
+        raise TypeError("clock must be callable or None")
+    source_id = getattr(provider, "source_id", None)
+    if type(source_id) is not str:
+        raise TypeError("provider source_id must be an exact string")
+    if not source_id or source_id.strip() != source_id or "|" in source_id:
+        raise ValueError("provider source_id must be canonical")
+    return effective_policy
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationWorkerMessage:
     result: ObservationResult | None = None
@@ -376,12 +405,18 @@ def poll_open_market_store_once(
         raise TypeError("health_store must be an exact SourceHealthStore")
     if type(mirror_updates) is not BoundedMirrorInvalidationBuffer:
         raise TypeError("mirror_updates must be an exact BoundedMirrorInvalidationBuffer")
+    effective_policy = _validate_observation_ingress(
+        provider,
+        max_items=max_items,
+        policy=policy,
+        clock=clock,
+    )
 
     bus = MarketEventBus(store)
     bus.subscribe(mirror_updates.accept_persisted)
     engine = IngestionEngine(
         bus,
-        policy=policy,
+        policy=effective_policy,
         health_store=health_store,
         clock=clock,
     )
@@ -408,6 +443,12 @@ def observe_workspace_once(
 
     if mirror_updates is not None and type(mirror_updates) is not BoundedMirrorInvalidationBuffer:
         raise TypeError("mirror_updates must be an exact BoundedMirrorInvalidationBuffer")
+    effective_policy = _validate_observation_ingress(
+        provider,
+        max_items=max_items,
+        policy=policy,
+        clock=clock,
+    )
 
     root = Path(workspace)
     root.mkdir(parents=True, exist_ok=True)
@@ -433,7 +474,7 @@ def observe_workspace_once(
         bus.subscribe(mirror_updates.accept_persisted)
         engine = IngestionEngine(
             bus,
-            policy=policy,
+            policy=effective_policy,
             health_store=health_store,
             clock=clock,
         )

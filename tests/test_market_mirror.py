@@ -131,6 +131,34 @@ class MarketMirrorTests(unittest.TestCase):
         self.assertEqual(mirror.apply(first).status, MirrorUpdate.APPLIED)
         self.assertEqual(mirror.apply(changed).status, MirrorUpdate.APPLIED)
 
+    def test_store_backed_mirror_entry_points_reject_store_subclasses(self) -> None:
+        class Store(SQLiteMarketStore):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            event = self.event()
+            try:
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    mirror.persist_and_apply(store, event)
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    MarketMirror.current_history_view_from_store(
+                        store,
+                        as_of=datetime(2026, 9, 16, 19, 0, 1, tzinfo=timezone.utc),
+                        max_age=timedelta(seconds=30),
+                    )
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    MarketMirror.replay_view_from_store(
+                        store,
+                        as_of=datetime(2026, 9, 16, 19, 0, 1, tzinfo=timezone.utc),
+                        max_age=timedelta(seconds=30),
+                    )
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    MarketMirror.from_store(store)
+            finally:
+                store.close()
+
     def test_new_and_forward_updates_are_applied(self) -> None:
         mirror = MarketMirror()
 

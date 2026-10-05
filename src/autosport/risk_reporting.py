@@ -263,11 +263,15 @@ def _paper_ticket_equity_locked_capital(ticket) -> Decimal:
         raise ValueError("ticket legs must be a non-empty canonical tuple")
     for leg in legs:
         side = object.__getattribute__(leg, "exchange_side")
+        if side is None:
+            continue
+        if type(side) is not str:
+            raise ValueError("PAPER equity path exchange side must be exact canonical text")
         if side == "lay":
             raise ValueError(
                 "PAPER equity path LAY locked capital requires canonical liability authority"
             )
-        if side not in {None, "back"}:
+        if side != "back":
             raise ValueError("PAPER equity path exchange side is non-canonical")
     return stake
 

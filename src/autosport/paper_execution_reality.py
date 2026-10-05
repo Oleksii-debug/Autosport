@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
 from . import _paper_execution_reality_legacy as _impl
+from .exchange_exposure import locked_capital_for_exchange_side
 from .real_execution_ledger import ExecutionAction, ExecutionPlan
 
 
@@ -65,6 +66,41 @@ def _decimal_scale_bps_exact(value: Decimal, basis_points: int) -> Decimal:
     return _decimal_from_coefficient(coefficient * basis_points, exponent - 4)
 
 
+def _attempt_locked_capital(attempt: PaperLegAttempt) -> Decimal:
+    if attempt.outcome not in {
+        PaperAttemptOutcome.ACCEPTED,
+        PaperAttemptOutcome.PARTIAL,
+    }:
+        raise PaperExecutionIntegrityError(
+            "locked capital requires ACCEPTED or PARTIAL execution truth"
+        )
+    if attempt.execution_stake is None or attempt.execution_odds is None:
+        raise PaperExecutionIntegrityError(
+            "accepted/partial attempt is missing execution stake or odds"
+        )
+    try:
+        return locked_capital_for_exchange_side(
+            stake=attempt.execution_stake,
+            odds=attempt.execution_odds,
+            exchange_side=attempt.side,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionIntegrityError(
+            "accepted/partial attempt has invalid exchange exposure economics"
+        ) from exc
+
+
+def _unknown_exposure_increment(attempt: PaperLegAttempt) -> Decimal:
+    side = attempt.side.strip().upper()
+    if side == "BACK":
+        return attempt.requested_stake
+    if side == "LAY":
+        raise PaperExecutionStateError(
+            "UNKNOWN LAY exposure has no canonical upper-odds liability bound"
+        )
+    raise PaperExecutionIntegrityError("durable attempt has unsupported exchange side")
+
+
 @dataclass(frozen=True, slots=True)
 class _DerivedRunEconomics:
     pending_action_ids: tuple[str, ...]
@@ -95,13 +131,18 @@ def _derive_run_economics(
             PaperAttemptOutcome.ACCEPTED,
             PaperAttemptOutcome.PARTIAL,
         }:
-            assert attempt.execution_stake is not None
-            known_exposure = _decimal_add_exact(known_exposure, attempt.execution_stake)
+            known_exposure = _decimal_add_exact(
+                known_exposure,
+                _attempt_locked_capital(attempt),
+            )
             worst_case = max(worst_case, known_exposure)
         elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
             worst_case = max(
                 worst_case,
-                _decimal_add_exact(known_exposure, attempt.requested_stake),
+                _decimal_add_exact(
+                    known_exposure,
+                    _unknown_exposure_increment(attempt),
+                ),
             )
 
         if attempt.outcome is not PaperAttemptOutcome.ACCEPTED:
@@ -394,7 +435,7 @@ def _synthetic_attempt(
     if action.side != "BACK":
         raise PaperExecutionStateError(
             "synthetic PAPER exposure model supports BACK only; non-BACK must use "
-            "explicit empirical/configured execution evidence"
+            "explicit empirical execution evidence"
         )
     start = _impl._timestamp(started_at, "started_at")
     delay_span = config.max_delay_ms - config.min_delay_ms
@@ -500,6 +541,36 @@ def _synthetic_attempt(
     )
 
 
+def _validate_lay_execution_surface(
+    *,
+    plan: ExecutionPlan,
+    observations: Mapping[str, ObservedPaperExecution],
+) -> None:
+    lay_actions = tuple(
+        action for action in plan.actions if action.side.strip().upper() == "LAY"
+    )
+    if not lay_actions:
+        return
+    if len(plan.actions) != 1 or len(lay_actions) != 1:
+        raise PaperExecutionStateError(
+            "LAY PAPER execution is limited to one single-leg action"
+        )
+    action = lay_actions[0]
+    observation = observations.get(action.action_id)
+    if observation is None:
+        raise PaperExecutionStateError(
+            "LAY PAPER execution requires explicit empirical execution evidence"
+        )
+    if observation.evidence_grade is not EvidenceGrade.EMPIRICAL:
+        raise PaperExecutionStateError(
+            "configured/synthetic LAY execution cannot establish liability truth"
+        )
+    if observation.outcome is PaperAttemptOutcome.UNKNOWN:
+        raise PaperExecutionStateError(
+            "UNKNOWN LAY exposure has no canonical upper-odds liability bound"
+        )
+
+
 def execute_paper_plan(
     *,
     plan: ExecutionPlan,
@@ -549,6 +620,8 @@ def execute_paper_plan(
         )
         observation_evidence_ids[action_id] = observation.evidence_id
 
+    _validate_lay_execution_surface(plan=plan, observations=observations)
+
     run_id = _impl._run_id(plan, trigger_id, config)
     ledger.reserve_run(
         run_id=run_id,
@@ -597,20 +670,14 @@ def execute_paper_plan(
     worst_case_exposure = Decimal("0")
     for prior in attempts:
         assert prior.outcome is PaperAttemptOutcome.ACCEPTED
-        assert prior.execution_stake is not None
         known_exposure = _decimal_add_exact(
             known_exposure,
-            prior.execution_stake,
+            _attempt_locked_capital(prior),
         )
         worst_case_exposure = max(worst_case_exposure, known_exposure)
 
     for sequence in range(len(attempts), len(plan.actions)):
         action = plan.actions[sequence]
-        if action.side != "BACK":
-            raise PaperExecutionStateError(
-                "PAPER execution-reality exposure model supports BACK only "
-                "until canonical LAY liability authority exists"
-            )
         observation = observations.get(action.action_id)
         if observation is not None:
             attempt = _impl._observed_attempt(
@@ -639,10 +706,9 @@ def execute_paper_plan(
             PaperAttemptOutcome.ACCEPTED,
             PaperAttemptOutcome.PARTIAL,
         }:
-            assert attempt.execution_stake is not None
             known_exposure = _decimal_add_exact(
                 known_exposure,
-                attempt.execution_stake,
+                _attempt_locked_capital(attempt),
             )
             worst_case_exposure = max(worst_case_exposure, known_exposure)
         elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
@@ -650,7 +716,7 @@ def execute_paper_plan(
                 worst_case_exposure,
                 _decimal_add_exact(
                     known_exposure,
-                    attempt.requested_stake,
+                    _unknown_exposure_increment(attempt),
                 ),
             )
 

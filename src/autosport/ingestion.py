@@ -266,6 +266,32 @@ class CommittedIngestionHealthError(RuntimeError):
 class IngestionEngine:
     """Deterministic provider -> quality -> normalize -> transactional persistence -> subscriber pipeline."""
 
+    @staticmethod
+    def _abandon_uncommitted_provider_batch(
+        provider: MarketProvider,
+        primary_error: BaseException,
+    ) -> None:
+        """Release provider-local pending state only before market publication begins."""
+
+        abandon = getattr(provider, "abandon_uncommitted", None)
+        has_inflight = getattr(provider, "has_inflight", False)
+        if not callable(abandon) or has_inflight is not True:
+            return
+        try:
+            abandon()
+        except BaseException as cleanup_error:
+            try:
+                try:
+                    detail = str(cleanup_error)
+                except BaseException:
+                    detail = "<unprintable exception>"
+                primary_error.add_note(
+                    "pre-commit provider cleanup also failed: "
+                    f"{type(cleanup_error).__name__}: {detail}"
+                )
+            except BaseException:
+                pass
+
     def __init__(
         self,
         bus: MarketEventBus,
@@ -361,76 +387,87 @@ class IngestionEngine:
         # One post-acquisition evidence instant governs both quote-age truth and this
         # poll's health transition. Equal instants remain distinct via durable
         # transition_order; genuinely older direct evidence still fails closed.
-        now = self.clock()
+        #
+        # Everything through ordered_flags is still strictly pre-publication. If one
+        # of these local evidence/normalization steps fails, a stateful provider may
+        # already have advanced its pending snapshot even though market state is not
+        # durable. Release only that proven-uncommitted provider state before the
+        # MarketEventBus boundary; never perform this cleanup after publish_many starts.
+        try:
+            now = self.clock()
 
-        health_before = None
-        previous_source_ts = None
-        if self.health_store is not None:
-            health_before = _SourceHealthSnapshot.from_state(
-                self.health_store.get(batch.source_id)
-            )
-            previous_source_ts = health_before.latest_source_ts
+            health_before = None
+            previous_source_ts = None
+            if self.health_store is not None:
+                health_before = _SourceHealthSnapshot.from_state(
+                    self.health_store.get(batch.source_id)
+                )
+                previous_source_ts = health_before.latest_source_ts
 
-        flags = set(batch.quality_flags)
-        normalized = []
-        rejected = 0
-        latest_source: datetime | None = None
-        now_point = parse_source_timestamp(now)
-        for quote in batch.quotes:
-            try:
-                observed_point = _timezone_aware_instant(
-                    quote.observed_ts,
-                    "observed_ts",
-                ).astimezone(timezone.utc)
-            except (AttributeError, TypeError, ValueError):
-                flags.add("INVALID_QUOTE")
-                rejected += 1
-                continue
-            if observed_point > now_point:
-                # observed_ts is local receipt evidence, not provider clock truth.
-                # A receipt claimed after this already-completed acquisition instant
-                # cannot be causally true for the current poll.
-                flags.add("FUTURE_OBSERVATION_TIMESTAMP")
-                rejected += 1
-                continue
-
-            source_point: datetime | None = None
-            freshness_point = observed_point
-            if quote.source_ts is not None:
+            flags = set(batch.quality_flags)
+            normalized = []
+            rejected = 0
+            latest_source: datetime | None = None
+            now_point = parse_source_timestamp(now)
+            for quote in batch.quotes:
                 try:
-                    source_point = _timezone_aware_instant(
-                        quote.source_ts,
-                        "source_ts",
+                    observed_point = _timezone_aware_instant(
+                        quote.observed_ts,
+                        "observed_ts",
                     ).astimezone(timezone.utc)
                 except (AttributeError, TypeError, ValueError):
-                    flags.add("INVALID_SOURCE_TIMESTAMP")
+                    flags.add("INVALID_QUOTE")
                     rejected += 1
                     continue
-                freshness_point = source_point
+                if observed_point > now_point:
+                    # observed_ts is local receipt evidence, not provider clock truth.
+                    # A receipt claimed after this already-completed acquisition instant
+                    # cannot be causally true for the current poll.
+                    flags.add("FUTURE_OBSERVATION_TIMESTAMP")
+                    rejected += 1
+                    continue
 
-            age_seconds = (now_point - freshness_point).total_seconds()
-            if age_seconds > self.policy.stale_after_seconds:
-                flags.add("STALE_SOURCE")
-            if source_point is not None and (
-                age_seconds < -self.policy.max_future_skew_seconds
-            ):
-                flags.add("FUTURE_CLOCK_SKEW")
-            try:
-                event = self.normalizer.normalize(batch.source_id, quote)
-            except (TypeError, ValueError):
-                flags.add("INVALID_QUOTE")
-                rejected += 1
-                continue
-            normalized.append(event)
-            if source_point is not None and (
-                latest_source is None or source_point > latest_source
-            ):
-                latest_source = source_point
+                source_point: datetime | None = None
+                freshness_point = observed_point
+                if quote.source_ts is not None:
+                    try:
+                        source_point = _timezone_aware_instant(
+                            quote.source_ts,
+                            "source_ts",
+                        ).astimezone(timezone.utc)
+                    except (AttributeError, TypeError, ValueError):
+                        flags.add("INVALID_SOURCE_TIMESTAMP")
+                        rejected += 1
+                        continue
+                    freshness_point = source_point
 
-        latest_source_ts = latest_source.isoformat() if latest_source is not None else None
-        if previous_source_ts is not None and latest_source is not None:
-            if latest_source < parse_source_timestamp(previous_source_ts):
-                flags.add("SOURCE_TIME_REGRESSION")
+                age_seconds = (now_point - freshness_point).total_seconds()
+                if age_seconds > self.policy.stale_after_seconds:
+                    flags.add("STALE_SOURCE")
+                if source_point is not None and (
+                    age_seconds < -self.policy.max_future_skew_seconds
+                ):
+                    flags.add("FUTURE_CLOCK_SKEW")
+                try:
+                    event = self.normalizer.normalize(batch.source_id, quote)
+                except (TypeError, ValueError):
+                    flags.add("INVALID_QUOTE")
+                    rejected += 1
+                    continue
+                normalized.append(event)
+                if source_point is not None and (
+                    latest_source is None or source_point > latest_source
+                ):
+                    latest_source = source_point
+
+            latest_source_ts = latest_source.isoformat() if latest_source is not None else None
+            if previous_source_ts is not None and latest_source is not None:
+                if latest_source < parse_source_timestamp(previous_source_ts):
+                    flags.add("SOURCE_TIME_REGRESSION")
+
+        except BaseException as exc:
+            self._abandon_uncommitted_provider_batch(provider, exc)
+            raise
 
         # Persistence and subscriber delivery are local pipeline stages. A failure here
         # must still propagate, but it must not be attributed to provider health after

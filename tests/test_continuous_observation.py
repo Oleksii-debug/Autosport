@@ -84,6 +84,37 @@ class ContinuousObservationTests(unittest.TestCase):
             **kwargs,
         )
 
+    def test_provider_identity_substitution_fails_before_workspace_creation(self):
+        class SourceId(str):
+            pass
+
+        class Provider:
+            source_id = SourceId("continuous-fixture")
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider I/O must not run")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "source_id must be an exact string"):
+                self._run(Provider(), self._config(workspace, max_cycles=1))
+
+            self.assertFalse(workspace.exists())
+
+    def test_provider_reserved_source_identity_fails_before_workspace_creation(self):
+        class Provider:
+            source_id = "continuous|fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider I/O must not run")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(ValueError, "source_id must be canonical"):
+                self._run(Provider(), self._config(workspace, max_cycles=1))
+
+            self.assertFalse(workspace.exists())
+
     def test_repeated_snapshot_is_deduplicated_without_duplicate_market_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

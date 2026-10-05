@@ -1206,40 +1206,41 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(len(book.tickets), 1)
             self.assertEqual(book.balance, Decimal("59.00"))
 
-    def test_lay_recovery_reproves_minted_authority_after_ledger_load(self):
+    def test_lay_recovery_instance_load_override_cannot_replace_durable_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)
             pre_action_book = PaperBook("100.00")
-            current = action("lay-recovery-ledger-callback", odds="5.00", stake="10.00", side="LAY")
+            current = action(
+                "lay-recovery-ledger-instance-override",
+                odds="5.00",
+                stake="10.00",
+                side="LAY",
+            )
             current_prepared = prepared(runtime, current)
 
             runtime.execute(
                 prepared=current_prepared,
-                trigger_id="trigger-lay-recovery-ledger-callback",
+                trigger_id="trigger-lay-recovery-ledger-instance-override",
                 started_at=STARTED_AT,
                 materialize_exposure=True,
             )
-            original_load_run = ledger.load_run
-            binding = current_prepared.exposure_bindings[0]
+            hostile_calls = 0
 
-            def load_then_mutate(*args, **kwargs):
-                run = original_load_run(*args, **kwargs)
-                object.__setattr__(binding, "bankroll_id", "mutated-after-ledger-read")
-                return run
+            def hostile_load_run(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("hostile instance load_run executed")
 
-            with patch.object(ledger, "load_run", load_then_mutate):
-                with self.assertRaisesRegex(
-                    PaperExecutionAdoptionError,
-                    "authority changed after mint",
-                ):
-                    runtime.assert_recoverable_book_state(
-                        pre_action_book=pre_action_book,
-                        prepared=current_prepared,
-                        trigger_id="trigger-lay-recovery-ledger-callback",
-                        started_at=STARTED_AT,
-                        materialize_exposure=True,
-                    )
+            with patch.object(ledger, "load_run", hostile_load_run):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=pre_action_book,
+                    prepared=current_prepared,
+                    trigger_id="trigger-lay-recovery-ledger-instance-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
 
+            self.assertEqual(hostile_calls, 0)
             self.assertEqual(len(book.tickets), 1)
             self.assertEqual(book.balance, Decimal("60.00"))
 

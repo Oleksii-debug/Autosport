@@ -53,34 +53,54 @@ def _require_helpers(
             raise ValueError("PAPER execution Decimal resource authority drifted")
 
 
-def _bounded_decimal(
-    value: object,
-    name: str,
-    *,
-    allow_zero: bool = False,
-    _parse=_ORIGINAL_DECIMAL,
-    _validate=_RESOURCE_VALIDATOR,
-    _require=_require_helpers,
-) -> Decimal:
-    _require()
-    parsed = _parse(value, name, allow_zero=allow_zero)
-    if type(parsed) is not Decimal:
-        raise ValueError(f"{name} must resolve to an exact Decimal")
-    _validate(parsed)
-    return parsed
+def _build_bounded_decimal(
+    parse: FunctionType,
+    validate: FunctionType,
+    require: FunctionType,
+) -> FunctionType:
+    def bounded_decimal(
+        value: object,
+        name: str,
+        *,
+        allow_zero: bool = False,
+    ) -> Decimal:
+        require()
+        parsed = parse(value, name, allow_zero=allow_zero)
+        if type(parsed) is not Decimal:
+            raise ValueError(f"{name} must resolve to an exact Decimal")
+        validate(parsed)
+        return parsed
+
+    return bounded_decimal
 
 
-def _bounded_decimal_text(
-    value: Decimal,
-    _serialize=_ORIGINAL_DECIMAL_TEXT,
-    _validate=_RESOURCE_VALIDATOR,
-    _require=_require_helpers,
-) -> str:
-    _require()
-    if type(value) is not Decimal:
-        raise ValueError("PAPER execution Decimal must be exact")
-    _validate(value)
-    return _serialize(value)
+def _build_bounded_decimal_text(
+    serialize: FunctionType,
+    validate: FunctionType,
+    require: FunctionType,
+) -> FunctionType:
+    def bounded_decimal_text(value: Decimal) -> str:
+        require()
+        if type(value) is not Decimal:
+            raise ValueError("PAPER execution Decimal must be exact")
+        validate(value)
+        return serialize(value)
+
+    return bounded_decimal_text
+
+
+_BOUNDED_DECIMAL = _build_bounded_decimal(
+    _ORIGINAL_DECIMAL,
+    _RESOURCE_VALIDATOR,
+    _require_helpers,
+)
+_BOUNDED_DECIMAL_TEXT = _build_bounded_decimal_text(
+    _ORIGINAL_DECIMAL_TEXT,
+    _RESOURCE_VALIDATOR,
+    _require_helpers,
+)
+del _build_bounded_decimal
+del _build_bounded_decimal_text
 
 
 def _build_bounded_evidence_to_dict(
@@ -121,8 +141,8 @@ def _install() -> None:
         raise RuntimeError("PAPER execution Decimal serializer changed before resource guard")
     if _impl.PaperExecutionEvidenceRecord.to_dict is not _ORIGINAL_EVIDENCE_TO_DICT:
         raise RuntimeError("PAPER execution evidence serializer changed before resource guard")
-    _impl._decimal = _bounded_decimal
-    _impl._decimal_text = _bounded_decimal_text
+    _impl._decimal = _BOUNDED_DECIMAL
+    _impl._decimal_text = _BOUNDED_DECIMAL_TEXT
     _impl.PaperExecutionEvidenceRecord.to_dict = _BOUNDED_EVIDENCE_TO_DICT
     _impl._autosport_decimal_resource_guard_installed = True
 

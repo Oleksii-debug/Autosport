@@ -63,6 +63,42 @@ class PaperBookSerializedIngressIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported PaperBook snapshot schema_version"):
             PaperBook.load_bytes(self._encoded(payload))
 
+    def test_legacy_open_only_control_remains_loadable_without_schema_version(self) -> None:
+        payload = self._payload()
+        payload.pop("schema_version")
+        payload.pop("lifecycle")
+
+        book = PaperBook.load_bytes(self._encoded(payload))
+
+        self.assertEqual(book.balance, Decimal("90"))
+        self.assertEqual(tuple(book.tickets), ("ticket-1",))
+        self.assertEqual(book._lifecycle, [("open", "ticket-1", (), ())])
+
+    def test_legacy_rejects_lifecycle_root_smuggling(self) -> None:
+        payload = self._payload()
+        payload.pop("schema_version")
+
+        with self.assertRaisesRegex(ValueError, "legacy root contains unexpected fields"):
+            PaperBook.load_bytes(self._encoded(payload))
+
+    def test_legacy_rejects_newer_ticket_semantics_smuggling(self) -> None:
+        payload = self._payload()
+        payload.pop("schema_version")
+        payload.pop("lifecycle")
+        payload["tickets"][0]["provider_source_ids"] = ["source-1"]
+
+        with self.assertRaisesRegex(ValueError, "legacy ticket contains unexpected fields"):
+            PaperBook.load_bytes(self._encoded(payload))
+
+    def test_legacy_rejects_newer_leg_semantics_smuggling(self) -> None:
+        payload = self._payload()
+        payload.pop("schema_version")
+        payload.pop("lifecycle")
+        payload["tickets"][0]["legs"][0]["exchange_side"] = "lay"
+
+        with self.assertRaisesRegex(ValueError, "legacy ticket leg contains unexpected fields"):
+            PaperBook.load_bytes(self._encoded(payload))
+
     def test_schema2_rejects_unknown_root_field_instead_of_ignoring_it(self) -> None:
         payload = self._payload()
         payload["future_root_semantics"] = "smuggled"

@@ -35,13 +35,53 @@ _SCHEMA_MISSING = object()
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 
 
-def _require_registry_book_key_authority(book: object) -> None:
-    book_type = type(book)
-    if (
-        book_type.__hash__ is not object.__hash__
-        or book_type.__eq__ is not object.__eq__
-    ):
-        raise ValueError("PaperBook registry key authority changed")
+def _make_paperbook_type_authority():
+    canonical_type = None
+
+    def install(candidate: type) -> None:
+        nonlocal canonical_type
+        if canonical_type is not None:
+            raise RuntimeError("PaperBook canonical type authority already installed")
+        if type(candidate) is not type:
+            raise TypeError("PaperBook canonical type authority must be an exact class")
+        canonical_type = candidate
+
+    def require(book: object) -> None:
+        if canonical_type is None:
+            raise RuntimeError("PaperBook canonical type authority is unavailable")
+        if type(book) is not canonical_type:
+            raise ValueError("PaperBook runtime object must be the canonical PaperBook type")
+
+    return install, require
+
+
+(
+    _install_paperbook_type_authority,
+    _require_paperbook_type_authority,
+) = _make_paperbook_type_authority()
+
+
+def _make_registry_book_key_authority():
+    require_type = _require_paperbook_type_authority
+    require_type_code = require_type.__code__
+
+    def require(book: object) -> None:
+        if require_type.__code__ is not require_type_code:
+            raise ValueError("PaperBook canonical type authority changed")
+        require_type(book)
+        if require_type.__code__ is not require_type_code:
+            raise ValueError("PaperBook canonical type authority changed")
+        book_type = type(book)
+        if (
+            book_type.__hash__ is not object.__hash__
+            or book_type.__eq__ is not object.__eq__
+        ):
+            raise ValueError("PaperBook registry key authority changed")
+
+    return require
+
+
+_require_registry_book_key_authority = _make_registry_book_key_authority()
 
 
 def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
@@ -355,6 +395,15 @@ def _make_paperbook_operation_lock_registry():
     weak_ref_factory = ref
     lock_factory = threading.RLock
     lock_factory_code = getattr(lock_factory, "__code__", None)
+    require_type = _require_paperbook_type_authority
+    require_type_code = require_type.__code__
+
+    def require_type_authority(book: object) -> None:
+        if require_type.__code__ is not require_type_code:
+            raise ValueError("PaperBook canonical type authority changed")
+        require_type(book)
+        if require_type.__code__ is not require_type_code:
+            raise ValueError("PaperBook canonical type authority changed")
 
     def require_lock_factory_authority() -> None:
         if (
@@ -364,6 +413,7 @@ def _make_paperbook_operation_lock_registry():
             raise ValueError("PaperBook operation lock factory authority changed")
 
     def register_book(book: object) -> None:
+        require_type_authority(book)
         identity = id(book)
 
         def cleanup(dead_ref: object, *, _identity: int = identity) -> None:
@@ -380,6 +430,7 @@ def _make_paperbook_operation_lock_registry():
             entries[identity] = (weak_book, book_lock)
 
     def require_lock(book: object) -> threading.RLock:
+        require_type_authority(book)
         with guard:
             current = entries.get(id(book))
             if current is None or current[0]() is not book:
@@ -463,11 +514,18 @@ def _guard_paperbook_runtime_authority(method):
     opening_authority_code = opening_authority.__code__
     causal_authority = _require_paperbook_causal_history_authority
     causal_authority_code = causal_authority.__code__
+    type_authority = _require_paperbook_type_authority
+    type_authority_code = type_authority.__code__
 
     @wraps(method)
     def guarded(self, *args, **kwargs):
         if method.__code__ is not method_code:
             raise ValueError("PaperBook runtime callable authority changed")
+        if type_authority.__code__ is not type_authority_code:
+            raise ValueError("PaperBook canonical type authority changed")
+        type_authority(self)
+        if type_authority.__code__ is not type_authority_code:
+            raise ValueError("PaperBook canonical type authority changed")
         # Preserve the existing safety order: canonical visible state must be
         # validated before hidden registries compare or hash caller-controlled
         # values. Invoke the closure-captured visible-state authority too, so
@@ -508,6 +566,15 @@ def _guard_paperbook_constructor_authority(method):
     opening_register_code = opening_register.__code__
     causal_register = _register_paperbook_causal_history_authority_book
     causal_register_code = causal_register.__code__
+    type_authority = _require_paperbook_type_authority
+    type_authority_code = type_authority.__code__
+
+    def require_type(book: object) -> None:
+        if type_authority.__code__ is not type_authority_code:
+            raise ValueError("PaperBook canonical type authority changed")
+        type_authority(book)
+        if type_authority.__code__ is not type_authority_code:
+            raise ValueError("PaperBook canonical type authority changed")
 
     def invoke(registrar, expected_code, label: str, book: object) -> None:
         if registrar.__code__ is not expected_code:
@@ -520,6 +587,7 @@ def _guard_paperbook_constructor_authority(method):
     def guarded(self, *args, **kwargs):
         if method.__code__ is not method_code:
             raise ValueError("PaperBook constructor callable authority changed")
+        require_type(self)
         invoke(
             operation_register,
             operation_register_code,
@@ -2065,6 +2133,12 @@ class PaperBook:
         _snapshot_authority_install(book)
         return book
 
+
+# Install exact class authority only after PaperBook exists. Constructor/runtime
+# guards and registries capture the require-function closure above, so subclasses
+# cannot redirect cls/self helper dispatch into attacker-controlled validation.
+_install_paperbook_type_authority(PaperBook)
+del _install_paperbook_type_authority
 
 # Install the exact classmethod implementation only after PaperBook exists.
 # Public runtime guards already capture the require-function closure above;

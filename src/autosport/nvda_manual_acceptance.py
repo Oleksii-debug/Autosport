@@ -136,8 +136,50 @@ class ManualNvdaDecisionRecord:
     event_sha256: str
 
 
+_MANUAL_NVDA_RESOLUTION_FIELD_NAMES = (
+    "record",
+    "accepted_manual_decision",
+    "reviewer_identity_verified",
+    "human_tested",
+    "nvda_verified",
+    "manual_truth_promotion_required",
+    "real_money_execution",
+    "whole_product_complete",
+)
+
+
+def _build_manual_nvda_resolution_meta():
+    sealed: set[type] = set()
+    protected = frozenset(_MANUAL_NVDA_RESOLUTION_FIELD_NAMES)
+
+    class _ManualNvdaResolutionMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "manual NVDA resolution authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "manual NVDA resolution authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed.add(cls)
+
+    return _ManualNvdaResolutionMeta
+
+
+_ManualNvdaResolutionMeta = _build_manual_nvda_resolution_meta()
+del _build_manual_nvda_resolution_meta
+
+
 @dataclass(frozen=True, slots=True, init=False)
-class ManualNvdaAcceptanceResolution:
+class ManualNvdaAcceptanceResolution(metaclass=_ManualNvdaResolutionMeta):
     """Resolver-issued current manual decision for one exact candidate.
 
     Recording an explicit manual ACCEPT is not, by itself, proof of reviewer
@@ -161,6 +203,10 @@ class ManualNvdaAcceptanceResolution:
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         raise TypeError("ManualNvdaAcceptanceResolution may not be subclassed")
+
+
+_ManualNvdaResolutionMeta.seal(ManualNvdaAcceptanceResolution)
+del _ManualNvdaResolutionMeta
 
 
 @dataclass(frozen=True, slots=True)

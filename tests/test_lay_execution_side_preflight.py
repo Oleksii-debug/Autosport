@@ -104,7 +104,7 @@ def test_noncanonical_lay_in_multi_leg_plan_fails_before_reservation(side: str) 
         observation, registry = _empirical_acceptance(ledger, lay)
         before = len(ledger.events())
 
-        with pytest.raises(PaperExecutionStateError, match="single-leg"):
+        with pytest.raises(PaperExecutionStateError, match="canonical BACK or LAY"):
             execute_paper_plan(
                 plan=_plan(lay, back),
                 trigger_id=f"mixed-{side!r}",
@@ -126,7 +126,7 @@ def test_noncanonical_single_leg_lay_fails_before_run_reservation(side: str) -> 
         observation, registry = _empirical_acceptance(ledger, lay)
         before = len(ledger.events())
 
-        with pytest.raises(PaperExecutionStateError, match="canonical LAY"):
+        with pytest.raises(PaperExecutionStateError, match="canonical BACK or LAY"):
             execute_paper_plan(
                 plan=_plan(lay),
                 trigger_id=f"single-{side!r}",
@@ -135,6 +135,25 @@ def test_noncanonical_single_leg_lay_fails_before_run_reservation(side: str) -> 
                 started_at=STARTED_AT,
                 observations={lay.action_id: observation},
                 evidence_registry=registry,
+            )
+
+        assert len(ledger.events()) == before
+
+
+@pytest.mark.parametrize("side", ("SIDEWAYS", "back", " BACK "))
+def test_unsupported_or_noncanonical_nonlay_side_fails_before_reservation(side: str) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        current = _action("bad-side", side=side, odds="2.00", stake="5.00")
+        before = len(ledger.events())
+
+        with pytest.raises(PaperExecutionStateError, match="canonical BACK or LAY"):
+            execute_paper_plan(
+                plan=_plan(current),
+                trigger_id=f"bad-{side!r}",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
             )
 
         assert len(ledger.events()) == before

@@ -9751,5 +9751,85 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(progress["phase"], "append_pending")
             loop.close()
 
+
+    def test_pre_pending_rejects_same_semantic_economic_authority_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            goal = EconomicGoalContract(
+                goal_id="goal-economic-authority-rebind",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                authority=authority,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            replacement = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            self.assertIsNot(replacement, authority)
+            self.assertEqual(
+                replacement.risk_policy.provenance_sha256,
+                authority.risk_policy.provenance_sha256,
+            )
+            loop.authority = replacement
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "economic decision authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertFalse(loop.progress_path.exists())
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            loop.close()
+
+
+    def test_pre_pending_rejects_live_quote_age_authority_expansion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                max_quote_age=timedelta(seconds=5),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.max_quote_age = timedelta(minutes=5)
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "quote-age authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertFalse(loop.progress_path.exists())
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            loop.close()
+
 if __name__ == "__main__":
     unittest.main()

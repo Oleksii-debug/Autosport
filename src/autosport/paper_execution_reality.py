@@ -26,6 +26,22 @@ ObservedPaperExecution = _impl.ObservedPaperExecution
 PaperLegAttempt = _impl.PaperLegAttempt
 PaperExecutionRun = _impl.PaperExecutionRun
 _LegacyPaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
+_IMPL_TEXT = _impl._text
+_IMPL_TIMESTAMP = _impl._timestamp
+_IMPL_RUN_ID = _impl._run_id
+_IMPL_REQUIRE_EVIDENCE_SURFACE = _impl._require_canonical_evidence_record_surface
+_IMPL_REQUIRE_ATTEMPT_SURFACE = _impl._require_canonical_attempt_surface
+_IMPL_REQUIRE_ACTION_SURFACE = _impl._require_canonical_action_surface
+_IMPL_REQUIRE_OBSERVATION_SURFACE = _impl._require_canonical_observation_surface
+_IMPL_CANONICAL_JSON = _impl._canonical
+_IMPL_DECIMAL = _impl._decimal
+_IMPL_DECIMAL_TEXT = _impl._decimal_text
+_IMPL_SERIALIZED_DECIMAL = _impl._serialized_decimal
+_IMPL_DETERMINISTIC_INT = _impl._deterministic_int
+_IMPL_ATTEMPT_ID = _impl._attempt_id
+_IMPL_TIMESTAMP_TEXT = _impl._timestamp_text
+_IMPL_OBSERVED_ATTEMPT = _impl._observed_attempt
+_IMPL_MILLISECONDS = _impl._milliseconds
 _LEGACY_LEDGER_INIT = _impl.PaperExecutionLedger.__init__
 _LEGACY_LEDGER_REGISTER_OBSERVATION_EVIDENCE = (
     _impl.PaperExecutionLedger.register_observation_evidence
@@ -239,10 +255,10 @@ def _canonical_run_reservation_inputs(
 ) -> tuple[str, str, tuple[str, ...], dict[str, str], str, str, str]:
     plan = _snapshot_execution_plan(plan)
     config = _snapshot_execution_config(config)
-    run_id = _impl._text(run_id, "run_id")
-    trigger_id = _impl._text(trigger_id, "trigger_id")
-    _impl._timestamp(started_at, "started_at")
-    canonical_run_id = _impl._run_id(plan, trigger_id, config)
+    run_id = _IMPL_TEXT(run_id, "run_id")
+    trigger_id = _IMPL_TEXT(trigger_id, "trigger_id")
+    _IMPL_TIMESTAMP(started_at, "started_at")
+    canonical_run_id = _IMPL_RUN_ID(plan, trigger_id, config)
     if run_id != canonical_run_id:
         raise PaperExecutionStateError(
             "run_id does not match canonical plan/trigger/config identity"
@@ -416,7 +432,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
         _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
-        _impl._require_canonical_evidence_record_surface(record)
+        _IMPL_REQUIRE_EVIDENCE_SURFACE(record)
         try:
             canonical_record = PaperExecutionEvidenceRecord.from_dict(
                 record.to_dict()
@@ -440,7 +456,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
         _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
-        evidence_id = _impl._text(evidence_id, "evidence_id")
+        evidence_id = _IMPL_TEXT(evidence_id, "evidence_id")
         return _LEGACY_LEDGER_RESOLVE_OBSERVATION_EVIDENCE(self, evidence_id)
 
     def reserve_run(
@@ -558,7 +574,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             return
 
         _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
-        encoded = _impl._canonical(event) + "\n"
+        encoded = _IMPL_CANONICAL_JSON(event) + "\n"
         path_existed_before = self.path.exists()
         try:
             with self.path.open("a", encoding="utf-8", newline="\n") as handle:
@@ -578,7 +594,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
         _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
-        _impl._require_canonical_attempt_surface(attempt)
+        _IMPL_REQUIRE_ATTEMPT_SURFACE(attempt)
         try:
             canonical_attempt = PaperLegAttempt.from_dict(attempt.to_dict())
         except (PaperExecutionIntegrityError, TypeError, ValueError) as exc:
@@ -708,7 +724,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             return
 
         _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
-        encoded = _impl._canonical(event) + "\n"
+        encoded = _IMPL_CANONICAL_JSON(event) + "\n"
         path_existed_before = self.path.exists()
         try:
             with self.path.open("a", encoding="utf-8", newline="\n") as handle:
@@ -735,7 +751,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
         _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
-        run_id = _impl._text(run_id, "run_id")
+        run_id = _IMPL_TEXT(run_id, "run_id")
         if (
             type(pending_action_ids) is not tuple
             or any(
@@ -758,7 +774,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             raise PaperExecutionStateError(
                 "worst_case_exposure exceeds canonical Decimal resource bounds"
             ) from exc
-        supplied_exposure = _impl._decimal(
+        supplied_exposure = _IMPL_DECIMAL(
             worst_case_exposure,
             "worst_case_exposure",
             allow_zero=True,
@@ -819,7 +835,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             payload = {
                 "pending_action_ids": list(derived.pending_action_ids),
                 "recovery_decision": derived.recovery_decision.value,
-                "worst_case_exposure": _impl._decimal_text(
+                "worst_case_exposure": _IMPL_DECIMAL_TEXT(
                     derived.worst_case_exposure
                 ),
             }
@@ -967,7 +983,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             try:
                 recovery = RecoveryDecision(payload["recovery_decision"])
                 pending = tuple(payload["pending_action_ids"])
-                exposure = _impl._serialized_decimal(
+                exposure = _IMPL_SERIALIZED_DECIMAL(
                     payload["worst_case_exposure"],
                     "completion worst_case_exposure",
                     allow_zero=True,
@@ -1041,7 +1057,7 @@ class PaperExecutionEvidenceRegistry(_LegacyPaperExecutionEvidenceRegistry):
 
     def register(self, record: PaperExecutionEvidenceRecord) -> str:
         ledger = _CANONICAL_EVIDENCE_REGISTRY_REQUIRE_AUTHORITY(self)
-        _impl._require_canonical_evidence_record_surface(record)
+        _IMPL_REQUIRE_EVIDENCE_SURFACE(record)
         _CANONICAL_LEDGER_REGISTER_OBSERVATION_EVIDENCE(ledger, record)
         return record.evidence_id
 
@@ -1067,8 +1083,8 @@ def _verify_observation_authority(
     observation: ObservedPaperExecution,
     registry: PaperExecutionEvidenceRegistry,
 ) -> PaperExecutionEvidenceRecord:
-    _impl._require_canonical_action_surface(action)
-    _impl._require_canonical_observation_surface(observation)
+    _IMPL_REQUIRE_ACTION_SURFACE(action)
+    _IMPL_REQUIRE_OBSERVATION_SURFACE(observation)
     ledger = _CANONICAL_EVIDENCE_REGISTRY_REQUIRE_AUTHORITY(registry)
     record = _CANONICAL_LEDGER_RESOLVE_OBSERVATION_EVIDENCE(
         ledger,
@@ -1115,19 +1131,19 @@ def _synthetic_attempt(
             "synthetic PAPER exposure model supports BACK only; non-BACK must use "
             "explicit empirical execution evidence"
         )
-    start = _impl._timestamp(started_at, "started_at")
+    start = _IMPL_TIMESTAMP(started_at, "started_at")
     delay_span = config.max_delay_ms - config.min_delay_ms
     delay_ms = config.min_delay_ms
     if delay_span:
-        delay_ms += _impl._deterministic_int(
+        delay_ms += _IMPL_DETERMINISTIC_INT(
             f"{config.seed}:{run_id}:{action.action_id}",
             "delay",
             delay_span + 1,
         )
     execution_time = start + _impl.timedelta(milliseconds=delay_ms)
-    decision_time = _impl._timestamp(action.quote_observed_at, "quote_observed_at")
-    quote_age_ms = _impl._milliseconds(execution_time - decision_time, "quote age")
-    expires = _impl._timestamp(action.expires_at, "expires_at")
+    decision_time = _IMPL_TIMESTAMP(action.quote_observed_at, "quote_observed_at")
+    quote_age_ms = _IMPL_MILLISECONDS(execution_time - decision_time, "quote age")
+    expires = _IMPL_TIMESTAMP(action.expires_at, "expires_at")
     execution_odds: Decimal | None = None
     execution_stake: Decimal | None = None
 
@@ -1141,7 +1157,7 @@ def _synthetic_attempt(
         outcome = PaperAttemptOutcome.REJECTED
         reason = "decision quote exceeded configured PAPER freshness bound"
     else:
-        bucket = _impl._deterministic_int(
+        bucket = _IMPL_DETERMINISTIC_INT(
             f"{config.seed}:{run_id}:{action.action_id}",
             "outcome",
             10_000,
@@ -1163,7 +1179,7 @@ def _synthetic_attempt(
             slippage_bps = (
                 0
                 if config.max_slippage_bps == 0
-                else _impl._deterministic_int(
+                else _IMPL_DETERMINISTIC_INT(
                     f"{config.seed}:{run_id}:{action.action_id}",
                     "slippage",
                     config.max_slippage_bps + 1,
@@ -1188,7 +1204,7 @@ def _synthetic_attempt(
                 )
 
     return PaperLegAttempt(
-        attempt_id=_impl._attempt_id(run_id, action, sequence),
+        attempt_id=_IMPL_ATTEMPT_ID(run_id, action, sequence),
         run_id=run_id,
         plan_id=plan.plan_id,
         action_id=action.action_id,
@@ -1203,7 +1219,7 @@ def _synthetic_attempt(
         decision_odds=action.requested_odds,
         requested_stake=action.requested_stake,
         decision_observed_at=action.quote_observed_at,
-        execution_observed_at=_impl._timestamp_text(execution_time),
+        execution_observed_at=_IMPL_TIMESTAMP_TEXT(execution_time),
         delay_ms=delay_ms,
         quote_age_ms=quote_age_ms,
         outcome=outcome,
@@ -1321,11 +1337,11 @@ def _require_canonical_execution_plan_surface(plan: ExecutionPlan) -> None:
 
 
     try:
-        _impl._text(plan.plan_id, "plan_id")
-        _impl._text(plan.bookmaker_profile_version, "bookmaker_profile_version")
-        _impl._text(plan.decision_id, "decision_id")
-        _impl._text(plan.approval_id, "approval_id")
-        _impl._timestamp(plan.created_at, "created_at")
+        _IMPL_TEXT(plan.plan_id, "plan_id")
+        _IMPL_TEXT(plan.bookmaker_profile_version, "bookmaker_profile_version")
+        _IMPL_TEXT(plan.decision_id, "decision_id")
+        _IMPL_TEXT(plan.approval_id, "approval_id")
+        _IMPL_TIMESTAMP(plan.created_at, "created_at")
     except ValueError as exc:
         raise PaperExecutionStateError(
             "execution plan no longer satisfies canonical value invariants"
@@ -1368,7 +1384,7 @@ def _snapshot_execution_plan(plan: ExecutionPlan) -> ExecutionPlan:
     actions: list[ExecutionAction] = []
     try:
         for action in plan.actions:
-            _impl._require_canonical_action_surface(action)
+            _IMPL_REQUIRE_ACTION_SURFACE(action)
             actions.append(
                 ExecutionAction(
                     action_id=action.action_id,
@@ -1413,7 +1429,7 @@ def _validate_lay_execution_surface(
 ) -> None:
     _require_canonical_execution_plan_surface(plan)
     for action in plan.actions:
-        _impl._require_canonical_action_surface(action)
+        _IMPL_REQUIRE_ACTION_SURFACE(action)
         if action.side not in {"BACK", "LAY"}:
             raise PaperExecutionStateError(
                 "PAPER execution requires canonical BACK or LAY action side "
@@ -1498,8 +1514,8 @@ def execute_paper_plan(
     config = _snapshot_execution_config(config)
     if type(ledger) is not PaperExecutionLedger:
         raise TypeError("ledger must be exact PaperExecutionLedger")
-    trigger_id = _impl._text(trigger_id, "trigger_id")
-    _impl._timestamp(started_at, "started_at")
+    trigger_id = _IMPL_TEXT(trigger_id, "trigger_id")
+    _IMPL_TIMESTAMP(started_at, "started_at")
     if observations is None:
         observations = {}
     if not isinstance(observations, Mapping):
@@ -1555,7 +1571,7 @@ def execute_paper_plan(
         suspended_action_ids=suspended_action_ids,
     )
 
-    run_id = _impl._run_id(plan, trigger_id, config)
+    run_id = _IMPL_RUN_ID(plan, trigger_id, config)
     # Validate every empirical/configured observation through the exact canonical
     # attempt constructor before the first durable write. Invalid fill/suspension,
     # freshness, expiry or stake facts must not strand a RUN_RESERVED record.
@@ -1563,7 +1579,7 @@ def execute_paper_plan(
         observation = observations.get(action.action_id)
         if observation is None:
             continue
-        _impl._observed_attempt(
+        _IMPL_OBSERVED_ATTEMPT(
             run_id=run_id,
             plan=plan,
             action=action,
@@ -1637,7 +1653,7 @@ def execute_paper_plan(
         action = plan.actions[sequence]
         observation = observations.get(action.action_id)
         if observation is not None:
-            attempt = _impl._observed_attempt(
+            attempt = _IMPL_OBSERVED_ATTEMPT(
                 run_id=run_id,
                 plan=plan,
                 action=action,

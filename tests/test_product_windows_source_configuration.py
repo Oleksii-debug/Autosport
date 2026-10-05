@@ -12,11 +12,15 @@ from autosport.operator_source_configuration import (
     OperatorSourceConfiguration,
     OperatorSourceConfigurationError,
 )
-from autosport.operator_source_registry import resolve_product_source_entry
+from autosport.operator_source_registry import (
+    list_product_source_entries,
+    resolve_product_source_entry,
+)
 from autosport.product_gui_worker import ProductGuiMessage
 from autosport.product_windows_gui import (
     ProductWindowsAutosportApp,
     _bind_product_workspace_environment,
+    _product_source_display_bindings,
 )
 
 
@@ -826,3 +830,25 @@ def test_async_runtime_error_quarantines_root_and_blocks_session_restore(
     assert open_calls == []
     assert surface.session is None
     assert surface._active_workspace == root
+
+
+def test_packaged_source_options_are_exact_closed_registry_projection() -> None:
+    entries = list_product_source_entries()
+    bindings = _product_source_display_bindings()
+
+    assert len(bindings) == len(entries)
+    assert tuple(source_id for _display, source_id, _provider_id in bindings) == tuple(
+        entry.source_id for entry in entries
+    )
+    assert tuple(provider_id for _display, _source_id, provider_id in bindings) == tuple(
+        entry.expected_provider_source_id for entry in entries
+    )
+    assert all(display.strip() for display, _source_id, _provider_id in bindings)
+    assert all(
+        entry.factory_spec not in display
+        for display, entry in zip(
+            (display for display, _source_id, _provider_id in bindings),
+            entries,
+            strict=True,
+        )
+    )

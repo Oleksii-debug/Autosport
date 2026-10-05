@@ -180,8 +180,8 @@ class PaperExecutionAdoptionRuntime:
     ) -> None:
         if not isinstance(book, PaperBook):
             raise TypeError("book must be PaperBook")
-        if not isinstance(ledger, PaperExecutionLedger):
-            raise TypeError("ledger must be PaperExecutionLedger")
+        if type(ledger) is not PaperExecutionLedger:
+            raise TypeError("ledger must be exact PaperExecutionLedger")
         if not isinstance(config, PaperExecutionModelConfig):
             raise TypeError("config must be PaperExecutionModelConfig")
         if type(max_quote_age) is not timedelta:

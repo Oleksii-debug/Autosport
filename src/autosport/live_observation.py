@@ -282,8 +282,16 @@ class _ReplayableBatchProvider:
                 )
             self._inflight = batch
             self._inflight_max_items = max_items
-        elif max_items != self._inflight_max_items:
-            raise RuntimeError("cannot change live batch bound before durable acknowledgement")
+        else:
+            current_source_id = getattr(self._provider, "source_id", None)
+            if type(current_source_id) is not str or current_source_id != self.source_id:
+                raise RuntimeError(
+                    "provider source identity changed before live batch retry"
+                )
+            if max_items != self._inflight_max_items:
+                raise RuntimeError(
+                    "cannot change live batch bound before durable acknowledgement"
+                )
         return self._inflight
 
     def carry_quality_flags(self, quality_flags: tuple[str, ...]) -> None:

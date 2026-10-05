@@ -44,19 +44,19 @@ class BetdaqCatalogueEvidence:
         if (
             type(self.requested_event_classifier_ids) is not tuple
             or not self.requested_event_classifier_ids
+            or tuple(sorted(set(self.requested_event_classifier_ids)))
+            != self.requested_event_classifier_ids
             or any(
                 type(value) is not int
                 or value < 0
                 or value > BETDAQ_PROVIDER_LONG_MAX
                 for value in self.requested_event_classifier_ids
             )
-            or len(set(self.requested_event_classifier_ids))
-            != len(self.requested_event_classifier_ids)
         ):
             raise ValueError(
-                "requested_event_classifier_ids must be canonical provider ids"
+                "requested_event_classifier_ids must be sorted unique canonical provider ids"
             )
-        _time(self.received_at, "catalogue received_at")
+        received, _ = _time(self.received_at, "catalogue received_at")
         for value, field in (
             (self.request_fingerprint, "catalogue request_fingerprint"),
             (self.response_sha256, "catalogue response_sha256"),
@@ -83,11 +83,25 @@ class BetdaqCatalogueEvidence:
                 "catalogue rate_admission_receipts must be non-empty SHA-256 tuple"
             )
         if self.provider_call_id is not None and (
-            type(self.provider_call_id) is not str or not self.provider_call_id
+            type(self.provider_call_id) is not str
+            or not self.provider_call_id
+            or self.provider_call_id != self.provider_call_id.strip()
         ):
-            raise ValueError("catalogue provider_call_id must be non-empty str or None")
+            raise ValueError(
+                "catalogue provider_call_id must be trimmed non-empty str or None"
+            )
         if self.provider_created_at is not None:
-            _time(self.provider_created_at, "catalogue provider_created_at")
+            created, _ = _time(
+                self.provider_created_at,
+                "catalogue provider_created_at",
+            )
+            if (
+                created.astimezone(timezone.utc)
+                > received.astimezone(timezone.utc)
+            ):
+                raise ValueError(
+                    "catalogue provider_created_at cannot follow catalogue receipt"
+                )
         if self.provider_origin_verified is not False:
             raise ValueError("catalogue evidence cannot claim provider-origin verification")
         if self.grants_execution_authority is not False:

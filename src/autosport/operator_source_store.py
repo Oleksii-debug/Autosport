@@ -34,9 +34,12 @@ class OperatorSourceConfigStore:
     """One durable source-id preference; never a runtime/source-factory authority."""
 
     def __init__(self, path: str | Path) -> None:
-        if not isinstance(path, (str, Path)):
-            raise TypeError("path must be str or Path")
-        self.path = Path(path)
+        if type(path) not in {str, type(Path("."))}:
+            raise TypeError("path must be exact str or exact Path")
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            raise ValueError("operator source configuration path must be absolute")
+        self.path = candidate
 
     def read(self) -> OperatorSourceConfig | None:
         """Return the exact valid stored config, or None when never configured."""

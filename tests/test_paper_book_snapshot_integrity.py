@@ -102,19 +102,6 @@ class _HostilePaperBookIdentity(PaperBook):
         return self is other
 
 
-class _HostilePaperBook(PaperBook):
-    hash_calls = 0
-    equality_calls = 0
-
-    def __hash__(self) -> int:
-        type(self).hash_calls += 1
-        return object.__hash__(self)
-
-    def __eq__(self, other: object) -> bool:
-        type(self).equality_calls += 1
-        return self is other
-
-
 class PaperBookSnapshotIntegrityTests(unittest.TestCase):
     def _snapshot(self, raw: dict) -> Path:
         root = Path(self._tmp.name)
@@ -1286,43 +1273,30 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
 
         self.assertEqual(committed, Decimal("18.01"))
 
-    def test_hidden_authority_registries_do_not_execute_paperbook_hash_or_equality(self):
-        _HostilePaperBook.hash_calls = 0
-        _HostilePaperBook.equality_calls = 0
-
-        book = _HostilePaperBook("100")
-        self.assertEqual(_HostilePaperBook.hash_calls, 0)
-        self.assertEqual(_HostilePaperBook.equality_calls, 0)
-
-        leg = TicketLeg(
-            "event-hostile-book-identity",
-            "market-hostile-book-identity",
-            "selection-hostile-book-identity",
-            locked_odds=Decimal("2"),
-        )
-        ticket = book.open_ticket([leg], "10")
-        self.assertEqual(book.committed_stake, Decimal("10"))
-        self.assertEqual(book.tickets[ticket.ticket_id].stake, Decimal("10"))
-        self.assertEqual(_HostilePaperBook.hash_calls, 0)
-        self.assertEqual(_HostilePaperBook.equality_calls, 0)
 
     def test_save_fsyncs_parent_directory_after_atomic_replace_when_supported(self):
         book = PaperBook("100")
         destination = Path(self._tmp.name) / "durable-snapshot.json"
         events: list[str] = []
+        descriptors = iter((4001, 4242))
 
-        def record_fsync(descriptor: int) -> None:
+        def canonical_open(path: object, flags: int) -> int:
+            return next(descriptors)
+
+        def canonical_fsync(descriptor: int) -> None:
             events.append("directory-fsync" if descriptor == 4242 else "file-fsync")
 
-        def record_replace(source: object, target: object) -> None:
+        def canonical_replace(source: object, target: object) -> None:
             events.append("replace")
+            os.replace(source, target)
 
         with (
-            patch("autosport.paper.os.O_DIRECTORY", 0x10000, create=True),
-            patch("autosport.paper.os.open", return_value=4242) as open_mock,
-            patch("autosport.paper.os.close") as close_mock,
-            patch("autosport.paper.os.fsync", side_effect=record_fsync),
-            patch("autosport.paper.os.replace", side_effect=record_replace),
+            patch.object(paper_module, "_CANONICAL_OS_OPEN", side_effect=canonical_open) as open_mock,
+            patch.object(paper_module, "_CANONICAL_OS_CLOSE") as close_mock,
+            patch.object(paper_module, "_CANONICAL_OS_FSYNC", side_effect=canonical_fsync),
+            patch.object(paper_module, "_CANONICAL_OS_REPLACE", side_effect=canonical_replace),
+            patch.object(paper_module, "_CANONICAL_OS_NAME", "posix"),
+            patch.object(paper_module, "_CANONICAL_OS_DIRECTORY", 0x10000),
         ):
             book.save(destination)
 
@@ -1331,20 +1305,30 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         self.assertIn("directory-fsync", events)
         self.assertLess(events.index("file-fsync"), events.index("replace"))
         self.assertLess(events.index("replace"), events.index("directory-fsync"))
-        open_mock.assert_called_once_with(
-            destination.parent,
-            os.O_RDONLY | 0x10000,
-        )
-        close_mock.assert_called_once_with(4242)
+        self.assertEqual(open_mock.call_count, 2)
+        open_mock.assert_any_call(destination, os.O_RDONLY)
+        open_mock.assert_any_call(destination.parent, os.O_RDONLY | 0x10000)
+        self.assertEqual(close_mock.call_count, 2)
+
 
     def test_save_surfaces_directory_fsync_failure_after_atomic_replace(self):
         book = PaperBook("100")
         destination = Path(self._tmp.name) / "directory-fsync-failure.json"
+        descriptors = iter((4001, 4242))
 
-        with patch.object(
-            PaperBook,
-            "_fsync_snapshot_directory",
-            side_effect=OSError("directory fsync failed"),
+        def canonical_open(path: object, flags: int) -> int:
+            return next(descriptors)
+
+        def canonical_fsync(descriptor: int) -> None:
+            if descriptor == 4242:
+                raise OSError("directory fsync failed")
+
+        with (
+            patch.object(paper_module, "_CANONICAL_OS_OPEN", side_effect=canonical_open),
+            patch.object(paper_module, "_CANONICAL_OS_CLOSE"),
+            patch.object(paper_module, "_CANONICAL_OS_FSYNC", side_effect=canonical_fsync),
+            patch.object(paper_module, "_CANONICAL_OS_NAME", "posix"),
+            patch.object(paper_module, "_CANONICAL_OS_DIRECTORY", 0x10000),
         ):
             with self.assertRaisesRegex(OSError, "directory fsync failed"):
                 book.save(destination)
@@ -1353,12 +1337,13 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         restored = PaperBook.load(destination)
         self.assertEqual(restored.balance, Decimal("100"))
 
+
     def test_save_fsyncs_each_new_parent_entry_before_snapshot_replace(self):
         book = PaperBook("100")
         root = Path(self._tmp.name)
         destination = root / "new-parent" / "nested" / "snapshot.json"
         events: list[tuple[str, Path | None]] = []
-        original_replace = os.replace
+        original_replace = paper_module._CANONICAL_OS_REPLACE
 
         def record_directory_fsync(directory: Path) -> None:
             events.append(("directory-fsync", directory))
@@ -1369,11 +1354,15 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
 
         with (
             patch.object(
-                PaperBook,
-                "_fsync_snapshot_directory",
+                paper_module,
+                "_CANONICAL_FSYNC_SNAPSHOT_DIRECTORY",
                 side_effect=record_directory_fsync,
             ),
-            patch("autosport.paper.os.replace", side_effect=record_replace),
+            patch.object(
+                paper_module,
+                "_CANONICAL_OS_REPLACE",
+                side_effect=record_replace,
+            ),
         ):
             book.save(destination)
 
@@ -1382,6 +1371,7 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         self.assertIn(("directory-fsync", root), pre_replace)
         self.assertIn(("directory-fsync", root / "new-parent"), pre_replace)
         self.assertTrue(destination.exists())
+
 
     def test_save_aborts_before_snapshot_creation_when_parent_publication_fsync_fails(self):
         book = PaperBook("100")
@@ -1394,8 +1384,8 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
             raise OSError("parent directory fsync failed")
 
         with patch.object(
-            PaperBook,
-            "_fsync_snapshot_directory",
+            paper_module,
+            "_CANONICAL_FSYNC_SNAPSHOT_DIRECTORY",
             side_effect=fail_first_parent_fsync,
         ):
             with self.assertRaisesRegex(OSError, "parent directory fsync failed"):
@@ -1406,13 +1396,14 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
 
+
     def test_save_does_not_create_parent_for_rejected_snapshot_candidate(self):
         book = PaperBook("100")
         destination = Path(self._tmp.name) / "rejected-parent" / "nested" / "snapshot.json"
 
         with patch.object(
-            PaperBook,
-            "_from_raw_snapshot",
+            paper_module,
+            "_CANONICAL_FROM_RAW_SNAPSHOT",
             side_effect=ValueError("candidate rejected"),
         ):
             with self.assertRaisesRegex(ValueError, "candidate rejected"):
@@ -1421,7 +1412,7 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         self.assertFalse(destination.parent.exists())
         self.assertFalse(destination.exists())
 
-    def test_schema7_load_rejects_unexpected_root_field(self):
+    def test_schema8_load_rejects_unexpected_root_field(self):
         book = PaperBook("100")
         leg = TicketLeg("e-root-extra", "m-root-extra", "s-root-extra", locked_odds=Decimal("2"))
         book.open_ticket([leg], "10")
@@ -1431,10 +1422,10 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         raw["future_root_semantics"] = {"authority": "smuggled"}
         path.write_text(json.dumps(raw), encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "schema 7 root contains unexpected fields"):
+        with self.assertRaisesRegex(ValueError, "schema 8 root contains unexpected fields"):
             PaperBook.load_bytes(path.read_bytes())
 
-    def test_schema7_load_rejects_unexpected_ticket_field(self):
+    def test_schema8_load_rejects_unexpected_ticket_field(self):
         book = PaperBook("100")
         leg = TicketLeg("e-ticket-extra", "m-ticket-extra", "s-ticket-extra", locked_odds=Decimal("2"))
         book.open_ticket([leg], "10")
@@ -1444,7 +1435,7 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         raw["tickets"][0]["future_ticket_semantics"] = "smuggled"
         path.write_text(json.dumps(raw), encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "schema 7 ticket contains unexpected fields"):
+        with self.assertRaisesRegex(ValueError, "schema 8 ticket contains unexpected fields"):
             PaperBook.load_bytes(path.read_bytes())
 
     def test_schema6_cannot_launder_schema7_exchange_side_field(self):
@@ -1461,12 +1452,13 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         book.save(path)
         raw = json.loads(path.read_text(encoding="utf-8"))
         raw["schema_version"] = 6
+        raw["tickets"][0]["legs"][0].pop("market_semantics_id")
         path.write_text(json.dumps(raw), encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "schema 6 ticket leg contains unexpected fields"):
             PaperBook.load_bytes(path.read_bytes())
 
-    def test_schema7_load_rejects_unexpected_leg_field(self):
+    def test_schema8_load_rejects_unexpected_leg_field(self):
         book = PaperBook("100")
         leg = TicketLeg("e-leg-extra", "m-leg-extra", "s-leg-extra", locked_odds=Decimal("2"))
         book.open_ticket([leg], "10")
@@ -1476,7 +1468,7 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         raw["tickets"][0]["legs"][0]["future_leg_semantics"] = "smuggled"
         path.write_text(json.dumps(raw), encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "schema 7 ticket leg contains unexpected fields"):
+        with self.assertRaisesRegex(ValueError, "schema 8 ticket leg contains unexpected fields"):
             PaperBook.load_bytes(path.read_bytes())
 
     def test_settlement_rejects_inexact_decimal_payout_before_mutation(self):

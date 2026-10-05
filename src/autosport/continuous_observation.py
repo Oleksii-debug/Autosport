@@ -319,6 +319,20 @@ def run_continuous_observation(
 
     current_run_id = run_id or uuid.uuid4().hex
     started_at = wall_clock()
+    if type(started_at) is not str:
+        raise TypeError("wall_clock must return an exact timestamp string")
+    try:
+        parse_source_timestamp(started_at)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("wall_clock must return a valid source timestamp") from exc
+    started_monotonic = monotonic()
+    if (
+        isinstance(started_monotonic, bool)
+        or not isinstance(started_monotonic, (int, float))
+        or not math.isfinite(float(started_monotonic))
+    ):
+        raise ValueError("monotonic must return a finite number")
+
     state = _LoopState(current_run_id, provider_source_id, started_at)
     stopper = stop_event or threading.Event()
     wait = waiter or stopper.wait
@@ -345,7 +359,6 @@ def run_continuous_observation(
         _publish_status(status_path, payload, reporter=reporter)
 
     publish("starting")
-    started_monotonic = monotonic()
     terminal_reason = "max_cycles"
     terminal_exit = 0
 

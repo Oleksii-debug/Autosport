@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from threading import RLock
+from typing import TypeVar
 
 from .domain import MarketEvent
 from .market_mirror import MarketMirror, MirrorApplyResult, MirrorSnapshot, MirrorUpdate
@@ -12,6 +13,7 @@ from .storage import SQLiteMarketStore
 
 MirrorQuoteKey = tuple[str, str]
 MirrorRefreshIdentity = tuple[MirrorQuoteKey, int]
+_StableReadT = TypeVar("_StableReadT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,14 +416,12 @@ class FocusedMirrorDependencyIndex:
             "selection_ids": dependency.selection_ids,
         }
 
-    def _stable_live_decision_view(
+    def _stable_dependency_read(
         self,
         input_id: str,
-        *,
-        as_of: datetime,
-        max_age: timedelta,
-    ) -> MirrorSnapshot:
-        """Read selector-based live truth only from a stable registry incarnation."""
+        reader: Callable[[FocusedMirrorDependency], _StableReadT],
+    ) -> _StableReadT:
+        """Run one selector-based read against a stable registry incarnation."""
         normalized_id = self._input_id(input_id)
         while True:
             with self._lock:
@@ -433,11 +433,7 @@ class FocusedMirrorDependencyIndex:
                     ) from exc
                 registry_revision = self._registry_revision
 
-            snapshot = self._mirror.active_view(
-                as_of=as_of,
-                max_age=max_age,
-                **self._selectors(dependency),
-            )
+            result = reader(dependency)
 
             with self._lock:
                 current_dependency = self._dependencies.get(normalized_id)
@@ -449,10 +445,27 @@ class FocusedMirrorDependencyIndex:
                     self._registry_revision == registry_revision
                     and current_dependency == dependency
                 ):
-                    return snapshot
-            # Registry truth changed while the mirror read was in flight. Retry
-            # against the now-authoritative selectors instead of returning a
-            # snapshot from a dependency incarnation that no longer exists.
+                    return result
+            # Registry truth changed while the dependency-bearing read was in
+            # flight. Retry against the now-authoritative selectors rather than
+            # returning a result from an incarnation that no longer exists.
+
+    def _stable_live_decision_view(
+        self,
+        input_id: str,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> MirrorSnapshot:
+        """Read selector-based live truth only from a stable registry incarnation."""
+        return self._stable_dependency_read(
+            input_id,
+            lambda dependency: self._mirror.active_view(
+                as_of=as_of,
+                max_age=max_age,
+                **self._selectors(dependency),
+            ),
+        )
 
     def matching_keys(self, input_id: str) -> tuple[MirrorQuoteKey, ...]:
         """Return immutable quote identities known to match one registered input."""
@@ -472,8 +485,12 @@ class FocusedMirrorDependencyIndex:
 
     def causal_view(self, input_id: str) -> MirrorSnapshot:
         """Read current product-issued state before freshness/status gating."""
-        dependency = self._dependency(input_id)
-        return self._mirror.causal_view(**self._selectors(dependency))
+        return self._stable_dependency_read(
+            input_id,
+            lambda dependency: self._mirror.causal_view(
+                **self._selectors(dependency)
+            ),
+        )
 
     def requires_current_history_fallback(
         self,
@@ -483,12 +500,11 @@ class FocusedMirrorDependencyIndex:
     ) -> bool:
         """Return whether latest-only state hides an earlier causally available value."""
 
-        dependency = self._dependency(input_id)
         boundary, _ = MarketMirror._decision_boundary(
             as_of=as_of,
             max_age=timedelta(0),
         )
-        current = self._mirror.causal_view(**self._selectors(dependency))
+        current = self.causal_view(input_id)
         return any(
             not MarketMirror._event_causally_available(
                 event,
@@ -507,12 +523,14 @@ class FocusedMirrorDependencyIndex:
     ) -> MirrorSnapshot:
         """Resolve one live input from verified durable history without replay issuance."""
 
-        dependency = self._dependency(input_id)
-        return MarketMirror.current_history_view_from_store(
-            store,
-            as_of=as_of,
-            max_age=max_age,
-            **self._selectors(dependency),
+        return self._stable_dependency_read(
+            input_id,
+            lambda dependency: MarketMirror.current_history_view_from_store(
+                store,
+                as_of=as_of,
+                max_age=max_age,
+                **self._selectors(dependency),
+            ),
         )
 
     def decision_state_from_proven_history(
@@ -711,12 +729,14 @@ class FocusedMirrorDependencyIndex:
         max_age: timedelta,
     ) -> MirrorSnapshot:
         """Reconstruct the same focused decision input at an historical timestamp."""
-        dependency = self._dependency(input_id)
-        return MarketMirror.replay_view_from_store(
-            store,
-            as_of=as_of,
-            max_age=max_age,
-            **self._selectors(dependency),
+        return self._stable_dependency_read(
+            input_id,
+            lambda dependency: MarketMirror.replay_view_from_store(
+                store,
+                as_of=as_of,
+                max_age=max_age,
+                **self._selectors(dependency),
+            ),
         )
 
 

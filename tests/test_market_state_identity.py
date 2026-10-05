@@ -252,15 +252,22 @@ def test_contract_binding_fields_fail_closed(
 
 
 @pytest.mark.parametrize(
-    "field_name",
-    ("request_fingerprint_sha256", "response_sha256", "snapshot_fingerprint_sha256"),
+    ("field_name", "message"),
+    (
+        ("request_fingerprint_sha256", "request fingerprint"),
+        ("response_sha256", "response_sha256"),
+        ("snapshot_fingerprint_sha256", "snapshot_fingerprint_sha256"),
+    ),
 )
-def test_digest_provenance_fields_require_lowercase_sha256(field_name: str) -> None:
+def test_digest_provenance_fields_require_lowercase_sha256(
+    field_name: str,
+    message: str,
+) -> None:
     payload = _event(sequence=1).to_dict()
     payload["metadata"][field_name] = "A" * 64
     malformed = MarketEvent.from_dict(payload)
 
-    with pytest.raises(MarketStateIdentityError, match=field_name):
+    with pytest.raises(MarketStateIdentityError, match=message):
         semantic_market_state_identity(malformed)
 
 

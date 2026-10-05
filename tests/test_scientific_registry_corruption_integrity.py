@@ -602,7 +602,7 @@ def test_empty_pristine_registry_copy_can_establish_new_workspace_authority(tmp_
 
     target = ScientificRegistry(target_path)
     assert target_path.read_bytes() == pristine_bytes
-    record_id = target.append(_question())
+    record_sha256 = target.append(_question())
 
-    assert record_id == "question-1"
+    assert record_sha256 == ScientificRegistry._entry(_question())["record_sha256"]
     assert ScientificRegistry(target_path).get("ResearchQuestion", "question-1") is not None

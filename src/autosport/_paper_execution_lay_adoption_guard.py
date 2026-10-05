@@ -34,9 +34,8 @@ _ORIGINAL_MINT_PREPARED = PaperExecutionAdoptionRuntime._mint_prepared
 _ORIGINAL_REQUIRE_MINTED = PaperExecutionAdoptionRuntime._require_minted
 _ORIGINAL_EXPECTED_RUN_ID = PaperExecutionAdoptionRuntime.expected_run_id
 _ORIGINAL_EXECUTE_UNLOCKED = PaperExecutionAdoptionRuntime._execute_unlocked
-_PREPARED_WITNESS_ATTR = "_autosport_lay_prepared_authority_witnesses"
-_RUNTIME_WITNESS_ATTR = "_autosport_lay_runtime_authority_witness"
-
+_PREPARED_WITNESSES: dict[int, tuple[PreparedPaperExecution, str]] = {}
+_RUNTIME_WITNESSES: dict[int, tuple[object, ...]] = {}
 
 
 
@@ -45,47 +44,51 @@ _RUNTIME_WITNESS_ATTR = "_autosport_lay_runtime_authority_witness"
 def _init(self: PaperExecutionAdoptionRuntime, *args, **kwargs) -> None:
     _ORIGINAL_INIT(self, *args, **kwargs)
     _reality._require_canonical_execution_config_surface(self.config)
-    setattr(
+    _RUNTIME_WITNESSES[id(self)] = (
         self,
-        _RUNTIME_WITNESS_ATTR,
-        {
-            "book": self.book,
-            "ledger": self.ledger,
-            "config": self.config,
-            "config_fingerprint": self.config.fingerprint,
-            "paper_book_path": self.paper_book_path,
-            "max_quote_age": self.max_quote_age,
-            "execution_lock": self._execution_lock,
-            "prepared_authorities": self._prepared_authorities,
-        },
+        self.book,
+        self.ledger,
+        self.config,
+        self.config.fingerprint,
+        self.paper_book_path,
+        self.max_quote_age,
+        self._execution_lock,
+        self._prepared_authorities,
     )
 
 
 def _require_runtime_authority(self: PaperExecutionAdoptionRuntime) -> None:
-    witness = getattr(self, _RUNTIME_WITNESS_ATTR, None)
-    if type(witness) is not dict:
+    witness = _RUNTIME_WITNESSES.get(id(self))
+    if witness is None or len(witness) != 9 or witness[0] is not self:
         raise PaperExecutionAdoptionError(
             "PAPER adoption runtime authority witness is unavailable"
         )
-    if (
-        self.book is not witness.get("book")
-        or self.ledger is not witness.get("ledger")
-        or self.config is not witness.get("config")
-    ):
+    (
+        _runtime,
+        book,
+        ledger,
+        config,
+        config_fingerprint,
+        paper_book_path,
+        max_quote_age,
+        execution_lock,
+        prepared_authorities,
+    ) = witness
+    if self.book is not book or self.ledger is not ledger or self.config is not config:
         raise PaperExecutionAdoptionError(
             "PAPER adoption runtime authority object changed after construction"
         )
     if (
-        self.paper_book_path is not witness.get("paper_book_path")
-        or self.max_quote_age is not witness.get("max_quote_age")
-        or self._execution_lock is not witness.get("execution_lock")
-        or self._prepared_authorities is not witness.get("prepared_authorities")
+        self.paper_book_path is not paper_book_path
+        or self.max_quote_age is not max_quote_age
+        or self._execution_lock is not execution_lock
+        or self._prepared_authorities is not prepared_authorities
     ):
         raise PaperExecutionAdoptionError(
             "PAPER adoption runtime configuration changed after construction"
         )
     _reality._require_canonical_execution_config_surface(self.config)
-    if self.config.fingerprint != witness.get("config_fingerprint"):
+    if self.config.fingerprint != config_fingerprint:
         raise PaperExecutionAdoptionError(
             "PAPER adoption execution config changed after construction"
         )
@@ -246,11 +249,7 @@ def _mint_prepared(
     _require_runtime_authority(self)
     witness = _prepared_authority_witness(prepared)
     minted = _ORIGINAL_MINT_PREPARED(self, prepared)
-    witnesses = getattr(self, _PREPARED_WITNESS_ATTR, None)
-    if witnesses is None:
-        witnesses = {}
-        setattr(self, _PREPARED_WITNESS_ATTR, witnesses)
-    witnesses[id(minted)] = witness
+    _PREPARED_WITNESSES[id(minted)] = (minted, witness)
     return minted
 
 
@@ -260,16 +259,17 @@ def _require_minted(
 ) -> None:
     _require_runtime_authority(self)
     _ORIGINAL_REQUIRE_MINTED(self, prepared)
-    witnesses = getattr(self, _PREPARED_WITNESS_ATTR, None)
-    if type(witnesses) is not dict:
+    witness = _PREPARED_WITNESSES.get(id(prepared))
+    if (
+        witness is None
+        or len(witness) != 2
+        or witness[0] is not prepared
+        or type(witness[1]) is not str
+    ):
         raise PaperExecutionAdoptionError(
             "prepared execution authority witness is unavailable"
         )
-    expected = witnesses.get(id(prepared))
-    if type(expected) is not str:
-        raise PaperExecutionAdoptionError(
-            "prepared execution authority witness is unavailable"
-        )
+    expected = witness[1]
     current = _prepared_authority_witness(prepared)
     if current != expected:
         raise PaperExecutionAdoptionError(

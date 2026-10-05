@@ -11,6 +11,7 @@ import autosport.betfair_standard_limit_price_bound_verifier as verifier_module
 import autosport.real_execution_ledger as ledger_module
 import autosport.supervised_plan_issuance as issuance_module
 import autosport.monotonic_workspace_authority as monotonic_module
+import autosport.json_integrity as json_integrity_module
 from autosport.betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
@@ -931,6 +932,79 @@ def test_rebound_issuance_schema_keys_are_rejected_before_decode(monkeypatch) ->
         "_PROVIDER_REQUEST_KEYS",
         frozenset({"action_id"}),
     )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+def test_rebound_strict_json_loader_is_rejected_before_durable_decode(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_loads(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return {}
+
+    monkeypatch.setattr(json_integrity_module.json, "loads", attacker_loads)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_strict_json_validator_mutation_is_rejected_before_decode() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    validator = json_integrity_module._validate_strict_json_value
+    original_code = validator.__code__
+    attacker_called = False
+
+    def attacker_validator(_value):
+        nonlocal attacker_called
+        attacker_called = True
+        return None
+
+    try:
+        validator.__code__ = attacker_validator.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        validator.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_rebound_strict_json_integer_limit_is_rejected_before_decode(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    monkeypatch.setattr(json_integrity_module, "_JSON_INTEGER_MAX_DIGITS", 1)
 
     with pytest.raises(
         BetfairStandardLimitPriceBoundError,

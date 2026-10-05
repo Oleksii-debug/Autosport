@@ -654,7 +654,7 @@ class ProductClockBoundaryTests(unittest.TestCase):
             self.assertEqual(store.state_snapshot_sha256(), evidence.state_sha256)
 
     def test_class_authority_entrypoints_reject_runtime_replacement(self) -> None:
-        for name in ("current", "product_clock_day_key", "state_snapshot_sha256", "require_current", "require_current_under_lock", "_current_under_lock", "_publish_day", "_evidence"):
+        for name in ("current", "product_clock_day_key", "state_snapshot_sha256", "require_current", "require_current_under_lock", "require_committed_window", "_current_under_lock", "_publish_day", "_evidence"):
             with self.subTest(name=name):
                 original = ProductDayRiskWindowStore.__dict__[name]
                 with self.assertRaisesRegex(TypeError, "authority method is sealed"):
@@ -666,7 +666,7 @@ class ProductClockBoundaryTests(unittest.TestCase):
                 self.assertIs(ProductDayRiskWindowStore.__dict__[name], original)
 
     def test_class_authority_entrypoints_reject_runtime_deletion(self) -> None:
-        for name in ("current", "require_current", "_publish_day", "_evidence"):
+        for name in ("current", "require_current", "require_committed_window", "_publish_day", "_evidence"):
             with self.subTest(name=name):
                 original = ProductDayRiskWindowStore.__dict__[name]
                 with self.assertRaisesRegex(TypeError, "authority method is sealed"):
@@ -709,6 +709,13 @@ class ProductClockBoundaryTests(unittest.TestCase):
             self.assertTrue(evidence.product_clock_authoritative)
             self.assertTrue(store.state_path.exists())
 
+
+    def test_committed_window_entrypoint_is_closure_sealed(self) -> None:
+        function = ProductDayRiskWindowStore.__dict__["require_committed_window"]
+        self.assertIsNotNone(function.__closure__)
+        freevars = set(function.__code__.co_freevars)
+        self.assertIn("function", freevars)
+        self.assertIn("frozen_globals", freevars)
 
     def test_committed_historical_window_re_resolves_from_monotonic_history(self) -> None:
         store = self._store()

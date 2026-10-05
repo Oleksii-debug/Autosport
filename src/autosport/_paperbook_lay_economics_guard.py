@@ -32,6 +32,7 @@ _ORIGINAL_VALIDATE_LOADED_STATE = _paper.PaperBook._validate_loaded_state.__func
 _ORIGINAL_REQUIRE_FINITE = _paper.PaperBook._require_finite
 _ORIGINAL_REQUIRE_CANONICAL_TEXT = _paper.PaperBook._require_canonical_text
 _ORIGINAL_DEBIT_BALANCE = _paper.PaperBook._debit_balance.__func__
+_ORIGINAL_DEBIT_BALANCE_CODE = _ORIGINAL_DEBIT_BALANCE.__code__
 _ORIGINAL_VALIDATE_PLACED_AT = _paper.PaperBook._validate_placed_at.__func__
 _ORIGINAL_REQUIRE_UTF8_STRING = _paper.PaperBook._require_utf8_string
 _ORIGINAL_VALIDATE_TICKET_PROVENANCE = _paper.PaperBook._validate_ticket_provenance.__func__
@@ -404,7 +405,11 @@ def _open_ticket_unlocked(
     )
     if _ORIGINAL_LOCKED_CAPITAL.__code__ is not _ORIGINAL_LOCKED_CAPITAL_CODE:
         raise ValueError("PaperBook canonical LAY liability authority changed")
+    if _ORIGINAL_DEBIT_BALANCE.__code__ is not _ORIGINAL_DEBIT_BALANCE_CODE:
+        raise ValueError("PaperBook canonical debit authority changed")
     new_balance = _ORIGINAL_DEBIT_BALANCE(_paper.PaperBook, self.balance, locked_capital)
+    if _ORIGINAL_DEBIT_BALANCE.__code__ is not _ORIGINAL_DEBIT_BALANCE_CODE:
+        raise ValueError("PaperBook canonical debit authority changed")
 
     ticket_placed_at = _validate_exact_timestamp(
         placed_at if placed_at is not None else _ORIGINAL_UTC_NOW_ISO(),
@@ -696,11 +701,15 @@ def _validate_lifecycle_reachability(cls, book: _paper.PaperBook) -> None:
             if ticket_id in opened:
                 raise ValueError("PaperBook lifecycle opens a ticket more than once")
             try:
+                if _ORIGINAL_DEBIT_BALANCE.__code__ is not _ORIGINAL_DEBIT_BALANCE_CODE:
+                    raise ValueError("PaperBook canonical debit authority changed")
                 replay_balance = _ORIGINAL_DEBIT_BALANCE(
                     _paper.PaperBook,
                     replay_balance,
                     _locked_capital_for_ticket(ticket),
                 )
+                if _ORIGINAL_DEBIT_BALANCE.__code__ is not _ORIGINAL_DEBIT_BALANCE_CODE:
+                    raise ValueError("PaperBook canonical debit authority changed")
             except ValueError as exc:
                 raise ValueError(
                     f"PaperBook lifecycle locked capital for ticket {ticket_id} was not affordable"

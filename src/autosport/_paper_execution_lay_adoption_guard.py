@@ -597,6 +597,38 @@ def _preflight_materialization_batch(
         ) from exc
 
 
+
+def _restore_paperbook_from_snapshot(
+    target: _adoption.PaperBook,
+    snapshot: _adoption.PaperBook,
+) -> None:
+    """Restore exact validated economic state after failed live batch materialization."""
+    if type(target) is not _adoption.PaperBook or type(snapshot) is not _adoption.PaperBook:
+        raise PaperExecutionAdoptionError(
+            "PaperBook rollback requires exact PaperBook authority"
+        )
+    try:
+        type(snapshot)._validate_loaded_state(snapshot)
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "PaperBook rollback snapshot is not canonical"
+        ) from exc
+
+    target.initial_bankroll = snapshot.initial_bankroll
+    target.balance = snapshot.balance
+    target.tickets = _adoption.copy.deepcopy(snapshot.tickets)
+    target._lifecycle = list(snapshot._lifecycle)
+    target._settlement_times = dict(snapshot._settlement_times)
+    try:
+        _paper._install_validated_ticket_opening_authority(target)
+        _paper._install_validated_paperbook_causal_history_authority(target)
+        type(target)._validate_loaded_state(target)
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "PaperBook rollback could not restore canonical authority"
+        ) from exc
+
+
 def _execute_unlocked(
     self: PaperExecutionAdoptionRuntime,
     *,
@@ -676,14 +708,36 @@ def _execute_unlocked(
     )
 
     ticket_ids: list[str] = []
-    for attempt, action, binding in accepted_attempts:
-        ticket = self._materialize_attempt(
-            attempt=attempt,
-            action=action,
-            binding=binding,
-            decision_id=prepared.execution_plan.decision_id,
-        )
-        ticket_ids.append(ticket.ticket_id)
+    pre_materialization_book = (
+        _authorized_paperbook_copy(self.book) if accepted_attempts else None
+    )
+    try:
+        for attempt, action, binding in accepted_attempts:
+            ticket = self._materialize_attempt(
+                attempt=attempt,
+                action=action,
+                binding=binding,
+                decision_id=prepared.execution_plan.decision_id,
+            )
+            ticket_ids.append(ticket.ticket_id)
+
+        if accepted_attempts:
+            # A materialization callback can mutate a later action/binding after
+            # the detached preflight. Re-prove the whole minted batch before any
+            # partially-mutated live book is allowed to approach publication.
+            self._require_minted(prepared)
+            for _attempt, action, binding in accepted_attempts:
+                _require_materialization_authority(action, binding)
+            try:
+                type(self.book)._validate_loaded_state(self.book)
+            except (TypeError, ValueError) as exc:
+                raise PaperExecutionAdoptionError(
+                    "PaperBook state is invalid after batch materialization"
+                ) from exc
+    except Exception:
+        if pre_materialization_book is not None:
+            _restore_paperbook_from_snapshot(self.book, pre_materialization_book)
+        raise
 
     if accepted_attempts:
         # Materialization/domain code is another mutation boundary. Validate the

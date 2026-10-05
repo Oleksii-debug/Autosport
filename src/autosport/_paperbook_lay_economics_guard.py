@@ -50,10 +50,27 @@ _ORIGINAL_UUID_STR_CODE = _ORIGINAL_UUID_STR.__code__
 _ORIGINAL_PAPER_DECIMAL_CONTEXT = _paper._paper_decimal_context
 _ORIGINAL_PAPER_DECIMAL_CONTEXT_CODE = _ORIGINAL_PAPER_DECIMAL_CONTEXT.__code__
 _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY = _paper._require_ticket_opening_authority
+_ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY_CODE = _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY.__code__
 _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _paper._require_paperbook_causal_history_authority
+_ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY_CODE = _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY.__code__
 _ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY = _paper._record_ticket_opening_authority
+_ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY_CODE = _ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY.__code__
 _ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN = _paper._advance_paperbook_causal_history_open
+_ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN_CODE = _ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN.__code__
 _ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE = _paper._advance_paperbook_causal_history_settle
+_ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE_CODE = _ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE.__code__
+
+
+def _require_lay_transition_authority() -> None:
+    witnesses = (
+        (_ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY, _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY_CODE),
+        (_ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY, _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY_CODE),
+        (_ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY, _ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY_CODE),
+        (_ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN, _ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN_CODE),
+        (_ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE, _ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE_CODE),
+    )
+    if any(function.__code__ is not expected for function, expected in witnesses):
+        raise ValueError("PaperBook canonical transition authority changed")
 
 
 def _require_decimal_arithmetic_authority() -> None:
@@ -399,8 +416,10 @@ def _open_ticket_unlocked(
     if type(self._settlement_times) is not dict:
         raise ValueError("PaperBook settlement-time witness must be a canonical mapping")
     _validate_loaded_state(_paper.PaperBook, self)
+    _require_lay_transition_authority()
     _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY(self)
     _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY(self)
+    _require_lay_transition_authority()
 
     leg = ticket_legs[0]
     _validate_ticket_leg(_paper.PaperBook, leg)
@@ -478,11 +497,15 @@ def _open_ticket_unlocked(
         bankroll_id=bankroll_id,
         currency=currency,
     )
+    _require_lay_transition_authority()
     _ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY(self, ticket)
+    _require_lay_transition_authority()
     self.balance = new_balance
     self.tickets[ticket.ticket_id] = ticket
     self._lifecycle.append(("open", ticket.ticket_id, (), ()))
+    _require_lay_transition_authority()
     _ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN(self, ticket.ticket_id)
+    _require_lay_transition_authority()
     return ticket
 
 
@@ -532,8 +555,10 @@ def _settle_unlocked(
 ) -> PaperTicket:
     _require_exact_text(ticket_id, "ticket_id")
     _validate_loaded_state(_paper.PaperBook, self)
+    _require_lay_transition_authority()
     _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY(self)
     _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY(self)
+    _require_lay_transition_authority()
     ticket = self.tickets[ticket_id]
     if not (len(ticket.legs) == 1 and _is_lay_leg(ticket.legs[0])):
         return _ORIGINAL_SETTLE(
@@ -579,6 +604,7 @@ def _settle_unlocked(
     # All visible containers and the hidden authority were revalidated above.
     # Advance the product-issued causal witness immediately adjacent to the
     # corresponding visible transition.
+    _require_lay_transition_authority()
     _ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE(
         self,
         ticket.ticket_id,
@@ -586,6 +612,7 @@ def _settle_unlocked(
         voids_tuple,
         settlement_time,
     )
+    _require_lay_transition_authority()
     ticket.payout = payout
     ticket.status = status
     ticket.settled_at = settlement_time

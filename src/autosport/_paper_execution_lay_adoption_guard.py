@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from decimal import Decimal
 
 from . import paper_execution_adoption as _adoption
 from .domain import TicketLeg
@@ -10,7 +11,7 @@ from .paper_execution_adoption import (
     PaperExposureBinding,
     PreparedPaperExecution,
 )
-from .real_execution_ledger import ExecutionAction
+from .real_execution_ledger import ExecutionAction, ExecutionPlan
 
 
 _ORIGINAL_PREPARE = PaperExecutionAdoptionRuntime.prepare
@@ -22,6 +23,189 @@ _ORIGINAL_ASSERT_RECOVERABLE_BOOK_STATE = (
 )
 _ORIGINAL_MATERIALIZE_ATTEMPT = PaperExecutionAdoptionRuntime._materialize_attempt
 _ORIGINAL_TICKET_MATCHES_ATTEMPT = PaperExecutionAdoptionRuntime._ticket_matches_attempt
+_ORIGINAL_MINT_PREPARED = PaperExecutionAdoptionRuntime._mint_prepared
+_ORIGINAL_REQUIRE_MINTED = PaperExecutionAdoptionRuntime._require_minted
+_PREPARED_WITNESS_ATTR = "_autosport_lay_prepared_authority_witnesses"
+
+
+
+
+def _exact_text(value: object, name: str, *, optional: bool = False) -> str | None:
+    if value is None and optional:
+        return None
+    if type(value) is not str or not value or value.strip() != value:
+        raise PaperExecutionAdoptionError(
+            f"{name} must retain exact canonical text authority"
+        )
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise PaperExecutionAdoptionError(
+            f"{name} must retain UTF-8 text authority"
+        ) from exc
+    return value
+
+
+def _prepared_authority_payload(
+    prepared: PreparedPaperExecution,
+) -> dict[str, object]:
+    """Return a hook-free snapshot of every authority-bearing prepared field."""
+    if type(prepared) is not PreparedPaperExecution:
+        raise TypeError("prepared must be exact PreparedPaperExecution")
+    plan = prepared.execution_plan
+    if type(plan) is not ExecutionPlan:
+        raise PaperExecutionAdoptionError(
+            "prepared execution plan must retain exact ExecutionPlan authority"
+        )
+    if type(plan.schema_version) is not int:
+        raise PaperExecutionAdoptionError(
+            "prepared execution plan schema_version must retain exact integer authority"
+        )
+    if type(plan.actions) is not tuple or not plan.actions:
+        raise PaperExecutionAdoptionError(
+            "prepared execution actions must retain canonical tuple authority"
+        )
+
+    plan_payload: dict[str, object] = {
+        "plan_id": _exact_text(plan.plan_id, "prepared plan_id"),
+        "bookmaker_profile_version": _exact_text(
+            plan.bookmaker_profile_version,
+            "prepared bookmaker_profile_version",
+        ),
+        "decision_id": _exact_text(plan.decision_id, "prepared decision_id"),
+        "approval_id": _exact_text(plan.approval_id, "prepared approval_id"),
+        "created_at": _exact_text(plan.created_at, "prepared created_at"),
+        "schema_version": plan.schema_version,
+        "actions": [],
+    }
+    action_payloads: list[dict[str, object]] = []
+    for action in plan.actions:
+        if type(action) is not ExecutionAction:
+            raise PaperExecutionAdoptionError(
+                "prepared action must retain exact ExecutionAction authority"
+            )
+        for name in (
+            "action_id",
+            "bookmaker_id",
+            "account_id",
+            "event_id",
+            "market_id",
+            "selection_id",
+            "side",
+            "quote_id",
+            "quote_observed_at",
+            "expires_at",
+        ):
+            _exact_text(getattr(action, name), f"prepared action {name}")
+        if (
+            type(action.requested_odds) is not Decimal
+            or type(action.requested_stake) is not Decimal
+        ):
+            raise PaperExecutionAdoptionError(
+                "prepared action economics must retain exact Decimal authority"
+            )
+        if (
+            not action.requested_odds.is_finite()
+            or action.requested_odds <= 0
+            or not action.requested_stake.is_finite()
+            or action.requested_stake <= 0
+        ):
+            raise PaperExecutionAdoptionError(
+                "prepared action economics left canonical positive finite authority"
+            )
+        action_payloads.append(action.to_dict())
+    plan_payload["actions"] = action_payloads
+
+    bindings = prepared.exposure_bindings
+    if type(bindings) is not tuple or len(bindings) != len(plan.actions):
+        raise PaperExecutionAdoptionError(
+            "prepared exposure bindings must retain exact action cardinality"
+        )
+    binding_payloads: list[dict[str, object]] = []
+    for binding in bindings:
+        if type(binding) is not PaperExposureBinding:
+            raise PaperExecutionAdoptionError(
+                "prepared exposure binding must retain exact binding authority"
+            )
+        binding_payloads.append(
+            {
+                "action_id": _exact_text(
+                    binding.action_id,
+                    "prepared binding action_id",
+                ),
+                "sport": _exact_text(
+                    binding.sport,
+                    "prepared binding sport",
+                    optional=True,
+                ),
+                "bankroll_id": _exact_text(
+                    binding.bankroll_id,
+                    "prepared binding bankroll_id",
+                    optional=True,
+                ),
+                "currency": _exact_text(
+                    binding.currency,
+                    "prepared binding currency",
+                    optional=True,
+                ),
+            }
+        )
+    if tuple(item["action_id"] for item in binding_payloads) != tuple(
+        action.action_id for action in plan.actions
+    ):
+        raise PaperExecutionAdoptionError(
+            "prepared exposure binding order no longer matches execution actions"
+        )
+
+    intent_evidence_json = _exact_text(
+        prepared.intent_evidence_json,
+        "prepared intent_evidence_json",
+    )
+    return {
+        "execution_plan": plan_payload,
+        "exposure_bindings": binding_payloads,
+        "intent_evidence_json": intent_evidence_json,
+    }
+
+
+def _prepared_authority_witness(prepared: PreparedPaperExecution) -> str:
+    return _adoption._digest(_prepared_authority_payload(prepared))
+
+
+def _mint_prepared(
+    self: PaperExecutionAdoptionRuntime,
+    prepared: PreparedPaperExecution,
+) -> PreparedPaperExecution:
+    witness = _prepared_authority_witness(prepared)
+    minted = _ORIGINAL_MINT_PREPARED(self, prepared)
+    witnesses = getattr(self, _PREPARED_WITNESS_ATTR, None)
+    if witnesses is None:
+        witnesses = {}
+        setattr(self, _PREPARED_WITNESS_ATTR, witnesses)
+    witnesses[id(minted)] = witness
+    return minted
+
+
+def _require_minted(
+    self: PaperExecutionAdoptionRuntime,
+    prepared: PreparedPaperExecution,
+) -> None:
+    _ORIGINAL_REQUIRE_MINTED(self, prepared)
+    witnesses = getattr(self, _PREPARED_WITNESS_ATTR, None)
+    if type(witnesses) is not dict:
+        raise PaperExecutionAdoptionError(
+            "prepared execution authority witness is unavailable"
+        )
+    expected = witnesses.get(id(prepared))
+    if type(expected) is not str:
+        raise PaperExecutionAdoptionError(
+            "prepared execution authority witness is unavailable"
+        )
+    current = _prepared_authority_witness(prepared)
+    if current != expected:
+        raise PaperExecutionAdoptionError(
+            "prepared execution authority changed after mint"
+        )
 
 
 def _normalized_action_side(exchange_side: str | None) -> str:
@@ -380,6 +564,8 @@ def _install() -> None:
     marker = "_autosport_lay_adoption_guard"
     if getattr(PaperExecutionAdoptionRuntime, marker, False):
         return
+    PaperExecutionAdoptionRuntime._mint_prepared = _mint_prepared
+    PaperExecutionAdoptionRuntime._require_minted = _require_minted
     PaperExecutionAdoptionRuntime._require_back_compatible_exchange_side = staticmethod(
         _require_supported_exchange_side
     )

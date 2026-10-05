@@ -349,6 +349,31 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertFalse(store.state_path.exists())
 
+
+    def test_opening_paperbook_helper_rebinding_fails_before_execution(self) -> None:
+        import autosport.economic_session as economic_session
+
+        store = self._store()
+        calls = 0
+
+        def forbidden(_path):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("hostile opening PaperBook helper executed")
+
+        original = economic_session._opening_paperbook_sha256
+        economic_session._opening_paperbook_sha256 = forbidden
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+        finally:
+            economic_session._opening_paperbook_sha256 = original
+
+        self.assertEqual(calls, 0)
+
     def test_default_clock_session_is_positive_boundary_authority(self) -> None:
         store = ProductEconomicSessionStore(
             self.workspace,

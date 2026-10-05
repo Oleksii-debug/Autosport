@@ -1244,6 +1244,32 @@ class PersistentLiveDecisionLoop:
     def stopped(self) -> bool:
         return self._control.state is LiveControlState.STOPPED
 
+    def _restore_dependency_registry(
+        self,
+        specs: tuple[_InputSpec, ...],
+    ) -> None:
+        """Restore exact pre-mutation focused/durable-process registry ordering."""
+        for current_id in self.dependencies.input_ids:
+            if not self.dependencies.unregister(current_id):
+                raise LiveDecisionProgressError(
+                    "live dependency rollback could not clear current registry"
+                )
+        self._input_specs.clear()
+        for spec in specs:
+            restored_dependency = self.dependencies.register(
+                spec.input_id,
+                source_ids=spec.source_ids,
+                sports=spec.sports,
+                event_ids=spec.event_ids,
+                market_ids=spec.market_ids,
+                selection_ids=spec.selection_ids,
+            )
+            if _InputSpec.from_dependency(restored_dependency) != spec:
+                raise LiveDecisionProgressError(
+                    "live dependency rollback changed canonical selectors"
+                )
+            self._input_specs[spec.input_id] = spec
+
     def register_input(
         self,
         input_id: str,
@@ -1305,8 +1331,7 @@ class PersistentLiveDecisionLoop:
         try:
             self._persist_input_registry(expected_previous=previous_specs)
         except BaseException:
-            self._input_specs.pop(candidate.input_id, None)
-            self.dependencies.unregister(candidate.input_id)
+            self._restore_dependency_registry(previous_specs)
             raise
         self._pending_affected[dependency.input_id] = None
         self._needs_cache_rebuild = True
@@ -1339,30 +1364,10 @@ class PersistentLiveDecisionLoop:
         try:
             self._persist_input_registry(expected_previous=previous_specs)
         except BaseException:
-            # Rebuild the exact pre-mutation ordering rather than merely appending
-            # the removed dependency back to the end. Registry order participates
-            # in durable progress identity, so a failed publication must be a true
-            # in-memory no-op as well as a durable no-op.
-            for current_id in self.dependencies.input_ids:
-                if not self.dependencies.unregister(current_id):
-                    raise LiveDecisionProgressError(
-                        "live dependency rollback could not clear current registry"
-                    )
-            self._input_specs.clear()
-            for spec in previous_specs:
-                restored_dependency = self.dependencies.register(
-                    spec.input_id,
-                    source_ids=spec.source_ids,
-                    sports=spec.sports,
-                    event_ids=spec.event_ids,
-                    market_ids=spec.market_ids,
-                    selection_ids=spec.selection_ids,
-                )
-                if _InputSpec.from_dependency(restored_dependency) != spec:
-                    raise LiveDecisionProgressError(
-                        "live dependency rollback changed canonical selectors"
-                    )
-                self._input_specs[spec.input_id] = spec
+            # Registry order participates in durable progress identity. Any failed
+            # publication must leave the complete process-local registry exactly at
+            # its pre-mutation semantic state, not append a retired input at the end.
+            self._restore_dependency_registry(previous_specs)
             raise
         self._pending_affected.pop(normalized_id, None)
         self._intent_cache.pop(normalized_id, None)

@@ -10,6 +10,7 @@ from .exchange_exposure import locked_capital_for_exchange_side
 
 
 _ORIGINAL_OPEN_TICKET = _paper.PaperBook.open_ticket
+_ORIGINAL_SETTLE = _paper.PaperBook.settle
 _ORIGINAL_VALIDATE_TICKET_LEG = _paper.PaperBook._validate_ticket_leg.__func__
 _ORIGINAL_SETTLEMENT_RESULT = _paper.PaperBook._settlement_result.__func__
 _ORIGINAL_VALIDATE_LIFECYCLE_REACHABILITY = (
@@ -30,6 +31,7 @@ _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY = _paper._require_ticket_opening_auth
 _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _paper._require_paperbook_causal_history_authority
 _ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY = _paper._record_ticket_opening_authority
 _ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN = _paper._advance_paperbook_causal_history_open
+_ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE = _paper._advance_paperbook_causal_history_settle
 
 
 def _require_exact_text(
@@ -414,6 +416,109 @@ def _open_ticket(
         )
 
 
+def _normalize_exact_resolution_keys(values: object, label: str) -> set[str]:
+    if type(values) not in {set, frozenset, list, tuple}:
+        raise ValueError(
+            f"PaperBook {label} must be an exact built-in collection of quote keys"
+        )
+    for value in values:
+        _require_exact_text(value, label)
+    return set(values)
+
+
+def _settle_unlocked(
+    self: _paper.PaperBook,
+    ticket_id: str,
+    winning_quote_keys,
+    void_quote_keys=None,
+    *,
+    settled_at: str | None = None,
+) -> PaperTicket:
+    _require_exact_text(ticket_id, "ticket_id")
+    _validate_loaded_state(_paper.PaperBook, self)
+    _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY(self)
+    _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY(self)
+    ticket = self.tickets[ticket_id]
+    if not (len(ticket.legs) == 1 and _is_lay_leg(ticket.legs[0])):
+        return _ORIGINAL_SETTLE(
+            self,
+            ticket_id,
+            winning_quote_keys,
+            void_quote_keys,
+            settled_at=settled_at,
+        )
+    if ticket.status is not TicketStatus.OPEN:
+        raise ValueError("ticket already settled")
+
+    winners = _normalize_exact_resolution_keys(
+        winning_quote_keys,
+        "winning_quote_keys",
+    )
+    voids = (
+        set()
+        if void_quote_keys is None
+        else _normalize_exact_resolution_keys(
+            void_quote_keys,
+            "void_quote_keys",
+        )
+    )
+    settlement_time = None
+    if settled_at is not None:
+        settlement_time = _validate_exact_timestamp(settled_at, "settled_at")
+        if _ORIGINAL_PARSE_ISO_TIMESTAMP(
+            settlement_time
+        ) < _ORIGINAL_PARSE_ISO_TIMESTAMP(ticket.placed_at):
+            raise ValueError("PaperBook settled_at must not precede placed_at")
+
+    status, payout, new_balance = _settlement_result(
+        _paper.PaperBook,
+        ticket,
+        self.balance,
+        winners,
+        voids,
+    )
+    winners_tuple = tuple(sorted(winners))
+    voids_tuple = tuple(sorted(voids))
+
+    # All visible containers and the hidden authority were revalidated above.
+    # Advance the product-issued causal witness immediately adjacent to the
+    # corresponding visible transition.
+    _ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE(
+        self,
+        ticket.ticket_id,
+        winners_tuple,
+        voids_tuple,
+        settlement_time,
+    )
+    ticket.payout = payout
+    ticket.status = status
+    ticket.settled_at = settlement_time
+    self.balance = new_balance
+    self._lifecycle.append(
+        ("settle", ticket.ticket_id, winners_tuple, voids_tuple)
+    )
+    self._settlement_times[ticket.ticket_id] = settlement_time
+    return ticket
+
+
+def _settle(
+    self: _paper.PaperBook,
+    ticket_id: str,
+    winning_quote_keys,
+    void_quote_keys=None,
+    *,
+    settled_at: str | None = None,
+) -> PaperTicket:
+    with _paperbook_operation_context(self):
+        return _settle_unlocked(
+            self,
+            ticket_id,
+            winning_quote_keys,
+            void_quote_keys,
+            settled_at=settled_at,
+        )
+
+
 def _settlement_result(
     cls,
     ticket: PaperTicket,
@@ -729,6 +834,7 @@ def _install() -> None:
     )
     _paper.PaperBook._validate_loaded_state = classmethod(_validate_loaded_state)
     _paper.PaperBook.open_ticket = _open_ticket
+    _paper.PaperBook.settle = _settle
     _paper.PaperBook.committed_capital = property(_committed_capital)
     setattr(_paper.PaperBook, marker, True)
 

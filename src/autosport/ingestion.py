@@ -13,7 +13,7 @@ from .ingestion_health import (
     parse_source_timestamp,
 )
 from .market_bus import MarketEventBus, MarketEventDeliveryError
-from .providers import CanonicalNormalizer, MarketProvider, ProviderUnavailableError
+from .providers import CanonicalNormalizer, MarketProvider, ProviderBatch, ProviderUnavailableError
 from .storage import _timezone_aware_instant
 
 
@@ -264,9 +264,24 @@ class IngestionEngine:
         provider_source_id: str | None = None
         try:
             provider_source_id = provider.source_id
+            if type(provider_source_id) is not str:
+                raise TypeError("provider source_id must be an exact string")
+            if (
+                not provider_source_id
+                or provider_source_id.strip() != provider_source_id
+                or "|" in provider_source_id
+            ):
+                raise ValueError("provider source_id must be canonical")
             batch = provider.read_batch(max_items=max_items)
-            if provider.source_id != provider_source_id:
+            post_read_source_id = provider.source_id
+            if type(post_read_source_id) is not str:
+                raise TypeError("provider source_id must remain an exact string")
+            if post_read_source_id != provider_source_id:
                 raise ValueError("provider source_id changed during batch acquisition")
+            if type(batch) is not ProviderBatch:
+                raise TypeError("provider must return an exact ProviderBatch")
+            if type(batch.source_id) is not str:
+                raise TypeError("provider batch source_id must be an exact string")
             if batch.source_id != provider_source_id:
                 raise ValueError("provider returned mismatched source_id")
             if len(batch.quotes) > max_items:

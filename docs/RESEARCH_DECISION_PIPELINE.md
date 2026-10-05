@@ -42,13 +42,14 @@ A future generic opportunity path must not synthesize a `ForecastRecord` merely 
 - input cutoff is no later than decision time;
 - candidate probability exactly matches ForecastRecord probability;
 - uncertainty is within configured policy;
-- a minimum number of evidence hashes used by the forecast were already available by its input cutoff;
+- every evidence hash declared by the forecast has a typed `ResearchEvidence` record for that leg that was causally available by the forecast input cutoff;
+- the configured minimum counts unique causal evidence hashes, not duplicate rows or aliases;
 - the forecast covers the latest evidence available at decision time;
 - candidate odds match the latest evidence;
 - blocked data-quality flags are absent from every causal evidence record whose hash the forecast actually includes;
 - optional market snapshot hash matches forecast and latest evidence.
 
-The default blocked flags include stale source, future provider clock skew, impossible future local observation, invalid source timestamp, invalid quote, source-time regression, truncated batch and explicit gap detection. A later clean evidence record does not launder an earlier blocked record that remains part of the forecast's declared evidence set.
+The default blocked flags include stale source, future provider clock skew, impossible future local observation, invalid source timestamp, invalid quote, source-time regression, truncated batch and explicit gap detection. A later clean evidence record does not launder an earlier blocked record that remains part of the forecast's declared evidence set. Forecasts with hidden/unknown hashes or hashes whose typed evidence becomes available only after the forecast input cutoff fail closed. Duplicate evidence rows cannot inflate the minimum-evidence threshold, and evidence IDs are unique within one decision input.
 
 ### Portfolio / Risk
 

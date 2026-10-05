@@ -21,7 +21,10 @@ from .integrity import atomic_write_json
 from .live_observation import poll_open_market_store_once
 from .market_mirror import MarketMirror
 from .market_mirror_runtime import BoundedMirrorInvalidationBuffer
-from .monotonic_workspace_authority import resolve_monotonic_authority_root
+from .monotonic_workspace_authority import (
+    MonotonicAuthorityConfigurationError,
+    resolve_monotonic_authority_root,
+)
 from .parlayapi_provider import ParlayApiTableTennisProvider, ProviderPayloadError
 from .providers import MarketProvider, ProviderUnavailableError
 from .storage import SQLiteMarketStore
@@ -382,9 +385,12 @@ def run_continuous_observation(
     if any(status_key == canonical_path_key(path) for path in protected_paths):
         raise ValueError("status_path must not collide with authoritative storage")
 
-    authority_root = resolve_monotonic_authority_root(
-        Path(canonical_path_key(root))
-    )
+    try:
+        authority_root = resolve_monotonic_authority_root(
+            Path(canonical_path_key(root))
+        )
+    except MonotonicAuthorityConfigurationError as exc:
+        raise ValueError("continuous observation authority root is unsafe") from exc
     authority_root_key = canonical_path_key(authority_root)
     try:
         status_in_authority_root = Path(status_key).is_relative_to(

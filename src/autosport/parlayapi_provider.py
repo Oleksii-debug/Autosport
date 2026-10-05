@@ -203,8 +203,12 @@ class ParlayApiTableTennisProvider:
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         max_items = _positive_nonboolean_int(max_items, field="max_items")
         if self._pending_quotes is None:
-            observed_ts = self.clock()
             response = self._fetch()
+            # Local observation/receipt authority cannot precede the network response.
+            # Capture it only after the complete provider response is available locally;
+            # otherwise replay could admit quotes at a cutoff that occurred while the
+            # HTTP request was still in flight.
+            observed_ts = self.clock()
             events = self._event_list(response.payload)
             self._pending_quotes = self._snapshot_quotes(
                 events,

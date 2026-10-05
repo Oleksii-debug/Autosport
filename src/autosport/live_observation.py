@@ -197,7 +197,12 @@ class OneShotObservationWorker:
             if type(result) is not ObservationResult:
                 raise TypeError("observation task must return an exact ObservationResult")
             result.validate()
-            message = ObservationWorkerMessage(result=result)
+            owned_result = ObservationResult(
+                result.stats,
+                result.health,
+                result.current_quotes,
+            )
+            message = ObservationWorkerMessage(result=owned_result)
         except BaseException as exc:
             # SystemExit/KeyboardInterrupt raised inside this background thread do
             # not terminate the GUI process. Publish a terminal failure so poll()

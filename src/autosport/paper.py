@@ -64,13 +64,21 @@ def _make_ticket_opening_authority_registry():
     # become their own witness.
     authorities = WeakKeyDictionary()
     guard = threading.RLock()
+    commitment_for = _ticket_opening_commitment
+    commitment_code = commitment_for.__code__
+
+    def require_commitment_authority() -> None:
+        if commitment_for.__code__ is not commitment_code:
+            raise ValueError("PaperBook ticket opening commitment authority changed")
 
     def register_book(book: object) -> None:
         with guard:
             authorities[book] = {}
 
     def record(book: object, ticket: PaperTicket) -> None:
-        commitment = _ticket_opening_commitment(ticket)
+        require_commitment_authority()
+        commitment = commitment_for(ticket)
+        require_commitment_authority()
         with guard:
             current = authorities.get(book)
             if current is None:
@@ -85,16 +93,19 @@ def _make_ticket_opening_authority_registry():
             authorities.pop(book, None)
 
     def install_validated_snapshot(book: object) -> None:
+        require_commitment_authority()
         commitments = {
-            ticket_id: _ticket_opening_commitment(ticket)
+            ticket_id: commitment_for(ticket)
             for ticket_id, ticket in book.tickets.items()
         }
+        require_commitment_authority()
         with guard:
             if book not in authorities:
                 raise RuntimeError("PaperBook opening authority registry is unavailable")
             authorities[book] = commitments
 
     def require_current(book: object) -> None:
+        require_commitment_authority()
         with guard:
             current = authorities.get(book)
             if current is None:
@@ -107,12 +118,15 @@ def _make_ticket_opening_authority_registry():
                 "PaperBook ticket set changed outside product-issued opening authority"
             )
         for ticket_id, ticket in book.tickets.items():
-            if expected[ticket_id] != _ticket_opening_commitment(ticket):
+            commitment = commitment_for(ticket)
+            require_commitment_authority()
+            if expected[ticket_id] != commitment:
                 raise ValueError(
                     "PaperBook ticket opening economic identity changed after admission"
                 )
 
     def require_candidate(source_book: object, candidate_book: object) -> None:
+        require_commitment_authority()
         with guard:
             current = authorities.get(source_book)
             if current is None:
@@ -126,10 +140,13 @@ def _make_ticket_opening_authority_registry():
                 "PaperBook serialized candidate ticket set differs from product-issued opening authority"
             )
         for ticket_id, ticket in candidate_tickets.items():
-            if (
-                type(ticket) is not PaperTicket
-                or _ticket_opening_commitment(ticket) != expected[ticket_id]
-            ):
+            if type(ticket) is not PaperTicket:
+                raise ValueError(
+                    "PaperBook serialized candidate opening economic identity differs from product-issued authority"
+                )
+            commitment = commitment_for(ticket)
+            require_commitment_authority()
+            if commitment != expected[ticket_id]:
                 raise ValueError(
                     "PaperBook serialized candidate opening economic identity differs from product-issued authority"
                 )

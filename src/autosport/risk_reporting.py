@@ -83,6 +83,7 @@ _CANONICAL_PAPERBOOK_DURABLE_LOAD_SURFACE = tuple(
     )
 )
 _CANONICAL_ECONOMIC_GOAL_STORE = EconomicGoalStore
+_CANONICAL_ECONOMIC_GOAL_STORE_INIT = EconomicGoalStore.__dict__["__init__"]
 _CANONICAL_ECONOMIC_GOAL_STORE_LOAD = EconomicGoalStore.load
 
 
@@ -119,6 +120,27 @@ def _require_canonical_equity_replay_code_authority() -> None:
     for authority, expected_code in _CANONICAL_EQUITY_REPLAY_CODE_WITNESSES:
         if _captured_callable_code(authority) is not expected_code:
             raise ValueError("canonical PAPER equity replay callable code changed")
+
+
+_CANONICAL_DURABLE_RESOLVER_CODE_WITNESSES = tuple(
+    (authority, _captured_callable_code(authority))
+    for authority in (
+        _CANONICAL_PAPERBOOK_LOAD,
+        _CANONICAL_ECONOMIC_GOAL_STORE_INIT,
+        _CANONICAL_ECONOMIC_GOAL_STORE_LOAD,
+    )
+)
+
+
+def _require_canonical_durable_resolver_code_authority() -> None:
+    if (
+        _CANONICAL_ECONOMIC_GOAL_STORE.__dict__.get("__init__")
+        is not _CANONICAL_ECONOMIC_GOAL_STORE_INIT
+    ):
+        raise ValueError("canonical durable equity resolver constructor changed")
+    for authority, expected_code in _CANONICAL_DURABLE_RESOLVER_CODE_WITNESSES:
+        if _captured_callable_code(authority) is not expected_code:
+            raise ValueError("canonical durable equity resolver callable code changed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -961,6 +983,7 @@ def _durable_source_pair(
     paper_book_path: str,
     workspace: str,
 ) -> tuple[PaperBook, EconomicGoalContract]:
+    _require_canonical_durable_resolver_code_authority()
     if type(paper_book_path) is not str or not paper_book_path:
         raise TypeError("paper_book_path must be an exact non-empty str")
     if type(workspace) is not str or not workspace:
@@ -1010,6 +1033,7 @@ def _durable_source_pair(
     goal_final = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD(store)
     if _CANONICAL_GOAL_PROVENANCE(goal_final) != goal_before_provenance:
         raise ValueError("durable economic goal changed during equity-path resolution")
+    _require_canonical_durable_resolver_code_authority()
     return book_after, goal_final
 
 

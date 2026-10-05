@@ -320,21 +320,36 @@ def run_continuous_observation(
         if waiter is None and not callable(getattr(stop_event, "wait", None)):
             raise TypeError("stop_event wait must be callable when waiter is omitted")
 
+    def read_wall_clock() -> str:
+        value = wall_clock()
+        if type(value) is not str:
+            raise TypeError("wall_clock must return an exact timestamp string")
+        try:
+            parse_source_timestamp(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("wall_clock must return a valid source timestamp") from exc
+        return value
+
+    last_monotonic: float | None = None
+
+    def read_monotonic() -> float:
+        nonlocal last_monotonic
+        value = monotonic()
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise ValueError("monotonic must return a finite number")
+        numeric = float(value)
+        if last_monotonic is not None and numeric < last_monotonic:
+            raise ValueError("monotonic clock must not regress")
+        last_monotonic = numeric
+        return numeric
+
     current_run_id = run_id or uuid.uuid4().hex
-    started_at = wall_clock()
-    if type(started_at) is not str:
-        raise TypeError("wall_clock must return an exact timestamp string")
-    try:
-        parse_source_timestamp(started_at)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("wall_clock must return a valid source timestamp") from exc
-    started_monotonic = monotonic()
-    if (
-        isinstance(started_monotonic, bool)
-        or not isinstance(started_monotonic, (int, float))
-        or not math.isfinite(float(started_monotonic))
-    ):
-        raise ValueError("monotonic must return a finite number")
+    started_at = read_wall_clock()
+    started_monotonic = read_monotonic()
 
     state = _LoopState(current_run_id, provider_source_id, started_at)
     stopper = stop_event if stop_event is not None else threading.Event()
@@ -352,7 +367,7 @@ def run_continuous_observation(
         payload = _status_payload(
             state,
             lifecycle_state=lifecycle_state,
-            updated_at=wall_clock(),
+            updated_at=read_wall_clock(),
             stop_reason=stop_reason,
             previous_run_id=previous_run_id if isinstance(previous_run_id, str) else None,
             previous_state=previous_state if isinstance(previous_state, str) else None,
@@ -414,7 +429,7 @@ def run_continuous_observation(
                 enter_loop = False
             else:
                 remaining_runtime = config.max_runtime_seconds - (
-                    monotonic() - started_monotonic
+                    read_monotonic() - started_monotonic
                 )
                 if remaining_runtime <= 0:
                     terminal_reason = "max_runtime"

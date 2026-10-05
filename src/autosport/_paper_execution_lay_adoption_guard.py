@@ -4,6 +4,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 from . import paper_execution_adoption as _adoption
+from . import paper_execution_reality as _reality
 from .domain import TicketLeg
 from .paper_execution_adoption import (
     PaperExecutionAdoptionError,
@@ -25,6 +26,7 @@ _ORIGINAL_MATERIALIZE_ATTEMPT = PaperExecutionAdoptionRuntime._materialize_attem
 _ORIGINAL_TICKET_MATCHES_ATTEMPT = PaperExecutionAdoptionRuntime._ticket_matches_attempt
 _ORIGINAL_MINT_PREPARED = PaperExecutionAdoptionRuntime._mint_prepared
 _ORIGINAL_REQUIRE_MINTED = PaperExecutionAdoptionRuntime._require_minted
+_ORIGINAL_EXPECTED_RUN_ID = PaperExecutionAdoptionRuntime.expected_run_id
 _PREPARED_WITNESS_ATTR = "_autosport_lay_prepared_authority_witnesses"
 
 
@@ -207,6 +209,21 @@ def _require_minted(
             "prepared execution authority changed after mint"
         )
 
+
+
+
+def _expected_run_id(
+    self: PaperExecutionAdoptionRuntime,
+    prepared: PreparedPaperExecution,
+    trigger_id: str,
+) -> str:
+    # Adoption publishes the exposure-scope event immediately after deriving this
+    # identity. Revalidate mutable frozen surfaces before any fingerprint/run-id
+    # calculation can influence that durable key.
+    self._require_minted(prepared)
+    _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
+    _reality._require_canonical_execution_config_surface(self.config)
+    return _ORIGINAL_EXPECTED_RUN_ID(self, prepared, trigger_id)
 
 def _normalized_action_side(exchange_side: str | None) -> str:
     if exchange_side is None:
@@ -566,6 +583,7 @@ def _install() -> None:
         return
     PaperExecutionAdoptionRuntime._mint_prepared = _mint_prepared
     PaperExecutionAdoptionRuntime._require_minted = _require_minted
+    PaperExecutionAdoptionRuntime.expected_run_id = _expected_run_id
     PaperExecutionAdoptionRuntime._require_back_compatible_exchange_side = staticmethod(
         _require_supported_exchange_side
     )

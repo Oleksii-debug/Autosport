@@ -60,7 +60,13 @@ class MarketEventBus:
         # an earlier input object before append_batch_accepted() returns. Storage,
         # delivery, and accepted-event evidence must all stay bound to the same
         # ingress value.
-        accepted = self.store.append_batch_accepted(deepcopy(event) for event in events)
+        def snapshots() -> Iterable[MarketEvent]:
+            for event in events:
+                if type(event) is not MarketEvent:
+                    raise TypeError("events must contain exact MarketEvent values")
+                yield deepcopy(event)
+
+        accepted = self.store.append_batch_accepted(snapshots())
         self._notify(accepted)
         return len(accepted)
 

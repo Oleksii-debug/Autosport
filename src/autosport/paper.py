@@ -18,7 +18,7 @@ from decimal import (
     localcontext,
 )
 from pathlib import Path
-from weakref import WeakKeyDictionary
+from weakref import ref
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
 from .forecasting import parse_iso_timestamp
@@ -33,6 +33,45 @@ _SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
 _SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
+
+
+class _IdentityWeakKeyDictionary:
+    """Weak identity map that never executes caller-defined hash/equality hooks."""
+
+    def __init__(self) -> None:
+        self._entries: dict[int, tuple[object, object]] = {}
+
+    def _discard_dead(self, identity: int, dead_ref: object) -> None:
+        current = self._entries.get(identity)
+        if current is not None and current[0] is dead_ref:
+            self._entries.pop(identity, None)
+
+    def __setitem__(self, key: object, value: object) -> None:
+        identity = id(key)
+
+        def cleanup(dead_ref: object, *, _identity: int = identity) -> None:
+            self._discard_dead(_identity, dead_ref)
+
+        weak_key = ref(key, cleanup)
+        self._entries[identity] = (weak_key, value)
+
+    def get(self, key: object, default: object = None) -> object:
+        current = self._entries.get(id(key))
+        if current is None or current[0]() is not key:
+            return default
+        return current[1]
+
+    def pop(self, key: object, default: object = None) -> object:
+        identity = id(key)
+        current = self._entries.get(identity)
+        if current is None or current[0]() is not key:
+            return default
+        self._entries.pop(identity, None)
+        return current[1]
+
+    def __contains__(self, key: object) -> bool:
+        current = self._entries.get(id(key))
+        return current is not None and current[0]() is key
 
 
 def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
@@ -64,7 +103,7 @@ def _make_ticket_opening_authority_registry():
     # Opening economics are product-issued facts. Keep the authoritative copy
     # outside caller-visible PaperTicket fields so coherent field rewrites cannot
     # become their own witness.
-    authorities = WeakKeyDictionary()
+    authorities = _IdentityWeakKeyDictionary()
     guard = threading.RLock()
 
     def register_book(book: object) -> None:
@@ -170,7 +209,7 @@ def _paperbook_causal_history_snapshot(book: object) -> tuple[object, ...]:
 def _make_paperbook_causal_history_authority_registry():
     # Lifecycle/settlement chronology is product-issued economic history. Keep
     # the authoritative copy outside caller-visible mutable PaperBook fields.
-    authorities = WeakKeyDictionary()
+    authorities = _IdentityWeakKeyDictionary()
     guard = threading.RLock()
 
     def register_book(book: object) -> None:
@@ -275,7 +314,7 @@ def _make_paperbook_causal_history_authority_registry():
 def _make_paperbook_operation_lock_registry():
     # Economic transitions must be linearizable per book. Keep synchronization
     # authority outside caller-visible state so snapshots cannot mint/replace it.
-    locks = WeakKeyDictionary()
+    locks = _IdentityWeakKeyDictionary()
     guard = threading.RLock()
 
     def register_book(book: object) -> None:

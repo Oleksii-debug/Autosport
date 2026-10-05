@@ -604,11 +604,11 @@ class _Progress:
                     "health_boundaries must be a tuple or null"
                 )
             if any(
-                not isinstance(boundary, ProviderHealthReplayBoundary)
+                type(boundary) is not ProviderHealthReplayBoundary
                 for boundary in self.health_boundaries
             ):
                 raise LiveDecisionProgressError(
-                    "health_boundaries must contain provider health replay boundaries"
+                    "health_boundaries must contain exact provider health replay boundaries"
                 )
             health_source_ids = tuple(
                 boundary.source_id for boundary in self.health_boundaries
@@ -650,8 +650,7 @@ class _Progress:
             # New PENDING cursors freeze the Decision Ledger byte frontier at
             # publication time. Legacy v1 cursors may still carry null here.
             if self.ledger_offset is not None and (
-                isinstance(self.ledger_offset, bool)
-                or not isinstance(self.ledger_offset, int)
+                type(self.ledger_offset) is not int
                 or self.ledger_offset < 0
             ):
                 raise LiveDecisionProgressError(
@@ -665,8 +664,7 @@ class _Progress:
             _canonical_text("decision_id", self.decision_id)
             _canonical_sha256("plan_sha256", self.plan_sha256)
             if (
-                isinstance(self.ledger_offset, bool)
-                or not isinstance(self.ledger_offset, int)
+                type(self.ledger_offset) is not int
                 or self.ledger_offset < 0
             ):
                 raise LiveDecisionProgressError(
@@ -686,7 +684,8 @@ class _Progress:
                 None
                 if self.health_boundaries is None
                 else [
-                    boundary.to_dict() for boundary in self.health_boundaries
+                    ProviderHealthReplayBoundary.to_dict(boundary)
+                    for boundary in self.health_boundaries
                 ]
             ),
             "decision_context_sha256": self.decision_context_sha256,

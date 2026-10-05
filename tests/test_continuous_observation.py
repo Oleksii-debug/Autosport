@@ -483,6 +483,31 @@ class ContinuousObservationTests(unittest.TestCase):
                 self._run(provider, self._config(workspace, max_cycles=1))
             self.assertEqual(provider.calls, 0)
 
+    def test_unprintable_cycle_error_preserves_terminal_status(self):
+        class UnprintableError(Exception):
+            def __str__(self):
+                raise RuntimeError("stringification must not mask primary failure")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            with patch(
+                "autosport.continuous_observation.poll_open_market_store_once",
+                side_effect=UnprintableError(),
+            ):
+                result = self._run(provider, self._config(workspace, max_cycles=1))
+
+            self.assertEqual(result.exit_code, 3)
+            self.assertEqual(result.stop_reason, "fail_closed_provider_or_validation_error")
+            status = json.loads(
+                (workspace / "continuous_observation_status.json").read_text("utf-8")
+            )
+            self.assertEqual(status["state"], "failed")
+            self.assertEqual(
+                status["last_error"],
+                "UnprintableError: exception details unavailable",
+            )
+
     def test_provider_error_status_redacts_configured_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

@@ -859,8 +859,10 @@ class PersistentLiveDecisionLoop:
         goal_quote_age = authority.contract.max_quote_age_seconds
         if max_quote_age is None:
             max_quote_age = _conservative_timedelta(goal_quote_age)
-        elif type(max_quote_age) is not timedelta or max_quote_age < timedelta(0):
-            raise ValueError("max_quote_age must be an exact non-negative timedelta or None")
+        elif type(max_quote_age) is not timedelta:
+            raise TypeError("max_quote_age must be an exact timedelta or None")
+        elif max_quote_age < timedelta(0):
+            raise ValueError("max_quote_age must be non-negative")
         elif _timedelta_decimal_seconds(max_quote_age) > goal_quote_age:
             raise ValueError(
                 "max_quote_age cannot exceed EconomicGoalContract.max_quote_age_seconds"

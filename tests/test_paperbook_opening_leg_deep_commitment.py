@@ -385,8 +385,6 @@ def test_settlement_resolution_keys_reject_str_subclass_before_internal_hashing(
     assert ticket.payout == Decimal("0")
 
 
-
-
 @pytest.mark.parametrize(
     "operation",
     ("committed_stake", "open_ticket", "settle", "save"),
@@ -486,6 +484,34 @@ def test_public_operation_ignores_rebound_causal_history_authority_dispatch(
         match="causal history changed outside product-issued transitions",
     ):
         _ = book.committed_stake
+
+
+
+
+def test_public_operation_rejects_in_place_causal_authority_code_mutation_before_execution() -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    authority = paper_module._require_paperbook_causal_history_authority
+    original_code = authority.__code__
+    attacker_calls = 0
+
+    def hostile_authority(_book):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        return None
+
+    try:
+        authority.__code__ = hostile_authority.__code__
+        with pytest.raises(
+            ValueError,
+            match="causal-history authority dispatch changed",
+        ):
+            _ = book.committed_stake
+    finally:
+        authority.__code__ = original_code
+
+    assert attacker_calls == 0
+    assert book.balance == Decimal("90")
 
 
 

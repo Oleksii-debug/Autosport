@@ -1134,6 +1134,73 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.balance, Decimal("60.00"))
             self.assertEqual(book.committed_capital, Decimal("40.00"))
 
+    def test_lay_adoption_bypasses_post_import_module_authority_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action(
+                "lay-sealed-module-graph",
+                odds="5.00",
+                stake="10.00",
+                side="LAY",
+            )
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("post-import adoption authority replacement executed")
+
+            targets = (
+                (adoption_module, "execute_paper_plan"),
+                (adoption_module.copy, "deepcopy"),
+                (lay_guard._paper, "_install_validated_ticket_opening_authority"),
+                (lay_guard._paper, "_install_validated_paperbook_causal_history_authority"),
+                (lay_guard._reality, "_require_canonical_execution_plan_surface"),
+                (lay_guard._reality, "_require_canonical_execution_config_surface"),
+                (lay_guard._reality, "_validate_lay_execution_surface"),
+                (lay_guard._reality._impl, "_run_id"),
+                (lay_guard._reality._impl, "_verify_observation_authority"),
+                (lay_guard._reality._impl, "_observed_attempt"),
+            )
+            patches = [
+                patch.object(owner, name, forbidden)
+                for owner, name in targets
+            ]
+            for current_patch in patches:
+                current_patch.start()
+            try:
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-lay-sealed-module-graph",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                    observations={current.action_id: registered.as_observation()},
+                    evidence_registry=registry,
+                )
+            finally:
+                for current_patch in reversed(patches):
+                    current_patch.stop()
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertTrue(result.run.completed)
+            self.assertEqual(result.run.worst_case_exposure, Decimal("40.0000"))
+            self.assertEqual(len(book.tickets), 1)
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("60.00"))
+            self.assertEqual(book.committed_capital, Decimal("40.00"))
+
     def test_empirical_accepted_lay_liability_uses_accepted_odds_not_requested_odds(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

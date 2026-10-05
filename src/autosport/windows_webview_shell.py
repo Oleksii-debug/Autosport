@@ -714,11 +714,9 @@ class AutosportWebController:
 
         candidate = (resolved_workspace, session_id, source_id)
         existing = getattr(self, "_product_runtime_identity", None)
-        if (
-            existing is not None
-            and existing[0] == resolved_workspace
-            and existing != candidate
-        ):
+        if existing is not None and existing != candidate:
+            existing_workspace = Path(existing[0])
+            self._recovery_required_workspaces.add(existing_workspace)
             self._reject_product_runtime_identity(resolved_workspace)
             return False
         self._product_runtime_identity = candidate

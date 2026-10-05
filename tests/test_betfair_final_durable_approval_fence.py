@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import multiprocessing
 import os
 import tempfile
@@ -357,6 +358,52 @@ def test_submitted_fact_is_durable_and_cross_instance_visible_before_post(
         assert observed_submitted
         assert result.outcome is PlaceOrdersOutcome.ACCEPTED
         assert result.attempt_state is AttemptState.ACCEPTED
+
+
+
+def test_final_send_persists_exact_serialized_request_digest_across_restart() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-durable-request-digest",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert len(transport.calls) == 1
+        request = transport.calls[0]["request"]
+        expected_digest = hashlib.sha256(
+            betfair_execution._canonical_bytes(request)
+        ).hexdigest()
+
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        view = restarted.verified_execution_view(
+            bound.execution_plan.plan_id
+        )
+        attempt = next(
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id
+            == "attempt-durable-request-digest"
+        )
+        assert attempt.submitted_request_sha256 == expected_digest
+
+        reconstructed = dict(request)
+        reconstructed["id"] = request["id"] + 1
+        reconstructed_digest = hashlib.sha256(
+            betfair_execution._canonical_bytes(reconstructed)
+        ).hexdigest()
+        assert reconstructed_digest != attempt.submitted_request_sha256
+
 
 
 def test_quote_expiry_exact_boundary_denies_before_submitted_or_transport(

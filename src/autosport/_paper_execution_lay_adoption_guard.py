@@ -684,6 +684,16 @@ def _materialize_attempt(
     side = _require_action_side(action)
     _require_materialization_authority(action, binding)
     self._require_attempt_action_identity(attempt, action)
+    # Existing PaperBook state is durable economic authority. Revalidate the
+    # complete canonical snapshot before searching marker strings or comparing
+    # ticket fields so a mutated/faulty in-memory ticket cannot execute custom
+    # equality/hash hooks or participate in restart idempotence decisions.
+    try:
+        type(self.book)._validate_loaded_state(self.book)
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "PaperBook state is invalid before execution materialization"
+        ) from exc
     if attempt.execution_odds is None or attempt.execution_stake is None:
         raise PaperExecutionAdoptionError(
             "accepted-equivalent attempt lacks execution odds/stake"

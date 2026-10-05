@@ -686,7 +686,7 @@ def main(
 
     try:
         provider = provider_factory(api_key, public_preview=args.public_preview)
-    except (ProviderPayloadError, ValueError) as exc:
+    except (ProviderPayloadError, TypeError, ValueError) as exc:
         redacted_error = _redacted_error(exc, (api_key,) if api_key else ())
         print(f"continuous_observation=CONFIG_ERROR error={redacted_error}")
         return 2
@@ -712,7 +712,7 @@ def main(
             stop_event=stop_event,
             redact_values=(api_key,) if api_key else (),
         )
-    except (OSError, sqlite3.Error, ValueError) as exc:
+    except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
         print(f"continuous_observation=FAIL_CLOSED error={_redacted_error(exc, (api_key,) if api_key else ())}")
         return 5
     finally:

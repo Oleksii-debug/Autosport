@@ -3082,6 +3082,11 @@ def launch_windows_shell(
                 runtime_identity_violation = True
                 trusted_document_violation = True
                 return False
+            if not runtime_witness_dispatch_intact():
+                revoke_trust()
+                runtime_identity_violation = True
+                trusted_document_violation = True
+                return False
             runtime_witness_published = True
 
         trusted_document_observed = True

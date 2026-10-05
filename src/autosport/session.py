@@ -336,7 +336,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         current = tuple(
             sorted(
                 (event for event in self.store.current().values() if event.source_id == source_id),
-                key=lambda event: (event.event_id, event.market_id, event.selection_id),
+                key=lambda event: event.quote_key,
             )
         )
         return ObservationResult(stats, self.source_health.get(source_id), current)

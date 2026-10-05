@@ -2745,6 +2745,12 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "live Decision Ledger persistence authority changed after construction"
             )
+        try:
+            self.decision_ledger.assert_transaction_authority()
+        except DecisionLedgerIntegrityError as exc:
+            raise LiveDecisionProgressError(
+                "live Decision Ledger transaction authority is unavailable"
+            ) from exc
         canonical_decision_ledger = self._workspace_authority / "decisions.jsonl"
         if self.decision_ledger.path != canonical_decision_ledger:
             raise LiveDecisionProgressError(

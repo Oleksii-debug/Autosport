@@ -805,6 +805,7 @@ class PersistentLiveDecisionLoop:
         self._risk_policy_authority = authority.risk_policy
         self.intent_factory = intent_factory
         self.intent_provenance = intent_provenance
+        self._intent_provenance_authority = intent_provenance
         self.provider = provider
         self.decision_ledger = decision_ledger or JsonlDecisionLedger(
             self._workspace_authority / "decisions.jsonl"
@@ -2588,6 +2589,10 @@ class PersistentLiveDecisionLoop:
         if self.authority.risk_policy is not self._risk_policy_authority:
             raise LiveDecisionProgressError(
                 "risk policy authority changed after construction"
+            )
+        if self.intent_provenance is not self._intent_provenance_authority:
+            raise LiveDecisionProgressError(
+                "live intent provenance authority changed after construction"
             )
         if self.max_quote_age != self._max_quote_age_authority:
             raise LiveDecisionProgressError(

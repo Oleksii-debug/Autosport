@@ -172,5 +172,19 @@ class ResearchStrategyPlanJsonIntegrityTests(unittest.TestCase):
             ResearchStrategyPlan.from_dict(raw)
 
 
+    def test_from_dict_rejects_uppercase_explicit_source_digest_alias(self):
+        raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+        canonical = ResearchStrategyPlan.from_dict(raw)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "lowercase SHA-256 hex digest",
+        ):
+            ResearchStrategyPlan.from_dict(
+                raw,
+                source_sha256=canonical.source_sha256.upper(),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -115,10 +115,9 @@ def locked_capital_for_exchange_side(
     if not odds.is_finite() or odds <= 1:
         raise ValueError("odds must be a finite Decimal > 1")
 
-    side = exchange_side.strip().upper()
-    if side not in _supported_sides:
-        raise ValueError("exchange_side must be BACK or LAY")
-    if side == "BACK":
+    if exchange_side not in _supported_sides:
+        raise ValueError("exchange_side must be exact canonical BACK or LAY")
+    if exchange_side == "BACK":
         return stake
     return _multiply(stake, _subtract(odds, _decimal_type("1")))
 

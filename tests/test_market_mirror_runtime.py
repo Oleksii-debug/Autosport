@@ -222,6 +222,26 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             ),
         )
 
+    def test_view_for_keys_causal_fence_excludes_generation_zero_truth(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        event = self.event(sequence=1)
+
+        runtime.reconcile_persisted(event, append_generation=0)
+        key = ((event.source_id, event.quote_key),)
+
+        raw = mirror.view_for_keys(key)
+        causal = mirror.view_for_keys(key, _causal_only=True)
+
+        self.assertEqual(raw.events, (event,))
+        self.assertEqual(causal.events, ())
+        self.assertEqual(raw.revision, causal.revision)
+
+    def test_view_for_keys_rejects_non_boolean_causal_fence(self) -> None:
+        mirror = MarketMirror()
+        with self.assertRaisesRegex(TypeError, "_causal_only must be a bool"):
+            mirror.view_for_keys((), _causal_only=1)
+
     def test_refresh_only_routing_uses_one_bounded_mirror_capture(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)
@@ -262,7 +282,60 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 ("decision",),
             )
 
-        bounded.assert_called_once_with(frozenset(batch.changed_keys))
+        bounded.assert_called_once_with(
+            frozenset(batch.changed_keys),
+            _causal_only=True,
+        )
+
+    def test_refresh_only_routing_fails_closed_on_registry_race(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="prophetx:sandbox")
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        runtime.accept_persisted(refresh)
+        batch = runtime.drain()
+
+        original = mirror.view_for_keys
+
+        def race_registry(keys, **kwargs):
+            captured = original(keys, **kwargs)
+            self.assertTrue(dependencies.unregister("decision"))
+            dependencies.register("replacement", source_ids="prophetx:sandbox")
+            return captured
+
+        with patch.object(mirror, "view_for_keys", side_effect=race_registry):
+            self.assertEqual(
+                dependencies.semantic_refresh_only_inputs(batch),
+                (),
+            )
+
+    def test_refresh_only_routing_requires_current_causal_truth(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="prophetx:sandbox")
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        runtime.reconcile_persisted(first, append_generation=1)
+        runtime.drain()
+        runtime.reconcile_persisted(refresh, append_generation=2)
+        batch = runtime.drain()
+
+        # Simulate a conservative authority-loss observation after the batch by
+        # advancing the same quote to a later generation-zero semantic refresh.
+        noncausal = self.prophetx_refresh_event(sequence=3)
+        result = runtime.reconcile_persisted(noncausal, append_generation=0)
+        self.assertEqual(result.status, MirrorUpdate.SEMANTIC_REFRESH)
+        self.assertEqual(
+            dependencies.semantic_refresh_only_inputs(batch),
+            (),
+        )
 
     def test_refresh_only_routing_fails_closed_on_missing_changed_key(self) -> None:
         mirror = MarketMirror()

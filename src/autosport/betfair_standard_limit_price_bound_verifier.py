@@ -26,6 +26,7 @@ from .betfair_standard_limit_price_bound import (
 from .real_execution_ledger import ExecutionAction, RealExecutionLedger
 from .supervised_execution import BoundSupervisedExecutionPlan
 from .supervised_plan_issuance import (
+    IssuedSupervisedPlan,
     SupervisedPlanIssuanceError,
     SupervisedPlanIssuanceStore,
 )
@@ -168,6 +169,7 @@ def _build_product_verifier():
     error_cls = BetfairStandardLimitPriceBoundError
     evidence_cls = BetfairStandardLimitPriceBoundEvidence
     issuance_store_cls = SupervisedPlanIssuanceStore
+    issued_plan_cls = IssuedSupervisedPlan
     issuance_error_cls = SupervisedPlanIssuanceError
     ledger_cls = RealExecutionLedger
     bound_cls = BoundSupervisedExecutionPlan
@@ -391,7 +393,12 @@ def _build_product_verifier():
             raise error_cls(
                 "durable product supervised-plan issuance is missing or invalid"
             ) from exc
-        bound = issued.bound
+        require_verifier_dependency_authority()
+        if type(issued) is not issued_plan_cls:
+            raise error_cls(
+                "durable product supervised-plan issuance returned a non-canonical record"
+            )
+        bound = object.__getattribute__(issued, "bound")
         require_execution_state_continuity(ledger=ledger, bound=bound)
 
         require_canonical_resolver_authority()
@@ -404,7 +411,7 @@ def _build_product_verifier():
         require_verifier_dependency_authority()
 
         require_issuance_time_provider_request(
-            issued_requests=issued.provider_requests,
+            issued_requests=object.__getattribute__(issued, "provider_requests"),
             expected=expected,
         )
         if exact_snapshot(evidence) != exact_snapshot(expected):

@@ -1135,10 +1135,17 @@ class AutosportWebController:
             if session is not None:
                 try:
                     session.close()
-                except Exception as exc:
+                except BaseException as exc:
                     self._recovery_required_workspaces.add(Path(workspace))
+                    self.bank = text(
+                        "ui.status.bank.quarantined",
+                        workspace=workspace,
+                    )
+                    self.tickets = [text("ui.status.tickets.startup_failure")]
                     self.last_error = _safe_exception_text(exc)
                     self.status = text("ui.status.startup.recovery_required")
+                    if not isinstance(exc, Exception):
+                        raise
 
     def _owner_workspace(self) -> Path | None:
         if self.strategy_id != RESEARCH_STRATEGY_ID or self.research_plan is None:

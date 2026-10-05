@@ -540,6 +540,10 @@ def _seal_paperbook_open_transition_authority(method):
 
     @wraps(method)
     def sealed(self, *args, **kwargs):
+        if opening_record.__code__ is not opening_record_code:
+            raise ValueError("PaperBook opening write authority changed")
+        if causal_advance.__code__ is not causal_advance_code:
+            raise ValueError("PaperBook causal-history open write authority changed")
         return method(
             self,
             *args,
@@ -572,6 +576,8 @@ def _seal_paperbook_settle_transition_authority(method):
 
     @wraps(method)
     def sealed(self, *args, **kwargs):
+        if causal_advance.__code__ is not causal_advance_code:
+            raise ValueError("PaperBook causal-history settle write authority changed")
         return method(
             self,
             *args,

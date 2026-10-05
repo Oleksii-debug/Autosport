@@ -254,28 +254,9 @@ class AuthoritativeAccountSnapshot:
 
     @property
     def source_authority_proven(self) -> bool:
-        """Remain fail-closed outside the lexical canonical provider-read operation."""
+        """Durable Python evidence never carries reusable provider-origin authority."""
 
-        try:
-            assert_account_snapshot_acquisition_authoritative(self)
-        except AccountSnapshotAcquisitionError:
-            return False
-        return True
-
-
-def assert_account_snapshot_acquisition_authoritative(
-    acquired: AuthoritativeAccountSnapshot,
-) -> None:
-    """Reject reusable provider-origin claims from durable Python evidence objects.
-
-    Same-process Python state is intentionally not a trust root for a reusable
-    provider-origin capability. Downstream positive authority must come from a
-    separately anchored product-owned boundary, not from this durable receipt.
-    """
-
-    raise AccountSnapshotAcquisitionError(
-        "account snapshot lacks live canonical provider-origin authority"
-    )
+        return False
 
 
 class BetfairAccountSnapshotAcquirer:

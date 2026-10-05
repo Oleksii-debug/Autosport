@@ -656,7 +656,7 @@ class LiveObservationTests(unittest.TestCase):
         self.assertEqual(provider.reset_calls, 0)
         self.assertFalse(wrapped.has_inflight)
 
-    def test_source_drift_preserves_primary_failure_when_pending_reset_fails(self):
+    def test_source_drift_clears_cached_batch_without_dispatching_foreign_reset(self):
         batch = ProviderBatch(
             source_id="live-fixture",
             quotes=(),
@@ -666,12 +666,14 @@ class LiveObservationTests(unittest.TestCase):
         class Provider:
             def __init__(self) -> None:
                 self.source_id = "live-fixture"
+                self.reset_calls = 0
 
             def read_batch(self, max_items: int = 1000) -> ProviderBatch:
                 return batch
 
             def reset_pending_snapshot(self) -> None:
-                raise RuntimeError("reset-failed")
+                self.reset_calls += 1
+                raise AssertionError("foreign-authority reset must not run")
 
         provider = Provider()
 
@@ -698,10 +700,11 @@ class LiveObservationTests(unittest.TestCase):
                 max_items=1,
             )
 
+        self.assertEqual(provider.reset_calls, 0)
         self.assertFalse(wrapped.has_inflight)
         self.assertTrue(
             any(
-                "provider pending-snapshot reset also failed: RuntimeError: reset-failed"
+                "provider source identity changed before pending-snapshot reset"
                 in note
                 for note in getattr(raised.exception, "__notes__", ())
             )

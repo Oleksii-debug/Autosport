@@ -559,3 +559,53 @@ def test_causal_registry_rejects_in_place_snapshot_code_mutation_before_executio
 
     assert attacker_calls == 0
     assert book.balance == Decimal("90")
+
+
+class _HostileSnapshotText(str):
+    comparisons = 0
+    hash_calls = 0
+
+    def __eq__(self, _other):
+        type(self).comparisons += 1
+        raise AssertionError("hostile snapshot text comparison must never execute")
+
+    def __hash__(self):
+        type(self).hash_calls += 1
+        raise AssertionError("hostile snapshot text hash must never execute")
+
+
+def test_snapshot_decimal_rejects_str_subclass_before_decimal_parsing() -> None:
+    hostile = _HostileSnapshotText("2.00")
+    _HostileSnapshotText.comparisons = 0
+    _HostileSnapshotText.hash_calls = 0
+
+    with pytest.raises(ValueError, match="non-empty trimmed decimal string"):
+        PaperBook._parse_snapshot_decimal(hostile, "locked_odds")
+
+    assert _HostileSnapshotText.comparisons == 0
+    assert _HostileSnapshotText.hash_calls == 0
+
+
+def test_snapshot_status_rejects_str_subclass_before_enum_lookup() -> None:
+    hostile = _HostileSnapshotText("open")
+    _HostileSnapshotText.comparisons = 0
+    _HostileSnapshotText.hash_calls = 0
+
+    with pytest.raises(ValueError, match="canonical string"):
+        PaperBook._parse_snapshot_status(hostile, "ticket-1")
+
+    assert _HostileSnapshotText.comparisons == 0
+    assert _HostileSnapshotText.hash_calls == 0
+
+
+def test_snapshot_lifecycle_rejects_action_str_subclass_before_comparison() -> None:
+    hostile = _HostileSnapshotText("open")
+    raw = [{"action": hostile, "ticket_id": "ticket-1"}]
+    _HostileSnapshotText.comparisons = 0
+    _HostileSnapshotText.hash_calls = 0
+
+    with pytest.raises(ValueError, match="lifecycle action must be canonical text"):
+        PaperBook._parse_lifecycle(raw, 7)
+
+    assert _HostileSnapshotText.comparisons == 0
+    assert _HostileSnapshotText.hash_calls == 0

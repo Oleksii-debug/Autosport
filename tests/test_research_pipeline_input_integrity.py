@@ -80,6 +80,18 @@ class ResearchPipelineInputIntegrityTests(unittest.TestCase):
                 ):
                     ResearchEvidence(**kwargs)
 
+
+    def test_research_evidence_rejects_uppercase_digest_aliases(self):
+        for field in ("content_sha256", "market_snapshot_hash"):
+            with self.subTest(field=field):
+                kwargs = self._evidence_kwargs()
+                kwargs[field] = str(kwargs[field]).upper()
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "lowercase 64-character SHA-256",
+                ):
+                    ResearchEvidence(**kwargs)
+
     def test_research_evidence_requires_canonical_string_identity_and_timestamps(self):
         for field, value in (
             ("evidence_id", " evidence-1"),

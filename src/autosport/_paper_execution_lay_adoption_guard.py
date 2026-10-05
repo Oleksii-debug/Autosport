@@ -818,10 +818,22 @@ def _assert_recoverable_book_state(
             materialize_exposure=materialize_exposure,
         )
 
-    if not isinstance(pre_action_book, _adoption.PaperBook):
-        raise TypeError("pre_action_book must be PaperBook")
+    if type(pre_action_book) is not _adoption.PaperBook:
+        raise TypeError("pre_action_book must be exact PaperBook")
     if type(materialize_exposure) is not bool:
         raise TypeError("materialize_exposure must be bool")
+
+    # Recovery equality decides whether durable economic state already equals
+    # the pre-action snapshot. Validate both exact PaperBook values before any
+    # field/container equality so corrupted frozen values cannot execute custom
+    # comparison hooks or mint an idempotent recovery result.
+    try:
+        type(self.book)._validate_loaded_state(self.book)
+        type(pre_action_book)._validate_loaded_state(pre_action_book)
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "PAPER recovery requires canonical validated PaperBook state"
+        ) from exc
 
     if self._same_book_state(self.book, pre_action_book):
         return

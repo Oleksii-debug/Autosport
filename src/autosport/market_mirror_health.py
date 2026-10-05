@@ -45,8 +45,7 @@ class ProviderHealthReplayBoundary:
                 "health replay source_id must be a non-empty trimmed string"
             )
         if (
-            isinstance(self.transition_order, bool)
-            or not isinstance(self.transition_order, int)
+            type(self.transition_order) is not int
             or self.transition_order < 0
         ):
             raise ValueError(
@@ -157,7 +156,7 @@ class HealthGatedMirrorDecisionIndex:
 
     @staticmethod
     def _boundary_order(value: object) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        if type(value) is not int or value < 0:
             raise ValueError("health replay transition_order must be a non-negative integer")
         return value
 

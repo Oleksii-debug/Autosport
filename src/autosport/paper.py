@@ -1249,18 +1249,21 @@ class PaperBook:
                 raise ValueError(
                     f"PaperBook snapshot leg {index} for ticket {ticket_id} must be an object"
                 )
-            if schema_version == _PAPER_SNAPSHOT_SCHEMA_VERSION:
+            if schema_version is not None:
                 expected_leg_fields = {
                     "event_id",
                     "market_id",
                     "selection_id",
                     "locked_odds",
-                    "sport",
-                    "exchange_side",
                 }
-                if set(raw_leg) != expected_leg_fields:
+                if schema_version >= 6:
+                    expected_leg_fields.add("sport")
+                if schema_version >= 7:
+                    expected_leg_fields.add("exchange_side")
+                unexpected_leg_fields = set(raw_leg) - expected_leg_fields
+                if unexpected_leg_fields:
                     raise ValueError(
-                        "PaperBook snapshot schema 7 ticket leg contains unexpected fields"
+                        f"PaperBook snapshot schema {schema_version} ticket leg contains unexpected fields"
                     )
             sport = (
                 cls._required_snapshot_field(raw_leg, "sport", "ticket leg")
@@ -1344,7 +1347,7 @@ class PaperBook:
             or schema_version not in _SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS
         ):
             raise ValueError("unsupported PaperBook snapshot schema_version")
-        if schema_version == _PAPER_SNAPSHOT_SCHEMA_VERSION:
+        if not is_legacy:
             expected_root_fields = {
                 "schema_version",
                 "initial_bankroll",
@@ -1352,9 +1355,10 @@ class PaperBook:
                 "tickets",
                 "lifecycle",
             }
-            if set(raw) != expected_root_fields:
+            unexpected_root_fields = set(raw) - expected_root_fields
+            if unexpected_root_fields:
                 raise ValueError(
-                    "PaperBook snapshot schema 7 root contains unexpected fields"
+                    f"PaperBook snapshot schema {schema_version} root contains unexpected fields"
                 )
 
         initial_bankroll = cls._parse_snapshot_decimal(
@@ -1373,24 +1377,28 @@ class PaperBook:
         for item in tickets_raw:
             if type(item) is not dict:
                 raise ValueError("PaperBook snapshot ticket must be an object")
-            if schema_version == _PAPER_SNAPSHOT_SCHEMA_VERSION:
+            if not is_legacy:
                 expected_ticket_fields = {
                     "ticket_id",
                     "stake",
                     "legs",
                     "placed_at",
-                    "settled_at",
                     "status",
                     "payout",
                     "strategy_reason",
-                    "provider_source_ids",
-                    "provider_accounts",
-                    "bankroll_id",
-                    "currency",
                 }
-                if set(item) != expected_ticket_fields:
+                if schema_version >= 3:
+                    expected_ticket_fields.update(
+                        {"provider_source_ids", "bankroll_id", "currency"}
+                    )
+                if schema_version >= 4:
+                    expected_ticket_fields.add("provider_accounts")
+                if schema_version >= 5:
+                    expected_ticket_fields.add("settled_at")
+                unexpected_ticket_fields = set(item) - expected_ticket_fields
+                if unexpected_ticket_fields:
                     raise ValueError(
-                        "PaperBook snapshot schema 7 ticket contains unexpected fields"
+                        f"PaperBook snapshot schema {schema_version} ticket contains unexpected fields"
                     )
             ticket_id = cls._require_canonical_text(
                 cls._required_snapshot_field(item, "ticket_id", "ticket"),

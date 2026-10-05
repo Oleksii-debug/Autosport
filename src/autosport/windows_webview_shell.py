@@ -1815,8 +1815,11 @@ class AutosportWebController:
                 initial_bankroll="10000",
                 poll_seconds=_PRODUCT_POLL_SECONDS,
             )
-        except Exception as exc:
-            return self._fail(_safe_exception_text(exc))
+        except Exception:
+            return self._fail(
+                "Тривалий імітаційний режим не запущено: "
+                "внутрішня перевірка конфігурації відхилила запуск."
+            )
         if not started:
             return self._fail("Тривалий імітаційний режим уже запущено.")
         existing_identity = getattr(self, "_product_runtime_identity", None)

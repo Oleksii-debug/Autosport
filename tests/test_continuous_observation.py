@@ -1048,7 +1048,39 @@ class ContinuousObservationTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     ValueError,
-                    "status_path must not enter monotonic authority root",
+                    "status_path must not overlap monotonic authority root",
+                ):
+                    self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertFalse(status_path.exists())
+            self.assertFalse(workspace.exists())
+
+    def test_status_path_cannot_be_ancestor_of_monotonic_authority_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            status_path = base / "operator-state"
+            workspace = base / "workspace"
+            authority_root = status_path / "machine-authority"
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=status_path,
+            )
+
+            with patch.dict(
+                "os.environ",
+                {"AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(authority_root)},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "status_path must not overlap monotonic authority root",
                 ):
                     self._run(provider, config)
 

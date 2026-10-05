@@ -363,12 +363,12 @@ def poll_open_market_store_once(
     only the new provider batch and publishes its material invalidations. It therefore
     avoids re-opening/rebuilding append-only market history on every live cycle.
     """
-    if not isinstance(store, SQLiteMarketStore):
-        raise TypeError("store must be a SQLiteMarketStore")
-    if not isinstance(health_store, SourceHealthStore):
-        raise TypeError("health_store must be a SourceHealthStore")
-    if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
-        raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
+    if type(store) is not SQLiteMarketStore:
+        raise TypeError("store must be an exact SQLiteMarketStore")
+    if type(health_store) is not SourceHealthStore:
+        raise TypeError("health_store must be an exact SourceHealthStore")
+    if type(mirror_updates) is not BoundedMirrorInvalidationBuffer:
+        raise TypeError("mirror_updates must be an exact BoundedMirrorInvalidationBuffer")
 
     bus = MarketEventBus(store)
     bus.subscribe(mirror_updates.accept_persisted)

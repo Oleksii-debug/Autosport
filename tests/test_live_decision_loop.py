@@ -33,9 +33,11 @@ from autosport.live_decision_loop import (
     LiveDecisionProgressError,
     LiveLoopBounds,
     PersistentLiveDecisionLoop,
+    _Progress,
 )
 from autosport.market_bus import MarketEventBus
 from autosport.market_mirror import MirrorSnapshot
+from autosport.market_mirror_health import ProviderHealthReplayBoundary
 from autosport.market_mirror_runtime import FocusedMirrorDependencyChurnError
 from autosport.market_state_identity import PROPHETX_REST_MARKET_STATE_CONTRACT
 from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
@@ -202,6 +204,54 @@ class _PositiveIntentFactory:
                 config_sha256=self.config_sha256,
             ),
         )
+
+
+class LiveDecisionProgressAuthorityTests(unittest.TestCase):
+    @staticmethod
+    def _progress(**overrides):
+        values = {
+            "loop_id": "loop-1",
+            "phase": "pending",
+            "decision_ts": "2026-09-18T18:00:00+00:00",
+            "market_state_sha256": "a" * 64,
+            "market_append_generation": 1,
+            "health_boundaries": (),
+            "decision_context_sha256": "b" * 64,
+            "affected_input_ids": (),
+            "registered_input_ids": (),
+            "decision_id": None,
+            "plan_sha256": None,
+            "ledger_offset": 0,
+            "gate": "normal",
+        }
+        values.update(overrides)
+        return _Progress(**values)
+
+    def test_progress_rejects_health_boundary_subclasses_before_serialization(self) -> None:
+        class Boundary(ProviderHealthReplayBoundary):
+            def to_dict(self):
+                raise AssertionError("hostile boundary serialization executed")
+
+        hostile = Boundary(
+            source_id="provider-a",
+            recorded_at=None,
+            transition_order=0,
+        )
+        with self.assertRaisesRegex(
+            LiveDecisionProgressError,
+            "exact provider health replay boundaries",
+        ):
+            self._progress(health_boundaries=(hostile,))
+
+    def test_progress_rejects_integer_subclass_ledger_frontier(self) -> None:
+        class Offset(int):
+            pass
+
+        with self.assertRaisesRegex(
+            LiveDecisionProgressError,
+            "ledger frontier must be non-negative",
+        ):
+            self._progress(ledger_offset=Offset(0))
 
 
 class PersistentLiveDecisionLoopTests(unittest.TestCase):

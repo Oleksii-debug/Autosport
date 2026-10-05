@@ -293,6 +293,26 @@ class _DecisionLedgerPathLock:
         self.blocking = blocking
         self._handle = None
 
+    def _assert_open_path_identity(self, handle) -> None:
+        try:
+            opened = os.fstat(handle.fileno())
+            current = os.lstat(self.path)
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer-lock path changed during acquisition"
+            ) from exc
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or stat.S_ISLNK(current.st_mode)
+            or getattr(opened, "st_nlink", 1) != 1
+            or getattr(current, "st_nlink", 1) != 1
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer-lock path changed during acquisition"
+            )
+
     def __enter__(self) -> "_DecisionLedgerPathLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -322,14 +342,7 @@ class _DecisionLedgerPathLock:
             ) from exc
         handle = os.fdopen(fd, "a+b", closefd=True)
         try:
-            info = os.fstat(handle.fileno())
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or getattr(info, "st_nlink", 1) != 1
-            ):
-                raise DecisionLedgerIntegrityError(
-                    "Decision Ledger writer-lock path must be one regular file"
-                )
+            self._assert_open_path_identity(handle)
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
                 handle.write(b"\0")
@@ -360,6 +373,7 @@ class _DecisionLedgerPathLock:
                     raise DecisionLedgerIntegrityError(
                         "Decision Ledger writer is active"
                     ) from exc
+            self._assert_open_path_identity(handle)
         except BaseException:
             handle.close()
             raise

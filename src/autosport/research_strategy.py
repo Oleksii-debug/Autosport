@@ -711,18 +711,24 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
         outcomes_raw = group_raw.get("outcomes")
         if not isinstance(outcomes_raw, list):
             raise ValueError("research scenario group outcomes must be a list")
-        outcomes = tuple(
-            ScenarioOutcome(
-                _canonical_plan_identity(
-                    outcome["quote_key"],
-                    "research scenario outcome quote_key",
-                ),
-                Decimal(str(outcome["probability"]))
-                if outcome.get("probability") is not None
-                else None,
+        outcomes_list: list[ScenarioOutcome] = []
+        for outcome in outcomes_raw:
+            if type(outcome) is not dict:
+                raise ValueError("research scenario outcome must be an object")
+            if "quote_key" not in outcome:
+                raise ValueError("research scenario outcome is missing required field quote_key")
+            outcomes_list.append(
+                ScenarioOutcome(
+                    _canonical_plan_identity(
+                        outcome["quote_key"],
+                        "research scenario outcome quote_key",
+                    ),
+                    Decimal(str(outcome["probability"]))
+                    if outcome.get("probability") is not None
+                    else None,
+                )
             )
-            for outcome in outcomes_raw
-        )
+        outcomes = tuple(outcomes_list)
         groups.append(
             ScenarioGroup(
                 _canonical_plan_identity(
@@ -821,6 +827,22 @@ def _risk_of_ruin_evidence_from_dict(raw: Any) -> RiskOfRuinEvidence:
 def _forecast_from_dict(raw: Any) -> ForecastRecord:
     if not isinstance(raw, dict):
         raise ValueError("ForecastRecord entry must be an object")
+    required_fields = (
+        "quote_key",
+        "probability",
+        "model_id",
+        "model_version",
+        "strategy_version",
+        "model_training_cutoff_ts",
+        "input_cutoff_ts",
+        "generated_at",
+        "forecast_id",
+    )
+    missing = [field for field in required_fields if field not in raw]
+    if missing:
+        raise ValueError(
+            "ForecastRecord is missing required field(s): " + ",".join(missing)
+        )
     evidence_hashes_raw = raw.get("evidence_hashes", [])
     if not isinstance(evidence_hashes_raw, list):
         raise ValueError("ForecastRecord evidence_hashes must be a JSON array")
@@ -869,6 +891,20 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
 def _evidence_from_dict(raw: Any) -> ResearchEvidence:
     if not isinstance(raw, dict):
         raise ValueError("ResearchEvidence entry must be an object")
+    required_fields = (
+        "evidence_id",
+        "quote_key",
+        "source_id",
+        "observed_at",
+        "available_at",
+        "decimal_odds",
+        "content_sha256",
+    )
+    missing = [field for field in required_fields if field not in raw]
+    if missing:
+        raise ValueError(
+            "ResearchEvidence is missing required field(s): " + ",".join(missing)
+        )
     quality_flags_raw = raw.get("quality_flags", [])
     if not isinstance(quality_flags_raw, list):
         raise ValueError("ResearchEvidence quality_flags must be a JSON array")

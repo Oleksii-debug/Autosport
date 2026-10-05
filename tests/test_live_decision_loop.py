@@ -243,6 +243,21 @@ class LiveDecisionProgressAuthorityTests(unittest.TestCase):
         ):
             self._progress(health_boundaries=(hostile,))
 
+    def test_committed_progress_rejects_integer_subclass_ledger_offset(self) -> None:
+        class Offset(int):
+            pass
+
+        with self.assertRaisesRegex(
+            LiveDecisionProgressError,
+            "requires non-negative ledger_offset",
+        ):
+            self._progress(
+                phase="committed",
+                decision_id="decision-1",
+                plan_sha256="c" * 64,
+                ledger_offset=Offset(0),
+            )
+
     def test_progress_rejects_integer_subclass_ledger_frontier(self) -> None:
         class Offset(int):
             pass

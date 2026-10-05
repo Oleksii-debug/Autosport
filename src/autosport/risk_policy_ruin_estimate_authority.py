@@ -221,6 +221,48 @@ _CANONICAL_JSON_HELPER = _canonical_json
 _CANONICAL_JSON_HELPER_CODE = getattr(_CANONICAL_JSON_HELPER, "__code__", None)
 
 
+def _estimate_fields_differ(
+    candidate: ProductFixedNRiskPolicyEstimate,
+    canonical: ProductFixedNRiskPolicyEstimate,
+    field_names: tuple[str, ...],
+) -> bool:
+    """Compare exact estimate fields without invoking caller-owned equality."""
+
+    try:
+        candidate_members = object.__getattribute__(candidate, "planned_member_ids")
+        canonical_members = object.__getattribute__(canonical, "planned_member_ids")
+    except AttributeError:
+        return True
+    if type(candidate_members) is not tuple or type(canonical_members) is not tuple:
+        return True
+    if len(candidate_members) != len(canonical_members):
+        return True
+    if any(type(item) is not str for item in candidate_members):
+        return True
+    if any(type(item) is not str for item in canonical_members):
+        return True
+
+    try:
+        for field_name in field_names:
+            candidate_value = object.__getattribute__(candidate, field_name)
+            canonical_value = object.__getattribute__(canonical, field_name)
+            if type(candidate_value) is not type(canonical_value):
+                return True
+            if candidate_value != canonical_value:
+                return True
+    except AttributeError:
+        return True
+    return False
+
+
+_ESTIMATE_FIELD_COMPARISON = _estimate_fields_differ
+_ESTIMATE_FIELD_COMPARISON_CODE = getattr(
+    _ESTIMATE_FIELD_COMPARISON,
+    "__code__",
+    None,
+)
+
+
 def _require_dispatch() -> None:
     if (
         ProductFixedNRiskEvaluationPrecommitAuthority is not _PRECOMMIT_TYPE
@@ -260,6 +302,9 @@ def _require_dispatch() -> None:
         or _canonical_json is not _CANONICAL_JSON_HELPER
         or getattr(_CANONICAL_JSON_HELPER, "__code__", None)
         is not _CANONICAL_JSON_HELPER_CODE
+        or _estimate_fields_differ is not _ESTIMATE_FIELD_COMPARISON
+        or getattr(_ESTIMATE_FIELD_COMPARISON, "__code__", None)
+        is not _ESTIMATE_FIELD_COMPARISON_CODE
         or _derive_policy_estimate_material
         is not _DERIVE_POLICY_ESTIMATE_MATERIAL
         or getattr(_DERIVE_POLICY_ESTIMATE_MATERIAL, "__code__", None)
@@ -607,18 +652,11 @@ def _build_verifier(resolver, estimate_type):
             raise ProductFixedNRiskPolicyEstimateError(
                 "risk policy estimate resolver returned invalid result type"
             )
-        try:
-            differs = any(
-                type(object.__getattribute__(candidate, field_name))
-                is not type(object.__getattribute__(canonical, field_name))
-                or object.__getattribute__(candidate, field_name)
-                != object.__getattribute__(canonical, field_name)
-                for field_name in field_names
-            )
-        except AttributeError as exc:
-            raise ProductFixedNRiskPolicyEstimateError(
-                "risk policy estimate differs from canonical durable roots"
-            ) from exc
+        differs = _ESTIMATE_FIELD_COMPARISON(
+            candidate,
+            canonical,
+            field_names,
+        )
         if differs:
             raise ProductFixedNRiskPolicyEstimateError(
                 "risk policy estimate differs from canonical durable roots"

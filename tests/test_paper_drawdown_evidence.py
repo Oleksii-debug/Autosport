@@ -341,7 +341,10 @@ def test_caller_modified_scalar_cannot_pass_current_reresolution(tmp_path):
         historical_max_drawdown_amount=Decimal("1"),
     )
 
-    with pytest.raises(PaperDrawdownEvidenceMismatchError):
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="positive historical drawdown requires fraction and episode identity",
+    ):
         require_current_paper_drawdown_evidence(tmp_path, forged)
 
 
@@ -567,6 +570,7 @@ def test_evidence_shape_rejects_lifecycle_and_path_claim_drift(tmp_path):
         replace(
             open_evidence,
             points=open_evidence.points + (duplicate_open,),
+            path_point_count=open_evidence.path_point_count + 1,
         )
 
     book.settle(

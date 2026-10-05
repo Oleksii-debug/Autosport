@@ -682,7 +682,7 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            paper_path = workspace / "paper-book.json"
+            paper_path = workspace / "paper_book.json"
             book.save(paper_path)
             EconomicGoalStore(workspace).initialize_owner(goal)
 
@@ -698,15 +698,34 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(actual_path, expected_path)
         self.assertEqual(actual_drawdown, expected_drawdown)
 
+    def test_durable_resolver_rejects_alternate_paper_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical workspace/paper_book.json",
+            ):
+                resolve_durable_product_issued_paper_equity_path(
+                    paper_book_path=str(workspace / "paper-book.json"),
+                    workspace=str(workspace),
+                )
+
+    def test_durable_resolver_rejects_relative_workspace_and_paper_path(self) -> None:
+        with self.assertRaisesRegex(ValueError, "workspace must be an absolute"):
+            resolve_durable_product_issued_paper_equity_path(
+                paper_book_path="workspace/paper_book.json",
+                workspace="workspace",
+            )
+
     def test_durable_resolver_rejects_noncanonical_path_argument_types(self) -> None:
         with self.assertRaisesRegex(TypeError, "paper_book_path"):
             resolve_durable_product_issued_paper_equity_path(
-                paper_book_path=Path("paper-book.json"),  # type: ignore[arg-type]
+                paper_book_path=Path("paper_book.json"),  # type: ignore[arg-type]
                 workspace="workspace",
             )
         with self.assertRaisesRegex(TypeError, "workspace"):
             resolve_durable_product_issued_paper_equity_path(
-                paper_book_path="paper-book.json",
+                paper_book_path="paper_book.json",
                 workspace=Path("workspace"),  # type: ignore[arg-type]
             )
 
@@ -947,7 +966,7 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            paper_path = workspace / "paper-book.json"
+            paper_path = workspace / "paper_book.json"
             book.save(paper_path)
             EconomicGoalStore(workspace).initialize_owner(goal)
 
@@ -983,7 +1002,7 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            paper_path = workspace / "paper-book.json"
+            paper_path = workspace / "paper_book.json"
             book.save(paper_path)
             EconomicGoalStore(workspace).initialize_owner(goal)
 
@@ -1015,7 +1034,7 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            paper_path = workspace / "paper-book.json"
+            paper_path = workspace / "paper_book.json"
             book.save(paper_path)
             EconomicGoalStore(workspace).initialize_owner(goal)
 
@@ -1047,7 +1066,7 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            paper_path = workspace / "paper-book.json"
+            paper_path = workspace / "paper_book.json"
             book.save(paper_path)
             EconomicGoalStore(workspace).initialize_owner(goal)
 
@@ -1077,7 +1096,7 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            paper_path = workspace / "paper-book.json"
+            paper_path = workspace / "paper_book.json"
             book.save(paper_path)
             EconomicGoalStore(workspace).initialize_owner(goal)
 
@@ -1198,7 +1217,7 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            paper_path = workspace / "paper-book.json"
+            paper_path = workspace / "paper_book.json"
             book.save(paper_path)
             EconomicGoalStore(workspace).initialize_owner(goal)
 

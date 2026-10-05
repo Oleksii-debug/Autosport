@@ -311,6 +311,91 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
 
+    def test_invalid_started_at_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("invalid-started-at", side="BACK"))
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(Exception, "started_at|ISO-8601|canonical"):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="invalid-started-at",
+                    started_at="not-a-timestamp",
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_unknown_observation_key_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("known-action", side="BACK"))
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                Exception,
+                "observation.*outside execution plan",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="unknown-observation",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                    observations={"foreign-action": object()},
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_unknown_suspension_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("known-suspension", side="BACK"))
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                Exception,
+                "suspended_action_ids.*outside execution plan",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="unknown-suspension",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                    suspended_action_ids=frozenset({"foreign-action"}),
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_post_mint_decimal_resource_bomb_fails_before_digest_or_durable_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("resource-bomb", odds="2.50", stake="10.00", side="BACK")
+            current_prepared = prepared(runtime, current)
+            object.__setattr__(current, "requested_odds", Decimal("1E+9000"))
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "Decimal resource bounds",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="resource-bomb",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
     def test_paper_value_rejects_mutated_side_subclass_without_comparison_hooks(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

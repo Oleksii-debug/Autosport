@@ -200,6 +200,13 @@ class BetfairAuthenticatedMarketProvider:
         self._pending: tuple[ProviderQuote, ...] = ()
         self._pending_offset = 0
         self._pending_authority_revoked = False
+        self._rollback_page: tuple[
+            tuple[ProviderQuote, ...],
+            int,
+            int,
+            dict[BetfairQuoteIdentity, ProviderQuote],
+            bool,
+        ] | None = None
 
     @property
     def durable_bound(self) -> bool:
@@ -478,6 +485,26 @@ class BetfairAuthenticatedMarketProvider:
 
         return tuple(emitted)
 
+    def reset_pending_snapshot(self) -> None:
+        """Rollback only the last exposed page when persistence never committed it."""
+
+        with self._lock:
+            if self._rollback_page is None:
+                return
+            (
+                pending,
+                start,
+                sequence,
+                open_by_identity,
+                authority_revoked,
+            ) = self._rollback_page
+            self._pending = pending
+            self._pending_offset = start
+            self._sequence = sequence
+            self._open_by_identity = open_by_identity
+            self._pending_authority_revoked = authority_revoked
+            self._rollback_page = None
+
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         with self._lock:
             return self._read_batch_locked(max_items)
@@ -490,6 +517,11 @@ class BetfairAuthenticatedMarketProvider:
                 "Betfair authenticated provider must bind durable current state before read"
             )
 
+        # A second underlying read can occur only after the previous exposed page has
+        # left the replay wrapper's in-flight slot. At that point the old rollback
+        # checkpoint is no longer eligible for pre-commit abandonment.
+        self._rollback_page = None
+
         if self._pending_offset >= len(self._pending):
             self._pending = self._build_transition()
             self._pending_offset = 0
@@ -500,6 +532,13 @@ class BetfairAuthenticatedMarketProvider:
         start = self._pending_offset
         stop = min(len(self._pending), start + max_items)
         quotes = self._pending[start:stop]
+        self._rollback_page = (
+            self._pending,
+            start,
+            self._sequence,
+            dict(self._open_by_identity),
+            self._pending_authority_revoked,
+        )
         self._pending_offset = stop
         for quote in quotes:
             identity = _identity_from_metadata(quote.metadata)

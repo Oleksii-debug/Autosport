@@ -637,6 +637,7 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         for helper_name in (
             "_clock_instant",
+            "_parse_instant",
             "_state_sha256",
             "_semantic_binding",
             "_tx_id",

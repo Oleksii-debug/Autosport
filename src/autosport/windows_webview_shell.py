@@ -251,6 +251,20 @@ def _write_webview2_runtime_witness(path: Path, browser_version: str) -> None:
             temporary.unlink()
 
 
+_CANONICAL_WEBVIEW2_RUNTIME_VERSION_OBSERVER = _observed_webview2_browser_version
+_CANONICAL_WEBVIEW2_RUNTIME_VERSION_OBSERVER_CODE = getattr(
+    _CANONICAL_WEBVIEW2_RUNTIME_VERSION_OBSERVER,
+    "__code__",
+    None,
+)
+_CANONICAL_WEBVIEW2_RUNTIME_WITNESS_WRITER = _write_webview2_runtime_witness
+_CANONICAL_WEBVIEW2_RUNTIME_WITNESS_WRITER_CODE = getattr(
+    _CANONICAL_WEBVIEW2_RUNTIME_WITNESS_WRITER,
+    "__code__",
+    None,
+)
+
+
 def web_shell_index_path() -> Path:
     return Path(__file__).resolve().with_name(WEB_SHELL_DIRNAME) / WEB_SHELL_INDEX
 
@@ -2893,17 +2907,13 @@ def launch_windows_shell(
     title: str | None = None,
     storage_path: Path | None = None,
 ) -> int:
-    runtime_version_observer = _observed_webview2_browser_version
-    runtime_version_observer_code = getattr(
-        runtime_version_observer,
-        "__code__",
-        None,
+    runtime_version_observer = _CANONICAL_WEBVIEW2_RUNTIME_VERSION_OBSERVER
+    runtime_version_observer_code = (
+        _CANONICAL_WEBVIEW2_RUNTIME_VERSION_OBSERVER_CODE
     )
-    runtime_witness_writer = _write_webview2_runtime_witness
-    runtime_witness_writer_code = getattr(
-        runtime_witness_writer,
-        "__code__",
-        None,
+    runtime_witness_writer = _CANONICAL_WEBVIEW2_RUNTIME_WITNESS_WRITER
+    runtime_witness_writer_code = (
+        _CANONICAL_WEBVIEW2_RUNTIME_WITNESS_WRITER_CODE
     )
 
     def runtime_witness_dispatch_intact() -> bool:
@@ -2914,6 +2924,11 @@ def launch_windows_shell(
             and _write_webview2_runtime_witness is runtime_witness_writer
             and getattr(runtime_witness_writer, "__code__", None)
             is runtime_witness_writer_code
+        )
+
+    if not runtime_witness_dispatch_intact():
+        raise WindowsWebViewUnavailable(
+            "Autosport runtime witness authority changed before launch"
         )
 
     _reject_webview2_environment_overrides()

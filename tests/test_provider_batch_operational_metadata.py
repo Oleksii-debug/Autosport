@@ -43,7 +43,9 @@ class ProviderBatchOperationalMetadataTests(unittest.TestCase):
             ("quality flags not tuple", None, ["GAP"], TypeError, "must be a tuple"),
             ("quality flag not string", None, (7,), TypeError, "quality flag must be str"),
             ("blank quality flag", None, ("",), ValueError, "non-empty and trimmed"),
-            ("untrimmed quality flag", None, (" GAP",), ValueError, "non-empty and trimmed"),
+            ("untrimmed quality flag", None, (" GAP",), ValueError, "canonical text"),
+            ("cursor control character", "page\nforged", (), ValueError, "control characters"),
+            ("quality flag control character", None, ("GAP\rFORGED",), ValueError, "canonical text"),
         )
 
         for label, cursor, quality_flags, error_type, message in cases:

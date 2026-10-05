@@ -1121,3 +1121,32 @@ def test_rebound_monotonic_authority_id_is_rejected_before_execution(monkeypatch
             action_id=action.action_id,
         )
 
+def test_in_place_issued_plan_constructor_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    constructor = issuance_module.IssuedSupervisedPlan.__init__
+    original_code = constructor.__code__
+    attacker_called = False
+
+    def attacker_init(self, *args, **kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated issued-plan constructor must never execute")
+
+    try:
+        constructor.__code__ = attacker_init.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        constructor.__code__ = original_code
+
+    assert attacker_called is False
+

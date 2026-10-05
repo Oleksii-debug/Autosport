@@ -330,7 +330,7 @@ class IngestionEngine:
                 raise ValueError(
                     f"provider returned {len(batch.quotes)} quotes above requested batch bound {max_items}"
                 )
-        except Exception as exc:
+        except BaseException as exc:
             if self.health_store is not None and provider_source_id is not None:
                 try:
                     self.health_store.record_failure(

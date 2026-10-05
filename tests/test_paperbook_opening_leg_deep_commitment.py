@@ -2242,6 +2242,32 @@ def test_save_rejects_rebound_directory_fsync_helper_before_execution(
     assert attacker_calls == 0
 
 
+def test_save_rejects_rebound_directory_fsync_before_nested_parent_creation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(directory):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound nested directory fsync helper executed")
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_fsync_snapshot_directory",
+        staticmethod(hostile),
+    )
+
+    with pytest.raises(ValueError, match="directory fsync dispatch changed"):
+        book.save(tmp_path / "missing-parent" / "nested" / "never-published.json")
+
+    assert attacker_calls == 0
+    assert not (tmp_path / "missing-parent").exists()
+
+
 
 _SNAPSHOT_HELPER_AUTHORITY_NAMES = (
     "_require_finite",

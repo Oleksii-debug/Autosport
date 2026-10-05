@@ -1274,6 +1274,10 @@ class PaperBook:
             raise ValueError(
                 f"PaperBook snapshot {label} must be a non-empty trimmed decimal string"
             )
+        if len(value) > _MAX_PAPER_DECIMAL_TEXT_CHARS:
+            raise ValueError(
+                f"PaperBook snapshot {label} decimal text exceeds the canonical size limit"
+            )
         try:
             parsed = Decimal(value)
         except DecimalException as exc:
@@ -1306,6 +1310,23 @@ class PaperBook:
             if type(raw_leg) is not dict:
                 raise ValueError(
                     f"PaperBook snapshot leg {index} for ticket {ticket_id} must be an object"
+                )
+            expected_leg_fields = {
+                "event_id",
+                "market_id",
+                "selection_id",
+                "locked_odds",
+            }
+            if schema_version is not None and schema_version >= 6:
+                expected_leg_fields.add("sport")
+            if schema_version is not None and schema_version >= 7:
+                expected_leg_fields.add("exchange_side")
+            if set(raw_leg) - expected_leg_fields:
+                version_label = (
+                    "legacy" if schema_version is None else f"schema {schema_version}"
+                )
+                raise ValueError(
+                    f"PaperBook snapshot {version_label} ticket leg contains unexpected fields"
                 )
             sport = (
                 cls._required_snapshot_field(raw_leg, "sport", "ticket leg")
@@ -1389,6 +1410,22 @@ class PaperBook:
             or schema_version not in _SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS
         ):
             raise ValueError("unsupported PaperBook snapshot schema_version")
+        expected_root_fields = (
+            {"initial_bankroll", "balance", "tickets"}
+            if is_legacy
+            else {
+                "schema_version",
+                "initial_bankroll",
+                "balance",
+                "tickets",
+                "lifecycle",
+            }
+        )
+        if set(raw) - expected_root_fields:
+            version_label = "legacy" if is_legacy else f"schema {schema_version}"
+            raise ValueError(
+                f"PaperBook snapshot {version_label} root contains unexpected fields"
+            )
 
         initial_bankroll = cls._parse_snapshot_decimal(
             cls._required_snapshot_field(raw, "initial_bankroll", "root"),
@@ -1406,6 +1443,28 @@ class PaperBook:
         for item in tickets_raw:
             if type(item) is not dict:
                 raise ValueError("PaperBook snapshot ticket must be an object")
+            expected_ticket_fields = {
+                "ticket_id",
+                "stake",
+                "legs",
+                "placed_at",
+                "status",
+                "payout",
+                "strategy_reason",
+            }
+            if not is_legacy and schema_version >= 3:
+                expected_ticket_fields.update(
+                    {"provider_source_ids", "bankroll_id", "currency"}
+                )
+            if not is_legacy and schema_version >= 4:
+                expected_ticket_fields.add("provider_accounts")
+            if not is_legacy and schema_version >= 5:
+                expected_ticket_fields.add("settled_at")
+            if set(item) - expected_ticket_fields:
+                version_label = "legacy" if is_legacy else f"schema {schema_version}"
+                raise ValueError(
+                    f"PaperBook snapshot {version_label} ticket contains unexpected fields"
+                )
             ticket_id = cls._require_canonical_text(
                 cls._required_snapshot_field(item, "ticket_id", "ticket"),
                 "snapshot ticket_id",

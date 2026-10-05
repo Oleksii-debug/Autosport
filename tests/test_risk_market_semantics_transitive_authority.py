@@ -135,6 +135,22 @@ def test_portfolio_digest_rejects_captured_payload_code_mutation(
     assert PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book) is None
 
 
+def test_portfolio_digest_rejects_canonical_domain_global_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg("rules:s1")], Decimal("1"), placed_at=_PROPOSAL)
+    assert PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book) is not None
+
+    monkeypatch.setattr(
+        domain_module,
+        "_CANONICAL_RESERVED_SEMANTIC_IDENTITIES",
+        frozenset(),
+    )
+
+    assert PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book) is None
+
+
 def test_vector_digest_rejects_captured_scalar_digest_code_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

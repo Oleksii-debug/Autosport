@@ -765,6 +765,25 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "schema 7 ticket contains unexpected fields"):
             PaperBook.load_bytes(path.read_bytes())
 
+    def test_schema6_cannot_launder_schema7_exchange_side_field(self):
+        book = PaperBook("100")
+        leg = TicketLeg(
+            "e-schema-downgrade",
+            "m-schema-downgrade",
+            "s-schema-downgrade",
+            locked_odds=Decimal("2"),
+            sport="tennis",
+        )
+        book.open_ticket([leg], "10")
+        path = Path(self._tmp.name) / "paper_book.json"
+        book.save(path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["schema_version"] = 6
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "schema 6 ticket leg contains unexpected fields"):
+            PaperBook.load_bytes(path.read_bytes())
+
     def test_schema7_load_rejects_unexpected_leg_field(self):
         book = PaperBook("100")
         leg = TicketLeg("e-leg-extra", "m-leg-extra", "s-leg-extra", locked_odds=Decimal("2"))

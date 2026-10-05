@@ -225,3 +225,31 @@ def test_product_verifier_rejects_noncanonical_ledger_path_handle_before_fspath_
 
     assert attacker_called is False
 
+def test_product_verifier_rejects_runtime_workspace_descriptor_rebinding_before_getter(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    bound, action, store, ledger, evidence = _case(monkeypatch, tmp_path)
+    attacker_called = False
+
+    def attacker_workspace(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("runtime workspace descriptor must never execute")
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        monkeypatch.setattr(type(runtime_profile), "workspace", property(attacker_workspace))
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="product verifier authority changed",
+        ):
+            verify_product_betfair_standard_limit_price_bound(
+                evidence=evidence,
+                ledger=ledger,
+                issuance_store=store,
+                runtime_profile=runtime_profile,
+                execution_plan_id=bound.execution_plan.plan_id,
+                action_id=action.action_id,
+            )
+
+    assert attacker_called is False
+

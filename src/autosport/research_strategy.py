@@ -107,6 +107,11 @@ def _stable_event_projection(event: MarketEvent) -> dict[str, Any]:
         "score_state": event.score_state,
         "metadata": event.metadata,
     }
+    # Preserve the exact legacy projection when local receipt equals observation,
+    # while binding any material local-availability delay into research evidence.
+    if event.ingest_ts != event.observed_ts:
+        projection["ingest_ts"] = event.ingest_ts
+
     # Preserve the exact legacy/None research projection while making concrete
     # canonical market/provenance semantics identity-bearing.
     for field_name in (
@@ -349,7 +354,9 @@ class ResearchReplayAgent:
             raise RuntimeError(f"research decision executed twice: {instruction.decision_id}")
         if context.decision_ledger is None:
             raise RuntimeError("research replay strategy requires a decision ledger")
-        _validate_market_binding(instruction, context.latest_quotes)
+        decision_time = parse_iso_timestamp(instruction.decision_ts)
+        causal_quotes = _causal_latest_quotes(context.latest_quotes, decision_time)
+        _validate_market_binding(instruction, causal_quotes)
         try:
             self.pipeline.decide_and_open(
                 book=context.paper_book,
@@ -361,7 +368,7 @@ class ResearchReplayAgent:
                 stake=instruction.stake,
                 decision_ts=instruction.decision_ts,
                 market_quotes=tuple(
-                    context.latest_quotes[leg.quote_key]
+                    causal_quotes[leg.quote_key]
                     for leg in instruction.candidate.legs
                 ),
                 risk_of_ruin_evidence=instruction.risk_of_ruin_evidence,
@@ -387,18 +394,41 @@ class ResearchReplayAgent:
             )
 
 
+
+def _event_causally_available(event: MarketEvent, decision_time) -> bool:
+    source_time = parse_iso_timestamp(event.source_ts or event.observed_ts)
+    observed_time = parse_iso_timestamp(event.observed_ts)
+    ingest_time = parse_iso_timestamp(event.ingest_ts)
+    return (
+        source_time <= decision_time
+        and observed_time <= decision_time
+        and ingest_time <= decision_time
+    )
+
+
+def _causal_latest_quotes(
+    latest_quotes: dict[str, MarketEvent],
+    decision_time,
+) -> dict[str, MarketEvent]:
+    return {
+        quote_key: event
+        for quote_key, event in latest_quotes.items()
+        if _event_causally_available(event, decision_time)
+    }
+
 def _validate_market_binding(
     instruction: ResearchReplayInstruction,
     latest_quotes: dict[str, MarketEvent],
 ) -> None:
     decision_time = parse_iso_timestamp(instruction.decision_ts)
-    _validate_scenario_space_binding(instruction.groups, latest_quotes, decision_time)
+    causal_quotes = _causal_latest_quotes(latest_quotes, decision_time)
+    _validate_scenario_space_binding(instruction.groups, causal_quotes, decision_time)
     candidate_keys = tuple(leg.quote_key for leg in instruction.candidate.legs)
-    snapshot_hash = research_market_snapshot_hash(latest_quotes, candidate_keys)
+    snapshot_hash = research_market_snapshot_hash(causal_quotes, candidate_keys)
     forecasts = instruction.forecasts_by_quote
 
     for leg in instruction.candidate.legs:
-        event = latest_quotes.get(leg.quote_key)
+        event = causal_quotes.get(leg.quote_key)
         if event is None:
             raise ValueError(f"research candidate quote absent from replay state: {leg.quote_key}")
         if leg.ticket_identity() != (event.event_id, event.market_id, event.selection_id):
@@ -413,8 +443,6 @@ def _validate_market_binding(
             raise ValueError(
                 f"research candidate quote is not verified executable price evidence: {leg.quote_key}"
             )
-        if parse_iso_timestamp(event.observed_ts) > decision_time:
-            raise ValueError(f"research candidate quote is from the future: {leg.quote_key}")
         if event.decimal_odds != leg.decimal_odds:
             raise ValueError(f"research candidate odds do not match replay state: {leg.quote_key}")
 

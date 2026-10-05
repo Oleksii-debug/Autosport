@@ -2394,5 +2394,109 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.balance, Decimal("90.00"))
 
 
+    def test_class_attempt_identity_override_cannot_replace_materialization_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("class-attempt-identity-override", stake="10.00"),
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class attempt identity override executed")
+
+            with patch.object(
+                PaperExecutionAdoptionRuntime,
+                "_require_attempt_action_identity",
+                new=forbidden,
+            ):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="class-attempt-identity-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+    def test_class_assert_same_book_override_cannot_replace_reload_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("class-assert-same-book-override", stake="10.00"),
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class assert_same_book_state override executed")
+
+            with patch.object(
+                PaperExecutionAdoptionRuntime,
+                "_assert_same_book_state",
+                new=forbidden,
+            ):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="class-assert-same-book-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+    def test_lay_recovery_class_same_book_override_cannot_replace_state_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            pre_action_book = PaperBook("100.00")
+            current_prepared = prepared(
+                runtime,
+                action(
+                    "class-same-book-recovery",
+                    odds="5.00",
+                    stake="10.00",
+                    side="LAY",
+                ),
+            )
+            runtime.execute(
+                prepared=current_prepared,
+                trigger_id="class-same-book-recovery",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                return True
+
+            with patch.object(
+                PaperExecutionAdoptionRuntime,
+                "_same_book_state",
+                new=forbidden,
+            ):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=pre_action_book,
+                    prepared=current_prepared,
+                    trigger_id="class-same-book-recovery",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(book.balance, Decimal("60.00"))
+            self.assertEqual(len(book.tickets), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

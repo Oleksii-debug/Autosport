@@ -1941,6 +1941,27 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(ticket.currency, "EUR")
         self.assertEqual(book.balance, Decimal("60.00"))
 
+    def test_lay_open_bypasses_rebound_uuid4_ticket_identity(self):
+        book = PaperBook(Decimal("100"))
+        hostile_calls = 0
+
+        def forged_uuid4():
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return "forged-ticket-id"
+
+        with patch.object(paper_module.uuid, "uuid4", forged_uuid4):
+            ticket = book.open_ticket(
+                [self._lay_leg()],
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+            )
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertNotEqual(ticket.ticket_id, "forged-ticket-id")
+        self.assertTrue(ticket.ticket_id)
+        self.assertEqual(book.balance, Decimal("60.00"))
+
     def test_lay_economics_bypass_rebound_domain_and_decimal_symbols(self):
         import autosport._paperbook_lay_economics_guard as lay_economics_guard
 

@@ -33,6 +33,12 @@ PRODUCT_RUNTIME_UK_UA: Mapping[str, str] = MappingProxyType(
         "ui.product_runtime.status.stopped": (
             "Тривалу PAPER-роботу зупинено: причина {reason}; циклів {cycles}."
         ),
+        "ui.product_runtime.stop_reason.operator_stop": "запит оператора",
+        "ui.product_runtime.stop_reason.app_close": "закриття програми",
+        "ui.product_runtime.stop_reason.source_identity_mismatch": (
+            "невідповідність джерела"
+        ),
+        "ui.product_runtime.stop_reason.other": "безпечне завершення",
         "ui.product_runtime.status.error": (
             "Тривала PAPER-робота завершилась помилкою типу {error_type}. "
             "Workspace заблоковано для економічних дій до перевірки відновлення."

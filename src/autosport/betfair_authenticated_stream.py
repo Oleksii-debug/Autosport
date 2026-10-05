@@ -48,6 +48,8 @@ _MAX_FILTER_NODES = 2_048
 _MAX_FILTER_COLLECTION_ITEMS = 1_024
 _MAX_FILTER_STRING_BYTES = 4_096
 _MAX_TRACKED_AUTHORITATIVE_QUOTES = 100_000
+_MAX_TRACKED_MARKET_AUTHORITY = 100_000
+_MAX_TRACKED_RUNNER_AUTHORITY = 100_000
 _SECRET_KEY_FRAGMENTS = (
     "password",
     "secret",
@@ -689,6 +691,13 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         frame_sequence: int,
     ) -> None:
         for market_id, status in updates.items():
+            if (
+                market_id not in self._market_status_by_id
+                and len(self._market_status_by_id) >= _MAX_TRACKED_MARKET_AUTHORITY
+            ):
+                raise BetfairAuthenticatedStreamError(
+                    "authenticated market-status authority map exceeded its bound"
+                )
             prior = self._market_status_by_id.get(market_id)
             self._market_status_by_id[market_id] = status
             if status == "OPEN":
@@ -703,6 +712,13 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         frame_sequence: int,
     ) -> None:
         for runner_key, status in updates.items():
+            if (
+                runner_key not in self._runner_status_by_key
+                and len(self._runner_status_by_key) >= _MAX_TRACKED_RUNNER_AUTHORITY
+            ):
+                raise BetfairAuthenticatedStreamError(
+                    "authenticated runner-status authority map exceeded its bound"
+                )
             prior = self._runner_status_by_key.get(runner_key)
             self._runner_status_by_key[runner_key] = status
             if status == "ACTIVE":

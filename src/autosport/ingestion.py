@@ -323,7 +323,10 @@ class IngestionEngine:
             source_point: datetime | None = None
             if quote.source_ts is not None:
                 try:
-                    source_point = parse_source_timestamp(quote.source_ts)
+                    source_point = _timezone_aware_instant(
+                        quote.source_ts,
+                        "source_ts",
+                    ).astimezone(timezone.utc)
                 except (AttributeError, TypeError, ValueError):
                     flags.add("INVALID_SOURCE_TIMESTAMP")
                     rejected += 1

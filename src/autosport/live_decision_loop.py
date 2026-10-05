@@ -1036,6 +1036,12 @@ class PersistentLiveDecisionLoop:
                 ),
             )
         self._health_gate_authority = self._health_gate
+        self._health_store_authority = self._default_health_store
+        self._health_max_age_authority = (
+            None
+            if self._health_gate is None
+            else self._health_gate._max_health_age
+        )
         self._dependency_mutation_lock = RLock()
         self.inputs_path = self._workspace_authority / self.INPUTS_FILE_NAME
         self._inputs_path_authority = self.inputs_path
@@ -2883,6 +2889,19 @@ class PersistentLiveDecisionLoop:
         if self._observe is not self._observe_authority:
             raise LiveDecisionProgressError(
                 "live observation authority changed after construction"
+            )
+        if self._health_gate is not self._health_gate_authority:
+            raise LiveDecisionProgressError(
+                "live provider-health gate authority changed after construction"
+            )
+        if self._health_gate is not None and (
+            self._default_health_store is not self._health_store_authority
+            or self._health_gate._health_store is not self._health_store_authority
+            or self._health_gate._dependencies is not self.dependencies
+            or self._health_gate._max_health_age != self._health_max_age_authority
+        ):
+            raise LiveDecisionProgressError(
+                "live provider-health gate semantics changed after construction"
             )
         if self._default_health_store is not None:
             try:

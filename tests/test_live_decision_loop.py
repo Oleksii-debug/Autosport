@@ -9588,5 +9588,108 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(progress["phase"], "append_pending")
             loop.close()
 
+
+    def test_post_append_hook_cannot_redirect_live_workspace_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            model = PaperExecutionModelConfig(
+                model_id="post-append-workspace-authority",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="post-append-workspace-authority",
+                seed="post-append-workspace-authority",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            canonical_ledger = PaperExecutionLedger(
+                workspace / "paper-execution.jsonl"
+            )
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=canonical_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-post-append-workspace-authority",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                authority=authority,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            foreign_workspace = workspace / "foreign-workspace"
+            foreign_workspace.mkdir()
+
+            def redirect_workspace_after_decision_append() -> None:
+                loop.workspace = foreign_workspace
+
+            loop.post_append_hook = redirect_workspace_after_decision_append
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "workspace persistence authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(canonical_ledger.events(), ())
+            progress = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(progress["phase"], "append_pending")
+            loop.close()
+
+
+    def test_pre_pending_rejects_decision_ledger_redirection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            foreign_ledger = JsonlDecisionLedger(
+                workspace / "foreign-decisions.jsonl"
+            )
+            loop.decision_ledger = foreign_ledger
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "Decision Ledger persistence authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertFalse(loop.progress_path.exists())
+            self.assertEqual(foreign_ledger.verified_records(), ())
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            loop.close()
+
 if __name__ == "__main__":
     unittest.main()

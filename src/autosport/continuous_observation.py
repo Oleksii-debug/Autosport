@@ -401,14 +401,8 @@ def run_continuous_observation(
     except MonotonicAuthorityConfigurationError as exc:
         raise ValueError("continuous observation authority root is unsafe") from exc
     authority_root_key = canonical_path_key(authority_root)
-    try:
-        status_in_authority_root = Path(status_key).is_relative_to(
-            Path(authority_root_key)
-        )
-    except ValueError:
-        status_in_authority_root = False
-    if status_in_authority_root:
-        raise ValueError("status_path must not enter monotonic authority root")
+    if paths_overlap(status_canonical, Path(authority_root_key)):
+        raise ValueError("status_path must not overlap monotonic authority root")
 
     state = _LoopState(current_run_id, provider_source_id, started_at)
     stopper = stop_event if stop_event is not None else threading.Event()

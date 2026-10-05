@@ -26,11 +26,16 @@ _LEG_TYPE = _domain.TicketLeg
 _QUOTE_TYPE = _domain.MarketEvent
 _BOOK_TYPE = _paper.PaperBook
 _TICKET_STATUS_TYPE = _domain.TicketStatus
+_DOMAIN_MODULE = _domain
 _CANONICAL_SHA256_PAYLOAD = _risk._sha256_payload
 _CANONICAL_CONTEXT_VALIDATOR = _CONTEXT_TYPE.__post_init__
 _CANONICAL_PROPOSED_LEG_VALIDATOR = _risk._validate_proposed_ticket_leg
 _CANONICAL_MARKET_SETTLEMENT_KEY = _domain._CANONICAL_MARKET_SETTLEMENT_KEY
 _CANONICAL_SEMANTIC_IDENTITY = _domain._CANONICAL_SEMANTIC_IDENTITY
+_CANONICAL_STRING_VALUE = _domain._CANONICAL_STRING_VALUE
+_CANONICAL_REQUIRE_UTF8_ENCODABLE = _domain._CANONICAL_REQUIRE_UTF8_ENCODABLE
+_CANONICAL_SEMANTIC_ID_CHARS = _domain._CANONICAL_SEMANTIC_ID_CHARS
+_CANONICAL_RESERVED_SEMANTIC_IDENTITIES = _domain._CANONICAL_RESERVED_SEMANTIC_IDENTITIES
 _CANONICAL_QUOTE_TO_DICT = _risk._CANONICAL_MARKET_EVENT_TO_DICT
 _CANONICAL_QUOTE_FROM_DICT = _risk._CANONICAL_MARKET_EVENT_FROM_DICT
 _CANONICAL_BOOK_VALIDATE_STATE = _BOOK_TYPE._validate_loaded_state
@@ -66,6 +71,41 @@ def _capture_function_witness(value: object) -> tuple[object, ...]:
         function.__kwdefaults__,
         function.__closure__,
     )
+
+
+_DOMAIN_SEMANTICS_HELPER_WITNESSES = tuple(
+    _capture_function_witness(helper)
+    for helper in (
+        _CANONICAL_STRING_VALUE,
+        _CANONICAL_REQUIRE_UTF8_ENCODABLE,
+    )
+)
+_DOMAIN_SEMANTICS_GLOBAL_WITNESSES = (
+    ("_CANONICAL_STRING_VALUE", _CANONICAL_STRING_VALUE),
+    ("_CANONICAL_REQUIRE_UTF8_ENCODABLE", _CANONICAL_REQUIRE_UTF8_ENCODABLE),
+    ("_CANONICAL_SEMANTIC_ID_CHARS", _CANONICAL_SEMANTIC_ID_CHARS),
+    ("_CANONICAL_RESERVED_SEMANTIC_IDENTITIES", _CANONICAL_RESERVED_SEMANTIC_IDENTITIES),
+)
+
+
+def _require_domain_market_semantics_authority(
+    _domain_module=_DOMAIN_MODULE,
+    _global_witnesses=_DOMAIN_SEMANTICS_GLOBAL_WITNESSES,
+    _helper_witnesses=_DOMAIN_SEMANTICS_HELPER_WITNESSES,
+    _function_type=FunctionType,
+) -> None:
+    for name, expected in _global_witnesses:
+        if getattr(_domain_module, name, None) is not expected:
+            raise ValueError("canonical market-semantics domain authority drifted")
+    for function, code, defaults, kwdefaults, closure in _helper_witnesses:
+        if (
+            type(function) is not _function_type
+            or function.__code__ is not code
+            or function.__defaults__ is not defaults
+            or function.__kwdefaults__ is not kwdefaults
+            or function.__closure__ is not closure
+        ):
+            raise ValueError("canonical market-semantics domain helper drifted")
 
 
 def _leg_settlement_key(
@@ -113,11 +153,14 @@ def _validate_context_market_semantics(
     context: object,
     _context_type=_CONTEXT_TYPE,
     _base_validator=_CANONICAL_CONTEXT_VALIDATOR,
+    _authority=_require_domain_market_semantics_authority,
     _leg_key=_leg_settlement_key,
     _quote_key=_quote_settlement_key,
 ) -> None:
     if type(context) is not _context_type:
         raise ValueError("risk context must be canonical ProposedTicketRiskContext")
+
+    _authority()
 
     # The source validator owns every pre-existing context invariant.  This layer
     # adds only the new settlement-semantic relation and intentionally delegates
@@ -147,6 +190,7 @@ def _context_post_init(
 _CONTEXT_MARKET_SEMANTICS_HELPER_WITNESSES = tuple(
     _capture_function_witness(helper)
     for helper in (
+        _require_domain_market_semantics_authority,
         _validate_context_market_semantics,
         _leg_settlement_key,
         _quote_settlement_key,
@@ -154,6 +198,8 @@ _CONTEXT_MARKET_SEMANTICS_HELPER_WITNESSES = tuple(
         _CANONICAL_PROPOSED_LEG_VALIDATOR,
         _CANONICAL_SEMANTIC_IDENTITY,
         _CANONICAL_MARKET_SETTLEMENT_KEY,
+        _CANONICAL_STRING_VALUE,
+        _CANONICAL_REQUIRE_UTF8_ENCODABLE,
         _CANONICAL_QUOTE_TO_DICT,
         _CANONICAL_QUOTE_FROM_DICT,
         _CANONICAL_LEG_QUOTE_KEY,

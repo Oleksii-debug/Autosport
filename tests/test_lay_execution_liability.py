@@ -1836,6 +1836,28 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertNotEqual(ticket.placed_at, "2099-01-01T00:00:00+00:00")
         self.assertEqual(book.balance, Decimal("60.00"))
 
+    def test_lay_open_bypasses_mutated_uuid_dispatch_before_state_commit(self):
+        book = PaperBook(Decimal("100"))
+        hostile_calls = 0
+
+        def hostile_uuid4():
+            nonlocal hostile_calls
+            hostile_calls += 1
+            book.balance = Decimal("1")
+            raise AssertionError("mutable uuid dispatch must not run")
+
+        with patch.object(paper_module.uuid, "uuid4", hostile_uuid4):
+            ticket = book.open_ticket(
+                [self._lay_leg()],
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+            )
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(ticket.stake, Decimal("10"))
+        self.assertEqual(book.balance, Decimal("60.00"))
+        self.assertEqual(book.committed_capital, Decimal("40.00"))
+
     def test_lay_open_class_debit_override_cannot_replace_liability_reserve_authority(self):
         book = PaperBook(Decimal("100"))
         hostile_calls = 0

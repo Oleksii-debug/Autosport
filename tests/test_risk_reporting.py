@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import autosport.risk_reporting as risk_reporting
 
-from autosport.domain import TicketLeg
+from autosport.domain import TicketLeg, TicketStatus
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.paper import PaperBook

@@ -263,6 +263,16 @@ class FocusedMirrorDependencyIndex:
         with self._lock:
             return tuple(self._dependencies.values())
 
+    def registry_state_snapshot(
+        self,
+    ) -> tuple[tuple[FocusedMirrorDependency, int], ...]:
+        """Return dependencies and their incarnation tokens from one registry lock."""
+        with self._lock:
+            return tuple(
+                (dependency, self._dependency_revisions[input_id])
+                for input_id, dependency in self._dependencies.items()
+            )
+
     def _dependency(self, input_id: str) -> FocusedMirrorDependency:
         normalized_id = self._input_id(input_id)
         with self._lock:
@@ -443,6 +453,7 @@ class FocusedMirrorDependencyIndex:
             with self._lock:
                 try:
                     dependency = self._dependencies[normalized_id]
+                    dependency_revision = self._dependency_revisions[normalized_id]
                 except KeyError as exc:
                     raise KeyError(
                         f"unknown focused mirror input {normalized_id!r}"
@@ -456,7 +467,11 @@ class FocusedMirrorDependencyIndex:
                     raise KeyError(
                         f"unknown focused mirror input {normalized_id!r}"
                     )
-                if current_dependency == dependency:
+                if (
+                    current_dependency == dependency
+                    and self._dependency_revisions.get(normalized_id)
+                    == dependency_revision
+                ):
                     return result
             # The target dependency changed while the dependency-bearing read was
             # in flight. Retry against its now-authoritative selectors rather than

@@ -1171,6 +1171,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 (lay_guard._reality._impl, "_run_id"),
                 (lay_guard._reality._impl, "_verify_observation_authority"),
                 (lay_guard._reality._impl, "_observed_attempt"),
+                (lay_guard, "_validate_decimal_text_resource_bound"),
             )
             patches = [
                 patch.object(owner, name, forbidden)

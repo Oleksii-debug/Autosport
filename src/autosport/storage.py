@@ -2235,8 +2235,8 @@ class SQLiteMarketStore:
         except TypeError as exc:
             raise TypeError("events must be an iterable of MarketEvent values") from exc
         for event in iterator:
-            if not isinstance(event, MarketEvent):
-                raise TypeError("events must contain only MarketEvent values")
+            if type(event) is not MarketEvent:
+                raise TypeError("events must contain only exact MarketEvent values")
             payload = _validate_incoming_event(event)
             admitted.append(MarketEvent.from_dict(_load_history_payload(payload)))
         batch = tuple(admitted)

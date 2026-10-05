@@ -797,5 +797,77 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.tickets, {})
 
 
+
+
+    def test_same_paper_book_path_shares_execution_lock_across_runtimes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, first = self.runtime(tmp)
+            second = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=config(),
+                max_quote_age=__import__("datetime").timedelta(seconds=5),
+                paper_book_path=Path(tmp) / "." / "paper-book.json",
+            )
+            self.assertIs(first._execution_lock, second._execution_lock)
+
+    def test_execution_guard_serializes_distinct_runtimes_for_same_book(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, first = self.runtime(tmp)
+            second = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=config(),
+                max_quote_age=__import__("datetime").timedelta(seconds=5),
+                paper_book_path=Path(tmp) / "paper-book.json",
+            )
+            entered = Event()
+            release = Event()
+            second_entered = Event()
+
+            def hold_first():
+                with first.execution_guard():
+                    entered.set()
+                    self.assertTrue(release.wait(timeout=2))
+
+            def enter_second():
+                with second.execution_guard():
+                    second_entered.set()
+
+            first_thread = Thread(target=hold_first)
+            second_thread = Thread(target=enter_second)
+            first_thread.start()
+            self.assertTrue(entered.wait(timeout=2))
+            second_thread.start()
+            self.assertFalse(second_entered.wait(timeout=0.05))
+            release.set()
+            first_thread.join(timeout=2)
+            second_thread.join(timeout=2)
+
+            self.assertFalse(first_thread.is_alive())
+            self.assertFalse(second_thread.is_alive())
+            self.assertTrue(second_entered.is_set())
+
+    def test_different_paper_book_paths_do_not_share_execution_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first_book = PaperBook("100.00")
+            first = PaperExecutionAdoptionRuntime(
+                book=first_book,
+                ledger=PaperExecutionLedger(Path(tmp) / "first-execution.jsonl"),
+                config=config(),
+                max_quote_age=__import__("datetime").timedelta(seconds=5),
+                paper_book_path=Path(tmp) / "first-paper-book.json",
+            )
+            second_book = PaperBook("100.00")
+            second = PaperExecutionAdoptionRuntime(
+                book=second_book,
+                ledger=PaperExecutionLedger(Path(tmp) / "second-execution.jsonl"),
+                config=config(),
+                max_quote_age=__import__("datetime").timedelta(seconds=5),
+                paper_book_path=Path(tmp) / "second-paper-book.json",
+            )
+            self.assertIsNot(first._execution_lock, second._execution_lock)
+
+
 if __name__ == "__main__":
     unittest.main()

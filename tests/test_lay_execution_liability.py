@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Mapping
 import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -317,7 +318,103 @@ class DurableSideIntegrityTests(unittest.TestCase):
         self.assertEqual(HostileSide.calls, 0)
 
 
+class _OneShotObservationMapping(Mapping):
+    def __init__(self, action_id: str, observation) -> None:
+        self._action_id = action_id
+        self._observation = observation
+        self.reads = 0
+
+    def __iter__(self):
+        return iter((self._action_id,))
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, key):
+        if key != self._action_id:
+            raise KeyError(key)
+        self.reads += 1
+        if self.reads > 1:
+            raise AssertionError("observation mapping was read more than once")
+        return self._observation
+
+
+class _EvidenceRegistrySubclass(PaperExecutionEvidenceRegistry):
+    pass
+
+
 class LayExecutionLiabilityTests(unittest.TestCase):
+    def test_stateful_observation_mapping_is_snapshotted_once_before_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            source_action = _action()
+            observation, registry = _registered_observation(
+                ledger,
+                source_action,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+            )
+            observations = _OneShotObservationMapping(
+                source_action.action_id,
+                observation,
+            )
+
+            run = execute_paper_plan(
+                plan=_plan(source_action),
+                trigger_id="one-shot-observations",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations=observations,
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(observations.reads, 1)
+            self.assertTrue(run.completed)
+            self.assertEqual(run.attempts[0].outcome, PaperAttemptOutcome.ACCEPTED)
+
+    def test_evidence_registry_subclass_cannot_replace_durable_resolver_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            source_action = _action()
+            canonical_registry = PaperExecutionEvidenceRegistry(ledger)
+            record = PaperExecutionEvidenceRecord(
+                action_id=source_action.action_id,
+                bookmaker_id=source_action.bookmaker_id,
+                account_id=source_action.account_id,
+                event_id=source_action.event_id,
+                market_id=source_action.market_id,
+                selection_id=source_action.selection_id,
+                side=source_action.side,
+                quote_id=source_action.quote_id,
+                outcome=PaperAttemptOutcome.ACCEPTED,
+                observed_at=STARTED_AT,
+                evidence_grade=EvidenceGrade.EMPIRICAL,
+                evidence_source="captured-paper-observation-v1",
+                accepted_odds="5.00",
+                accepted_stake="10.00",
+            )
+            canonical_registry.register(record)
+            before = len(ledger.events())
+            subclass_registry = _EvidenceRegistrySubclass(ledger)
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "exact durable evidence registry authority",
+            ):
+                execute_paper_plan(
+                    plan=_plan(source_action),
+                    trigger_id="registry-subclass",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={source_action.action_id: record.as_observation()},
+                    evidence_registry=subclass_registry,
+                )
+
+            self.assertEqual(len(ledger.events()), before)
+
     def test_registry_revalidates_mutated_decimal_before_durable_write(self):
         class HostileDecimal(Decimal):
             pass

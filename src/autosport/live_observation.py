@@ -196,6 +196,7 @@ class OneShotObservationWorker:
             result = task()
             if type(result) is not ObservationResult:
                 raise TypeError("observation task must return an exact ObservationResult")
+            result.validate()
             message = ObservationWorkerMessage(result=result)
         except BaseException as exc:
             # SystemExit/KeyboardInterrupt raised inside this background thread do

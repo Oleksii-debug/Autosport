@@ -759,5 +759,45 @@ class MarketMirrorTests(unittest.TestCase):
         self.assertEqual(mirror.snapshot(), (event,))
 
 
+    def test_inverted_semantic_refresh_preserves_previous_live_truth(self) -> None:
+        mirror = MarketMirror()
+        first = self.prophetx_refresh_event(sequence=1)
+        mirror.apply(first)
+
+        payload = self.prophetx_refresh_event(sequence=2).to_dict()
+        payload["observed_ts"] = "2026-09-16T19:00:02+00:00"
+        payload["ingest_ts"] = "2026-09-16T19:00:01+00:00"
+        inverted = MarketEvent.from_dict(payload)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts must not precede observed_ts",
+        ):
+            mirror.apply(inverted)
+
+        self.assertEqual(mirror.snapshot(), (first,))
+
+    def test_persist_and_apply_inverted_receipt_has_no_durable_or_live_side_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            try:
+                inverted = self.event(
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                    ingest_ts="2026-09-16T19:00:00+00:00",
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ingest_ts must not precede observed_ts",
+                ):
+                    mirror.persist_and_apply(store, inverted)
+
+                self.assertEqual(store.events(), [])
+                self.assertEqual(mirror.snapshot(), ())
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

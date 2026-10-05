@@ -849,6 +849,25 @@ class LiveObservationTests(unittest.TestCase):
         self.assertEqual(message.error, "RuntimeError: network-test")
         self.assertFalse(worker.busy)
 
+    def test_worker_unprintable_exception_still_publishes_terminal_error(self):
+        class UnprintableError(RuntimeError):
+            def __str__(self) -> str:
+                raise RuntimeError("stringification-failed")
+
+        worker = OneShotObservationWorker()
+
+        def task():
+            raise UnprintableError()
+
+        self.assertTrue(worker.start(task))
+        failed = self._wait_for_message(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(
+            failed.error,
+            "UnprintableError: <unprintable exception>",
+        )
+        self.assertFalse(worker.busy)
+
     def test_worker_converts_system_exit_to_terminal_error_and_allows_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             expected = self._observe(tmp)

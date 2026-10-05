@@ -425,6 +425,7 @@ def _serialized_paperbook_operation(method):
 
 def _guard_paperbook_runtime_authority(method):
     """Seal public PaperBook authority checks against module-level rebinding."""
+    method_code = method.__code__
     opening_authority = _require_ticket_opening_authority
     opening_authority_code = opening_authority.__code__
     causal_authority = _require_paperbook_causal_history_authority
@@ -432,6 +433,8 @@ def _guard_paperbook_runtime_authority(method):
 
     @wraps(method)
     def guarded(self, *args, **kwargs):
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook runtime callable authority changed")
         # Preserve the existing safety order: canonical visible state must be
         # validated before hidden registries compare or hash caller-controlled
         # values. Then invoke closure-captured authorities so rebinding their
@@ -447,7 +450,12 @@ def _guard_paperbook_runtime_authority(method):
         causal_authority(self)
         if causal_authority.__code__ is not causal_authority_code:
             raise ValueError("PaperBook causal-history authority dispatch changed")
-        return method(self, *args, **kwargs)
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook runtime callable authority changed")
+        result = method(self, *args, **kwargs)
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook runtime callable authority changed")
+        return result
 
     # Do not publish an unguarded entry point via functools.wraps.__wrapped__.
     del guarded.__wrapped__
@@ -456,6 +464,7 @@ def _guard_paperbook_runtime_authority(method):
 
 def _guard_paperbook_constructor_authority(method):
     """Seal PaperBook authority registration before instance state is accepted."""
+    method_code = method.__code__
     operation_register = _register_paperbook_operation_lock
     operation_register_code = operation_register.__code__
     opening_register = _register_ticket_opening_authority_book
@@ -472,6 +481,8 @@ def _guard_paperbook_constructor_authority(method):
 
     @wraps(method)
     def guarded(self, *args, **kwargs):
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook constructor callable authority changed")
         invoke(
             operation_register,
             operation_register_code,
@@ -490,7 +501,12 @@ def _guard_paperbook_constructor_authority(method):
             "causal-history registry",
             self,
         )
-        return method(self, *args, **kwargs)
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook constructor callable authority changed")
+        result = method(self, *args, **kwargs)
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook constructor callable authority changed")
+        return result
 
     # Constructor registration is part of the authority boundary; exposing the
     # original __init__ through __wrapped__ would permit registry-free objects.
@@ -527,6 +543,7 @@ def _reject_nonfinite_json_constant(value: str) -> None:
 
 def _seal_paperbook_open_transition_authority(method):
     """Inject closure-captured write authorities into open_ticket."""
+    method_code = method.__code__
     opening_record = _record_ticket_opening_authority
     opening_record_code = opening_record.__code__
     causal_advance = _advance_paperbook_causal_history_open
@@ -548,17 +565,22 @@ def _seal_paperbook_open_transition_authority(method):
 
     @wraps(method)
     def sealed(self, *args, **kwargs):
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook open callable authority changed")
         if opening_record.__code__ is not opening_record_code:
             raise ValueError("PaperBook opening write authority changed")
         if causal_advance.__code__ is not causal_advance_code:
             raise ValueError("PaperBook causal-history open write authority changed")
-        return method(
+        result = method(
             self,
             *args,
             _opening_authority_record=record_opening,
             _causal_open_advance=advance_open,
             **kwargs,
         )
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook open callable authority changed")
+        return result
 
     del sealed.__wrapped__
     return sealed
@@ -711,6 +733,7 @@ def _seal_paperbook_save_candidate_authority(method):
 
 def _seal_paperbook_snapshot_json_publish_authority(method):
     """Inject closure-captured JSON serialization authority into durable save."""
+    method_code = method.__code__
     dump = json.dump
     dump_code = dump.__code__
 
@@ -723,9 +746,14 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
 
     @wraps(method)
     def sealed(self, *args, **kwargs):
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook save publish callable authority changed")
         if dump.__code__ is not dump_code:
             raise ValueError("PaperBook JSON serializer authority changed")
-        return method(self, *args, _json_dump=publish, **kwargs)
+        result = method(self, *args, _json_dump=publish, **kwargs)
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook save publish callable authority changed")
+        return result
 
     del sealed.__wrapped__
     return sealed
@@ -733,6 +761,7 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
 
 def _seal_paperbook_settle_transition_authority(method):
     """Inject closure-captured write authority into settle."""
+    method_code = method.__code__
     causal_advance = _advance_paperbook_causal_history_settle
     causal_advance_code = causal_advance.__code__
 
@@ -751,14 +780,19 @@ def _seal_paperbook_settle_transition_authority(method):
 
     @wraps(method)
     def sealed(self, *args, **kwargs):
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook settle callable authority changed")
         if causal_advance.__code__ is not causal_advance_code:
             raise ValueError("PaperBook causal-history settle write authority changed")
-        return method(
+        result = method(
             self,
             *args,
             _causal_settle_advance=advance_settle,
             **kwargs,
         )
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook settle callable authority changed")
+        return result
 
     del sealed.__wrapped__
     return sealed

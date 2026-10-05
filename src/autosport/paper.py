@@ -18,6 +18,7 @@ from decimal import (
 )
 from functools import wraps
 from pathlib import Path
+from types import FunctionType
 from weakref import WeakKeyDictionary, ref
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
@@ -703,28 +704,55 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
     snapshot_path_descriptor = None
     snapshot_path_function = None
     snapshot_path_code = None
+    lifecycle_json_descriptor = None
+    lifecycle_json_function = None
+    lifecycle_json_code = None
+    ensure_parent_descriptor = None
+    ensure_parent_function = None
+    ensure_parent_code = None
+    fsync_directory_descriptor = None
+    fsync_directory_function = None
+    fsync_directory_code = None
 
     def install(canonical_type: type) -> None:
         nonlocal raw_snapshot_descriptor, raw_snapshot_function, raw_snapshot_code
         nonlocal load_bytes_descriptor, load_bytes_function, load_bytes_code
         nonlocal snapshot_path_descriptor, snapshot_path_function, snapshot_path_code
+        nonlocal lifecycle_json_descriptor, lifecycle_json_function, lifecycle_json_code
+        nonlocal ensure_parent_descriptor, ensure_parent_function, ensure_parent_code
+        nonlocal fsync_directory_descriptor, fsync_directory_function, fsync_directory_code
         if raw_snapshot_descriptor is not None:
             raise RuntimeError("PaperBook snapshot entry dispatch authority already installed")
         raw_snapshot_descriptor = canonical_type.__dict__["_from_raw_snapshot"]
         load_bytes_descriptor = canonical_type.__dict__["load_bytes"]
         snapshot_path_descriptor = canonical_type.__dict__["_canonical_snapshot_path"]
+        lifecycle_json_descriptor = canonical_type.__dict__["_lifecycle_to_json"]
+        ensure_parent_descriptor = canonical_type.__dict__["_ensure_snapshot_parent_durable"]
+        fsync_directory_descriptor = canonical_type.__dict__["_fsync_snapshot_directory"]
         if type(raw_snapshot_descriptor) is not classmethod:
             raise TypeError("PaperBook raw snapshot decoder must remain a classmethod")
         if type(load_bytes_descriptor) is not classmethod:
             raise TypeError("PaperBook byte loader must remain a classmethod")
         if type(snapshot_path_descriptor) is not staticmethod:
             raise TypeError("PaperBook snapshot path helper must remain a staticmethod")
+        if type(lifecycle_json_descriptor) is not FunctionType:
+            raise TypeError("PaperBook lifecycle serializer must remain an instance method")
+        if type(ensure_parent_descriptor) is not classmethod:
+            raise TypeError("PaperBook parent durability helper must remain a classmethod")
+        if type(fsync_directory_descriptor) is not staticmethod:
+            raise TypeError("PaperBook directory fsync helper must remain a staticmethod")
         raw_snapshot_function = raw_snapshot_descriptor.__func__
         load_bytes_function = load_bytes_descriptor.__func__
         snapshot_path_function = snapshot_path_descriptor.__func__
+        lifecycle_json_function = lifecycle_json_descriptor
+        ensure_parent_function = ensure_parent_descriptor.__func__
+        fsync_directory_function = fsync_directory_descriptor.__func__
         raw_snapshot_code = raw_snapshot_function.__code__
         load_bytes_code = load_bytes_function.__code__
         snapshot_path_code = snapshot_path_function.__code__
+        lifecycle_json_code = lifecycle_json_function.__code__
+        ensure_parent_code = ensure_parent_function.__code__
+        fsync_directory_code = fsync_directory_function.__code__
 
     def decode_raw(canonical_type: type, raw: object):
         if raw_snapshot_descriptor is None or raw_snapshot_function is None or raw_snapshot_code is None:
@@ -762,7 +790,49 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             raise ValueError("PaperBook snapshot path authority changed")
         return result
 
-    return install, decode_raw, decode_bytes, canonical_path
+    def lifecycle_json(canonical_type: type, book: object):
+        if lifecycle_json_descriptor is None or lifecycle_json_function is None or lifecycle_json_code is None:
+            raise RuntimeError("PaperBook lifecycle serializer dispatch authority is unavailable")
+        if canonical_type.__dict__.get("_lifecycle_to_json") is not lifecycle_json_descriptor:
+            raise ValueError("PaperBook lifecycle serializer dispatch changed")
+        if lifecycle_json_function.__code__ is not lifecycle_json_code:
+            raise ValueError("PaperBook lifecycle serializer authority changed")
+        result = lifecycle_json_function(book)
+        if lifecycle_json_function.__code__ is not lifecycle_json_code:
+            raise ValueError("PaperBook lifecycle serializer authority changed")
+        return result
+
+    def ensure_parent(canonical_type: type, directory: Path) -> None:
+        if ensure_parent_descriptor is None or ensure_parent_function is None or ensure_parent_code is None:
+            raise RuntimeError("PaperBook parent durability dispatch authority is unavailable")
+        if canonical_type.__dict__.get("_ensure_snapshot_parent_durable") is not ensure_parent_descriptor:
+            raise ValueError("PaperBook parent durability dispatch changed")
+        if ensure_parent_function.__code__ is not ensure_parent_code:
+            raise ValueError("PaperBook parent durability authority changed")
+        ensure_parent_function(canonical_type, directory)
+        if ensure_parent_function.__code__ is not ensure_parent_code:
+            raise ValueError("PaperBook parent durability authority changed")
+
+    def fsync_directory(canonical_type: type, directory: Path) -> None:
+        if fsync_directory_descriptor is None or fsync_directory_function is None or fsync_directory_code is None:
+            raise RuntimeError("PaperBook directory fsync dispatch authority is unavailable")
+        if canonical_type.__dict__.get("_fsync_snapshot_directory") is not fsync_directory_descriptor:
+            raise ValueError("PaperBook directory fsync dispatch changed")
+        if fsync_directory_function.__code__ is not fsync_directory_code:
+            raise ValueError("PaperBook directory fsync authority changed")
+        fsync_directory_function(directory)
+        if fsync_directory_function.__code__ is not fsync_directory_code:
+            raise ValueError("PaperBook directory fsync authority changed")
+
+    return (
+        install,
+        decode_raw,
+        decode_bytes,
+        canonical_path,
+        lifecycle_json,
+        ensure_parent,
+        fsync_directory,
+    )
 
 
 (
@@ -770,6 +840,9 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
     _decode_canonical_paperbook_raw_snapshot,
     _decode_canonical_paperbook_bytes,
     _canonical_paperbook_snapshot_path,
+    _canonical_paperbook_lifecycle_json,
+    _ensure_canonical_paperbook_snapshot_parent,
+    _fsync_canonical_paperbook_snapshot_directory,
 ) = _make_paperbook_snapshot_entry_dispatch_authority()
 
 
@@ -987,6 +1060,12 @@ def _seal_paperbook_snapshot_install_authority(method):
     canonical_load_bytes_code = canonical_load_bytes.__code__
     canonical_snapshot_path = _canonical_paperbook_snapshot_path
     canonical_snapshot_path_code = canonical_snapshot_path.__code__
+    lifecycle_json = _canonical_paperbook_lifecycle_json
+    lifecycle_json_code = lifecycle_json.__code__
+    ensure_parent = _ensure_canonical_paperbook_snapshot_parent
+    ensure_parent_code = ensure_parent.__code__
+    fsync_directory = _fsync_canonical_paperbook_snapshot_directory
+    fsync_directory_code = fsync_directory.__code__
 
     def require_type(target: object) -> None:
         if type_authority.__code__ is not type_authority_code:
@@ -1020,6 +1099,12 @@ def _seal_paperbook_snapshot_install_authority(method):
             raise ValueError("PaperBook byte loader dispatch authority changed")
         if canonical_snapshot_path.__code__ is not canonical_snapshot_path_code:
             raise ValueError("PaperBook snapshot path dispatch authority changed")
+        if lifecycle_json.__code__ is not lifecycle_json_code:
+            raise ValueError("PaperBook lifecycle serializer dispatch authority changed")
+        if ensure_parent.__code__ is not ensure_parent_code:
+            raise ValueError("PaperBook parent durability dispatch authority changed")
+        if fsync_directory.__code__ is not fsync_directory_code:
+            raise ValueError("PaperBook directory fsync dispatch authority changed")
         result = method(
             cls,
             *args,
@@ -1081,6 +1166,9 @@ def _seal_paperbook_save_candidate_authority(method):
             _causal_candidate_authority=require_causal,
             _canonical_snapshot_decode=canonical_raw_snapshot,
             _snapshot_path=canonical_snapshot_path,
+            _lifecycle_json=lifecycle_json,
+            _ensure_parent_durable=ensure_parent,
+            _fsync_directory=fsync_directory,
             **kwargs,
         )
         if method.__code__ is not method_code:
@@ -1483,6 +1571,9 @@ class PaperBook:
         _causal_candidate_authority=None,
         _canonical_snapshot_decode=None,
         _snapshot_path=None,
+        _lifecycle_json=None,
+        _ensure_parent_durable=None,
+        _fsync_directory=None,
         _json_dump=None,
     ) -> None:
         # Runtime visible-state + hidden-authority validation is performed once
@@ -1522,7 +1613,7 @@ class PaperBook:
                 }
                 for t in self.tickets.values()
             ],
-            "lifecycle": self._lifecycle_to_json(),
+            "lifecycle": _lifecycle_json(type(self), self),
         }
 
         # The raw snapshot is detached from the mutable live object. Validate
@@ -1533,7 +1624,7 @@ class PaperBook:
         _causal_candidate_authority(self, candidate)
 
         # Rejected candidates must not publish filesystem state.
-        self._ensure_snapshot_parent_durable(destination.parent)
+        _ensure_parent_durable(type(self), destination.parent)
 
         temporary: Path | None = None
         try:
@@ -1552,7 +1643,7 @@ class PaperBook:
                 os.fsync(handle.fileno())
             os.replace(temporary, destination)
             temporary = None
-            self._fsync_snapshot_directory(destination.parent)
+            _fsync_directory(type(self), destination.parent)
         finally:
             if temporary is not None:
                 try:

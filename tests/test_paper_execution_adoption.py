@@ -1169,42 +1169,44 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.balance, Decimal("70.00"))
             self.assertEqual(book.committed_capital, Decimal("30.00"))
 
-    def test_lay_recovery_revalidates_live_book_after_reconstruction_callback(self):
+    def test_lay_recovery_class_open_ticket_override_cannot_replace_reconstruction_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)
             pre_action_book = PaperBook("100.00")
-            current = action("lay-recovery-final-boundary", odds="5.00", stake="10.00", side="LAY")
-            current_prepared = prepared(runtime, current)
-
+            current_prepared = prepared(
+                runtime,
+                action(
+                    "lay-recovery-open-ticket-class-override",
+                    odds="5.00",
+                    stake="10.00",
+                    side="LAY",
+                ),
+            )
             runtime.execute(
                 prepared=current_prepared,
-                trigger_id="trigger-lay-recovery-final-boundary",
+                trigger_id="trigger-lay-recovery-open-ticket-class-override",
                 started_at=STARTED_AT,
                 materialize_exposure=True,
             )
-            original_open_ticket = PaperBook.open_ticket
+            hostile_calls = 0
 
-            def open_then_mutate(target, *args, **kwargs):
-                result = original_open_ticket(target, *args, **kwargs)
-                if target is not book:
-                    book.balance = Decimal("59.00")
-                return result
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class open_ticket override must not own recovery reconstruction")
 
-            with patch.object(PaperBook, "open_ticket", open_then_mutate):
-                with self.assertRaisesRegex(
-                    PaperExecutionAdoptionError,
-                    "changed or became invalid during reconstruction",
-                ):
-                    runtime.assert_recoverable_book_state(
-                        pre_action_book=pre_action_book,
-                        prepared=current_prepared,
-                        trigger_id="trigger-lay-recovery-final-boundary",
-                        started_at=STARTED_AT,
-                        materialize_exposure=True,
-                    )
+            with patch.object(PaperBook, "open_ticket", new=forbidden):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=pre_action_book,
+                    prepared=current_prepared,
+                    trigger_id="trigger-lay-recovery-open-ticket-class-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
 
+            self.assertEqual(hostile_calls, 0)
             self.assertEqual(len(book.tickets), 1)
-            self.assertEqual(book.balance, Decimal("59.00"))
+            self.assertEqual(book.balance, Decimal("60.00"))
 
     def test_lay_recovery_instance_load_override_cannot_replace_durable_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2246,6 +2248,33 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(durable.balance, Decimal("90.00"))
             self.assertEqual(durable.tickets, book.tickets)
 
+
+    def test_class_open_ticket_override_cannot_replace_money_moving_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("class-open-ticket-override", stake="10.00"),
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class open_ticket override must not run")
+
+            with patch.object(PaperBook, "open_ticket", new=forbidden):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="class-open-ticket-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertEqual(len(book.tickets), 1)
 
     def test_instance_open_ticket_override_cannot_replace_money_moving_authority(self):
         with tempfile.TemporaryDirectory() as tmp:

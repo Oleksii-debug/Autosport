@@ -60,6 +60,10 @@ class IngestionHealthTests(unittest.TestCase):
             ProviderBatch(Text("source-a"), ())
         with self.assertRaisesRegex(TypeError, "cursor must be an exact str"):
             ProviderBatch("source-a", (), cursor=Text("cursor-1"))
+        with self.assertRaisesRegex(ValueError, "source_id must not contain control"):
+            ProviderBatch("source\nforged", ())
+        with self.assertRaisesRegex(ValueError, "cursor must not contain control"):
+            ProviderBatch("source-a", (), cursor="cursor\rforged")
         with self.assertRaisesRegex(TypeError, "provider_event_id must be an exact str"):
             ProviderQuote(
                 provider_event_id=Text("event-1"),
@@ -161,6 +165,20 @@ class IngestionHealthTests(unittest.TestCase):
             IngestionStats("source-a", 1, 1, 0, 0.1, Text("cursor"))
         with self.assertRaisesRegex(TypeError, "quality_flags"):
             IngestionStats("source-a", 1, 1, 0, 0.1, None, ["STALE_SOURCE"])
+        with self.assertRaisesRegex(ValueError, "source_id"):
+            IngestionStats("source\nforged", 1, 1, 0, 0.1, None)
+        with self.assertRaisesRegex(ValueError, "cursor must not contain control"):
+            IngestionStats("source-a", 1, 1, 0, 0.1, "cursor\nforged")
+        with self.assertRaisesRegex(ValueError, "canonical non-empty strings"):
+            IngestionStats(
+                "source-a",
+                1,
+                1,
+                0,
+                0.1,
+                None,
+                ("STALE\rFORGED",),
+            )
         with self.assertRaisesRegex(ValueError, "duplicates"):
             IngestionStats(
                 "source-a",

@@ -285,8 +285,13 @@ class BetfairStandardLayLimitPriceBoundEvidence:
             _CANONICAL_EVIDENCE_TO_DICT(self, include_evidence_id=False)
         )
 
-    def to_dict(self, *, include_evidence_id: bool = True) -> dict[str, Any]:
-        _CANONICAL_EVIDENCE_VALIDATE(self)
+    def to_dict(
+        self,
+        *,
+        include_evidence_id: bool = True,
+        _validate=_validate,
+    ) -> dict[str, Any]:
+        _validate(self)
         payload: dict[str, Any] = {
             "schema": "autosport.betfair_standard_lay_limit_price_bound",
             "schema_version": _SCHEMA_VERSION,

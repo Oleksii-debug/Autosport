@@ -2096,6 +2096,25 @@ class RealExecutionLedger:
             attempt_events = self._attempt_events(events, attempt_id)
             state = self._state(attempt_events)
             if state == AttemptState.SUBMITTED:
+                submitted_events = [
+                    event
+                    for event in attempt_events
+                    if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value
+                ]
+                if len(submitted_events) != 1:
+                    raise ExecutionLedgerIntegrityError(
+                        "attempt has multiple submission facts"
+                    )
+                existing_digest = submitted_events[0]["payload"].get(
+                    "submitted_request_sha256"
+                )
+                if (
+                    submitted_request_sha256 is not None
+                    and existing_digest != submitted_request_sha256
+                ):
+                    raise ExecutionIdentityConflict(
+                        "attempt already has a different submitted request digest"
+                    )
                 return
             if state != AttemptState.RESERVED:
                 raise ExecutionStateError(

@@ -545,6 +545,40 @@ class IngestionHealthTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_provider_failure_survives_health_base_exception(self):
+        class Provider:
+            source_id = "source"
+
+            def read_batch(self, max_items: int = 1000):
+                raise RuntimeError("provider-primary")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            health_failure = SystemExit("health-stop")
+            try:
+                with patch.object(
+                    SourceHealthStore,
+                    "record_failure",
+                    side_effect=health_failure,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "provider-primary",
+                    ) as raised:
+                        engine.poll_once(Provider(), max_items=1)
+
+                self.assertIs(raised.exception.__cause__, health_failure)
+                self.assertTrue(
+                    any(
+                        "source health failure persistence also failed: "
+                        "SystemExit: health-stop" in note
+                        for note in getattr(raised.exception, "__notes__", ())
+                    )
+                )
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
     def test_provider_failure_note_survives_unprintable_health_persistence_error(self):
         class UnprintableHealthError(OSError):
             def __str__(self) -> str:

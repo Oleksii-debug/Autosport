@@ -381,9 +381,17 @@ def _make_paperbook_operation_lock_registry():
 
 
 def _serialized_paperbook_operation(method):
+    require_lock = _require_paperbook_operation_lock
+    require_lock_code = require_lock.__code__
+
     @wraps(method)
     def serialized(self, *args, **kwargs):
-        with _require_paperbook_operation_lock(self):
+        if require_lock.__code__ is not require_lock_code:
+            raise ValueError("PaperBook operation lock authority changed")
+        lock = require_lock(self)
+        if require_lock.__code__ is not require_lock_code:
+            raise ValueError("PaperBook operation lock authority changed")
+        with lock:
             return method(self, *args, **kwargs)
 
     return serialized
@@ -474,7 +482,20 @@ class PaperBook:
         self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
-        return sum((t.stake for t in self.tickets.values() if t.status is TicketStatus.OPEN), Decimal("0"))
+        try:
+            with localcontext(_paper_decimal_context()) as context:
+                total = Decimal("0")
+                for ticket in self.tickets.values():
+                    if ticket.status is TicketStatus.OPEN:
+                        total += ticket.stake
+                if context.flags[Inexact]:
+                    raise ValueError("PaperBook committed stake loses Decimal precision")
+        except DecimalException as exc:
+            raise ValueError(
+                "PaperBook committed stake arithmetic is not representable"
+            ) from exc
+        self._require_finite(total, "committed_stake")
+        return total
 
     @classmethod
     def _canonical_decimal_input(cls, value: object, label: str) -> Decimal:
@@ -617,7 +638,7 @@ class PaperBook:
 
         status = TicketStatus.VOID if not effective_legs else TicketStatus.WON
         try:
-            with localcontext(_paper_decimal_context()):
+            with localcontext(_paper_decimal_context()) as context:
                 effective_odds = Decimal("1")
                 for leg in effective_legs:
                     effective_odds *= leg.locked_odds
@@ -631,6 +652,8 @@ class PaperBook:
                 cls._require_finite(new_balance, f"balance after settling ticket {ticket.ticket_id}")
                 if payout != 0 and new_balance == balance:
                     raise ValueError("PaperBook settlement payout loses all Decimal balance effect")
+                if context.flags[Inexact]:
+                    raise ValueError("PaperBook settlement arithmetic loses Decimal precision")
         except DecimalException as exc:
             raise ValueError("PaperBook settlement arithmetic is not representable") from exc
         return status, payout, new_balance

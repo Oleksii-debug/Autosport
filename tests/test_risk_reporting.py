@@ -16,6 +16,7 @@ from autosport.risk_reporting import (
     DRAWDOWN_EVIDENCE_SCHEMA,
     DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
     EQUITY_PATH_SCHEMA,
+    HISTORY_VIEW_RESTATED_CURRENT,
     RISK_OF_RUIN_STATUS_UNKNOWN,
     RISK_REPORT_SCHEMA,
     RISK_REPORT_SCOPE_PAPER_ONLY,
@@ -761,6 +762,75 @@ class PaperRiskReportingTests(unittest.TestCase):
             "complete durable availability chronology",
         ):
             verified_settled_minimum_equity(book, goal, evidence)
+
+    def test_equity_path_is_explicitly_restated_current_not_as_known_history(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(68),),
+            Decimal("10"),
+            placed_at="2026-09-21T14:00:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T14:05:00+00:00",
+        )
+        goal = self._goal()
+
+        path = build_product_issued_paper_equity_path(book, goal)
+        drawdown = build_product_issued_paper_drawdown_evidence(book, goal)
+        report = build_paper_risk_report(book, goal)
+
+        self.assertEqual(path.history_view, HISTORY_VIEW_RESTATED_CURRENT)
+        self.assertFalse(path.historical_as_known_supported)
+        self.assertEqual(drawdown.history_view, HISTORY_VIEW_RESTATED_CURRENT)
+        self.assertFalse(drawdown.historical_as_known_supported)
+        self.assertEqual(report.history_view, HISTORY_VIEW_RESTATED_CURRENT)
+        self.assertFalse(report.historical_as_known_supported)
+
+    def test_missing_settlement_timestamp_never_upgrades_to_as_known_history(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(69),),
+            Decimal("10"),
+            placed_at="2026-09-21T14:10:00+00:00",
+        )
+        book.settle(ticket.ticket_id, set())
+        goal = self._goal()
+
+        path = build_product_issued_paper_equity_path(book, goal)
+
+        self.assertFalse(path.availability_complete)
+        self.assertEqual(path.history_view, HISTORY_VIEW_RESTATED_CURRENT)
+        self.assertFalse(path.historical_as_known_supported)
+
+    def test_same_numeric_book_state_has_distinct_path_identity_across_money_scope(self) -> None:
+        book = PaperBook("100")
+        usd_goal = self._goal(bankroll_id="bankroll-usd", currency="USD")
+        eur_goal = self._goal(bankroll_id="bankroll-eur", currency="EUR")
+
+        usd = build_product_issued_paper_equity_path(book, usd_goal)
+        eur = build_product_issued_paper_equity_path(book, eur_goal)
+
+        self.assertEqual(usd.current_equity, eur.current_equity)
+        self.assertNotEqual(usd.path_sha256, eur.path_sha256)
+        self.assertNotEqual(
+            (usd.bankroll_id, usd.currency, usd.goal_contract_sha256),
+            (eur.bankroll_id, eur.currency, eur.goal_contract_sha256),
+        )
+
+    def test_same_goal_id_revision_with_changed_semantics_changes_path_identity(self) -> None:
+        book = PaperBook("100")
+        baseline = self._goal(max_drawdown_fraction=Decimal("0.20"))
+        tightened = self._goal(max_drawdown_fraction=Decimal("0.10"))
+
+        first = build_product_issued_paper_equity_path(book, baseline)
+        second = build_product_issued_paper_equity_path(book, tightened)
+
+        self.assertEqual(first.goal_id, second.goal_id)
+        self.assertEqual(first.goal_revision, second.goal_revision)
+        self.assertNotEqual(first.goal_contract_sha256, second.goal_contract_sha256)
+        self.assertNotEqual(first.path_sha256, second.path_sha256)
 
     def test_restart_preserves_exact_report_identity_and_values(self) -> None:
         book = PaperBook("100")

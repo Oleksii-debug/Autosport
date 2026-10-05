@@ -734,6 +734,13 @@ def build_paper_risk_report(
     )
     if drawdown_evidence.equity_path_sha256 != equity_path.path_sha256:
         raise ValueError("canonical PAPER drawdown evidence path identity is inconsistent")
+    # Preserve the established independent replay callback boundary as a
+    # consistency/race falsifier. It is not the published evidence authority:
+    # the product-issued path/drawdown digests above are. This cross-check also
+    # catches state mutation between the two independent canonical replays.
+    replay_crosscheck = _historical_max_drawdown(book)
+    if replay_crosscheck is None:
+        raise ValueError("canonical PAPER drawdown replay is unavailable")
     maximum_drawdown = _HistoricalMaxDrawdown(
         amount=drawdown_evidence.max_drawdown_amount,
         fraction=drawdown_evidence.max_drawdown_fraction,
@@ -755,6 +762,7 @@ def build_paper_risk_report(
     if (
         maximum_drawdown.current_equity != metrics.current_equity
         or maximum_drawdown.peak_equity != metrics.peak_equity
+        or replay_crosscheck != maximum_drawdown
     ):
         raise ValueError("canonical PAPER drawdown replay is inconsistent")
 

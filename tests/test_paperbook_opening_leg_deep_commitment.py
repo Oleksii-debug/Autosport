@@ -1,6 +1,7 @@
 from decimal import Decimal
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -874,3 +875,89 @@ def test_public_operations_never_execute_rebound_causal_authority(
         book.save(tmp_path / "rebound-causal-never-runs.json")
 
     assert attacker_calls == 0
+
+
+
+class _HostileResolutionIterable:
+    iter_calls = 0
+
+    def __iter__(self):
+        type(self).iter_calls += 1
+        raise AssertionError("hostile settlement iterable executed")
+
+
+def test_settlement_rejects_nonbuiltin_collection_before_iteration() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    _HostileResolutionIterable.iter_calls = 0
+
+    with pytest.raises(ValueError, match="exact built-in collection"):
+        book.settle(ticket.ticket_id, _HostileResolutionIterable(), settled_at=_TS)
+
+    assert _HostileResolutionIterable.iter_calls == 0
+    assert ticket.status.value == "open"
+    assert book.balance == Decimal("90")
+
+
+class _HostilePathSubclass(type(Path("."))):
+    fspath_calls = 0
+
+    def __fspath__(self):
+        type(self).fspath_calls += 1
+        raise AssertionError("hostile path coercion executed")
+
+
+def test_save_rejects_path_subclass_before_fspath(tmp_path) -> None:
+    book = PaperBook("100")
+    hostile = _HostilePathSubclass(tmp_path / "snapshot.json")
+    _HostilePathSubclass.fspath_calls = 0
+
+    with pytest.raises(TypeError, match="exact str or exact Path"):
+        book.save(hostile)
+
+    assert _HostilePathSubclass.fspath_calls == 0
+
+
+def test_load_rejects_path_subclass_before_fspath(tmp_path) -> None:
+    hostile = _HostilePathSubclass(tmp_path / "snapshot.json")
+    _HostilePathSubclass.fspath_calls = 0
+
+    with pytest.raises(TypeError, match="exact str or exact Path"):
+        PaperBook.load(hostile)
+
+    assert _HostilePathSubclass.fspath_calls == 0
+
+
+def test_rejected_snapshot_candidate_does_not_create_parent_directories(
+    monkeypatch, tmp_path
+) -> None:
+    book = PaperBook("100")
+    destination = tmp_path / "rejected-parent" / "nested" / "snapshot.json"
+
+    def reject_candidate(cls, _raw):
+        raise ValueError("candidate rejected")
+
+    monkeypatch.setattr(PaperBook, "_from_raw_snapshot", classmethod(reject_candidate))
+
+    with pytest.raises(ValueError, match="candidate rejected"):
+        book.save(destination)
+
+    assert not destination.parent.exists()
+    assert not destination.exists()
+
+
+def test_successful_save_fsyncs_destination_directory(monkeypatch, tmp_path) -> None:
+    book = PaperBook("100")
+    destination = tmp_path / "snapshot.json"
+    calls: list[Path] = []
+    original = PaperBook._fsync_snapshot_directory
+
+    def record(directory: Path) -> None:
+        calls.append(directory)
+
+    monkeypatch.setattr(PaperBook, "_fsync_snapshot_directory", staticmethod(record))
+    book.save(destination)
+
+    assert destination.exists()
+    assert calls == [tmp_path]
+    monkeypatch.setattr(PaperBook, "_fsync_snapshot_directory", original)

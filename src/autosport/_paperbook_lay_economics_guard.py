@@ -59,9 +59,6 @@ def _validate_ticket_leg(
     ticket_id: str | None = None,
 ) -> TicketLeg:
     if _is_lay_leg(leg):
-        # Reuse the canonical BACK validator for every identity/odds invariant.
-        # The only semantic delta here is that canonical lower-case ``lay`` is now
-        # admitted for the single-leg liability state machine below.
         validated = _ORIGINAL_VALIDATE_TICKET_LEG(
             cls,
             replace(leg, exchange_side="back"),
@@ -100,7 +97,6 @@ def _open_ticket(
         )
 
     if any(type(leg) is not TicketLeg for leg in ticket_legs):
-        # Preserve the owning validator's canonical type error.
         return _ORIGINAL_OPEN_TICKET(
             self,
             ticket_legs,
@@ -117,6 +113,10 @@ def _open_ticket(
             "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
         )
 
+    _paper._require_ticket_opening_authority(self)
+    _paper._require_paperbook_causal_history_authority(self)
+    type(self)._validate_loaded_state(self)
+
     leg = ticket_legs[0]
     type(self)._validate_ticket_leg(leg)
     amount = Decimal(str(stake))
@@ -128,26 +128,40 @@ def _open_ticket(
         leg.locked_odds,
         "LAY",
     )
+    new_balance = type(self)._debit_balance(self.balance, locked_capital)
 
-    # Drive all existing opening/provenance/causal authority through the owning
-    # implementation while reserving the economically correct amount. Immediately
-    # restore the product facts that distinguish execution stake from locked capital
-    # and re-issue the opening commitment before returning control to the caller.
-    ticket = _ORIGINAL_OPEN_TICKET(
-        self,
-        (replace(leg, exchange_side="back"),),
-        locked_capital,
-        reason,
-        placed_at,
+    ticket_placed_at = type(self)._validate_placed_at(
+        placed_at if placed_at is not None else _paper.utc_now_iso()
+    )
+    type(self)._require_utf8_string(reason, "strategy_reason")
+    (
+        provider_source_ids,
+        provider_accounts,
+        bankroll_id,
+        currency,
+    ) = type(self)._validate_ticket_provenance(
+        provider_source_ids,
+        provider_accounts,
+        bankroll_id,
+        currency,
+    )
+
+    ticket = PaperTicket(
+        ticket_id=str(_paper.uuid.uuid4()),
+        stake=amount,
+        legs=ticket_legs,
+        placed_at=ticket_placed_at,
+        strategy_reason=reason,
         provider_source_ids=provider_source_ids,
         provider_accounts=provider_accounts,
         bankroll_id=bankroll_id,
         currency=currency,
     )
-    ticket.stake = amount
-    ticket.legs = (leg,)
-    _paper._install_validated_ticket_opening_authority(self)
-    type(self)._validate_loaded_state(self)
+    _paper._record_ticket_opening_authority(self, ticket)
+    self.balance = new_balance
+    self.tickets[ticket.ticket_id] = ticket
+    self._lifecycle.append(("open", ticket.ticket_id, (), ()))
+    _paper._advance_paperbook_causal_history_open(self, ticket.ticket_id)
     return ticket
 
 
@@ -184,12 +198,9 @@ def _settlement_result(
         status = TicketStatus.VOID
         payout = locked_capital
     elif leg.quote_key in winning_quote_keys:
-        # The laid selection won: the bettor loses the reserved liability.
         status = TicketStatus.LOST
         payout = Decimal("0")
     else:
-        # The laid selection did not win: release liability plus the order stake,
-        # where order stake is the exact gross LAY profit before commission.
         status = TicketStatus.WON
         try:
             with localcontext(_paper._paper_decimal_context()) as context:

@@ -263,9 +263,12 @@ class _SourceHealthWriterLock:
         handle = os.fdopen(fd, "a+b", closefd=True)
         try:
             info = os.fstat(handle.fileno())
-            if not stat.S_ISREG(info.st_mode):
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or getattr(info, "st_nlink", 1) != 1
+            ):
                 raise RuntimeError(
-                    "source health writer-lock path must be a regular file"
+                    "source health writer-lock path must be one regular file"
                 )
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
@@ -362,6 +365,22 @@ class SourceHealthStore:
         if (parent_info.st_dev, parent_info.st_ino) != self._parent_identity_authority:
             raise RuntimeError(
                 "source health persistence directory authority changed after construction"
+            )
+
+    def _assert_target_shape(self) -> None:
+        try:
+            info = os.lstat(self._path_authority)
+        except OSError as exc:
+            raise RuntimeError(
+                "source health persistence target is unavailable"
+            ) from exc
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or getattr(info, "st_nlink", 1) != 1
+        ):
+            raise RuntimeError(
+                "source health persistence target must be one regular non-symlink file"
             )
 
     def _sync_parent_directory(self) -> None:
@@ -721,6 +740,7 @@ class SourceHealthStore:
 
     def _read(self) -> dict:
         self._assert_persistence_authority()
+        self._assert_target_shape()
         try:
             raw = json.loads(
                 self._path_authority.read_text(encoding="utf-8"),
@@ -825,9 +845,12 @@ class SourceHealthStore:
             fd = os.open(temporary, flags, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n", closefd=True) as handle:
                 info = os.fstat(handle.fileno())
-                if not stat.S_ISREG(info.st_mode):
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or getattr(info, "st_nlink", 1) != 1
+                ):
                     raise RuntimeError(
-                        "source health temporary persistence path must be a regular file"
+                        "source health temporary persistence path must be one regular file"
                     )
                 json.dump(raw, handle, ensure_ascii=False, indent=2, sort_keys=True)
                 handle.write("\n")

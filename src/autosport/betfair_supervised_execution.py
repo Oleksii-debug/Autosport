@@ -1008,8 +1008,9 @@ def _place_action_with_final_durable_authority(
 
         submitted = False
 
-        def authorize_and_submit(_request_sha256: str) -> None:
+        def authorize_and_submit(request_sha256: str) -> None:
             nonlocal submitted
+            _sha(request_sha256, "submitted_request_sha256")
             send_at = _supervised_execution_runtime._trusted_now()
             _require_approval(bound, approval, send_at)
             _require_durable_approval(ledger, bound, approval)
@@ -1032,7 +1033,10 @@ def _place_action_with_final_durable_authority(
                 bound.execution_plan.plan_id,
                 action.action_id,
                 attempt_id,
-                {"submitted_at": send_at},
+                {
+                    "submitted_at": send_at,
+                    "submitted_request_sha256": request_sha256,
+                },
             )
             submitted = True
 

@@ -12,6 +12,7 @@ caller-writable module globals after installation.
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from enum import StrEnum
 import hashlib
 import json
@@ -438,6 +439,7 @@ def _build_canonical_authority():
     completeness_cls = ProspectiveApplicableCostCompleteness
     reason_cls = ProspectiveApplicableCostReason
     datetime_cls = datetime
+    decimal_cls = Decimal
     timezone_utc = timezone.utc
     sha_pattern = re.compile(r"^[0-9a-f]{64}$")
     json_dumps = json.dumps
@@ -734,6 +736,34 @@ def _build_canonical_authority():
     def slippage_evidence_id(value: object) -> str:
         if type(value) is not slippage_evidence_cls:
             raise error_cls("canonical Betfair slippage evidence type changed")
+
+        requested_stake = object.__getattribute__(value, "requested_stake")
+        price_floor_odds = object.__getattribute__(value, "price_floor_odds")
+        if (
+            type(requested_stake) is not decimal_cls
+            or not requested_stake.is_finite()
+            or requested_stake <= 0
+        ):
+            raise error_cls("slippage requested_stake must be an exact finite positive Decimal")
+        if (
+            type(price_floor_odds) is not decimal_cls
+            or not price_floor_odds.is_finite()
+            or price_floor_odds <= 0
+        ):
+            raise error_cls("slippage price_floor_odds must be an exact finite positive Decimal")
+
+        matchme_proven = object.__getattribute__(value, "matchme_applicability_proven")
+        zero_adverse = object.__getattribute__(value, "zero_adverse_price_deterioration")
+        feasibility = object.__getattribute__(value, "execution_feasibility_proven")
+        realized_exact = object.__getattribute__(value, "realized_price_exact")
+        if (
+            type(matchme_proven) is not bool
+            or type(zero_adverse) is not bool
+            or type(feasibility) is not bool
+            or type(realized_exact) is not bool
+        ):
+            raise error_cls("slippage proof flags must be exact bool values")
+
         payload = {
             "schema": "autosport.betfair_standard_limit_price_bound",
             "schema_version": 2,
@@ -785,12 +815,8 @@ def _build_canonical_authority():
                 object.__getattribute__(value, "side"),
                 "slippage side",
             ),
-            "requested_stake": str(
-                object.__getattribute__(value, "requested_stake")
-            ),
-            "price_floor_odds": str(
-                object.__getattribute__(value, "price_floor_odds")
-            ),
+            "requested_stake": str(requested_stake),
+            "price_floor_odds": str(price_floor_odds),
             "quote_id": text(
                 object.__getattribute__(value, "quote_id"),
                 "slippage quote_id",
@@ -828,14 +854,10 @@ def _build_canonical_authority():
                 "slippage write_adapter_version",
             ),
             "status": "PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION",
-            "matchme_applicability_proven": object.__getattribute__(
-                value, "matchme_applicability_proven"
-            ),
-            "zero_adverse_price_deterioration": object.__getattribute__(
-                value, "zero_adverse_price_deterioration"
-            ),
-            "execution_feasibility_proven": False,
-            "realized_price_exact": False,
+            "matchme_applicability_proven": matchme_proven,
+            "zero_adverse_price_deterioration": zero_adverse,
+            "execution_feasibility_proven": feasibility,
+            "realized_price_exact": realized_exact,
         }
         if json_dumps.__code__ is not json_dumps_code:
             raise error_cls("canonical JSON proof serializer authority changed")

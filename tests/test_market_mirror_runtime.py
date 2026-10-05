@@ -1987,5 +1987,82 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(snapshot.events, (provider_a,))
 
 
+    def test_affected_inputs_fails_safe_on_same_selector_reincarnation(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        event = self.event(
+            source_id="provider-a",
+            selection="selection-a",
+            sequence=1,
+        )
+        runtime.accept_persisted(event)
+        batch = runtime.drain()
+        original_view_for_keys = mirror.view_for_keys
+        raced = [False]
+
+        def reincarnate_during_route(*args, **kwargs):
+            snapshot = original_view_for_keys(*args, **kwargs)
+            if not raced[0]:
+                raced[0] = True
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-a")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "view_for_keys",
+            side_effect=reincarnate_during_route,
+        ):
+            affected = dependencies.affected_inputs(batch)
+
+        self.assertTrue(raced[0])
+        self.assertEqual(affected, ("decision",))
+
+    def test_incremental_view_falls_back_on_same_selector_reincarnation(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(
+            source_id="provider-a",
+            selection="selection-a",
+            sequence=1,
+        )
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_bounded = mirror.active_view_for_keys
+        raced = [False]
+
+        def reincarnate_during_bounded_read(*args, **kwargs):
+            snapshot = original_bounded(*args, **kwargs)
+            if not raced[0]:
+                raced[0] = True
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-a")
+            return snapshot
+
+        with (
+            patch.object(
+                mirror,
+                "active_view_for_keys",
+                side_effect=reincarnate_during_bounded_read,
+            ),
+            patch.object(
+                mirror,
+                "active_view",
+                wraps=mirror.active_view,
+            ) as full_view,
+        ):
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertTrue(raced[0])
+        self.assertEqual(snapshot.events, (event,))
+        full_view.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

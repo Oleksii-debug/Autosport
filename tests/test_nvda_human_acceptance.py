@@ -190,6 +190,41 @@ def test_dataclass_replace_cannot_mint_successor_authority() -> None:
         replace(result, transcript_sha256="c" * 64)
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "transcript_sha256",
+        "artifact_sha256",
+        "source_sha",
+        "windows_version",
+        "nvda_version",
+        "webview2_runtime_browser_version",
+        "webview2_runtime_witness_sha256",
+        "evidence_origin",
+        "human_tester_attestation_sha256",
+        "journey_content_sha256",
+        "status",
+        "human_tested",
+        "nvda_verified",
+        "manual_truth_promotion_required",
+        "real_money_execution",
+        "whole_product_complete",
+    ),
+)
+def test_structural_result_field_descriptor_rebinding_is_rejected(field_name):
+    with pytest.raises(
+        TypeError,
+        match="NVDA structural result authority surface is sealed",
+    ):
+        setattr(NvdaHumanAcceptanceStructuralResult, field_name, object())
+
+    with pytest.raises(
+        TypeError,
+        match="NVDA structural result authority surface is sealed",
+    ):
+        delattr(NvdaHumanAcceptanceStructuralResult, field_name)
+
+
 def test_same_object_payload_mutation_invalidates_live_issuance() -> None:
     result = _validate(_valid_transcript())
     object.__setattr__(result, "source_sha", "c" * 40)

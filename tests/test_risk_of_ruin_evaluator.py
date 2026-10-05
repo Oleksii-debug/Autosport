@@ -461,6 +461,34 @@ def test_exact_bound_matches_reference_cases(
     assert abs(bound - expected) < Decimal("1e-14")
 
 
+
+def test_direct_evaluation_rejects_lossy_submicrosecond_issuance_clock() -> None:
+    request = _request(planned=2)
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="precision finer than microseconds is unsupported",
+    ):
+        evaluate_risk_of_ruin(
+            request,
+            workspace_instance_id="workspace:test",
+            issued_at="2026-01-04T00:00:00.0000001+00:00",
+            source_sha256=SHA_F,
+        )
+
+
+def test_direct_evaluation_accepts_zero_only_excess_issuance_precision() -> None:
+    request = _request(planned=2)
+
+    result = evaluate_risk_of_ruin(
+        request,
+        workspace_instance_id="workspace:test",
+        issued_at="2026-01-04T00:00:00.123456000+00:00",
+        source_sha256=SHA_F,
+    )
+
+    assert result.issued_at == "2026-01-04T00:00:00.123456+00:00"
+
 def test_transient_path_breach_counts_as_ruin() -> None:
     observations = tuple(
         _observation(index, ruined=(index == 4)) for index in range(10)

@@ -87,6 +87,45 @@ class MarketMirrorTests(unittest.TestCase):
 
 
 
+    def test_semantic_identity_does_not_hide_causal_authority_promotion(self) -> None:
+        mirror = MarketMirror()
+        legacy = self.prophetx_refresh_event(sequence=1)
+        promoted = self.prophetx_refresh_event(sequence=2)
+
+        baseline = mirror._apply_with_causal_authority(
+            legacy,
+            decision_causal=False,
+        )
+        self.assertEqual(baseline.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, ())
+
+        promotion = mirror._apply_with_causal_authority(
+            promoted,
+            decision_causal=True,
+        )
+        self.assertEqual(promotion.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, (promoted,))
+
+    def test_semantic_identity_does_not_hide_causal_authority_loss(self) -> None:
+        mirror = MarketMirror()
+        causal = self.prophetx_refresh_event(sequence=1)
+        audit_only = self.prophetx_refresh_event(sequence=2)
+
+        self.assertEqual(
+            mirror._apply_with_causal_authority(
+                causal,
+                decision_causal=True,
+            ).status,
+            MirrorUpdate.APPLIED,
+        )
+        loss = mirror._apply_with_causal_authority(
+            audit_only,
+            decision_causal=False,
+        )
+
+        self.assertEqual(loss.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, ())
+
     def test_semantic_refresh_advances_live_liveness_without_changing_price_state(self) -> None:
         mirror = MarketMirror()
         first = self.prophetx_refresh_event(sequence=1)

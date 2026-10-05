@@ -25,7 +25,13 @@ _ORIGINAL_TICKET_MATCHES_ATTEMPT = PaperExecutionAdoptionRuntime._ticket_matches
 
 
 def _normalized_action_side(exchange_side: str | None) -> str:
-    if exchange_side is None or exchange_side == "back":
+    if exchange_side is None:
+        return "BACK"
+    if type(exchange_side) is not str:
+        raise PaperExecutionAdoptionError(
+            "PAPER adoption exchange side must be an exact canonical string"
+        )
+    if exchange_side == "back":
         return "BACK"
     if exchange_side == "lay":
         return "LAY"
@@ -146,6 +152,10 @@ def _prepare_paper_value_action(
 
 
 def _require_action_side(action: ExecutionAction) -> str:
+    if type(action) is not ExecutionAction or type(action.side) is not str:
+        raise PaperExecutionAdoptionError(
+            "PaperBook materialization requires canonical ExecutionAction side authority"
+        )
     if action.side not in {"BACK", "LAY"}:
         raise PaperExecutionAdoptionError(
             "PaperBook materialization requires canonical BACK or LAY execution side"

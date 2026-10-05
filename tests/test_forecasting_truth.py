@@ -276,6 +276,35 @@ class ForecastTruthTests(unittest.TestCase):
         context = AgentContext(book, replay_run_id="causal-run")
         PaperValueAgent({event.quote_key: future}).on_market_event(event, context)
         self.assertEqual(len(book.tickets), 0)
+        self.assertEqual(context.notes, [])
+
+
+    def test_paper_agent_rejects_forecast_generated_after_event_even_with_old_input_cutoff(self):
+        event = MarketEvent.from_dict(
+            {
+                "event_id": "e",
+                "market_id": "winner",
+                "selection_id": "a",
+                "decimal_odds": "2.0",
+                "observed_ts": "2026-02-10T12:00:00+00:00",
+                "source_id": "fixture",
+                "sequence": 1,
+            }
+        )
+        future_generated = self._record(
+            input_cutoff="2026-02-10T11:59:59+00:00",
+            generated_at="2026-02-10T12:00:00.000001+00:00",
+        )
+        book = PaperBook("10000")
+        context = AgentContext(book, replay_run_id="generation-causal-run")
+
+        PaperValueAgent({event.quote_key: future_generated}).on_market_event(
+            event,
+            context,
+        )
+
+        self.assertEqual(len(book.tickets), 0)
+        self.assertEqual(context.notes, [])
 
 
 if __name__ == "__main__":

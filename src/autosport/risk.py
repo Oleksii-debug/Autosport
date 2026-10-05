@@ -1611,6 +1611,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 " evidence is invalid",
                 "quote exceeds economic goal maximum age",
                 "quote timestamp is after proposal timestamp",
+                "quote was not locally available by proposal timestamp",
             )
         )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dis
 import json
 import os
 import tempfile
@@ -471,6 +472,100 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
                     terminal_population_authority._require_dispatch()
             finally:
                 getter.__code__ = original_code
+
+    def test_population_positive_capability_code_mutation_fails_closed(
+        self,
+    ) -> None:
+        getter = ProductProposalTargetTerminalPopulation.__dict__[
+            "population_identity_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        proof = getter.__defaults__[0]
+        original_code = proof.__code__
+
+        def forged(_instance: object) -> bool:
+            return True
+
+        try:
+            proof.__code__ = forged.__code__
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                terminal_population_authority._require_dispatch()
+        finally:
+            proof.__code__ = original_code
+
+    def test_population_capability_token_mutation_fails_closed(self) -> None:
+        getter = ProductProposalTargetTerminalPopulation.__dict__[
+            "population_identity_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        proof = getter.__defaults__[0]
+        closure = proof.__closure__
+        self.assertIsNotNone(closure)
+        self.assertEqual(len(closure), 1)
+        cell = closure[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = object()
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                terminal_population_authority._require_dispatch()
+        finally:
+            cell.cell_contents = original
+
+    def test_population_binder_code_mutation_fails_closed(self) -> None:
+        binder = terminal_population_authority._BIND_IDENTITY
+        original_code = binder.__code__
+
+        def forged(_instance: object) -> None:
+            return None
+
+        try:
+            binder.__code__ = forged.__code__
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                terminal_population_authority._require_dispatch()
+        finally:
+            binder.__code__ = original_code
+
+    def test_population_build_snapshots_construction_roots_before_guard(
+        self,
+    ) -> None:
+        instructions = list(dis.get_instructions(terminal_population_authority._build))
+        store_indices = {}
+        for local_name in ("population_type", "bind_identity", "dispatch_guard"):
+            stores = [
+                index
+                for index, instruction in enumerate(instructions)
+                if instruction.opname == "STORE_FAST"
+                and instruction.argval == local_name
+            ]
+            self.assertEqual(len(stores), 1)
+            store_indices[local_name] = stores[0]
+
+        guard_load_index = next(
+            index
+            for index, instruction in enumerate(instructions)
+            if instruction.opname == "LOAD_FAST"
+            and instruction.argval == "dispatch_guard"
+            and index > store_indices["dispatch_guard"]
+        )
+        self.assertLess(store_indices["population_type"], guard_load_index)
+        self.assertLess(store_indices["bind_identity"], guard_load_index)
+
+        late_global_reads = [
+            instruction.argval
+            for instruction in instructions[guard_load_index + 1 :]
+            if instruction.opname == "LOAD_GLOBAL"
+            and instruction.argval in {"_POPULATION_TYPE", "_BIND_IDENTITY"}
+        ]
+        self.assertEqual(late_global_reads, [])
 
     def test_population_json_dump_root_and_code_recheck_after_dispatch(self) -> None:
         original = terminal_population_authority.json.dumps

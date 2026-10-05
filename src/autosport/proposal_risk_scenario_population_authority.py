@@ -2088,21 +2088,25 @@ def _make_public_operations(
         terminal_population: ProductProposalTargetTerminalPopulation,
         members: tuple[CounterfactualScenarioMemberBinding, ...],
     ) -> ProductProposalRiskScenarioPopulation:
+        bind_identity = _bind_identity
+        issue_core = _issue_core
+        expected_bind_code = _bind_code
+        expected_issue_core_code = _issue_core_code
         if (
-            getattr(_bind_identity, "__code__", None) is not _bind_code
-            or getattr(_issue_core, "__code__", None)
-            is not _issue_core_code
+            getattr(bind_identity, "__code__", None) is not expected_bind_code
+            or getattr(issue_core, "__code__", None)
+            is not expected_issue_core_code
         ):
             raise ProductProposalRiskScenarioPopulationError(
                 "scenario population public issue closure changed"
             )
-        instance = _issue_core(
+        instance = issue_core(
             workspace,
             precommit,
             terminal_population,
             members,
         )
-        _bind_identity(instance)
+        bind_identity(instance)
         return instance
 
     def resolve(
@@ -2110,20 +2114,24 @@ def _make_public_operations(
         precommit: ProductProposalRiskEvaluationPrecommit,
         terminal_population: ProductProposalTargetTerminalPopulation,
     ) -> ProductProposalRiskScenarioPopulation:
+        bind_identity = _bind_identity
+        resolve_core = _resolve_core
+        expected_bind_code = _bind_code
+        expected_resolve_core_code = _resolve_core_code
         if (
-            getattr(_bind_identity, "__code__", None) is not _bind_code
-            or getattr(_resolve_core, "__code__", None)
-            is not _resolve_core_code
+            getattr(bind_identity, "__code__", None) is not expected_bind_code
+            or getattr(resolve_core, "__code__", None)
+            is not expected_resolve_core_code
         ):
             raise ProductProposalRiskScenarioPopulationError(
                 "scenario population public resolve closure changed"
             )
-        instance = _resolve_core(
+        instance = resolve_core(
             workspace,
             precommit,
             terminal_population,
         )
-        _bind_identity(instance)
+        bind_identity(instance)
         return instance
 
     issue.__name__ = "issue_product_proposal_risk_scenario_population"

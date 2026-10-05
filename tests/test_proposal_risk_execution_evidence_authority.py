@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dis
 import hashlib
 import json
 import os
@@ -695,6 +696,234 @@ from autosport.proposal_risk_terminal_state_mapping_authority import (
 )
 
 
+    def test_mapping_json_dumps_code_mutation_is_rejected(self) -> None:
+        original_code = json.dumps.__code__
+
+        def forged_dumps(*_args, **_kwargs):
+            return "{}"
+
+        try:
+            json.dumps.__code__ = forged_dumps.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "dispatch root changed",
+            ):
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
+        finally:
+            json.dumps.__code__ = original_code
+
+    def test_mapping_json_loads_code_mutation_is_rejected(self) -> None:
+        original_code = json.loads.__code__
+
+        def forged_loads(*_args, **_kwargs):
+            return {}
+
+        try:
+            json.loads.__code__ = forged_loads.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "dispatch root changed",
+            ):
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
+        finally:
+            json.loads.__code__ = original_code
+
+    def test_mapping_dispatch_guard_code_mutation_is_rejected(self) -> None:
+        guard = terminal_mapping_authority._REQUIRE_DISPATCH_ORIGINAL
+        original_code = guard.__code__
+
+        def forged_guard(*_args, **_kwargs):
+            return None
+
+        try:
+            guard.__code__ = forged_guard.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "dispatch guard root changed",
+            ):
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
+        finally:
+            guard.__code__ = original_code
+
+    def test_mapping_positive_capability_token_cell_mutation_is_rejected(
+        self,
+    ) -> None:
+        getter = ProductProposalRiskTerminalStateMapping.__dict__[
+            "terminal_mapping_proven"
+        ].fget
+        proof = getter.__defaults__[0]
+        closure = proof.__closure__
+        self.assertIsNotNone(closure)
+        self.assertEqual(len(closure), 1)
+        cell = closure[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = object()
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "result authority surface changed",
+            ):
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
+        finally:
+            cell.cell_contents = original
+
+    def test_mapping_public_binder_token_cell_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        resolver = (
+            terminal_mapping_authority
+            .resolve_product_proposal_risk_terminal_state_mapping
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        binder_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "bind"
+        ]
+        self.assertEqual(len(binder_cells), 1)
+        binder = binder_cells[0].cell_contents
+        binder_closure = binder.__closure__
+        self.assertIsNotNone(binder_closure)
+        self.assertEqual(len(binder_closure), 1)
+        token_cell = binder_closure[0]
+        original = token_cell.cell_contents
+        try:
+            token_cell.cell_contents = object()
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "public resolver root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            token_cell.cell_contents = original
+
+    def test_mapping_result_field_descriptor_rebind_is_rejected(self) -> None:
+        original = ProductProposalRiskTerminalStateMapping.__dict__[
+            "resolution_sha256"
+        ]
+        try:
+            ProductProposalRiskTerminalStateMapping.resolution_sha256 = (
+                property(lambda _self: "0" * 64)
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "result field surface changed",
+            ):
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
+        finally:
+            ProductProposalRiskTerminalStateMapping.resolution_sha256 = original
+
+    def test_mapping_public_result_type_closure_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        resolver = (
+            terminal_mapping_authority
+            .resolve_product_proposal_risk_terminal_state_mapping
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        result_type_cells = [
+            cell
+            for cell in closure
+            if cell.cell_contents is ProductProposalRiskTerminalStateMapping
+        ]
+        self.assertEqual(len(result_type_cells), 1)
+        cell = result_type_cells[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "public resolver root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
+    def test_mapping_public_resolver_snapshots_closure_before_core(
+        self,
+    ) -> None:
+        resolver = (
+            terminal_mapping_authority
+            .resolve_product_proposal_risk_terminal_state_mapping
+        )
+        instructions = list(dis.get_instructions(resolver))
+        values_store_index = next(
+            index
+            for index, instruction in enumerate(instructions)
+            if instruction.opname == "STORE_FAST"
+            and instruction.argval == "values"
+        )
+        snapshot_locals = (
+            "bind_mapping",
+            "resolve_core",
+            "result_type",
+            "result_fields",
+            "expected_bind_code",
+            "expected_core_code",
+        )
+        for local_name in snapshot_locals:
+            with self.subTest(local_name=local_name):
+                stores = [
+                    index
+                    for index, instruction in enumerate(instructions)
+                    if instruction.opname == "STORE_FAST"
+                    and instruction.argval == local_name
+                ]
+                self.assertEqual(len(stores), 1)
+                self.assertLess(stores[0], values_store_index)
+
+        mutable_cells = {
+            "_bind_mapping",
+            "_resolve_core",
+            "_result_type",
+            "_result_fields",
+            "_bind_code",
+            "_resolve_core_code",
+        }
+        late_reads = [
+            instruction.argval
+            for instruction in instructions[values_store_index + 1 :]
+            if instruction.opname == "LOAD_DEREF"
+            and instruction.argval in mutable_cells
+        ]
+        self.assertEqual(late_reads, [])
+
+    def test_mapping_helper_witness_table_rebind_is_rejected(self) -> None:
+        original = terminal_mapping_authority._HELPER_WITNESSES_EXPECTED
+        try:
+            terminal_mapping_authority._HELPER_WITNESSES_EXPECTED = tuple(
+                list(original)
+            )
+            self.assertIsNot(
+                terminal_mapping_authority._HELPER_WITNESSES_EXPECTED,
+                original,
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "dispatch root changed",
+            ):
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
+        finally:
+            terminal_mapping_authority._HELPER_WITNESSES_EXPECTED = original
+
+    def test_mapping_helper_kwdefault_mutation_is_rejected(self) -> None:
+        kwdefaults = terminal_mapping_authority._text.__kwdefaults__
+        self.assertIsNotNone(kwdefaults)
+        original = kwdefaults["max_length"]
+        try:
+            kwdefaults["max_length"] = original + 1
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "helper root changed",
+            ):
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
+        finally:
+            kwdefaults["max_length"] = original
+
+
 import autosport.proposal_risk_terminal_payoff_authority as terminal_payoff_authority
 from autosport.proposal_risk_terminal_payoff_authority import (
     ProductProposalRiskTerminalPayoffEvaluation,
@@ -1304,6 +1533,84 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
         self.assertFalse(unbound.scenario_execution_proven)
         self.assertFalse(unbound.grants_ticket_authority)
         self.assertFalse(unbound.grants_real_money_authority)
+
+    def test_public_issue_snapshots_binder_before_core(self) -> None:
+        issue = (
+            scenario_population_authority
+            .issue_product_proposal_risk_scenario_population
+        )
+        instructions = list(dis.get_instructions(issue))
+        instance_store_index = next(
+            index
+            for index, instruction in enumerate(instructions)
+            if instruction.opname == "STORE_FAST"
+            and instruction.argval == "instance"
+        )
+        for local_name in (
+            "bind_identity",
+            "issue_core",
+            "expected_bind_code",
+            "expected_issue_core_code",
+        ):
+            stores = [
+                index
+                for index, instruction in enumerate(instructions)
+                if instruction.opname == "STORE_FAST"
+                and instruction.argval == local_name
+            ]
+            self.assertEqual(len(stores), 1)
+            self.assertLess(stores[0], instance_store_index)
+        late_reads = [
+            instruction.argval
+            for instruction in instructions[instance_store_index + 1 :]
+            if instruction.opname == "LOAD_DEREF"
+            and instruction.argval in {
+                "_bind_identity",
+                "_issue_core",
+                "_bind_code",
+                "_issue_core_code",
+            }
+        ]
+        self.assertEqual(late_reads, [])
+
+    def test_public_resolve_snapshots_binder_before_core(self) -> None:
+        resolve = (
+            scenario_population_authority
+            .resolve_product_proposal_risk_scenario_population
+        )
+        instructions = list(dis.get_instructions(resolve))
+        instance_store_index = next(
+            index
+            for index, instruction in enumerate(instructions)
+            if instruction.opname == "STORE_FAST"
+            and instruction.argval == "instance"
+        )
+        for local_name in (
+            "bind_identity",
+            "resolve_core",
+            "expected_bind_code",
+            "expected_resolve_core_code",
+        ):
+            stores = [
+                index
+                for index, instruction in enumerate(instructions)
+                if instruction.opname == "STORE_FAST"
+                and instruction.argval == local_name
+            ]
+            self.assertEqual(len(stores), 1)
+            self.assertLess(stores[0], instance_store_index)
+        late_reads = [
+            instruction.argval
+            for instruction in instructions[instance_store_index + 1 :]
+            if instruction.opname == "LOAD_DEREF"
+            and instruction.argval in {
+                "_bind_identity",
+                "_resolve_core",
+                "_bind_code",
+                "_resolve_core_code",
+            }
+        ]
+        self.assertEqual(late_reads, [])
 
     def test_public_issue_resolver_rebind_is_rejected_by_durable_core(self) -> None:
         original = (
@@ -2518,6 +2825,264 @@ class ProductProposalRiskTerminalPayoffEvaluationTests(unittest.TestCase):
             terminal_payoff_authority._SCHEMA = original
 
 
+    def test_payoff_json_dumps_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original_code = json.dumps.__code__
+
+        def forged_dumps(*_args, **_kwargs):
+            return "{}"
+
+        try:
+            json.dumps.__code__ = forged_dumps.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            json.dumps.__code__ = original_code
+
+    def test_payoff_json_loads_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original_code = json.loads.__code__
+
+        def forged_loads(*_args, **_kwargs):
+            return {}
+
+        try:
+            json.loads.__code__ = forged_loads.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            json.loads.__code__ = original_code
+
+    def test_payoff_dispatch_guard_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        guard = terminal_payoff_authority._REQUIRE_DISPATCH_ORIGINAL
+        original_code = guard.__code__
+
+        def forged_guard(*_args, **_kwargs):
+            return None
+
+        try:
+            guard.__code__ = forged_guard.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch guard root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            guard.__code__ = original_code
+
+    def test_payoff_positive_capability_token_cell_mutation_is_rejected(
+        self,
+    ) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        getter = ProductProposalRiskTerminalPayoffEvaluation.__dict__[
+            "target_terminal_payoff_evaluation_proven"
+        ].fget
+        proof = getter.__defaults__[0]
+        closure = proof.__closure__
+        self.assertIsNotNone(closure)
+        self.assertEqual(len(closure), 1)
+        cell = closure[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = object()
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "result authority surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
+    def test_payoff_public_binder_token_cell_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        resolver = (
+            terminal_payoff_authority
+            .resolve_product_proposal_risk_terminal_payoff_evaluation
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        binder_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "bind"
+        ]
+        self.assertEqual(len(binder_cells), 1)
+        binder = binder_cells[0].cell_contents
+        binder_closure = binder.__closure__
+        self.assertIsNotNone(binder_closure)
+        self.assertEqual(len(binder_closure), 1)
+        token_cell = binder_closure[0]
+        original = token_cell.cell_contents
+        try:
+            token_cell.cell_contents = object()
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "public resolver root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            token_cell.cell_contents = original
+
+    def test_payoff_result_field_descriptor_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = ProductProposalRiskTerminalPayoffEvaluation.__dict__[
+            "evaluation_sha256"
+        ]
+        try:
+            ProductProposalRiskTerminalPayoffEvaluation.evaluation_sha256 = (
+                property(lambda _self: "0" * 64)
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "result field surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            ProductProposalRiskTerminalPayoffEvaluation.evaluation_sha256 = original
+
+    def test_payoff_public_result_type_closure_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        resolver = (
+            terminal_payoff_authority
+            .resolve_product_proposal_risk_terminal_payoff_evaluation
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        result_type_cells = [
+            cell
+            for cell in closure
+            if cell.cell_contents is ProductProposalRiskTerminalPayoffEvaluation
+        ]
+        self.assertEqual(len(result_type_cells), 1)
+        cell = result_type_cells[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "public resolver root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
+    def test_payoff_public_resolver_snapshots_closure_before_core(
+        self,
+    ) -> None:
+        resolver = (
+            terminal_payoff_authority
+            .resolve_product_proposal_risk_terminal_payoff_evaluation
+        )
+        instructions = list(dis.get_instructions(resolver))
+        values_store_index = next(
+            index
+            for index, instruction in enumerate(instructions)
+            if instruction.opname == "STORE_FAST"
+            and instruction.argval == "values"
+        )
+        snapshot_locals = (
+            "bind_identity",
+            "resolve_core",
+            "result_type",
+            "result_fields",
+            "expected_bind_code",
+            "expected_core_code",
+        )
+        for local_name in snapshot_locals:
+            with self.subTest(local_name=local_name):
+                stores = [
+                    index
+                    for index, instruction in enumerate(instructions)
+                    if instruction.opname == "STORE_FAST"
+                    and instruction.argval == local_name
+                ]
+                self.assertEqual(len(stores), 1)
+                self.assertLess(stores[0], values_store_index)
+
+        mutable_cells = {
+            "_bind_identity",
+            "_resolve_core",
+            "_result_type",
+            "_result_fields",
+            "_bind_code",
+            "_resolve_core_code",
+        }
+        late_reads = [
+            instruction.argval
+            for instruction in instructions[values_store_index + 1 :]
+            if instruction.opname == "LOAD_DEREF"
+            and instruction.argval in mutable_cells
+        ]
+        self.assertEqual(late_reads, [])
+
+    def test_payoff_helper_witness_table_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = terminal_payoff_authority._HELPER_WITNESSES_EXPECTED
+        try:
+            terminal_payoff_authority._HELPER_WITNESSES_EXPECTED = tuple(
+                list(original)
+            )
+            self.assertIsNot(
+                terminal_payoff_authority._HELPER_WITNESSES_EXPECTED,
+                original,
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            terminal_payoff_authority._HELPER_WITNESSES_EXPECTED = original
+
+    def test_payoff_helper_kwdefault_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        kwdefaults = terminal_payoff_authority._text.__kwdefaults__
+        self.assertIsNotNone(kwdefaults)
+        original = kwdefaults["max_length"]
+        try:
+            kwdefaults["max_length"] = original + 1
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "helper root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            kwdefaults["max_length"] = original
+
+    def test_payoff_paper_context_type_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = terminal_payoff_authority._paper_module.Context
+        try:
+            terminal_payoff_authority._paper_module.Context = (
+                lambda *args, **kwargs: original(*args, **kwargs)
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            terminal_payoff_authority._paper_module.Context = original
+
+
 import autosport.proposal_risk_terminal_component_provenance_authority as terminal_component_provenance_authority
 from autosport.proposal_risk_terminal_component_provenance_authority import (
     ProductProposalRiskTerminalComponentProvenance,
@@ -2932,5 +3497,1021 @@ class ProductProposalRiskTerminalComponentProvenanceTests(unittest.TestCase):
         finally:
             core.__code__ = original_code
 
+
+    def test_component_json_dumps_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original_code = json.dumps.__code__
+
+        def forged_dumps(*_args, **_kwargs):
+            return "{}"
+
+        try:
+            json.dumps.__code__ = forged_dumps.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            json.dumps.__code__ = original_code
+
+    def test_component_dispatch_guard_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        guard = terminal_component_provenance_authority._REQUIRE_DISPATCH_ORIGINAL
+        original_code = guard.__code__
+
+        def forged_guard(*_args, **_kwargs):
+            return None
+
+        try:
+            guard.__code__ = forged_guard.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "dispatch guard root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            guard.__code__ = original_code
+
+    def test_component_positive_capability_token_cell_mutation_is_rejected(
+        self,
+    ) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        getter = ProductProposalRiskTerminalComponentProvenance.__dict__[
+            "provider_terminal_component_provenance_proven"
+        ].fget
+        proof = getter.__defaults__[0]
+        closure = proof.__closure__
+        self.assertIsNotNone(closure)
+        self.assertEqual(len(closure), 1)
+        cell = closure[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = object()
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "result authority surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
+    def test_component_public_binder_token_cell_mutation_is_rejected(
+        self,
+    ) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        resolver = (
+            terminal_component_provenance_authority
+            .resolve_product_proposal_risk_terminal_component_provenance
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        binder_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "bind"
+        ]
+        self.assertEqual(len(binder_cells), 1)
+        binder = binder_cells[0].cell_contents
+        binder_closure = binder.__closure__
+        self.assertIsNotNone(binder_closure)
+        self.assertEqual(len(binder_closure), 1)
+        token_cell = binder_closure[0]
+        original = token_cell.cell_contents
+        try:
+            token_cell.cell_contents = object()
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "public resolver root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            token_cell.cell_contents = original
+
+    def test_component_result_field_descriptor_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = ProductProposalRiskTerminalComponentProvenance.__dict__[
+            "provenance_sha256"
+        ]
+        try:
+            ProductProposalRiskTerminalComponentProvenance.provenance_sha256 = (
+                property(lambda _self: "0" * 64)
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "result field surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            ProductProposalRiskTerminalComponentProvenance.provenance_sha256 = (
+                original
+            )
+
+    def test_component_public_result_type_closure_mutation_is_rejected(
+        self,
+    ) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        resolver = (
+            terminal_component_provenance_authority
+            .resolve_product_proposal_risk_terminal_component_provenance
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        result_type_cells = [
+            cell
+            for cell in closure
+            if cell.cell_contents is ProductProposalRiskTerminalComponentProvenance
+        ]
+        self.assertEqual(len(result_type_cells), 1)
+        cell = result_type_cells[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "public resolver root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
+    def test_component_public_resolver_snapshots_closure_before_core(
+        self,
+    ) -> None:
+        resolver = (
+            terminal_component_provenance_authority
+            .resolve_product_proposal_risk_terminal_component_provenance
+        )
+        instructions = list(dis.get_instructions(resolver))
+        values_store_index = next(
+            index
+            for index, instruction in enumerate(instructions)
+            if instruction.opname == "STORE_FAST"
+            and instruction.argval == "values"
+        )
+        snapshot_locals = (
+            "bind_identity",
+            "resolve_core",
+            "result_type",
+            "result_fields",
+            "expected_bind_code",
+            "expected_core_code",
+        )
+        for local_name in snapshot_locals:
+            with self.subTest(local_name=local_name):
+                stores = [
+                    index
+                    for index, instruction in enumerate(instructions)
+                    if instruction.opname == "STORE_FAST"
+                    and instruction.argval == local_name
+                ]
+                self.assertEqual(len(stores), 1)
+                self.assertLess(stores[0], values_store_index)
+
+        mutable_cells = {
+            "_bind_identity",
+            "_resolve_core",
+            "_result_type",
+            "_result_fields",
+            "_bind_code",
+            "_resolve_core_code",
+        }
+        late_reads = [
+            instruction.argval
+            for instruction in instructions[values_store_index + 1 :]
+            if instruction.opname == "LOAD_DEREF"
+            and instruction.argval in mutable_cells
+        ]
+        self.assertEqual(late_reads, [])
+
+    def test_component_helper_witness_table_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = terminal_component_provenance_authority._HELPER_WITNESSES_EXPECTED
+        try:
+            terminal_component_provenance_authority._HELPER_WITNESSES_EXPECTED = (
+                tuple(list(original))
+            )
+            self.assertIsNot(
+                terminal_component_provenance_authority._HELPER_WITNESSES_EXPECTED,
+                original,
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            terminal_component_provenance_authority._HELPER_WITNESSES_EXPECTED = (
+                original
+            )
+
+    def test_component_helper_kwdefault_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        kwdefaults = terminal_component_provenance_authority._text.__kwdefaults__
+        self.assertIsNotNone(kwdefaults)
+        original = kwdefaults["max_length"]
+        try:
+            kwdefaults["max_length"] = original + 1
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "helper root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            kwdefaults["max_length"] = original
+
+
+import autosport.proposal_risk_counterfactual_cash_floor_authority as cash_floor_authority
+from autosport.proposal_risk_counterfactual_cash_floor_authority import (
+    ProductProposalRiskCounterfactualCashFloor,
+    ProductProposalRiskCounterfactualCashFloorError,
+    resolve_product_proposal_risk_counterfactual_cash_floor,
+)
+from autosport.proposal_risk_terminal_payoff_authority import (
+    resolve_product_proposal_risk_terminal_payoff_evaluation,
+)
+
+
+class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.precommit = _canonical_precommit(self)
+        self.workspace = getattr(self, "_proposal_risk_workspace")
+        self.terminal_population = getattr(self, "_proposal_terminal_population")
+        self.authorities = getattr(self, "_proposal_terminal_authorities")
+
+    def _binding(self, state_ids: tuple[str, ...]):
+        return derive_product_proposal_terminal_scenario_binding(
+            self.workspace,
+            precommit=self.precommit,
+            authorities=self.authorities,
+            market_state_ids=state_ids,
+        )
+
+    def _bindings(self):
+        return (
+            self._binding(("canonical:win,loss", "canonical:loss,win")),
+            self._binding(("canonical:loss,win", "canonical:win,loss")),
+        )
+
+    def _issue(self, bindings=None) -> None:
+        first, second = bindings or self._bindings()
+        issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self.terminal_population,
+            (
+                CounterfactualScenarioMemberBinding(
+                    member_id=self.precommit.planned_member_ids[0],
+                    scenario_id=first.scenario_id,
+                    mapping_sha256=first.mapping_sha256,
+                ),
+                CounterfactualScenarioMemberBinding(
+                    member_id=self.precommit.planned_member_ids[1],
+                    scenario_id=second.scenario_id,
+                    mapping_sha256=second.mapping_sha256,
+                ),
+            ),
+        )
+
+    def _resolve(self, bindings=None) -> ProductProposalRiskCounterfactualCashFloor:
+        first, second = bindings or self._bindings()
+        return resolve_product_proposal_risk_counterfactual_cash_floor(
+            self.workspace,
+            precommit=self.precommit,
+            authorities=self.authorities,
+            member_market_state_ids=(
+                first.market_state_ids,
+                second.market_state_ids,
+            ),
+        )
+
+    def test_conservative_cash_floor_is_positive_but_not_execution_or_risk(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        payoff = resolve_product_proposal_risk_terminal_payoff_evaluation(
+            self.workspace,
+            precommit=self.precommit,
+            authorities=self.authorities,
+            member_market_state_ids=(
+                bindings[0].market_state_ids,
+                bindings[1].market_state_ids,
+            ),
+        )
+        result = self._resolve(bindings)
+        stake_a, stake_b = self.precommit.evaluated_stakes
+        base = PaperBook.load(self.workspace / "paper_book.json").balance
+        after_a = PaperBook._debit_balance(base, stake_a)
+        post_open = PaperBook._debit_balance(after_a, stake_b)
+
+        self.assertTrue(result.evaluation_identity_proven)
+        self.assertTrue(result.base_portfolio_identity_proven)
+        self.assertTrue(result.counterfactual_target_stake_reservation_proven)
+        self.assertTrue(result.terminal_payout_reconstruction_proven)
+        self.assertTrue(result.counterfactual_minimum_cash_floor_proven)
+        self.assertFalse(result.per_market_terminal_space_exact)
+        self.assertFalse(result.joint_terminal_space_exact)
+        self.assertEqual(
+            result.path_protocol,
+            "paperbook.cash-floor.open-all-before-settlement.v1",
+        )
+        self.assertEqual(result.base_cash_balance, base)
+        self.assertEqual(
+            result.candidate_open_cash_balances,
+            (after_a, post_open),
+        )
+        self.assertEqual(result.post_open_cash_balance, post_open)
+        self.assertEqual(
+            result.member_candidate_payout_vectors,
+            (
+                (Decimal("0"), stake_b * Decimal("2")),
+                (stake_a * Decimal("2"), Decimal("0")),
+            ),
+        )
+        self.assertEqual(
+            result.member_terminal_cash_balances,
+            (
+                base + payoff.member_paper_terminal_profits[0],
+                base + payoff.member_paper_terminal_profits[1],
+            ),
+        )
+        self.assertEqual(
+            result.member_minimum_cash_floors,
+            (post_open, post_open),
+        )
+        self.assertFalse(result.product_scenario_source_provenance_proven)
+        self.assertFalse(result.scenario_selection_law_proven)
+        self.assertFalse(result.iid_member_mapping_proven)
+        self.assertFalse(result.joint_scenario_support_proven)
+        self.assertFalse(result.minimum_equity_path_proven)
+        self.assertFalse(result.cashflow_chronology_proven)
+        self.assertFalse(result.execution_costs_proven)
+        self.assertFalse(result.slippage_realization_proven)
+        self.assertFalse(result.net_execution_pnl_proven)
+        self.assertFalse(result.scenario_execution_proven)
+        self.assertFalse(result.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(result.risk_upper_bound_for_target)
+        self.assertFalse(result.grants_risk_approval_authority)
+        self.assertFalse(result.grants_ticket_authority)
+        self.assertFalse(result.grants_broker_execution_authority)
+        self.assertFalse(result.grants_real_money_authority)
+        self.assertFalse(result.grants_state_mutation_authority)
+        self.assertEqual(len(result.evaluation_sha256), 64)
+        self.assertEqual(self._resolve(bindings), result)
+
+    def test_all_void_refunds_restore_base_cash_but_floor_remains_post_open(self) -> None:
+        void_member = self._binding(
+            ("canonical:void,void", "canonical:void,void")
+        )
+        bindings = (void_member, void_member)
+        self._issue(bindings)
+        result = self._resolve(bindings)
+        stake_a, stake_b = self.precommit.evaluated_stakes
+        base = result.base_cash_balance
+
+        self.assertEqual(
+            result.member_candidate_payout_vectors,
+            (
+                (stake_a, stake_b),
+                (stake_a, stake_b),
+            ),
+        )
+        self.assertEqual(
+            result.member_terminal_cash_balances,
+            (base, base),
+        )
+        self.assertEqual(
+            result.member_minimum_cash_floors,
+            (result.post_open_cash_balance, result.post_open_cash_balance),
+        )
+        self.assertTrue(result.counterfactual_minimum_cash_floor_proven)
+        self.assertFalse(result.per_market_terminal_space_exact)
+        self.assertFalse(result.joint_terminal_space_exact)
+        self.assertFalse(result.minimum_equity_path_proven)
+        self.assertFalse(result.risk_upper_bound_for_target)
+
+    def test_repeated_member_preserves_cash_arithmetic_without_iid_truth(self) -> None:
+        repeated = self._binding(
+            ("canonical:loss,win", "canonical:win,loss")
+        )
+        bindings = (repeated, repeated)
+        self._issue(bindings)
+        result = self._resolve(bindings)
+
+        self.assertEqual(
+            result.member_candidate_payout_vectors[0],
+            result.member_candidate_payout_vectors[1],
+        )
+        self.assertEqual(
+            result.member_terminal_cash_balances[0],
+            result.member_terminal_cash_balances[1],
+        )
+        self.assertFalse(result.per_market_terminal_space_exact)
+        self.assertFalse(result.joint_terminal_space_exact)
+        self.assertFalse(result.iid_member_mapping_proven)
+        self.assertFalse(result.scenario_selection_law_proven)
+        self.assertFalse(result.risk_upper_bound_for_target)
+
+    def test_unfundable_target_stake_vector_fails_closed(self) -> None:
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "not cash-fundable",
+        ):
+            cash_floor_authority._open_target_stakes(
+                Decimal("1"),
+                (Decimal("2"),),
+            )
+
+    def test_open_target_stakes_requires_nonempty_exact_tuple(self) -> None:
+        for invalid in ([], ()):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    ProductProposalRiskCounterfactualCashFloorError,
+                    "non-empty exact tuple",
+                ):
+                    cash_floor_authority._open_target_stakes(
+                        Decimal("10"),
+                        invalid,
+                    )
+
+    def test_open_target_stakes_rejects_negative_base_cash(self) -> None:
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "base cash balance cannot be negative",
+        ):
+            cash_floor_authority._open_target_stakes(
+                Decimal("-1"),
+                (Decimal("0"),),
+            )
+
+    def test_zero_stakes_preserve_cash_reservation_and_floor(self) -> None:
+        balances, post_open = cash_floor_authority._open_target_stakes(
+            Decimal("10"),
+            (Decimal("0"), Decimal("2"), Decimal("0")),
+        )
+        self.assertEqual(
+            balances,
+            (Decimal("10"), Decimal("8"), Decimal("8")),
+        )
+        self.assertEqual(post_open, Decimal("8"))
+
+        payouts, terminal, minimum = cash_floor_authority._member_cash_path(
+            base_balance=Decimal("10"),
+            post_open_balance=post_open,
+            stakes=(Decimal("0"), Decimal("2"), Decimal("0")),
+            candidate_profits=(
+                Decimal("0"),
+                Decimal("-2"),
+                Decimal("0"),
+            ),
+            total_profit=Decimal("-2"),
+            member_index=0,
+        )
+        self.assertEqual(
+            payouts,
+            (Decimal("0"), Decimal("0"), Decimal("0")),
+        )
+        self.assertEqual(terminal, Decimal("8"))
+        self.assertEqual(minimum, Decimal("8"))
+
+    def test_exact_add_rejects_decimal_precision_loss(self) -> None:
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "loses Decimal precision",
+        ):
+            cash_floor_authority._exact_add(
+                Decimal("1.234567890123456789012345678"),
+                Decimal("0.0000000000000000000000000001"),
+                "precision-falsifier",
+            )
+
+    def test_cash_path_rejects_nonexact_member_index(self) -> None:
+        for invalid in (True, 1.0):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    ProductProposalRiskCounterfactualCashFloorError,
+                    "non-negative exact integer",
+                ):
+                    cash_floor_authority._member_cash_path(
+                        base_balance=Decimal("10"),
+                        post_open_balance=Decimal("9"),
+                        stakes=(Decimal("1"),),
+                        candidate_profits=(Decimal("-1"),),
+                        total_profit=Decimal("-1"),
+                        member_index=invalid,
+                    )
+
+    def test_cash_path_rejects_negative_member_stake(self) -> None:
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "member target stake cannot be negative",
+        ):
+            cash_floor_authority._member_cash_path(
+                base_balance=Decimal("10"),
+                post_open_balance=Decimal("9"),
+                stakes=(Decimal("-1"),),
+                candidate_profits=(Decimal("1"),),
+                total_profit=Decimal("0"),
+                member_index=0,
+            )
+
+    def test_cash_path_rejects_impossible_post_open_balance(self) -> None:
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "invalid base/post-open cash boundary",
+        ):
+            cash_floor_authority._member_cash_path(
+                base_balance=Decimal("10"),
+                post_open_balance=Decimal("11"),
+                stakes=(Decimal("1"),),
+                candidate_profits=(Decimal("0"),),
+                total_profit=Decimal("0"),
+                member_index=0,
+            )
+
+    def test_cash_path_requires_exact_tuple_stakes(self) -> None:
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "lost target cardinality",
+        ):
+            cash_floor_authority._member_cash_path(
+                base_balance=Decimal("10"),
+                post_open_balance=Decimal("9"),
+                stakes=[Decimal("1")],
+                candidate_profits=(Decimal("0"),),
+                total_profit=Decimal("0"),
+                member_index=0,
+            )
+
+    def test_negative_reconstructed_payout_fails_closed(self) -> None:
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "negative PaperBook payout",
+        ):
+            cash_floor_authority._member_cash_path(
+                base_balance=Decimal("10"),
+                post_open_balance=Decimal("9"),
+                stakes=(Decimal("1"),),
+                candidate_profits=(Decimal("-2"),),
+                total_profit=Decimal("-2"),
+                member_index=0,
+            )
+
+    def test_direct_or_forged_result_cannot_mint_cash_floor_truth(self) -> None:
+        with self.assertRaises(TypeError):
+            ProductProposalRiskCounterfactualCashFloor()
+
+        forged = object.__new__(ProductProposalRiskCounterfactualCashFloor)
+        self.assertFalse(forged.evaluation_identity_proven)
+        self.assertFalse(forged.base_portfolio_identity_proven)
+        self.assertFalse(forged.counterfactual_target_stake_reservation_proven)
+        self.assertFalse(forged.terminal_payout_reconstruction_proven)
+        self.assertFalse(forged.counterfactual_minimum_cash_floor_proven)
+        self.assertFalse(forged.minimum_equity_path_proven)
+        self.assertFalse(forged.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(forged.risk_upper_bound_for_target)
+        self.assertFalse(forged.grants_ticket_authority)
+        self.assertFalse(forged.grants_real_money_authority)
+
+    def test_superseded_target_invalidates_cash_floor(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("0.9"), Decimal("0.7")),
+            contexts=getattr(self, "_proposal_risk_contexts"),
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "terminal component provenance cannot be re-resolved",
+        ):
+            self._resolve(bindings)
+
+    def test_protocol_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = cash_floor_authority._PATH_PROTOCOL
+        try:
+            cash_floor_authority._PATH_PROTOCOL = "forged-path"
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cash_floor_authority._PATH_PROTOCOL = original
+
+    def test_debit_function_alias_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = cash_floor_authority._BOOK_DEBIT_FUNCTION
+        try:
+            cash_floor_authority._BOOK_DEBIT_FUNCTION = (
+                lambda *_args, **_kwargs: Decimal("999")
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cash_floor_authority._BOOK_DEBIT_FUNCTION = original
+
+    def test_positive_capability_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        getter = ProductProposalRiskCounterfactualCashFloor.__dict__[
+            "counterfactual_minimum_cash_floor_proven"
+        ].fget
+        proof = getter.__defaults__[0]
+        original_code = proof.__code__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            proof.__code__ = forged_proof.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "result authority surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            proof.__code__ = original_code
+
+    def test_hard_false_risk_getter_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        getter = ProductProposalRiskCounterfactualCashFloor.__dict__[
+            "risk_upper_bound_for_target"
+        ].fget
+        original_code = getter.__code__
+
+        def forged_risk(_instance):
+            return True
+
+        try:
+            getter.__code__ = forged_risk.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "result authority surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            getter.__code__ = original_code
+
+    def test_result_type_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = cash_floor_authority._RESULT_TYPE
+        try:
+            cash_floor_authority._RESULT_TYPE = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cash_floor_authority._RESULT_TYPE = original
+
+    def test_module_core_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = cash_floor_authority._resolve_values
+        try:
+            cash_floor_authority._resolve_values = lambda *args, **kwargs: {}
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "helper root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cash_floor_authority._resolve_values = original
+
+    def test_json_dumps_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original_code = json.dumps.__code__
+
+        def forged_dumps(*_args, **_kwargs):
+            return "{}"
+
+        try:
+            json.dumps.__code__ = forged_dumps.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            json.dumps.__code__ = original_code
+
+    def test_dispatch_guard_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        guard = cash_floor_authority._REQUIRE_DISPATCH_ORIGINAL
+        original_code = guard.__code__
+
+        def forged_guard(*_args, **_kwargs):
+            return None
+
+        try:
+            guard.__code__ = forged_guard.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch guard root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            guard.__code__ = original_code
+
+    def test_positive_capability_token_cell_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        getter = ProductProposalRiskCounterfactualCashFloor.__dict__[
+            "counterfactual_minimum_cash_floor_proven"
+        ].fget
+        proof = getter.__defaults__[0]
+        closure = proof.__closure__
+        self.assertIsNotNone(closure)
+        self.assertEqual(len(closure), 1)
+        cell = closure[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = object()
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "result authority surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
+    def test_public_resolver_binder_token_cell_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        resolver = (
+            cash_floor_authority
+            .resolve_product_proposal_risk_counterfactual_cash_floor
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        binder_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "bind"
+        ]
+        self.assertEqual(len(binder_cells), 1)
+        binder = binder_cells[0].cell_contents
+        binder_closure = binder.__closure__
+        self.assertIsNotNone(binder_closure)
+        self.assertEqual(len(binder_closure), 1)
+        token_cell = binder_closure[0]
+        original = token_cell.cell_contents
+        try:
+            token_cell.cell_contents = object()
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "public resolver root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            token_cell.cell_contents = original
+
+    def test_result_field_descriptor_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = ProductProposalRiskCounterfactualCashFloor.__dict__[
+            "evaluation_sha256"
+        ]
+        try:
+            ProductProposalRiskCounterfactualCashFloor.evaluation_sha256 = (
+                property(lambda _self: "0" * 64)
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "result field surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            ProductProposalRiskCounterfactualCashFloor.evaluation_sha256 = original
+
+    def test_paper_decimal_precision_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = cash_floor_authority._paper_module._PAPER_DECIMAL_PRECISION
+        try:
+            cash_floor_authority._paper_module._PAPER_DECIMAL_PRECISION = (
+                original + 1
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cash_floor_authority._paper_module._PAPER_DECIMAL_PRECISION = original
+
+    def test_paper_context_type_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = cash_floor_authority._paper_module.Context
+        try:
+            cash_floor_authority._paper_module.Context = (
+                lambda *args, **kwargs: original(*args, **kwargs)
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cash_floor_authority._paper_module.Context = original
+
+    def test_public_resolver_result_type_closure_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        resolver = (
+            cash_floor_authority
+            .resolve_product_proposal_risk_counterfactual_cash_floor
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        result_type_cells = [
+            cell
+            for cell in closure
+            if cell.cell_contents is ProductProposalRiskCounterfactualCashFloor
+        ]
+        self.assertEqual(len(result_type_cells), 1)
+        cell = result_type_cells[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "public resolver root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
+    def test_public_resolver_snapshots_construction_closure_before_core(
+        self,
+    ) -> None:
+        resolver = (
+            cash_floor_authority
+            .resolve_product_proposal_risk_counterfactual_cash_floor
+        )
+        instructions = list(dis.get_instructions(resolver))
+        values_store_index = next(
+            index
+            for index, instruction in enumerate(instructions)
+            if instruction.opname == "STORE_FAST"
+            and instruction.argval == "values"
+        )
+
+        snapshot_locals = (
+            "bind_identity",
+            "resolve_core",
+            "result_type",
+            "result_fields",
+            "expected_bind_code",
+            "expected_core_code",
+        )
+        for local_name in snapshot_locals:
+            with self.subTest(local_name=local_name):
+                store_indices = [
+                    index
+                    for index, instruction in enumerate(instructions)
+                    if instruction.opname == "STORE_FAST"
+                    and instruction.argval == local_name
+                ]
+                self.assertEqual(len(store_indices), 1)
+                self.assertLess(store_indices[0], values_store_index)
+
+        mutable_construction_cells = {
+            "_bind_identity",
+            "_resolve_core",
+            "_result_type",
+            "_result_fields",
+            "bind_code",
+            "core_code",
+        }
+        late_closure_reads = [
+            instruction.argval
+            for instruction in instructions[values_store_index + 1 :]
+            if instruction.opname == "LOAD_DEREF"
+            and instruction.argval in mutable_construction_cells
+        ]
+        self.assertEqual(late_closure_reads, [])
+
+    def test_helper_witness_table_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = cash_floor_authority._HELPER_WITNESSES_EXPECTED
+        try:
+            cash_floor_authority._HELPER_WITNESSES_EXPECTED = tuple(
+                list(original)
+            )
+            self.assertIsNot(
+                cash_floor_authority._HELPER_WITNESSES_EXPECTED,
+                original,
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cash_floor_authority._HELPER_WITNESSES_EXPECTED = original
+
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_cash_floor_rejects_risk_portfolio_hash_helper_substitution(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = cash_floor_authority._risk_module._sha256_payload
+        try:
+            cash_floor_authority._risk_module._sha256_payload = (
+                lambda payload: "0" * 64
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cash_floor_authority._risk_module._sha256_payload = original
+
+    def test_cash_floor_rejects_paperbook_state_validator_substitution(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = PaperBook.__dict__["_validate_loaded_state"]
+        try:
+            PaperBook._validate_loaded_state = classmethod(
+                lambda cls, book: None
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            setattr(PaperBook, "_validate_loaded_state", original)
+
+    def test_cash_floor_rejects_lifecycle_validator_substitution(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = PaperBook.__dict__["_validate_lifecycle_entry"]
+        try:
+            PaperBook._validate_lifecycle_entry = classmethod(
+                lambda cls, entry: entry
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            setattr(PaperBook, "_validate_lifecycle_entry", original)
+
+    def test_cash_floor_rejects_risk_module_paperbook_rebinding(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = cash_floor_authority._risk_module.PaperBook
+        try:
+            cash_floor_authority._risk_module.PaperBook = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cash_floor_authority._risk_module.PaperBook = original
+
+
+    def test_cash_floor_rejects_json_encoder_substitution(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = cash_floor_authority.json.JSONEncoder
+        try:
+            cash_floor_authority.json.JSONEncoder = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cash_floor_authority.json.JSONEncoder = original

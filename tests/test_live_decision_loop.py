@@ -8337,5 +8337,44 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             resumed.close()
 
 
+    def test_idempotent_register_rejects_focused_selector_divergence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertTrue(loop.dependencies.unregister("input-a"))
+            loop.dependencies.register("input-a", selection_ids="selection-b")
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "inconsistent during idempotent registration",
+            ):
+                loop.register_input("input-a", selection_ids="selection-a")
+            loop.close()
+
+    def test_unregister_rejects_undurable_ghost_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            loop.dependencies.register("ghost-input", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "undurable ghost registration",
+            ):
+                loop.unregister_input("ghost-input")
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

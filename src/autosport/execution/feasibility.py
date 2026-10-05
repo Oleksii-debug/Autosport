@@ -326,6 +326,17 @@ del _ExecutionFeasibilityResultMeta
 EXECUTION_FEASIBILITY_RESULT_TRUST_BOUNDARY = "trusted-process-api-provenance-v1"
 
 
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _feasibility_result_fingerprint(result: ExecutionFeasibilitySnapshot) -> str:
     """Bind every semantics-bearing result field to one exact issued object."""
 
@@ -1049,17 +1060,6 @@ def _ladder_payload(quotes: Iterable[PriceSize]) -> list[dict[str, str | None]]:
     return [{"price": _decimal(q.price), "size": _decimal(q.size)} for q in quotes]
 
 
-
-
-def _canonical_digest(value: object) -> str:
-    encoded = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _provider_timestamp(value: str) -> datetime:

@@ -494,7 +494,11 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             try:
                 recovery = RecoveryDecision(payload["recovery_decision"])
                 pending = tuple(payload["pending_action_ids"])
-                exposure = Decimal(payload["worst_case_exposure"])
+                exposure = _impl._serialized_decimal(
+                    payload["worst_case_exposure"],
+                    "completion worst_case_exposure",
+                    allow_zero=True,
+                )
             except (KeyError, ValueError, InvalidOperation, TypeError) as exc:
                 raise PaperExecutionIntegrityError("invalid completion payload") from exc
             if (

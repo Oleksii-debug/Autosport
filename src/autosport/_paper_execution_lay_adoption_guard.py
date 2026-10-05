@@ -35,6 +35,8 @@ _ORIGINAL_REQUIRE_MINTED = PaperExecutionAdoptionRuntime._require_minted
 _ORIGINAL_EXPECTED_RUN_ID = PaperExecutionAdoptionRuntime.expected_run_id
 _ORIGINAL_EXECUTE_UNLOCKED = PaperExecutionAdoptionRuntime._execute_unlocked
 _PREPARED_WITNESSES: dict[int, tuple[PreparedPaperExecution, str]] = {}
+_ACTION_WITNESSES: dict[int, tuple[ExecutionAction, str]] = {}
+_BINDING_WITNESSES: dict[int, tuple[PaperExposureBinding, tuple[str, str | None, str | None, str | None]]] = {}
 _RUNTIME_WITNESSES: dict[int, tuple[object, ...]] = {}
 
 
@@ -242,6 +244,62 @@ def _prepared_authority_witness(prepared: PreparedPaperExecution) -> str:
     return _adoption._digest(_prepared_authority_payload(prepared))
 
 
+def _action_authority_witness(action: ExecutionAction) -> str:
+    if type(action) is not ExecutionAction:
+        raise PaperExecutionAdoptionError(
+            "materialization action must retain exact ExecutionAction authority"
+        )
+    _reality._impl._require_canonical_action_surface(action)
+    return _adoption._digest(action.to_dict())
+
+
+def _binding_authority_witness(
+    binding: PaperExposureBinding,
+) -> tuple[str, str | None, str | None, str | None]:
+    if type(binding) is not PaperExposureBinding:
+        raise PaperExecutionAdoptionError(
+            "materialization binding must retain exact PaperExposureBinding authority"
+        )
+    return (
+        _exact_text(binding.action_id, "materialization binding action_id"),
+        _exact_text(binding.sport, "materialization binding sport", optional=True),
+        _exact_text(
+            binding.bankroll_id,
+            "materialization binding bankroll_id",
+            optional=True,
+        ),
+        _exact_text(binding.currency, "materialization binding currency", optional=True),
+    )
+
+
+def _require_materialization_authority(
+    action: ExecutionAction,
+    binding: PaperExposureBinding,
+) -> None:
+    action_witness = _ACTION_WITNESSES.get(id(action))
+    if (
+        action_witness is None
+        or action_witness[0] is not action
+        or action_witness[1] != _action_authority_witness(action)
+    ):
+        raise PaperExecutionAdoptionError(
+            "prepared action authority changed after mint"
+        )
+    binding_witness = _BINDING_WITNESSES.get(id(binding))
+    if (
+        binding_witness is None
+        or binding_witness[0] is not binding
+        or binding_witness[1] != _binding_authority_witness(binding)
+    ):
+        raise PaperExecutionAdoptionError(
+            "prepared exposure binding authority changed after mint"
+        )
+    if binding.action_id != action.action_id:
+        raise PaperExecutionAdoptionError(
+            "prepared exposure binding no longer matches execution action"
+        )
+
+
 def _mint_prepared(
     self: PaperExecutionAdoptionRuntime,
     prepared: PreparedPaperExecution,
@@ -250,6 +308,13 @@ def _mint_prepared(
     witness = _prepared_authority_witness(prepared)
     minted = _ORIGINAL_MINT_PREPARED(self, prepared)
     _PREPARED_WITNESSES[id(minted)] = (minted, witness)
+    for action in minted.execution_plan.actions:
+        _ACTION_WITNESSES[id(action)] = (action, _action_authority_witness(action))
+    for binding in minted.exposure_bindings:
+        _BINDING_WITNESSES[id(binding)] = (
+            binding,
+            _binding_authority_witness(binding),
+        )
     return minted
 
 
@@ -572,6 +637,7 @@ def _ticket_matches_attempt(
     binding: PaperExposureBinding,
 ) -> bool:
     try:
+        _require_materialization_authority(action, binding)
         side = _require_action_side(action)
     except PaperExecutionAdoptionError:
         return False
@@ -615,6 +681,7 @@ def _materialize_attempt(
     binding: PaperExposureBinding,
     decision_id: str,
 ):
+    _require_materialization_authority(action, binding)
     side = _require_action_side(action)
     self._require_attempt_action_identity(attempt, action)
     if attempt.execution_odds is None or attempt.execution_stake is None:
@@ -739,6 +806,7 @@ def _assert_recoverable_book_state(
             raise PaperExecutionAdoptionError(
                 "durable attempt is not bound to prepared execution action"
             )
+        _require_materialization_authority(action, binding)
         side = _require_action_side(action)
         self._require_attempt_action_identity(attempt, action)
         if attempt.execution_odds is None or attempt.execution_stake is None:

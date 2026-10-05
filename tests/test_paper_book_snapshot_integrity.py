@@ -671,6 +671,26 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate quote_key"):
             PaperBook.load_bytes(path.read_bytes())
 
+    def test_settlement_rejects_inexact_decimal_payout_before_mutation(self):
+        book = PaperBook("100")
+        leg = TicketLeg(
+            "event-inexact-settlement",
+            "market-inexact-settlement",
+            "selection-inexact-settlement",
+            locked_odds=Decimal("1.12345678901234567890123456789"),
+        )
+        ticket = book.open_ticket([leg], "1")
+        balance_before = book.balance
+        lifecycle_before = tuple(book._lifecycle)
+
+        with self.assertRaisesRegex(ValueError, "loses Decimal precision"):
+            book.settle(ticket.ticket_id, {leg.quote_key})
+
+        self.assertEqual(book.balance, balance_before)
+        self.assertEqual(tuple(book._lifecycle), lifecycle_before)
+        self.assertEqual(ticket.status.value, "open")
+        self.assertEqual(ticket.payout, Decimal("0"))
+
     def test_load_rejects_impossible_status_payout(self):
         path = self._snapshot(
             {

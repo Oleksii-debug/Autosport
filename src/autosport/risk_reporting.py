@@ -86,6 +86,41 @@ _CANONICAL_ECONOMIC_GOAL_STORE = EconomicGoalStore
 _CANONICAL_ECONOMIC_GOAL_STORE_LOAD = EconomicGoalStore.load
 
 
+def _captured_callable_code(authority: object):
+    target = getattr(authority, "__func__", authority)
+    code = getattr(target, "__code__", None)
+    if code is None:
+        raise TypeError("canonical equity replay authority must be a Python callable")
+    return code
+
+
+_CANONICAL_EQUITY_REPLAY_CODE_WITNESSES = tuple(
+    (authority, _captured_callable_code(authority))
+    for authority in (
+        _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE,
+        _CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY,
+        _CANONICAL_PAPERBOOK_DEBIT_BALANCE,
+        _CANONICAL_PAPERBOOK_SETTLEMENT_RESULT,
+        _CANONICAL_RISK_PORTFOLIO_SHA256,
+        _CANONICAL_RISK_EXACT_POSITIVE_SUM,
+        _CANONICAL_RISK_DECIMAL_CONTEXT,
+        _CANONICAL_RISK_HISTORICAL_METRICS,
+        _CANONICAL_RISK_GOAL_HISTORY_ROOMS,
+        _CANONICAL_REQUIRE_TICKET_OPENING_AUTHORITY,
+        _CANONICAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY,
+        _CANONICAL_GOAL_PROVENANCE,
+        _CANONICAL_GOAL_FROM_PAYLOAD,
+        _CANONICAL_GOAL_TO_PAYLOAD,
+    )
+)
+
+
+def _require_canonical_equity_replay_code_authority() -> None:
+    for authority, expected_code in _CANONICAL_EQUITY_REPLAY_CODE_WITNESSES:
+        if _captured_callable_code(authority) is not expected_code:
+            raise ValueError("canonical PAPER equity replay callable code changed")
+
+
 @dataclass(frozen=True, slots=True)
 class _HistoricalMaxDrawdown:
     amount: Decimal
@@ -447,6 +482,7 @@ def build_product_issued_paper_equity_path(
     if type(goal) is not EconomicGoalContract:
         raise TypeError("goal must be canonical EconomicGoalContract")
 
+    _require_canonical_equity_replay_code_authority()
     _require_product_issued_paper_state(book)
 
     goal_provenance_before = _CANONICAL_GOAL_PROVENANCE(goal)
@@ -579,6 +615,7 @@ def build_product_issued_paper_equity_path(
         raise ValueError("canonical PAPER risk state changed during equity-path issuance")
     if after_source_sha256 != before_source_sha256:
         raise ValueError("canonical PAPER source state changed during equity-path issuance")
+    _require_canonical_equity_replay_code_authority()
     if _CANONICAL_GOAL_PROVENANCE(goal) != goal_snapshot_provenance:
         raise ValueError("canonical economic goal changed during equity-path issuance")
     # Current PaperBook persistence owns the opening numeric balance but does not
@@ -1225,6 +1262,8 @@ def build_paper_risk_report(
         raise TypeError("book must be canonical PaperBook")
     if type(goal) is not EconomicGoalContract:
         raise TypeError("goal must be canonical EconomicGoalContract")
+
+    _require_canonical_equity_replay_code_authority()
 
     # Frozen dataclasses remain technically mutable through low-level same-process
     # operations such as object.__setattr__. Capture one canonical persisted-value

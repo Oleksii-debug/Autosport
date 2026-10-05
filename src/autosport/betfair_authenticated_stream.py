@@ -446,8 +446,10 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         )
         self._freshness = BetfairStreamPublishFreshnessRuntime(context)
         self._transport_by_identity: dict[
-            BetfairQuoteIdentity, tuple[str, str, int]
+            BetfairQuoteIdentity, tuple[str, str, int, int]
         ] = {}
+        self._market_status_by_id: dict[str, str] = {}
+        self._market_open_sequence: dict[str, int] = {}
         # The subscription acknowledgement is required to be authenticated frame 1.
         # Every later market frame must therefore be consumed by this runtime without
         # gaps; otherwise an unseen delta could make the local market image false.
@@ -490,11 +492,16 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                             "authenticated market freshness runtime accepts only mcm frames after subscription acknowledgement"
                         )
                     accepted_ms = _wall_time_ms()
+                    market_status_updates = _market_status_updates(raw)
                     self._require_current_connection()
                     issued = self._freshness.ingest_raw(
                         raw,
                         received_time_ms=accepted_ms,
                         ingested_time_ms=accepted_ms,
+                    )
+                    self._commit_market_status_updates(
+                        market_status_updates,
+                        frame.frame_sequence,
                     )
                     for evidence in issued:
                         identity = evidence.quote.identity
@@ -511,6 +518,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                             evidence.evidence_id,
                             frame.payload_sha256,
                             frame.received_monotonic_ns,
+                            frame.frame_sequence,
                         )
                     self._next_frame_sequence += 1
                     return issued
@@ -573,7 +581,36 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     transport_frame_sha256=frame_sha,
                     evaluated_at_ms=evaluated_at_ms,
                 )
-            frame_sha, received_monotonic_ns = frame_binding
+            frame_sha, received_monotonic_ns, frame_sequence = frame_binding
+            market_id = identity.market_id
+            if "EX_MARKET_DEF" not in self._subscription.market_data_fields:
+                return BetfairAuthenticatedFreshnessDecision(
+                    verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
+                    reason="EX_MARKET_DEF is required for live market-status authority",
+                    evidence_id=structural.evidence_id,
+                    subscription_id=self._subscription.subscription_id,
+                    transport_frame_sha256=frame_sha,
+                    evaluated_at_ms=evaluated_at_ms,
+                )
+            if self._market_status_by_id.get(market_id) != "OPEN":
+                return BetfairAuthenticatedFreshnessDecision(
+                    verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
+                    reason="Betfair market status is not authoritatively OPEN",
+                    evidence_id=structural.evidence_id,
+                    subscription_id=self._subscription.subscription_id,
+                    transport_frame_sha256=frame_sha,
+                    evaluated_at_ms=evaluated_at_ms,
+                )
+            open_sequence = self._market_open_sequence.get(market_id)
+            if open_sequence is None or frame_sequence < open_sequence:
+                return BetfairAuthenticatedFreshnessDecision(
+                    verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
+                    reason="quote predates the current Betfair OPEN market epoch",
+                    evidence_id=structural.evidence_id,
+                    subscription_id=self._subscription.subscription_id,
+                    transport_frame_sha256=frame_sha,
+                    evaluated_at_ms=evaluated_at_ms,
+                )
             if self._transport.identity.app_key_class != "LIVE":
                 return BetfairAuthenticatedFreshnessDecision(
                     verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
@@ -618,16 +655,38 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 )
             return decision
 
+    def _commit_market_status_updates(
+        self,
+        updates: dict[str, str],
+        frame_sequence: int,
+    ) -> None:
+        for market_id, status in updates.items():
+            prior = self._market_status_by_id.get(market_id)
+            self._market_status_by_id[market_id] = status
+            if status == "OPEN":
+                if prior != "OPEN":
+                    self._market_open_sequence[market_id] = frame_sequence
+                continue
+            self._market_open_sequence.pop(market_id, None)
+            for identity in tuple(self._transport_by_identity):
+                if identity.market_id == market_id:
+                    self._transport_by_identity.pop(identity, None)
+
     def _bound_frame_binding(
         self,
         identity: BetfairQuoteIdentity,
         evidence_id: str | None,
-    ) -> tuple[str, int] | None:
+    ) -> tuple[str, int, int] | None:
         binding = self._transport_by_identity.get(identity)
         if evidence_id is not None and binding is not None:
-            bound_evidence_id, bound_frame_sha, received_monotonic_ns = binding
+            (
+                bound_evidence_id,
+                bound_frame_sha,
+                received_monotonic_ns,
+                frame_sequence,
+            ) = binding
             if bound_evidence_id == evidence_id:
-                return bound_frame_sha, received_monotonic_ns
+                return bound_frame_sha, received_monotonic_ns, frame_sequence
             self._transport_by_identity.pop(identity, None)
         elif evidence_id is None:
             self._transport_by_identity.pop(identity, None)
@@ -672,7 +731,15 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             )
             if frame_binding is None:
                 return False
-            frame_sha, received_monotonic_ns = frame_binding
+            frame_sha, received_monotonic_ns, frame_sequence = frame_binding
+            market_id = identity.market_id
+            if "EX_MARKET_DEF" not in self._subscription.market_data_fields:
+                return False
+            if self._market_status_by_id.get(market_id) != "OPEN":
+                return False
+            open_sequence = self._market_open_sequence.get(market_id)
+            if open_sequence is None or frame_sequence < open_sequence:
+                return False
             if (
                 _consumer_lag_rejection_reason(
                     received_monotonic_ns,
@@ -694,6 +761,40 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             raise BetfairAuthenticatedStreamError(
                 "authenticated subscription is no longer bound to the live transport connection"
             )
+
+
+def _market_status_updates(raw_message: dict[str, Any]) -> dict[str, str]:
+    market_changes = raw_message.get("mc", [])
+    if type(market_changes) is not list:
+        raise BetfairAuthenticatedStreamError(
+            "authenticated market-change mc must be a list"
+        )
+    updates: dict[str, str] = {}
+    allowed = {"INACTIVE", "OPEN", "SUSPENDED", "CLOSED"}
+    for change in market_changes:
+        if type(change) is not dict:
+            raise BetfairAuthenticatedStreamError(
+                "authenticated market change must be an object"
+            )
+        definition = change.get("marketDefinition")
+        if definition is None:
+            continue
+        if type(definition) is not dict:
+            raise BetfairAuthenticatedStreamError(
+                "Betfair marketDefinition must be an object"
+            )
+        market_id = change.get("id")
+        status = definition.get("status")
+        if type(market_id) is not str or not market_id or market_id.strip() != market_id:
+            raise BetfairAuthenticatedStreamError(
+                "Betfair marketDefinition requires canonical market id"
+            )
+        if type(status) is not str or status not in allowed:
+            raise BetfairAuthenticatedStreamError(
+                "Betfair marketDefinition status is unsupported"
+            )
+        updates[market_id] = status
+    return updates
 
 
 def _consumer_lag_rejection_reason(

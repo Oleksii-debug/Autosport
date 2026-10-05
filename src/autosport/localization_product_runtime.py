@@ -18,7 +18,7 @@ PRODUCT_RUNTIME_UK_UA: Mapping[str, str] = MappingProxyType(
             "Запускається канонічна тривала PAPER-робота…"
         ),
         "ui.product_runtime.status.running": (
-            "Тривала PAPER-робота активна: джерело {source_id}; циклів {cycles}; "
+            "Тривала PAPER-робота активна: джерело {source_label}; циклів {cycles}; "
             "останнє успішне оновлення {last_success_at}."
         ),
         "ui.product_runtime.status.tick": (
@@ -49,7 +49,7 @@ PRODUCT_RUNTIME_UK_UA: Mapping[str, str] = MappingProxyType(
             "Вибране джерело ще не збережено. Збережіть його перед запуском."
         ),
         "ui.product_runtime.status.configuration_saved": (
-            "Джерело {source_id} збережено для наступного запуску."
+            "Джерело {source_label} збережено для наступного запуску."
         ),
         "ui.product_runtime.status.workspace_conflict": (
             "Тривала PAPER-робота не запущена: налаштований product workspace "

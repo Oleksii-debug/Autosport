@@ -1244,13 +1244,6 @@ class PersistentLiveDecisionLoop:
         market_ids: str | tuple[str, ...] | None = None,
         selection_ids: str | tuple[str, ...] | None = None,
     ) -> None:
-        if (
-            self._progress is not None
-            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
-        ):
-            raise LiveDecisionProgressError(
-                "cannot mutate live dependency registry while a decision is unfinished"
-            )
         normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
         candidate = _InputSpec(
             input_id=normalized_id,
@@ -1267,6 +1260,13 @@ class PersistentLiveDecisionLoop:
                     f"input_id {normalized_id!r} conflicts with durable registration"
                 )
             return
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+        ):
+            raise LiveDecisionProgressError(
+                "cannot mutate live dependency registry while a decision is unfinished"
+            )
         if len(self._input_specs) >= self.bounds.max_registered_inputs:
             raise ValueError("max_registered_inputs would be exceeded")
 

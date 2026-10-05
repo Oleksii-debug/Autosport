@@ -1,5 +1,6 @@
 import io
 import os
+import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -8,6 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autosport.cli import run_observe_table_tennis
+import autosport.storage as storage_module
+from autosport.domain import MarketEvent
 from autosport.providers import InMemoryProvider, ProviderQuote
 from autosport.session import AutosportSession
 
@@ -90,6 +93,95 @@ class ObservationFlowTests(unittest.TestCase):
 
                 self.assertEqual(quote_keys, tuple(sorted(quote_keys)))
                 self.assertEqual(len(set(quote_keys)), 2)
+            finally:
+                session.close()
+
+    def test_session_observation_excludes_generation_zero_migration_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "market.db"
+            legacy = MarketEvent(
+                event_id="legacy-event",
+                market_id="winner",
+                selection_id="legacy-selection",
+                decimal_odds=Decimal("2.20"),
+                observed_ts="2026-09-12T20:00:00+00:00",
+                ingest_ts="2026-09-12T20:00:00+00:00",
+                source_id="fixture:table_tennis",
+                sequence=3,
+                status="open",
+                source_ts="2026-09-12T19:59:59+00:00",
+            )
+            payload = storage_module._canonical_payload(legacy)
+            raw = sqlite3.connect(path)
+            try:
+                raw.execute(
+                    """CREATE TABLE market_events (
+                        dedupe_key TEXT PRIMARY KEY,
+                        quote_key TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        market_id TEXT NOT NULL,
+                        selection_id TEXT NOT NULL,
+                        decimal_odds TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL
+                    )"""
+                )
+                raw.execute(
+                    """CREATE TABLE current_quotes (
+                        source_id TEXT NOT NULL,
+                        quote_key TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        PRIMARY KEY (source_id, quote_key)
+                    )"""
+                )
+                raw.execute(
+                    """INSERT INTO market_events
+                       (dedupe_key,quote_key,event_id,market_id,selection_id,
+                        decimal_odds,observed_ts,source_id,sequence,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        legacy.dedupe_key,
+                        legacy.quote_key,
+                        legacy.event_id,
+                        legacy.market_id,
+                        legacy.selection_id,
+                        str(legacy.decimal_odds),
+                        legacy.observed_ts,
+                        legacy.source_id,
+                        legacy.sequence,
+                        payload,
+                    ),
+                )
+                raw.execute(
+                    """INSERT INTO current_quotes
+                       (source_id,quote_key,observed_ts,sequence,payload_json)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        legacy.source_id,
+                        legacy.quote_key,
+                        legacy.observed_ts,
+                        legacy.sequence,
+                        payload,
+                    ),
+                )
+                raw.commit()
+            finally:
+                raw.close()
+
+            session = AutosportSession(tmp, "10000")
+            try:
+                result = session.observe_provider_once(self._provider(), max_items=10)
+
+                self.assertEqual(result.stats.accepted, 2)
+                self.assertNotIn(
+                    legacy.dedupe_key,
+                    {event.dedupe_key for event in result.current_quotes},
+                )
+                self.assertEqual(len(result.current_quotes), 2)
             finally:
                 session.close()
 

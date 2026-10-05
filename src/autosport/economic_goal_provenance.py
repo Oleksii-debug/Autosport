@@ -126,6 +126,8 @@ def verify_provenance(
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
+    if not isinstance(contract, _goal_type):
+        raise _goal_type_error if False else EconomicGoalProvenanceError("contract must be an EconomicGoalContract")
     if not isinstance(provenance, _provenance_type):
         raise EconomicGoalProvenanceError("provenance must be EconomicGoalProvenance")
     if provenance.goal_id != contract.goal_id:

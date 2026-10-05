@@ -793,7 +793,15 @@ def _execute_unlocked(
             ) from exc
         book = self.book
         paper_book_path = self.paper_book_path
-        book.save(paper_book_path)
+        try:
+            book.save(paper_book_path)
+        except Exception:
+            # Canonical PaperBook.save publishes only via an atomic os.replace.
+            # Any exception means that replacement did not complete, so restore
+            # the already-materialized live economics to the pinned pre-batch state.
+            if pre_materialization_book is not None:
+                _restore_paperbook_from_snapshot(book, pre_materialization_book)
+            raise
 
         # Save is an external durability boundary. Re-prove both runtime/prepared
         # authority and the in-memory economic snapshot before selecting reload path.

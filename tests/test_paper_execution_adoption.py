@@ -59,6 +59,21 @@ class _MutatingObservationMapping(Mapping):
         return self.value
 
 
+class _HostilePaperBook(PaperBook):
+    authority_reads = 0
+
+    def __getattribute__(self, name):
+        if name in {
+            "initial_bankroll",
+            "balance",
+            "tickets",
+            "_lifecycle",
+            "_settlement_times",
+        }:
+            type(self).authority_reads += 1
+        return super().__getattribute__(name)
+
+
 class _HostileExchangeSide(str):
     comparisons = 0
 
@@ -196,6 +211,25 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             paper_book_path=Path(tmp) / "paper-book.json",
         )
         return book, ledger, runtime
+
+    def test_lay_recovery_rejects_paperbook_subclass_before_state_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            current = action("recovery-book-subclass", side="LAY")
+            current_prepared = prepared(runtime, current)
+            hostile = _HostilePaperBook("100.00")
+            _HostilePaperBook.authority_reads = 0
+
+            with self.assertRaisesRegex(TypeError, "exact PaperBook"):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=hostile,
+                    prepared=current_prepared,
+                    trigger_id="recovery-book-subclass",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(_HostilePaperBook.authority_reads, 0)
 
     def test_recovery_dispatch_rejects_mutated_action_side_without_hooks(self):
         with tempfile.TemporaryDirectory() as tmp:

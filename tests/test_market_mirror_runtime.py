@@ -2103,5 +2103,29 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(reads[0], 8)
 
 
+    def test_registration_catch_up_failure_rolls_back_exact_incarnation(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        original_view = mirror.view
+        calls = [0]
+
+        def fail_second_view(*args, **kwargs):
+            calls[0] += 1
+            if calls[0] == 2:
+                raise RuntimeError("simulated registration catch-up failure")
+            return original_view(*args, **kwargs)
+
+        with patch.object(mirror, "view", side_effect=fail_second_view):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated registration catch-up failure",
+            ):
+                dependencies.register("decision", source_ids="provider-a")
+
+        self.assertEqual(calls[0], 2)
+        self.assertEqual(dependencies.input_ids, ())
+        self.assertEqual(dependencies.registry_snapshot(), ())
+
+
 if __name__ == "__main__":
     unittest.main()

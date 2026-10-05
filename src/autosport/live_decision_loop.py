@@ -2945,7 +2945,29 @@ class PersistentLiveDecisionLoop:
                     ledger_offset=self._ledger_end_offset(),
                     gate=gate,
                 )
-                atomic_write_json(self.progress_path, pending.to_dict())
+                # Seal the focused dependency incarnation across the durable PENDING
+                # publication itself.  The earlier snapshot proves what was captured,
+                # while this final guard prevents a direct index replacement/reincarnation
+                # from crossing the atomic progress commit after validation.
+                with self.dependencies.registry_state_guard() as focused_state:
+                    guarded_input_specs = tuple(
+                        _InputSpec.from_dependency(dependency)
+                        for dependency, _revision in focused_state
+                    )
+                    guarded_dependency_revisions = tuple(
+                        (dependency.input_id, revision)
+                        for dependency, revision in focused_state
+                    )
+                    if (
+                        guarded_input_specs != bound_input_specs
+                        or guarded_dependency_revisions
+                        != pending_dependency_revisions
+                    ):
+                        raise LiveDecisionProgressError(
+                            "focused dependency registry changed concurrently "
+                            "before pending publication"
+                        )
+                    atomic_write_json(self.progress_path, pending.to_dict())
                 return pending, pending_dependency_revisions
 
         try:

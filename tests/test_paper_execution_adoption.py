@@ -106,6 +106,7 @@ def evidence(
     *,
     odds: str | None = None,
     stake: str | None = None,
+    grade: EvidenceGrade = EvidenceGrade.CONFIGURED,
 ):
     return PaperExecutionEvidenceRecord(
         action_id=current.action_id,
@@ -118,7 +119,7 @@ def evidence(
         quote_id=current.quote_id,
         outcome=outcome,
         observed_at=STARTED_AT,
-        evidence_grade=EvidenceGrade.CONFIGURED,
+        evidence_grade=grade,
         evidence_source="fixture-observation",
         accepted_odds=odds,
         accepted_stake=stake,
@@ -169,6 +170,80 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(prepared_lay.execution_plan.actions[0].side, "LAY")
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_empirical_accepted_lay_materializes_liability_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("lay-adoption", odds="5.00", stake="10.00", side="LAY")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            first = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-adoption",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+            second = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-adoption",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(first.run, second.run)
+            self.assertEqual(first.ticket_ids, second.ticket_ids)
+            self.assertEqual(len(book.tickets), 1)
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("5.00"))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("60.00"))
+            self.assertEqual(book.committed_capital, Decimal("40.00"))
+
+    def test_empirical_partial_lay_materializes_only_partial_liability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("lay-partial", odds="5.00", stake="10.00", side="LAY")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.PARTIAL,
+                odds="4.50",
+                stake="4.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-partial",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(len(result.ticket_ids), 1)
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("4.50"))
+            self.assertEqual(ticket.stake, Decimal("4.00"))
+            self.assertEqual(book.balance, Decimal("86.00"))
+            self.assertEqual(book.committed_capital, Decimal("14.00"))
 
     def test_paper_value_back_and_legacy_side_remain_back_compatible(self):
         for exchange_side in ("back", None):

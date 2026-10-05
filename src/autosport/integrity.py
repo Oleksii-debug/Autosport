@@ -127,14 +127,37 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _sync_parent_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        directory_fd = os.open(path.parent, flags)
+    except OSError as exc:
+        raise RuntimeError(
+            f"parent-directory durability barrier failed for {path}"
+        ) from exc
+    try:
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise RuntimeError(
+            f"parent-directory durability barrier failed for {path}"
+        ) from exc
+    finally:
+        os.close(directory_fd)
+
+
 def ensure_durable_file(path: str | Path) -> None:
-    """Create an empty file when absent and fsync its current bytes without rewriting existing content."""
+    """Create/fsync a file and make first pathname publication crash-durable."""
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    existed = destination.exists()
     with destination.open("ab") as handle:
         handle.flush()
         os.fsync(handle.fileno())
+    if not existed:
+        _sync_parent_directory(destination)
 
 
 def _looks_like_scientific_registry_state(payload: dict[str, Any]) -> bool:
@@ -317,6 +340,7 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
             with _ATOMIC_JSON_PUBLISH_LOCK:
                 if not protect_scientific_registry:
                     os.replace(temporary, destination)
+                    _sync_parent_directory(destination)
                     return
 
                 assert intended is not None
@@ -349,6 +373,7 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
                     raise RuntimeError(
                         "published ScientificRegistry bytes do not match prepared authority digest"
                     )
+                _sync_parent_directory(destination)
                 authority.commit(
                     tx_id=tx_id,
                     observed_state_sha256=published,

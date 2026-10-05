@@ -151,6 +151,74 @@ def test_mutated_config_identity_fails_before_fingerprint_or_reservation() -> No
         assert ledger.events() == []
 
 
+def test_mutated_action_exact_string_value_fails_semantic_revalidation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        lay = _action("action-empty-id", side="LAY")
+        object.__setattr__(lay, "bookmaker_id", "")
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="action no longer satisfies canonical value invariants",
+        ):
+            execute_paper_plan(
+                plan=_plan(lay),
+                trigger_id="action-empty-id",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=frozenset({lay.action_id}),
+            )
+
+        assert ledger.events() == []
+
+
+def test_mutated_plan_exact_timestamp_value_fails_semantic_revalidation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        lay = _action("plan-bad-time", side="LAY")
+        plan = _plan(lay)
+        object.__setattr__(plan, "created_at", "not-a-timestamp")
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="plan no longer satisfies canonical value invariants",
+        ):
+            execute_paper_plan(
+                plan=plan,
+                trigger_id="plan-bad-time",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=frozenset({lay.action_id}),
+            )
+
+        assert ledger.events() == []
+
+
+def test_mutated_config_exact_string_value_fails_semantic_revalidation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        lay = _action("config-empty-seed", side="LAY")
+        config = _config()
+        object.__setattr__(config, "seed", "")
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="config no longer satisfies canonical value invariants",
+        ):
+            execute_paper_plan(
+                plan=_plan(lay),
+                trigger_id="config-empty-seed",
+                config=config,
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=frozenset({lay.action_id}),
+            )
+
+        assert ledger.events() == []
+
+
 def test_mutated_config_range_fails_before_reservation() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

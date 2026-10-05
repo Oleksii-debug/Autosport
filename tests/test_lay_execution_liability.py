@@ -1220,6 +1220,43 @@ class PaperExecutionLedgerPrimitiveAuthorityTests(unittest.TestCase):
             self.assertTrue(result.completed)
             self.assertEqual(result.worst_case_exposure, Decimal("10.00"))
 
+    def test_execute_bypasses_internal_durable_primitive_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            current = _action(
+                "ledger-internal-primitive-dispatch",
+                side="BACK",
+                odds="2.00",
+                stake="10.00",
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("internal durable primitive override executed")
+
+            ledger._event = forbidden
+            ledger._sync_parent_directory = forbidden
+            ledger._write_anchor_unlocked = forbidden
+            try:
+                result = execute_paper_plan(
+                    plan=_plan(current),
+                    trigger_id="ledger-internal-primitive-dispatch",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                )
+            finally:
+                ledger.__dict__.pop("_event", None)
+                ledger.__dict__.pop("_sync_parent_directory", None)
+                ledger.__dict__.pop("_write_anchor_unlocked", None)
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertTrue(result.completed)
+            self.assertEqual(result.worst_case_exposure, Decimal("10.00"))
+            self.assertEqual(result.attempts[0].outcome, PaperAttemptOutcome.ACCEPTED)
+
 
 class PaperBookLayEconomicsTests(unittest.TestCase):
     @staticmethod

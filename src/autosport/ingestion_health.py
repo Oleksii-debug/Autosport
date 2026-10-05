@@ -252,6 +252,22 @@ class _SourceHealthWriterLock:
 
     def __enter__(self) -> "_SourceHealthWriterLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = os.lstat(self.path)
+        except FileNotFoundError:
+            existing = None
+        except OSError as exc:
+            raise RuntimeError(
+                "source health writer-lock path is unavailable"
+            ) from exc
+        if existing is not None and (
+            stat.S_ISLNK(existing.st_mode)
+            or not stat.S_ISREG(existing.st_mode)
+            or getattr(existing, "st_nlink", 1) != 1
+        ):
+            raise RuntimeError(
+                "source health writer-lock path must be one regular non-symlink file"
+            )
         flags = os.O_CREAT | os.O_RDWR
         flags |= getattr(os, "O_NOFOLLOW", 0)
         try:

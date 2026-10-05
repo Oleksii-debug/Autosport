@@ -14,6 +14,7 @@ import autosport.monotonic_workspace_authority as monotonic_module
 import autosport.json_integrity as json_integrity_module
 import autosport.integrity as integrity_module
 import autosport.workspace_lock as workspace_lock_module
+import autosport.supervised_execution as supervised_module
 from autosport.betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
@@ -1326,6 +1327,93 @@ def test_rebound_workspace_lock_handle_validator_is_rejected_before_execution(mo
             bound=bound,
             action_id=action.action_id,
         )
+
+    assert attacker_called is False
+
+def test_rebound_bound_binding_helper_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_binding(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return "0" * 64
+
+    monkeypatch.setattr(supervised_module, "_bound_binding_sha256", attacker_binding)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="bound-plan dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_rebound_execution_plan_fingerprint_property_is_rejected_before_getter(
+    monkeypatch,
+) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_fingerprint(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        return bound.execution_plan.fingerprint
+
+    monkeypatch.setattr(
+        supervised_module.ExecutionPlan,
+        "fingerprint",
+        property(attacker_fingerprint),
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="bound-plan dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_approval_fingerprint_getter_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    getter = supervised_module.SupervisedApproval.fingerprint.fget
+    original_code = getter.__code__
+    attacker_called = False
+
+    def attacker_getter(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        return "0" * 64
+
+    try:
+        getter.__code__ = attacker_getter.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="bound-plan dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        getter.__code__ = original_code
 
     assert attacker_called is False
 

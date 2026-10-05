@@ -3,7 +3,11 @@
 This module owns only verified provider TLS/authentication and bounded opaque CRLF
 frame ingress. A positive transport-origin frame proves only that these exact bytes were
 read by this product transport after Betfair returned SUCCESS on the same verified TLS
-connection. Configured account/application labels are not provider-attested identity,
+connection. Each issued authenticated frame also binds the local monotonic timestamp of
+the socket recv block containing that frame's final byte; buffered/coalesced frames do
+not acquire a newer timestamp merely because a caller consumes them later. This is a
+local queue-age authority, not a provider/wall-clock arrival claim. Configured
+account/application labels are not provider-attested identity,
 and this layer deliberately does not claim durable persistence. It does not decode
 stream JSON semantics, persist credentials, auto-login, or expose betting-write methods.
 """
@@ -1099,6 +1103,8 @@ PUBLIC_PROTOCOL = MappingProxyType(
         "configured_identity_provider_attested": False,
         "durable_persistence_authority": False,
         "authenticated_transport_origin_authority": True,
+        "socket_ingress_monotonic_timestamp_authority": True,
+        "buffered_frame_timestamp_refresh": False,
         "connect_cancellation_supported": True,
         "market_write_authority": False,
         "betting_write_authority": False,

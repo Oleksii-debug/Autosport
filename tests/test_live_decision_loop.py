@@ -10465,6 +10465,110 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+    def test_stop_rejects_control_path_retarget_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            foreign = workspace / "foreign-control.json"
+            loop.control_path = foreign
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "live control path authority changed",
+            ):
+                loop.stop()
+
+            self.assertFalse(foreign.exists())
+            self.assertFalse(loop.stopped)
+            loop.control_path = loop._control_path_authority
+            loop.close()
+
+    def test_pause_rejects_control_monotonic_authority_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            loop._control_authority = MonotonicWorkspaceAuthority(
+                workspace=workspace.resolve(strict=False),
+                domain="autosport.live-decision-control.v1",
+                key="live-test-loop",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "live control monotonic authority changed",
+            ):
+                loop.pause()
+
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.CONTROL_FILE_NAME).exists()
+            )
+            loop._control_authority = loop._control_authority_object
+            loop.close()
+
+    def test_register_input_rejects_registry_path_retarget_and_rolls_back_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            foreign = workspace / "foreign-inputs.json"
+            loop.inputs_path = foreign
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "live input-registry path authority changed",
+            ):
+                loop.register_input("input-a", selection_ids="selection-a")
+
+            self.assertEqual(loop.dependencies.input_ids, ())
+            self.assertEqual(tuple(loop._input_specs), ())
+            self.assertFalse(foreign.exists())
+            loop.inputs_path = loop._inputs_path_authority
+            loop.close()
+
+    def test_register_input_rejects_registry_monotonic_authority_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            loop._inputs_authority = MonotonicWorkspaceAuthority(
+                workspace=workspace.resolve(strict=False),
+                domain="autosport.live-decision-inputs.v1",
+                key="live-test-loop",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "live input-registry monotonic authority changed",
+            ):
+                loop.register_input("input-a", selection_ids="selection-a")
+
+            self.assertEqual(loop.dependencies.input_ids, ())
+            self.assertEqual(tuple(loop._input_specs), ())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.INPUTS_FILE_NAME).exists()
+            )
+            loop._inputs_authority = loop._inputs_authority_object
+            loop.close()
+
+
     def test_cycle_entry_rejects_observation_authority_rebinding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

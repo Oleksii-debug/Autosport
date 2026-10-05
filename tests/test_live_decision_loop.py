@@ -8533,5 +8533,31 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+    def test_dependency_publication_rejects_focused_registry_divergence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            previous = tuple(loop._input_specs.values())
+            inputs_before = loop.inputs_path.read_bytes()
+
+            self.assertTrue(loop.dependencies.unregister("input-a"))
+            loop.dependencies.register("input-a", selection_ids="selection-b")
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "focused dependency registry changed before dependency publication",
+            ):
+                loop._persist_input_registry(expected_previous=previous)
+
+            self.assertEqual(loop.inputs_path.read_bytes(), inputs_before)
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

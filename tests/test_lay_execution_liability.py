@@ -1637,6 +1637,39 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
 
         self.assertEqual(_HostileSettlementKey.calls, 0)
 
+    def test_lay_open_rejects_arbitrary_stake_before_str_execution_without_upstream_parser(self):
+        book = PaperBook(Decimal("100"))
+        _HostileStake.calls = 0
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact Decimal, str, int, or float",
+        ):
+            book.open_ticket(
+                [self._lay_leg()],
+                _HostileStake(),
+                placed_at=QUOTE_AT,
+            )
+
+        self.assertEqual(_HostileStake.calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+
+    def test_lay_open_rejects_arbitrary_leg_iterable_before_iteration_without_upstream_parser(self):
+        book = PaperBook(Decimal("100"))
+        _HostileLegIterable.calls = 0
+
+        with self.assertRaisesRegex(ValueError, "exact list or tuple"):
+            book.open_ticket(
+                _HostileLegIterable(),
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+            )
+
+        self.assertEqual(_HostileLegIterable.calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+
     def test_lay_open_reuses_canonical_stake_ingress_when_available(self):
         book = PaperBook(Decimal("100"))
         _HostileStake.calls = 0

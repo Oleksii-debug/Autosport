@@ -244,12 +244,24 @@ def _build_product_verifier():
     issuance_decode_execution_plan = _issuance_module._decode_execution_plan
     issuance_decode_execution_plan_code = issuance_decode_execution_plan.__code__
     issuance_execution_action_cls = _issuance_module.ExecutionAction
+    issuance_execution_action_init = issuance_execution_action_cls.__init__
+    issuance_execution_action_init_code = issuance_execution_action_init.__code__
     issuance_execution_plan_cls = _issuance_module.ExecutionPlan
+    issuance_execution_plan_init = issuance_execution_plan_cls.__init__
+    issuance_execution_plan_init_code = issuance_execution_plan_init.__code__
     issuance_supervised_approval_cls = _issuance_module.SupervisedApproval
+    issuance_supervised_approval_init = issuance_supervised_approval_cls.__init__
+    issuance_supervised_approval_init_code = issuance_supervised_approval_init.__code__
     issuance_approval_state_cls = _issuance_module.ApprovalState
     issuance_profile_binding_cls = _issuance_module.ProfileBinding
+    issuance_profile_binding_init = issuance_profile_binding_cls.__init__
+    issuance_profile_binding_init_code = issuance_profile_binding_init.__code__
     issuance_constraint_cls = _issuance_module.ExecutionLegConstraint
+    issuance_constraint_init = issuance_constraint_cls.__init__
+    issuance_constraint_init_code = issuance_constraint_init.__code__
     issuance_bound_cls = _issuance_module.BoundSupervisedExecutionPlan
+    issuance_bound_init = issuance_bound_cls.__init__
+    issuance_bound_init_code = issuance_bound_init.__code__
     issuance_decimal_cls = _issuance_module.Decimal
     issuance_schema = _issuance_module._SCHEMA
     issuance_schema_version = _issuance_module._SCHEMA_VERSION
@@ -432,12 +444,24 @@ def _build_product_verifier():
             or issued_plan_cls.__init__ is not issued_plan_init
             or issued_plan_init.__code__ is not issued_plan_init_code
             or _issuance_module.ExecutionAction is not issuance_execution_action_cls
+            or issuance_execution_action_cls.__init__ is not issuance_execution_action_init
+            or issuance_execution_action_init.__code__ is not issuance_execution_action_init_code
             or _issuance_module.ExecutionPlan is not issuance_execution_plan_cls
+            or issuance_execution_plan_cls.__init__ is not issuance_execution_plan_init
+            or issuance_execution_plan_init.__code__ is not issuance_execution_plan_init_code
             or _issuance_module.SupervisedApproval is not issuance_supervised_approval_cls
+            or issuance_supervised_approval_cls.__init__ is not issuance_supervised_approval_init
+            or issuance_supervised_approval_init.__code__ is not issuance_supervised_approval_init_code
             or _issuance_module.ApprovalState is not issuance_approval_state_cls
             or _issuance_module.ProfileBinding is not issuance_profile_binding_cls
+            or issuance_profile_binding_cls.__init__ is not issuance_profile_binding_init
+            or issuance_profile_binding_init.__code__ is not issuance_profile_binding_init_code
             or _issuance_module.ExecutionLegConstraint is not issuance_constraint_cls
+            or issuance_constraint_cls.__init__ is not issuance_constraint_init
+            or issuance_constraint_init.__code__ is not issuance_constraint_init_code
             or _issuance_module.BoundSupervisedExecutionPlan is not issuance_bound_cls
+            or issuance_bound_cls.__init__ is not issuance_bound_init
+            or issuance_bound_init.__code__ is not issuance_bound_init_code
             or _issuance_module.Decimal is not issuance_decimal_cls
             or _issuance_module._SCHEMA != issuance_schema
             or _issuance_module._SCHEMA_VERSION != issuance_schema_version

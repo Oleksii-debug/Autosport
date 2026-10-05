@@ -578,3 +578,30 @@ def test_active_strategy_quarantine_blocks_product_runtime_before_teardown(
     assert surface.product_worker.started == []
     assert surface._active_workspace == active_workspace
     assert "відновіть карантинований workspace" in surface.product_status.value
+
+
+def test_python_factory_text_cannot_be_saved_as_operator_source(tmp_path: Path) -> None:
+    surface = SimpleNamespace(
+        _closing=False,
+        _product_busy=False,
+        product_status=_Value(),
+        status=_Value(),
+        product_source=_Value("evil.module:create_source"),
+        _product_source_display_to_id={
+            "Parlay API — настільний теніс": "parlayapi-table-tennis"
+        },
+        _product_source_id_to_display={
+            "parlayapi-table-tennis": "Parlay API — настільний теніс"
+        },
+        workspace=tmp_path / "workspace",
+        bell=lambda: None,
+        _append_log=lambda _message: None,
+    )
+
+    with patch(
+        "autosport.product_windows_gui.save_operator_source_configuration"
+    ) as save:
+        ProductWindowsAutosportApp.save_product_source_configuration(surface)
+
+    save.assert_not_called()
+    assert "пошкоджена" in surface.product_status.value

@@ -853,3 +853,94 @@ def test_rebound_monotonic_record_hash_is_rejected_before_execution(monkeypatch)
 
     assert attacker_called is False
 
+def test_rebound_issuance_provider_resolver_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_resolver(**_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound issuance provider resolver must never execute")
+
+    monkeypatch.setattr(
+        issuance_module,
+        "resolve_betfair_standard_limit_price_bound",
+        attacker_resolver,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_rebound_issuance_authority_domain_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    monkeypatch.setattr(
+        issuance_module,
+        "_AUTHORITY_DOMAIN",
+        "attacker.supervised-plan-issuance",
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_rebound_issuance_execution_plan_type_is_rejected_before_decode(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    monkeypatch.setattr(issuance_module, "ExecutionPlan", object)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_rebound_issuance_schema_keys_are_rejected_before_decode(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    monkeypatch.setattr(
+        issuance_module,
+        "_PROVIDER_REQUEST_KEYS",
+        frozenset({"action_id"}),
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+

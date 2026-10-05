@@ -531,6 +531,8 @@ def _build_canonical_authority():
 
     def instant(value: object, field: str) -> datetime:
         if type(value) is datetime_cls:
+            if object.__getattribute__(value, "tzinfo") is not timezone_utc:
+                raise error_cls(f"{field} datetime input must use exact UTC timezone authority")
             parsed = value
         elif type(value) is str:
             raw = text(value, field)

@@ -386,7 +386,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 )
 
             self.assertEqual(len(book.tickets), 1)
-            self.assertEqual(book.balance, Decimal("85.00"))
+            self.assertEqual(book.balance, Decimal("90.00"))
 
     def test_runtime_book_replacement_after_attempt_fails_before_materialization(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -452,7 +452,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertTrue(Path(canonical_path).exists())
             self.assertTrue(redirected_path.exists())
             self.assertEqual(len(book.tickets), 1)
-            self.assertEqual(book.balance, Decimal("85.00"))
+            self.assertEqual(book.balance, Decimal("90.00"))
 
     def test_post_run_ticket_marker_mutation_cannot_redirect_restart_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

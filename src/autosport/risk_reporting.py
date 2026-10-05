@@ -34,6 +34,7 @@ from .risk import PaperRiskPolicy
 
 RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v5"
 EQUITY_PATH_SCHEMA = "autosport.paper-equity-path.v1"
+PAPER_EQUITY_SOURCE_STATE_SCHEMA = "autosport.paper-equity-source-state.v1"
 DRAWDOWN_EVIDENCE_SCHEMA = "autosport.paper-realized-settled-drawdown.v1"
 HISTORY_VIEW_RESTATED_CURRENT = "RESTATED_CURRENT_HISTORY"
 RISK_REPORT_SCOPE_PAPER_ONLY = "PAPER_ONLY"
@@ -101,6 +102,7 @@ class ProductIssuedPaperDrawdownEvidence:
     equity_path_sha256: str
     paperbook_source_state_sha256: str
     equity_path_point_count: int
+    paper_source_state_sha256: str
     goal_id: str
     goal_revision: int
     bankroll_id: str
@@ -263,6 +265,86 @@ def _paperbook_equity_source_sha256(book: PaperBook) -> str:
     payload = {
         "schema": "autosport.paper-equity-source.v1",
         "initial_bankroll": _decimal_text(book.initial_bankroll, "initial bankroll"),
+        "balance": _decimal_text(book.balance, "balance"),
+        "tickets": tickets,
+        "lifecycle": lifecycle,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _paper_equity_source_state_sha256(book: PaperBook) -> str:
+    """Hash complete canonical PAPER source state used by equity evidence."""
+
+    if type(book) is not PaperBook:
+        raise TypeError("book must be canonical PaperBook")
+    _require_product_issued_paper_state(book)
+    PaperBook._validate_loaded_state(book)
+
+    tickets: list[dict[str, object]] = []
+    for ticket_id in sorted(book.tickets):
+        ticket = book.tickets[ticket_id]
+        tickets.append(
+            {
+                "ticket_id": ticket.ticket_id,
+                "stake": _decimal_text(ticket.stake, "ticket stake"),
+                "placed_at": ticket.placed_at,
+                "settled_at": ticket.settled_at,
+                "status": ticket.status.value,
+                "payout": _decimal_text(ticket.payout, "ticket payout"),
+                "strategy_reason": ticket.strategy_reason,
+                "provider_source_ids": list(ticket.provider_source_ids),
+                "provider_accounts": [
+                    {"source_id": source_id, "account_id": account_id}
+                    for source_id, account_id in ticket.provider_accounts
+                ],
+                "bankroll_id": ticket.bankroll_id,
+                "currency": ticket.currency,
+                "legs": [
+                    {
+                        "event_id": leg.event_id,
+                        "market_id": leg.market_id,
+                        "selection_id": leg.selection_id,
+                        "locked_odds": _decimal_text(
+                            leg.locked_odds,
+                            "ticket leg locked_odds",
+                        ),
+                        "sport": leg.sport,
+                        "exchange_side": leg.exchange_side,
+                    }
+                    for leg in ticket.legs
+                ],
+            }
+        )
+
+    lifecycle: list[dict[str, object]] = []
+    for raw_entry in book._lifecycle:
+        action, ticket_id, winners, voids = PaperBook._validate_lifecycle_entry(
+            raw_entry
+        )
+        lifecycle.append(
+            {
+                "action": action,
+                "ticket_id": ticket_id,
+                "winning_quote_keys": list(winners),
+                "void_quote_keys": list(voids),
+                "settled_at": (
+                    book._settlement_times[ticket_id]
+                    if action == "settle"
+                    else None
+                ),
+            }
+        )
+
+    payload = {
+        "schema": PAPER_EQUITY_SOURCE_STATE_SCHEMA,
+        "initial_bankroll": _decimal_text(book.initial_bankroll, "initial_bankroll"),
         "balance": _decimal_text(book.balance, "balance"),
         "tickets": tickets,
         "lifecycle": lifecycle,
@@ -663,6 +745,7 @@ def _drawdown_evidence_payload(
         "equity_path_sha256": path.path_sha256,
         "paperbook_source_state_sha256": path.paperbook_source_state_sha256,
         "equity_path_point_count": path.point_count,
+        "paper_source_state_sha256": path.paper_source_state_sha256,
         "goal_id": path.goal_id,
         "goal_revision": path.goal_revision,
         "bankroll_id": path.bankroll_id,
@@ -714,6 +797,7 @@ def build_product_issued_paper_drawdown_evidence(
         equity_path_sha256=path.path_sha256,
         paperbook_source_state_sha256=path.paperbook_source_state_sha256,
         equity_path_point_count=path.point_count,
+        paper_source_state_sha256=path.paper_source_state_sha256,
         goal_id=path.goal_id,
         goal_revision=path.goal_revision,
         bankroll_id=path.bankroll_id,
@@ -1093,6 +1177,7 @@ def build_paper_risk_report(
     ):
         raise ValueError("canonical economic goal changed during reporting")
 
+    before_source_sha256 = _paper_equity_source_state_sha256(book)
     before_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
     if before_sha256 is None:
         raise ValueError("canonical PAPER risk state cannot be reported")

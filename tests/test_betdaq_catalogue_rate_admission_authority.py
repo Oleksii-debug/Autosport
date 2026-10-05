@@ -95,15 +95,30 @@ class _AdmissionOnlyTransport:
         self.last_rate_admission = admission
 
 
-def _live_provider_with_admission(
-    admission: BetdaqRateAdmission,
-) -> BetdaqLiveReadOnlyProvider:
+class _SwappingAdmissionTransport:
+    def __init__(self) -> None:
+        self.reads = 0
+        self._catalogue = _admission()
+        self._prices = _admission("GetPrices")
+
+    @property
+    def last_rate_admission(self) -> BetdaqRateAdmission:
+        self.reads += 1
+        return self._catalogue if self.reads == 1 else self._prices
+
+
+def _live_provider_with_transport(transport: object) -> BetdaqLiveReadOnlyProvider:
     # Bypass network-bearing construction only to isolate the evidence-binding method.
     provider = object.__new__(BetdaqLiveReadOnlyProvider)
-    transport = _AdmissionOnlyTransport(admission)
     provider.transport = transport
     provider._live_transport = transport
     return provider
+
+
+def _live_provider_with_admission(
+    admission: BetdaqRateAdmission,
+) -> BetdaqLiveReadOnlyProvider:
+    return _live_provider_with_transport(_AdmissionOnlyTransport(admission))
 
 
 def test_catalogue_retry_rejects_reused_rate_admission() -> None:
@@ -152,3 +167,13 @@ def test_live_getprices_evidence_accepts_getprices_admission() -> None:
     provider = _live_provider_with_admission(admission)
 
     assert provider._rate_admission_receipt() == admission.receipt_sha256
+
+
+def test_live_getprices_evidence_reads_shared_admission_slot_once() -> None:
+    transport = _SwappingAdmissionTransport()
+    provider = _live_provider_with_transport(transport)
+
+    with pytest.raises(ValueError, match="GetPrices acquisition bound wrong rate admission"):
+        provider._rate_admission_receipt()
+
+    assert transport.reads == 1

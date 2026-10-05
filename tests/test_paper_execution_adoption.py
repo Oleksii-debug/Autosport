@@ -208,6 +208,38 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                     decision_id="decision-lay",
                 )
 
+    def test_execute_with_clock_rejects_datetime_subclass_before_hooks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            runtime, prepared = self._runtime_and_prepared(workspace)
+
+            class HostileDateTime(datetime):
+                def utcoffset(self):
+                    raise AssertionError("hostile utcoffset must not execute")
+
+                def astimezone(self, *args, **kwargs):
+                    raise AssertionError("hostile astimezone must not execute")
+
+            hostile = HostileDateTime(
+                2026,
+                9,
+                21,
+                12,
+                0,
+                tzinfo=timezone.utc,
+            )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "PAPER execution clock must return exact datetime",
+            ):
+                runtime.execute_with_clock(
+                    prepared=prepared,
+                    trigger_id="trigger-1",
+                    clock=lambda: hostile,
+                    materialize_exposure=False,
+                )
+
     def test_execute_with_clock_rejects_product_clock_before_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

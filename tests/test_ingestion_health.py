@@ -47,6 +47,20 @@ class StaticProvider:
 
 
 class IngestionHealthTests(unittest.TestCase):
+    def test_ingestion_policy_rejects_numeric_subclasses(self):
+        class BatchSize(int):
+            pass
+
+        class Seconds(float):
+            pass
+
+        with self.assertRaisesRegex(ValueError, "max_batch_size"):
+            IngestionPolicy(max_batch_size=BatchSize(100))
+        with self.assertRaisesRegex(ValueError, "stale_after_seconds"):
+            IngestionPolicy(stale_after_seconds=Seconds(60.0))
+        with self.assertRaisesRegex(ValueError, "max_future_skew_seconds"):
+            IngestionPolicy(max_future_skew_seconds=Seconds(5.0))
+
     def _engine(self, tmp: str, *, now: str = "2026-09-12T12:00:00+00:00", policy=None):
         store = SQLiteMarketStore(Path(tmp) / "market.db")
         bus = MarketEventBus(store)

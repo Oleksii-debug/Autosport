@@ -546,8 +546,14 @@ def _validate_lay_execution_surface(
     plan: ExecutionPlan,
     observations: Mapping[str, ObservedPaperExecution],
 ) -> None:
+    for action in plan.actions:
+        if action.side not in {"BACK", "LAY"}:
+            raise PaperExecutionStateError(
+                "PAPER execution requires canonical BACK or LAY action side "
+                "before reservation"
+            )
     lay_actions = tuple(
-        action for action in plan.actions if action.side.strip().upper() == "LAY"
+        action for action in plan.actions if action.side == "LAY"
     )
     if not lay_actions:
         return
@@ -556,10 +562,6 @@ def _validate_lay_execution_surface(
             "LAY PAPER execution is limited to one single-leg action"
         )
     action = lay_actions[0]
-    if action.side != "LAY":
-        raise PaperExecutionStateError(
-            "LAY PAPER execution requires canonical LAY action side before reservation"
-        )
     observation = observations.get(action.action_id)
     if observation is None:
         raise PaperExecutionStateError(

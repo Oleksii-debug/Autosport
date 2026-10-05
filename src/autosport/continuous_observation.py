@@ -417,17 +417,15 @@ def run_continuous_observation(
             raise TypeError("waiter must return bool")
         return value
 
-    def wait_provider_backoff(seconds: float) -> bool:
-        """Wait a provider retry delay without trusting an injected waiter to sleep."""
-        if waiter is None:
-            return wait_once(seconds)
+    def wait_delay(seconds: float) -> bool:
+        """Enforce elapsed-time authority for every non-stopping wait."""
         before = read_monotonic()
         stopped = wait_once(seconds)
         if stopped:
             return True
         after = read_monotonic()
         if after - before < seconds:
-            raise ValueError("waiter returned before provider backoff elapsed")
+            raise ValueError("waiter returned before requested delay elapsed")
         return False
 
     root.mkdir(parents=True, exist_ok=True)
@@ -512,7 +510,7 @@ def run_continuous_observation(
                         restart_backoff_remaining,
                         remaining_runtime,
                     )
-                    if wait_provider_backoff(startup_wait):
+                    if wait_delay(startup_wait):
                         terminal_reason = "operator_stop"
                         enter_loop = False
                     elif startup_wait >= remaining_runtime:
@@ -594,7 +592,7 @@ def run_continuous_observation(
                     ),
                     remaining,
                 )
-                if wait_provider_backoff(backoff):
+                if wait_delay(backoff):
                     terminal_reason = "operator_stop"
                     break
                 continue
@@ -641,7 +639,7 @@ def run_continuous_observation(
             if remaining <= 0:
                 terminal_reason = "max_runtime"
                 break
-            if wait_once(min(config.interval_seconds, remaining)):
+            if wait_delay(min(config.interval_seconds, remaining)):
                 terminal_reason = "operator_stop"
                 break
     except Exception as exc:

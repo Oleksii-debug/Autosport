@@ -255,8 +255,7 @@ class IngestionPolicy:
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.max_batch_size, bool)
-            or not isinstance(self.max_batch_size, int)
+            type(self.max_batch_size) is not int
             or self.max_batch_size <= 0
         ):
             raise ValueError("max_batch_size must be a positive integer")
@@ -265,8 +264,7 @@ class IngestionPolicy:
             ("max_future_skew_seconds", self.max_future_skew_seconds),
         ):
             if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
+                type(value) not in {int, float}
                 or not isfinite(value)
                 or value < 0
             ):

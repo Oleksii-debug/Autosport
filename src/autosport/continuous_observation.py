@@ -427,7 +427,7 @@ def run_continuous_observation(
             return True
         after = read_monotonic()
         if after - before < seconds:
-            raise RuntimeError("waiter returned before provider backoff elapsed")
+            raise ValueError("waiter returned before provider backoff elapsed")
         return False
 
     root.mkdir(parents=True, exist_ok=True)

@@ -13,7 +13,7 @@ from .betdaq_catalogue_binding import (
 )
 from .betdaq_readonly_live_transport import BetdaqReadOnlyLiveTransport
 from .betdaq_readonly_market_wire import BetdaqSoapProtocolError
-from .betdaq_rate_governor import BetdaqRateGovernor
+from .betdaq_rate_governor import BetdaqRateAdmission, BetdaqRateGovernor
 from .betdaq_readonly_provider import (
     BetdaqMarketBinding,
     BetdaqReadOnlyProvider,
@@ -96,13 +96,21 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
         return self._last_catalogue_evidence
 
     def _rate_admission_receipt(self) -> str | None:
-        receipt = super()._rate_admission_receipt()
+        # Capture exactly once: last_rate_admission is an observation slot shared by
+        # both read-only operations. Validation and receipt extraction must bind to
+        # the same object rather than performing a second mutable-slot read.
         admission = self._live_transport.last_rate_admission
-        if admission is not None and admission.method != "GetPrices":
+        if admission is None:
+            return None
+        if type(admission) is not BetdaqRateAdmission:
+            raise TypeError(
+                "live transport last_rate_admission must be canonical BetdaqRateAdmission"
+            )
+        if admission.method != "GetPrices":
             raise ValueError(
                 "live BETDAQ GetPrices acquisition bound wrong rate admission"
             )
-        return receipt
+        return admission.receipt_sha256
 
     def _binding_for_market(
         self,

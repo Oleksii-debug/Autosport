@@ -335,18 +335,49 @@ def _preflight_adoption_inputs(
         raise _reality.PaperExecutionStateError(
             "suspended_action_ids contain action outside execution plan"
         )
-    if (
-        observation_snapshot
-        and type(evidence_registry) is not _reality.PaperExecutionEvidenceRegistry
-    ):
-        raise _reality.PaperExecutionStateError(
-            "configured/empirical observations require the exact durable evidence registry authority"
-        )
+    if observation_snapshot:
+        if type(evidence_registry) is not _reality.PaperExecutionEvidenceRegistry:
+            raise _reality.PaperExecutionStateError(
+                "configured/empirical observations require the exact durable evidence registry authority"
+            )
+        if evidence_registry.authority_ledger is not self.ledger:
+            raise _reality.PaperExecutionStateError(
+                "execution evidence registry must be bound to the exact runtime ledger"
+            )
+        action_by_id = {
+            action.action_id: action
+            for action in prepared.execution_plan.actions
+        }
+        for action_id, observation in observation_snapshot.items():
+            _reality._impl._verify_observation_authority(
+                action=action_by_id[action_id],
+                observation=observation,
+                registry=evidence_registry,
+            )
     _reality._validate_lay_execution_surface(
         plan=prepared.execution_plan,
         observations=observation_snapshot,
         suspended_action_ids=suspended_action_ids,
     )
+    if observation_snapshot:
+        run_id = _reality._impl._run_id(
+            prepared.execution_plan,
+            trigger_id,
+            self.config,
+        )
+        for sequence, action in enumerate(prepared.execution_plan.actions):
+            observation = observation_snapshot.get(action.action_id)
+            if observation is None:
+                continue
+            _reality._impl._observed_attempt(
+                run_id=run_id,
+                plan=prepared.execution_plan,
+                action=action,
+                sequence=sequence,
+                config=self.config,
+                observation=observation,
+                started_at=started_at,
+            )
     return observation_snapshot
 
 

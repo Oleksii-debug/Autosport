@@ -1001,6 +1001,43 @@ _CANONICAL_LEDGER_RESOLVE_OBSERVATION_EVIDENCE = (
 )
 
 
+def _verify_observation_authority(
+    *,
+    action: ExecutionAction,
+    observation: ObservedPaperExecution,
+    registry: PaperExecutionEvidenceRegistry,
+) -> PaperExecutionEvidenceRecord:
+    _impl._require_canonical_action_surface(action)
+    _impl._require_canonical_observation_surface(observation)
+    ledger = _CANONICAL_EVIDENCE_REGISTRY_REQUIRE_AUTHORITY(registry)
+    record = _CANONICAL_LEDGER_RESOLVE_OBSERVATION_EVIDENCE(
+        ledger,
+        observation.evidence_id,
+    )
+    if observation.evidence_sha256 != record.evidence_sha256:
+        raise PaperExecutionStateError("observation evidence digest mismatch")
+    expected = record.as_observation()
+    if observation != expected:
+        raise PaperExecutionStateError(
+            "observation does not match immutable registered evidence"
+        )
+    exact_action = (
+        record.action_id == action.action_id
+        and record.bookmaker_id == action.bookmaker_id
+        and record.account_id == action.account_id
+        and record.event_id == action.event_id
+        and record.market_id == action.market_id
+        and record.selection_id == action.selection_id
+        and record.side == action.side
+        and record.quote_id == action.quote_id
+    )
+    if not exact_action:
+        raise PaperExecutionStateError(
+            "registered observation evidence does not bind exact action/quote/provider/account"
+        )
+    return record
+
+
 def _synthetic_attempt(
     *,
     run_id: str,
@@ -1428,7 +1465,7 @@ def execute_paper_plan(
             raise PaperExecutionStateError(
                 "configured/empirical observations require the exact durable evidence registry authority"
             )
-        if evidence_registry.authority_ledger is not ledger:
+        if _CANONICAL_EVIDENCE_REGISTRY_REQUIRE_AUTHORITY(evidence_registry) is not ledger:
             raise PaperExecutionStateError(
                 "execution evidence registry must be bound to the exact run ledger"
             )
@@ -1437,7 +1474,7 @@ def execute_paper_plan(
     canonical_observations: dict[str, ObservedPaperExecution] = {}
     for action_id, observation in observations.items():
         assert evidence_registry is not None
-        record = _impl._verify_observation_authority(
+        record = _verify_observation_authority(
             action=action_by_id[action_id],
             observation=observation,
             registry=evidence_registry,

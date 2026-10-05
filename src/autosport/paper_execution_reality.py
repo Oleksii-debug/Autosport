@@ -385,9 +385,31 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         recovery_decision: RecoveryDecision,
         worst_case_exposure: Decimal,
     ) -> None:
+        if type(self) is not PaperExecutionLedger:
+            raise TypeError("ledger must be exact PaperExecutionLedger")
         run_id = _impl._text(run_id, "run_id")
-        if not isinstance(recovery_decision, RecoveryDecision):
-            raise TypeError("recovery_decision must be RecoveryDecision")
+        if (
+            type(pending_action_ids) is not tuple
+            or any(
+                type(item) is not str
+                or not item
+                or item.strip() != item
+                for item in pending_action_ids
+            )
+        ):
+            raise TypeError(
+                "pending_action_ids must be a canonical tuple[str, ...]"
+            )
+        if type(recovery_decision) is not RecoveryDecision:
+            raise TypeError("recovery_decision must be exact RecoveryDecision")
+        if type(worst_case_exposure) is not Decimal:
+            raise TypeError("worst_case_exposure must be exact Decimal")
+        try:
+            _validate_decimal_text_resource_bound(worst_case_exposure)
+        except ValueError as exc:
+            raise PaperExecutionStateError(
+                "worst_case_exposure exceeds canonical Decimal resource bounds"
+            ) from exc
         supplied_exposure = _impl._decimal(
             worst_case_exposure,
             "worst_case_exposure",
@@ -428,7 +450,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionStateError(
                     "run cannot complete before a terminal outcome or all actions ACCEPTED"
                 )
-            if tuple(pending_action_ids) != derived.pending_action_ids:
+            if pending_action_ids != derived.pending_action_ids:
                 raise PaperExecutionStateError(
                     "pending_action_ids conflict with durable attempt state"
                 )

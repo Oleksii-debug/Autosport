@@ -219,7 +219,7 @@ def _canonical_open_stake(book: _paper.PaperBook, stake) -> Decimal:
         if type(amount) is not _DECIMAL_TYPE:
             raise ValueError("canonical stake parser must return exact Decimal")
         return amount
-    if type(stake) not in {Decimal, str, int, float}:
+    if type(stake) not in {_DECIMAL_TYPE, str, int, float}:
         raise TypeError(
             "stake must be an exact Decimal, str, int, or float"
         )
@@ -763,7 +763,7 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
             ticket.bankroll_id,
             ticket.currency,
         )
-        if type(ticket.status) is not TicketStatus:
+        if type(ticket.status) is not _TICKET_STATUS_TYPE:
             raise ValueError(
                 "PaperBook snapshot ticket status must be canonical TicketStatus"
             )

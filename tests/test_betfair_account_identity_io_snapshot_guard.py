@@ -23,28 +23,6 @@ from autosport.betfair_account_readonly import (
 )
 
 
-def _install_https_test_dispatch(
-    monkeypatch: pytest.MonkeyPatch,
-    fake_open,
-) -> None:
-    """Intercept below a freshly-built urllib opener without global _opener."""
-
-    def fake_do_open(_self, _http_class, request, **_kwargs):
-        response = fake_open(request, getattr(request, "timeout", 0))
-        response.code = 200
-        response.status = 200
-        response.url = request.full_url
-        response.msg = "OK"
-        response.info = lambda: {}
-        return response
-
-    monkeypatch.setattr(
-        _urllib_request.AbstractHTTPHandler,
-        "do_open",
-        fake_do_open,
-    )
-
-
 def _reachable_functions(root: FunctionType) -> tuple[FunctionType, ...]:
     pending: list[object] = [root]
     seen: set[int] = set()
@@ -155,7 +133,7 @@ def test_transient_clock_substitution_during_provider_io_cannot_backdate_identit
             assert data is None
             return fake_open(request, timeout)
 
-    _install_https_test_dispatch(monkeypatch, fake_open)
+    monkeypatch.setattr(_urllib_request, "_opener", Opener())
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token")
     )
@@ -245,7 +223,7 @@ def test_transient_parser_currency_substitution_cannot_launder_k07_identity(
             return "GBP"
         return original_provider_text(raw, key, field)
 
-    _install_https_test_dispatch(monkeypatch, fake_open)
+    monkeypatch.setattr(_urllib_request, "_opener", Opener())
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token")
     )
@@ -338,7 +316,7 @@ def test_json_codec_rebinding_cannot_redirect_or_forge_k07_rpc(monkeypatch) -> N
             return forged
         return decoded
 
-    _install_https_test_dispatch(monkeypatch, fake_open)
+    monkeypatch.setattr(_urllib_request, "_opener", Opener())
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token")
     )
@@ -433,7 +411,7 @@ def test_transient_private_rpc_decode_swap_during_io_cannot_launder_identity(
         forged["result"] = forged_result
         return forged
 
-    _install_https_test_dispatch(monkeypatch, fake_open)
+    monkeypatch.setattr(_urllib_request, "_opener", Opener())
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token")
     )

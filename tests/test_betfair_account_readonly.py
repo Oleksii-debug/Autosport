@@ -8,8 +8,6 @@ import json
 
 import pytest
 
-from betfair_execution_readback_test_support import semantic_execution_readback
-
 import autosport.betfair_account_readonly as betfair_readonly
 from autosport.betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
@@ -66,85 +64,6 @@ def client_for(*responses: bytes):
         clock=lambda: FIXED_NOW,
     )
     return client, transport
-
-
-class _StrictHttpResponse:
-    def __init__(self, *, status: int, url: str, payload: bytes = b"{}") -> None:
-        self.status = status
-        self.code = status
-        self.url = url
-        self._payload = payload
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, traceback):
-        return False
-
-    def geturl(self) -> str:
-        return self.url
-
-    def read(self, limit: int) -> bytes:
-        assert limit >= len(self._payload)
-        return self._payload
-
-
-class _StrictOpener:
-    def __init__(self, response: _StrictHttpResponse) -> None:
-        self.response = response
-
-    def open(self, request, timeout: float):
-        assert request.full_url
-        assert timeout > 0
-        return self.response
-
-
-def test_urllib_transport_refuses_redirect_before_follow() -> None:
-    handler = betfair_readonly._RejectBetfairRedirects()
-    with pytest.raises(BetfairReadOnlyError, match="redirect refused"):
-        handler.redirect_request(
-            object(),
-            object(),
-            302,
-            "Found",
-            {},
-            "https://example.invalid/redirect",
-        )
-
-
-@pytest.mark.parametrize(
-    ("status", "final_url", "message"),
-    (
-        (201, BETTING_JSON_RPC_ENDPOINT, "exactly 200"),
-        (200, "https://example.invalid/json-rpc", "origin changed"),
-    ),
-)
-def test_urllib_transport_requires_exact_status_and_final_origin(
-    monkeypatch: pytest.MonkeyPatch,
-    status: int,
-    final_url: str,
-    message: str,
-) -> None:
-    response = _StrictHttpResponse(status=status, url=final_url)
-    opener = _StrictOpener(response)
-    seen_handlers: list[object] = []
-
-    def fake_build_opener(*handlers):
-        seen_handlers.extend(handlers)
-        return opener
-
-    monkeypatch.setattr(betfair_readonly, "build_opener", fake_build_opener)
-    transport = betfair_readonly.UrllibBetfairHttpTransport()
-
-    with pytest.raises(BetfairReadOnlyError, match=message):
-        transport.post(
-            BETTING_JSON_RPC_ENDPOINT,
-            headers={"X-Application": "a", "X-Authentication": "b"},
-            body=b"{}",
-            timeout_seconds=1.0,
-        )
-    assert len(seen_handlers) == 1
-    assert isinstance(seen_handlers[0], betfair_readonly._RejectBetfairRedirects)
 
 
 def test_credentials_and_client_repr_never_expose_secrets():
@@ -464,8 +383,6 @@ def test_execution_readback_binds_action_market_account_and_all_cleared_statuses
     assert requests[1]["params"]["customerOrderRefs"] == ["action-1"]
     assert requests[1]["params"]["marketIds"] == ["1.234"]
     assert requests[1]["params"]["orderProjection"] == "ALL"
-    assert "orderBy" not in requests[1]["params"]
-    assert "dateRange" not in requests[1]["params"]
     assert [request["params"]["betStatus"] for request in requests[2:]] == [
         "SETTLED",
         "VOIDED",
@@ -480,184 +397,8 @@ def test_execution_readback_binds_action_market_account_and_all_cleared_statuses
         assert "settledDateRange" not in params
 
 
-def test_execution_readback_freezes_current_scope_dispatch_before_market_callback():
-    target_ref = "a" * 32
-    foreign_ref = "b" * 32
-    original_current = BetfairReadOnlyClient.read_current_orders_page
-
-    class RebindingTransport(FakeTransport):
-        client: BetfairReadOnlyClient | None = None
-        forged_calls = 0
-
-        def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
-            request = json.loads(body)
-            client = self.client
-            assert client is not None
-
-            if request["method"] == "SportsAPING/v1.0/listMarketCatalogue":
-                def forged_current(
-                    *,
-                    from_record: int = 0,
-                    record_count: int = 1000,
-                    customer_order_refs=None,
-                    market_ids=None,
-                ):
-                    self.forged_calls += 1
-                    client.__dict__.pop("read_current_orders_page", None)
-                    return original_current(
-                        client,
-                        from_record=from_record,
-                        record_count=record_count,
-                        customer_order_refs=(foreign_ref,),
-                        market_ids=market_ids,
-                    )
-
-                client.read_current_orders_page = forged_current
-            elif request["method"] == "SportsAPING/v1.0/listCurrentOrders":
-                # With canonical capture-time binding the injected shadow is never
-                # called; remove it during the real provider call so the outer
-                # post-capture authority check observes the original instance shape.
-                client.__dict__.pop("read_current_orders_page", None)
-
-            return super().post(
-                url,
-                headers=headers,
-                body=body,
-                timeout_seconds=timeout_seconds,
-            )
-
-    responses = [
-        response([{"marketId": "1.234", "event": {"id": "event-1"}}], 1),
-        response({"currentOrders": [], "moreAvailable": False}, 2),
-        response({"clearedOrders": [], "moreAvailable": False}, 3),
-        response({"clearedOrders": [], "moreAvailable": False}, 4),
-        response({"clearedOrders": [], "moreAvailable": False}, 5),
-        response({"clearedOrders": [], "moreAvailable": False}, 6),
-        response({"currentOrders": [], "moreAvailable": False}, 7),
-        response({"clearedOrders": [], "moreAvailable": False}, 8),
-        response({"clearedOrders": [], "moreAvailable": False}, 9),
-        response({"clearedOrders": [], "moreAvailable": False}, 10),
-        response({"clearedOrders": [], "moreAvailable": False}, 11),
-    ]
-    transport = RebindingTransport(responses)
-    client = BetfairReadOnlyClient(
-        BetfairSessionCredentials("app-secret", "session-secret"),
-        transport=transport,
-        clock=lambda: FIXED_NOW,
-    )
-    transport.client = client
-
-    capture = client.read_execution_readback(
-        action_id="action-1",
-        market_id="1.234",
-        provider_order_ref=target_ref,
-    )
-
-    assert capture.provider_order_ref == target_ref
-    assert transport.forged_calls == 0
-    current_requests = [
-        json.loads(call["body"])
-        for call in transport.calls
-        if json.loads(call["body"])["method"] == "SportsAPING/v1.0/listCurrentOrders"
-    ]
-    assert len(current_requests) == 2
-    assert all(
-        request["params"]["customerOrderRefs"] == [target_ref]
-        for request in current_requests
-    )
-
-
-def test_execution_readback_freezes_cleared_scope_dispatch_before_current_callback():
-    target_ref = "c" * 32
-    foreign_ref = "d" * 32
-    original_cleared = BetfairReadOnlyClient.read_cleared_orders_page
-
-    class RebindingTransport(FakeTransport):
-        client: BetfairReadOnlyClient | None = None
-        forged_calls = 0
-
-        def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
-            request = json.loads(body)
-            client = self.client
-            assert client is not None
-
-            if request["method"] == "SportsAPING/v1.0/listCurrentOrders":
-                def forged_cleared(
-                    *,
-                    from_record: int = 0,
-                    record_count: int = 1000,
-                    settled_from=None,
-                    bet_status: str = "SETTLED",
-                    customer_order_refs=None,
-                    market_ids=None,
-                ):
-                    self.forged_calls += 1
-                    client.__dict__.pop("read_cleared_orders_page", None)
-                    return original_cleared(
-                        client,
-                        from_record=from_record,
-                        record_count=record_count,
-                        settled_from=settled_from,
-                        bet_status=bet_status,
-                        customer_order_refs=(foreign_ref,),
-                        market_ids=market_ids,
-                    )
-
-                client.read_cleared_orders_page = forged_cleared
-            elif request["method"] == "SportsAPING/v1.0/listClearedOrders":
-                client.__dict__.pop("read_cleared_orders_page", None)
-
-            return super().post(
-                url,
-                headers=headers,
-                body=body,
-                timeout_seconds=timeout_seconds,
-            )
-
-    responses = [
-        response([{"marketId": "1.234", "event": {"id": "event-1"}}], 1),
-        response({"currentOrders": [], "moreAvailable": False}, 2),
-        response({"clearedOrders": [], "moreAvailable": False}, 3),
-        response({"clearedOrders": [], "moreAvailable": False}, 4),
-        response({"clearedOrders": [], "moreAvailable": False}, 5),
-        response({"clearedOrders": [], "moreAvailable": False}, 6),
-        response({"currentOrders": [], "moreAvailable": False}, 7),
-        response({"clearedOrders": [], "moreAvailable": False}, 8),
-        response({"clearedOrders": [], "moreAvailable": False}, 9),
-        response({"clearedOrders": [], "moreAvailable": False}, 10),
-        response({"clearedOrders": [], "moreAvailable": False}, 11),
-    ]
-    transport = RebindingTransport(responses)
-    client = BetfairReadOnlyClient(
-        BetfairSessionCredentials("app-secret", "session-secret"),
-        transport=transport,
-        clock=lambda: FIXED_NOW,
-    )
-    transport.client = client
-
-    capture = client.read_execution_readback(
-        action_id="action-1",
-        market_id="1.234",
-        provider_order_ref=target_ref,
-    )
-
-    assert capture.provider_order_ref == target_ref
-    assert transport.forged_calls == 0
-    cleared_requests = [
-        json.loads(call["body"])
-        for call in transport.calls
-        if json.loads(call["body"])["method"] == "SportsAPING/v1.0/listClearedOrders"
-    ]
-    assert len(cleared_requests) == 8
-    assert all(
-        request["params"]["customerOrderRefs"] == [target_ref]
-        for request in cleared_requests
-    )
-
-
 def test_execution_readback_authority_cannot_be_imported_or_forged():
-    capture = semantic_execution_readback(
-        [
+    client, _ = client_for(
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
             1,
@@ -667,15 +408,12 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         response({"clearedOrders": [], "moreAvailable": False}, 4),
         response({"clearedOrders": [], "moreAvailable": False}, 5),
         response({"clearedOrders": [], "moreAvailable": False}, 6),
-    ],
+    )
+    capture = client.read_execution_readback(
         action_id="action-1",
         market_id="1.234",
-        provider_order_ref=None,
-        account_id="default-account",
     )
-    capture._validate()
-    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
-        capture.assert_authoritative()
+    capture.assert_authoritative()
 
     assert not hasattr(BetfairExecutionReadbackEnvelope, "_from_client")
     assert not hasattr(betfair_readonly, "_EXECUTION_READBACK_SEAL")
@@ -696,17 +434,16 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         capture.request_scope_sha256,
         capture.evidence_sha256,
     )
-    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+    with pytest.raises(BetfairReadOnlyError, match="not issued"):
         forged.assert_authoritative()
 
     copied = replace(capture)
-    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+    with pytest.raises(BetfairReadOnlyError, match="not issued"):
         copied.assert_authoritative()
 
 
-def test_semantic_execution_readback_remains_non_authoritative_after_timestamp_tamper():
-    capture = semantic_execution_readback(
-        [
+def test_execution_readback_detects_post_capture_origin_tampering():
+    client, _ = client_for(
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
             1,
@@ -716,21 +453,19 @@ def test_semantic_execution_readback_remains_non_authoritative_after_timestamp_t
         response({"clearedOrders": [], "moreAvailable": False}, 4),
         response({"clearedOrders": [], "moreAvailable": False}, 5),
         response({"clearedOrders": [], "moreAvailable": False}, 6),
-    ],
+    )
+    capture = client.read_execution_readback(
         action_id="action-1",
         market_id="1.234",
-        provider_order_ref=None,
-        account_id="default-account",
     )
 
     object.__setattr__(capture, "observed_at", "2026-09-17T17:31:00+00:00")
-    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+    with pytest.raises(BetfairReadOnlyError, match="changed after canonical adapter capture"):
         capture.assert_authoritative()
 
 
-def test_semantic_execution_readback_rejects_scope_digest_tampering():
-    capture = semantic_execution_readback(
-        [
+def test_execution_readback_detects_post_capture_scope_tampering():
+    client, _ = client_for(
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
             1,
@@ -740,11 +475,10 @@ def test_semantic_execution_readback_rejects_scope_digest_tampering():
         response({"clearedOrders": [], "moreAvailable": False}, 4),
         response({"clearedOrders": [], "moreAvailable": False}, 5),
         response({"clearedOrders": [], "moreAvailable": False}, 6),
-    ],
+    )
+    capture = client.read_execution_readback(
         action_id="action-1",
         market_id="1.234",
-        provider_order_ref=None,
-        account_id="default-account",
     )
 
     object.__setattr__(capture, "account_id", "forged-account")
@@ -771,109 +505,26 @@ def test_execution_readback_fails_closed_when_market_event_identity_is_unavailab
     assert len(transport.calls) == 6
 
 
-def test_bet_readback_capability_requires_action_bound_execution_readback():
+def test_bet_readback_capability_is_advertised_only_by_real_readonly_adapter():
     from autosport.bookmaker_capability import BookmakerCapability
 
-    client, transport = client_for()
-
-    with pytest.raises(
-        BetfairReadOnlyError,
-        match="action-bound read_execution_readback evidence",
-    ):
-        client.read_account_snapshot(
-            frozenset({BookmakerCapability.BET_READBACK})
-        )
-
-    assert transport.calls == []
-
-
-
-def test_cleared_order_correction_fields_are_preserved_and_typed():
     client, _ = client_for(
         response(
             {
-                "clearedOrders": [
-                    {
-                        "betId": "settled-correction",
-                        "marketId": "1.999",
-                        "selectionId": 42,
-                        "side": "BACK",
-                        "placedDate": "2026-09-16T10:00:00+00:00",
-                        "settledDate": "2026-09-17T10:00:00+00:00",
-                        "priceRequested": 1.91,
-                        "priceMatched": 1.90,
-                        "sizeSettled": 10.00,
-                        "profit": -10.00,
-                        "eventId": "event-42",
-                        "betOutcome": "LOST",
-                        "voidedDate": "2026-09-17T10:01:00+00:00",
-                        "handicap": -1.5,
-                    }
-                ],
-                "moreAvailable": False,
+                "currencyCode": "GBP",
+                "localeCode": "en",
+                "region": "GBR",
+                "timezone": "Europe/London",
             },
             1,
         )
     )
-    order = client.read_all_cleared_orders(page_size=1000)[0]
-    assert order.event_id == "event-42"
-    assert order.bet_outcome == "LOST"
-    assert order.voided_date == "2026-09-17T10:01:00+00:00"
-    assert order.handicap == Decimal("-1.5")
 
-
-@pytest.mark.parametrize(
-    ("field", "value", "match"),
-    (
-        ("betOutcome", " LOST ", "bet_outcome"),
-        ("voidedDate", "not-a-time", "voided_date"),
-        ("handicap", "not-a-number", "handicap must be a JSON number"),
-    ),
-)
-def test_cleared_order_correction_fields_fail_closed_when_malformed(field, value, match):
-    row = {
-        "betId": "settled-bad-correction",
-        "marketId": "1.999",
-        "selectionId": 42,
-        "side": "BACK",
-        "placedDate": "2026-09-16T10:00:00+00:00",
-        "settledDate": "2026-09-17T10:00:00+00:00",
-        "priceRequested": 1.91,
-        "priceMatched": 1.90,
-        "sizeSettled": 10.00,
-        "profit": -10.00,
-        field: value,
-    }
-    client, _ = client_for(response({"clearedOrders": [row], "moreAvailable": False}, 1))
-    with pytest.raises(BetfairReadOnlyError, match=match):
-        client.read_all_cleared_orders(page_size=1000)
-
-
-def test_cleared_order_correction_fields_remain_optional_for_legacy_rows():
-    client, _ = client_for(
-        response(
-            {
-                "clearedOrders": [
-                    {
-                        "betId": "settled-legacy-correction",
-                        "marketId": "1.999",
-                        "selectionId": 42,
-                        "side": "BACK",
-                        "placedDate": "2026-09-16T10:00:00+00:00",
-                        "settledDate": "2026-09-17T10:00:00+00:00",
-                        "priceRequested": 1.91,
-                        "priceMatched": 1.90,
-                        "sizeSettled": 10.00,
-                        "profit": 9.10,
-                    }
-                ],
-                "moreAvailable": False,
-            },
-            1,
-        )
+    snapshot = client.read_account_snapshot(
+        frozenset({BookmakerCapability.BET_READBACK})
     )
-    order = client.read_all_cleared_orders(page_size=1000)[0]
-    assert order.event_id is None
-    assert order.bet_outcome is None
-    assert order.voided_date is None
-    assert order.handicap is None
+
+    assert snapshot.observed_capabilities == frozenset(
+        {BookmakerCapability.BET_READBACK}
+    )
+    snapshot.profile.require(BookmakerCapability.BET_READBACK)

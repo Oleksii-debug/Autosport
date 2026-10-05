@@ -6,7 +6,7 @@ numbers remain Decimal observations and every response carries an exact SHA-256 
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -15,7 +15,8 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request, urlopen
+from weakref import ref
 
 ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v1"
 BETTING_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/betting/json-rpc/v1"
@@ -34,12 +35,6 @@ _READ_METHOD_ENDPOINT = MappingProxyType({
     _LIST_CLEARED_ORDERS: BETTING_JSON_RPC_ENDPOINT,
     _LIST_MARKET_CATALOGUE: BETTING_JSON_RPC_ENDPOINT,
 })
-
-
-def _canonical_utc_now() -> datetime:
-    """Product-owned UTC clock for authenticated provider evidence."""
-
-    return datetime.now(timezone.utc)
 
 
 class BetfairReadOnlyError(RuntimeError):
@@ -120,16 +115,6 @@ class BetfairHttpTransport(Protocol):
     def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes: ...
 
 
-class _RejectBetfairRedirects(HTTPRedirectHandler):
-    """Refuse redirects before authenticated Betfair headers can change origin."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        del req, fp, msg, headers, newurl
-        raise BetfairReadOnlyError(
-            f"Betfair HTTP redirect refused with status {code}"
-        )
-
-
 class UrllibBetfairHttpTransport:
     def __init__(self, *, max_response_bytes: int = 8 * 1024 * 1024) -> None:
         if not isinstance(max_response_bytes, int) or isinstance(max_response_bytes, bool) or max_response_bytes <= 0:
@@ -139,30 +124,8 @@ class UrllibBetfairHttpTransport:
     def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes:
         request = Request(url, data=body, headers=dict(headers), method="POST")
         try:
-            # urllib.request.urlopen() dereferences process-global _opener state.
-            # Build an isolated opener per authenticated provider request so caller
-            # global opener injection cannot become Betfair origin authority. Refuse
-            # redirects before an authenticated request can change provider origin.
-            opener = build_opener(_RejectBetfairRedirects())
-            with opener.open(request, timeout=timeout_seconds) as response:
-                status = getattr(response, "status", getattr(response, "code", None))
-                if status != 200:
-                    raise BetfairReadOnlyError(
-                        f"Betfair HTTP response status must be exactly 200, got {status!r}"
-                    )
-                geturl = getattr(response, "geturl", None)
-                final_url = (
-                    geturl()
-                    if callable(geturl)
-                    else getattr(response, "url", None)
-                )
-                if final_url != url:
-                    raise BetfairReadOnlyError(
-                        "Betfair HTTP response origin changed"
-                    )
+            with urlopen(request, timeout=timeout_seconds) as response:
                 payload = response.read(self._max_response_bytes + 1)
-        except BetfairReadOnlyError:
-            raise
         except HTTPError as exc:
             raise BetfairReadOnlyError(f"Betfair HTTP request failed with status {exc.code}") from None
         except (URLError, TimeoutError, OSError):
@@ -266,9 +229,6 @@ class BetfairClearedOrderObservation:
     customer_strategy_ref: str | None
     evidence: BetfairEvidence
     event_id: str | None = None
-    bet_outcome: str | None = None
-    voided_date: str | None = None
-    handicap: Decimal | None = None
 
     def __post_init__(self) -> None:
         _required_text(self.bet_id, "bet_id")
@@ -285,11 +245,6 @@ class BetfairClearedOrderObservation:
         _optional_text(self.customer_order_ref, "customer_order_ref")
         _optional_text(self.customer_strategy_ref, "customer_strategy_ref")
         _optional_text(self.event_id, "event_id")
-        _optional_text(self.bet_outcome, "bet_outcome")
-        if self.voided_date is not None:
-            _iso_timestamp(self.voided_date, "voided_date")
-        if self.handicap is not None:
-            _decimal(self.handicap, "handicap")
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,27 +310,6 @@ class BetfairExecutionReadbackEnvelope:
     request_scope_sha256: str
     evidence_sha256: str
     provider_order_ref: str | None = None
-    _authority_client: object | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
-    _authority_account_identity: object | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
-    _authority_capture_fingerprint: str | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
-    _authority_origin_proof: str | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
-    _authority_capture_started_at: str | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
-    _authority_capture_started_monotonic_ns: int | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
-    _authority_capture_start_fingerprint: str | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
 
     def __post_init__(self) -> None:
         self._validate()
@@ -487,7 +421,7 @@ def _execution_request_scope(
     customer_order_ref = provider_order_ref or action_id
     scope: dict[str, object] = {
         "schema": "autosport.betfair_execution_readback_scope",
-        "schema_version": 3 if provider_order_ref is not None else 1,
+        "schema_version": 2 if provider_order_ref is not None else 1,
         "venue_id": venue_id,
         "account_id": account_id,
         "adapter_id": ADAPTER_ID,
@@ -519,12 +453,6 @@ def _execution_request_scope(
     }
     if provider_order_ref is not None:
         scope["provider_order_ref"] = provider_order_ref
-        scope["empty_exact_ref_coherence"] = {
-            "required_when_first_complete_sweep_empty": True,
-            "passes": 2,
-            "surfaces": ["CURRENT", *_EXECUTION_CLEARED_STATUSES],
-            "transition_policy": "fail_closed",
-        }
     return scope
 
 
@@ -587,7 +515,7 @@ class BetfairReadOnlyClient:
         self._credentials = credentials
         self._transport = transport or UrllibBetfairHttpTransport()
         self._timeout_seconds = float(timeout_seconds)
-        self._clock = clock or _canonical_utc_now
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._request_id = 0
         self._request_lock = Lock()
         self._venue_id = _required_text(venue_id, "venue_id")
@@ -714,17 +642,6 @@ class BetfairReadOnlyClient:
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
-        # Freeze the exact helper dispatch and status coverage before the first
-        # provider-capable callback.  The product-origin wrapper has already
-        # established that these bound methods are canonical; retaining the
-        # bindings prevents an in-flight callback from installing a transient
-        # self-removing instance shadow that redirects a later scope read and
-        # disappears before the wrapper's post-capture dispatch check.
-        read_market_event = self.read_market_event
-        read_current_orders_page = self.read_current_orders_page
-        read_cleared_orders_page = self.read_cleared_orders_page
-        cleared_statuses = _EXECUTION_CLEARED_STATUSES
-
         action = _required_text(action_id, "action_id")
         order_ref = action
         if provider_order_ref is not None:
@@ -741,7 +658,7 @@ class BetfairReadOnlyClient:
         _positive_int(max_pages, "max_pages")
         market_event: BetfairMarketEventObservation | None
         try:
-            market_event = read_market_event(market)
+            market_event = self.read_market_event(market)
         except BetfairReadOnlyError as exc:
             if str(exc) != (
                 "exact market-to-event identity is unavailable from listMarketCatalogue"
@@ -752,88 +669,53 @@ class BetfairReadOnlyClient:
             # eventId. Empty evidence remains fail-closed.
             market_event = None
 
-        def read_current_scope() -> list[BetfairCurrentOrderPage]:
-            pages: list[BetfairCurrentOrderPage] = []
+        current_pages: list[BetfairCurrentOrderPage] = []
+        offset = 0
+        for _ in range(max_pages):
+            page = self.read_current_orders_page(
+                from_record=offset,
+                record_count=page_size,
+                customer_order_refs=(order_ref,),
+                market_ids=(market,),
+            )
+            current_pages.append(page)
+            if not page.more_available:
+                break
+            if not page.orders:
+                raise BetfairReadOnlyError(
+                    "execution currentOrders cannot advance from an empty page"
+                )
+            offset += len(page.orders)
+        else:
+            raise BetfairReadOnlyError(
+                "execution currentOrders pagination exceeded max_pages"
+            )
+
+        cleared_groups: list[tuple[str, tuple[BetfairClearedOrderPage, ...]]] = []
+        for status in _EXECUTION_CLEARED_STATUSES:
+            pages: list[BetfairClearedOrderPage] = []
             offset = 0
             for _ in range(max_pages):
-                page = read_current_orders_page(
+                page = self.read_cleared_orders_page(
                     from_record=offset,
                     record_count=page_size,
+                    bet_status=status,
                     customer_order_refs=(order_ref,),
                     market_ids=(market,),
                 )
                 pages.append(page)
                 if not page.more_available:
-                    return pages
+                    break
                 if not page.orders:
                     raise BetfairReadOnlyError(
-                        "execution currentOrders cannot advance from an empty page"
+                        f"execution {status} pagination cannot advance from an empty page"
                     )
                 offset += len(page.orders)
-            raise BetfairReadOnlyError(
-                "execution currentOrders pagination exceeded max_pages"
-            )
-
-        def read_cleared_scope() -> list[
-            tuple[str, tuple[BetfairClearedOrderPage, ...]]
-        ]:
-            groups: list[
-                tuple[str, tuple[BetfairClearedOrderPage, ...]]
-            ] = []
-            for status in cleared_statuses:
-                pages: list[BetfairClearedOrderPage] = []
-                offset = 0
-                for _ in range(max_pages):
-                    page = read_cleared_orders_page(
-                        from_record=offset,
-                        record_count=page_size,
-                        bet_status=status,
-                        customer_order_refs=(order_ref,),
-                        market_ids=(market,),
-                    )
-                    pages.append(page)
-                    if not page.more_available:
-                        break
-                    if not page.orders:
-                        raise BetfairReadOnlyError(
-                            f"execution {status} pagination cannot advance from an empty page"
-                        )
-                    offset += len(page.orders)
-                else:
-                    raise BetfairReadOnlyError(
-                        f"execution {status} pagination exceeded max_pages"
-                    )
-                groups.append((status, tuple(pages)))
-            return groups
-
-        current_pages = read_current_scope()
-        cleared_groups = read_cleared_scope()
-
-        first_scope_empty = (
-            not any(page.orders for page in current_pages)
-            and not any(
-                page.orders
-                for _, pages in cleared_groups
-                for page in pages
-            )
-        )
-        if provider_order_ref is not None and first_scope_empty:
-            coherence_current_pages = read_current_scope()
-            if any(page.orders for page in coherence_current_pages):
+            else:
                 raise BetfairReadOnlyError(
-                    "execution readback changed during empty-sweep coherence check"
+                    f"execution {status} pagination exceeded max_pages"
                 )
-            coherence_cleared_groups = read_cleared_scope()
-            if any(
-                page.orders
-                for _, pages in coherence_cleared_groups
-                for page in pages
-            ):
-                raise BetfairReadOnlyError(
-                    "execution readback changed during empty-sweep coherence check"
-                )
-            current_pages = coherence_current_pages
-            cleared_groups = coherence_cleared_groups
+            cleared_groups.append((status, tuple(pages)))
 
         if market_event is None:
             event_sources = [
@@ -952,14 +834,11 @@ class BetfairReadOnlyClient:
         )
         if not isinstance(requested_capabilities, frozenset):
             raise TypeError("requested_capabilities must be a frozenset")
-        if BookmakerCapability.BET_READBACK in requested_capabilities:
-            raise BetfairReadOnlyError(
-                "BET_READBACK requires action-bound read_execution_readback evidence"
-            )
         supported = {
             BookmakerCapability.BALANCE_READ,
             BookmakerCapability.OPEN_POSITIONS_READ,
             BookmakerCapability.SETTLED_POSITIONS_READ,
+            BookmakerCapability.BET_READBACK,
         }
         if any(c not in supported for c in requested_capabilities):
             raise BetfairReadOnlyError("requested capability is not implemented by the Betfair account adapter")
@@ -1169,9 +1048,6 @@ def _parse_cleared_order(
         _provider_optional_text(raw, "customerStrategyRef", "customer_strategy_ref"),
         evidence,
         _provider_optional_text(raw, "eventId", "event_id"),
-        _provider_optional_text(raw, "betOutcome", "bet_outcome"),
-        _provider_optional_text(raw, "voidedDate", "voided_date"),
-        _provider_optional_number(raw, "handicap", "handicap"),
     )
 
 
@@ -1203,23 +1079,6 @@ def _provider_text(value: Mapping[str, object], key: str, field: str) -> str:
 def _provider_optional_text(value: Mapping[str, object], key: str, field: str) -> str | None:
     raw = value.get(key)
     return None if raw is None else _required_text(raw, field)
-
-
-def _provider_optional_number(
-    value: Mapping[str, object], key: str, field: str
-) -> Decimal | None:
-    raw = value.get(key)
-    if raw is None:
-        return None
-    if isinstance(raw, Decimal):
-        result = raw
-    elif isinstance(raw, int) and not isinstance(raw, bool):
-        result = Decimal(raw)
-    else:
-        raise BetfairReadOnlyError(
-            f"{field} must be a JSON number decoded without binary float"
-        )
-    return _decimal(result, field)
 
 
 def _provider_int(value: Mapping[str, object], key: str, field: str) -> int:
@@ -1362,172 +1221,14 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
         seen.add(bet_id)
         target.append(order)
 
-# Bind positive execution-readback authority to the existing K07 authenticated
-# client/session-context authority. Direct/custom BetfairReadOnlyClient instances remain
-# useful for read-only parsing and network-free fixtures, but their captures deliberately
-# carry no provider-origin authority and therefore cannot authorize provider effects or
-# timeout absence.
-#
-# Import K07 here, after this module's read-only types and client are fully defined. This
-# avoids a second client/transport registry while letting K07 capture the exact canonical
-# read-only implementation it already owns.
+# Bind execution-readback authority to captures actually emitted by the canonical
+# adapter.  The registration closure is deliberately not exported: importing this
+# module exposes neither a seal token nor a registration function that can mint
+# authority for caller-constructed DTOs.
 def _install_execution_readback_authority() -> None:
-    from . import betfair_account_identity as account_identity
-
+    issued: dict[int, tuple[object, str]] = {}
     raw_read = BetfairReadOnlyClient.read_execution_readback
-    raw_read_code = raw_read.__code__
     validate_integrity = BetfairExecutionReadbackEnvelope.assert_authoritative
-    validate_integrity_code = validate_integrity.__code__
-    fingerprint_method = BetfairExecutionReadbackEnvelope._authority_fingerprint
-    fingerprint_method_code = fingerprint_method.__code__
-    client_type = BetfairReadOnlyClient
-    envelope_type = BetfairExecutionReadbackEnvelope
-    readback_dispatch = tuple(
-        (
-            name,
-            getattr(client_type, name),
-            getattr(getattr(client_type, name), "__code__", None),
-        )
-        for name in (
-            "read_market_event",
-            "read_current_orders_page",
-            "read_cleared_orders_page",
-        )
-    )
-    readback_dispatch_defaults = tuple(
-        (
-            method.__defaults__,
-            method.__kwdefaults__,
-            (
-                None
-                if method.__kwdefaults__ is None
-                else tuple(sorted(method.__kwdefaults__.items()))
-            ),
-        )
-        for _, method, _ in readback_dispatch
-    )
-    module_globals = globals()
-    missing = object()
-
-    def seal_function_graph(
-        roots: tuple[object, ...],
-    ) -> tuple[tuple[str, object, object | None], ...]:
-        sealed: list[tuple[str, object, object | None]] = []
-        sealed_names: set[str] = set()
-        pending = list(roots)
-        visited: set[int] = set()
-        while pending:
-            function = pending.pop()
-            if id(function) in visited:
-                continue
-            visited.add(id(function))
-            code = getattr(function, "__code__", None)
-            if code is None or getattr(function, "__globals__", None) is not module_globals:
-                continue
-            for name in code.co_names:
-                if name not in module_globals or name in sealed_names:
-                    continue
-                value = module_globals[name]
-                value_code = getattr(value, "__code__", None)
-                sealed.append((name, value, value_code))
-                sealed_names.add(name)
-                if (
-                    value_code is not None
-                    and getattr(value, "__globals__", None) is module_globals
-                ):
-                    pending.append(value)
-        return tuple(sealed)
-
-    sealed_readback_graph = seal_function_graph(
-        (
-            raw_read,
-            validate_integrity,
-            fingerprint_method,
-            *(method for _, method, _ in readback_dispatch),
-        )
-    )
-
-    identity_type = account_identity.BetfairAuthenticatedAccountIdentity
-    identity_error = account_identity.BetfairAccountIdentityError
-    resolve_identity = account_identity.resolve_betfair_authenticated_account_identity
-    require_identity = account_identity.require_authoritative_betfair_account_identity
-    binder_name = "_bind_betfair_execution_readback_origin_authority"
-    bind_origin = getattr(account_identity, binder_name)
-    object_id = id
-    string_type = str
-
-    issue_origin = None
-    verify_origin = None
-    origin_dispatch_current = None
-
-    def require_executable_authority() -> None:
-        # read_execution_readback is intentionally composed by the timeout
-        # capture-start authority later in package import. Pin this lower callable's
-        # own code and the envelope assertion, not the mutable class dispatch slot.
-        if (
-            authoritative_read.__code__ is not authoritative_read_code
-            or envelope_type.assert_authoritative is not assert_authoritative
-            or assert_authoritative.__code__ is not assert_authoritative_code
-            or raw_read.__code__ is not raw_read_code
-            or validate_integrity.__code__ is not validate_integrity_code
-            or envelope_type._authority_fingerprint is not fingerprint_method
-            or fingerprint_method.__code__ is not fingerprint_method_code
-            or issue_origin is None
-            or verify_origin is None
-            or origin_dispatch_current is None
-            or issue_origin.__code__ is not issue_origin_code
-            or verify_origin.__code__ is not verify_origin_code
-            or origin_dispatch_current.__code__ is not origin_dispatch_current_code
-            or origin_dispatch_current.__closure__ is not None
-            or origin_dispatch_current.__defaults__ is not origin_dispatch_current_defaults
-            or hasattr(account_identity, binder_name)
-            or any(
-                getattr(client_type, name, None) is not expected
-                or getattr(expected, "__code__", None) is not expected_code
-                for name, expected, expected_code in readback_dispatch
-            )
-            or any(
-                method.__defaults__ is not expected_defaults
-                or method.__kwdefaults__ is not expected_kwdefaults
-                or (
-                    expected_kwdefaults is not None
-                    and tuple(sorted(expected_kwdefaults.items()))
-                    != expected_kwdefaults_items
-                )
-                for (_, method, _), (
-                    expected_defaults,
-                    expected_kwdefaults,
-                    expected_kwdefaults_items,
-                ) in zip(
-                    readback_dispatch,
-                    readback_dispatch_defaults,
-                    strict=True,
-                )
-            )
-            or any(
-                module_globals.get(name, missing) is not expected
-                or (
-                    expected_code is not None
-                    and getattr(expected, "__code__", None) is not expected_code
-                )
-                for name, expected, expected_code in sealed_readback_graph
-            )
-        ):
-            raise BetfairReadOnlyError(
-                "execution readback origin authority implementation changed"
-            )
-
-    def require_readback_dispatch_authority(
-        client: BetfairReadOnlyClient,
-    ) -> None:
-        require_executable_authority()
-        instance_dict = getattr(client, "__dict__", None)
-        if type(instance_dict) is not dict or any(
-            name in instance_dict for name, _, _ in readback_dispatch
-        ):
-            raise BetfairReadOnlyError(
-                "execution readback helper dispatch changed"
-            )
 
     def authoritative_read(
         self: BetfairReadOnlyClient,
@@ -1538,20 +1239,6 @@ def _install_execution_readback_authority() -> None:
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
-        require_readback_dispatch_authority(self)
-
-        # K07 is the sole product-owned authenticated-client/session authority,
-        # but even K07 identity acquisition must not run through a network graph that
-        # was already replaced before this readback started.  Noncanonical dispatch
-        # remains usable only for structural/semantic capture.
-        origin_candidate = origin_dispatch_current()
-        identity = None
-        if origin_candidate:
-            try:
-                identity = resolve_identity(self)
-            except identity_error:
-                identity = None
-
         capture = raw_read(
             self,
             action_id=action_id,
@@ -1560,148 +1247,30 @@ def _install_execution_readback_authority() -> None:
             page_size=page_size,
             max_pages=max_pages,
         )
-        require_readback_dispatch_authority(self)
-        if type(capture) is not envelope_type:
-            raise BetfairReadOnlyError(
-                "execution readback returned non-canonical envelope"
-            )
+        capture_id = id(capture)
 
-        if (
-            identity is None
-            or not origin_candidate
-            or not origin_dispatch_current()
-        ):
-            return capture
+        def forget(_weakref: object, *, key: int = capture_id) -> None:
+            issued.pop(key, None)
 
-        try:
-            require_identity(identity, client=self)
-        except identity_error as exc:
-            raise BetfairReadOnlyError(
-                "authenticated Betfair client/session changed during execution readback"
-            ) from exc
-
-        # A structurally valid capture is still useful for deterministic semantic
-        # tests and diagnostics when Python-visible HTTPS/TLS dispatch was replaced.
-        # Such a path is not live provider-origin authority, so do not mint or attach
-        # any origin capability to the capture.
-        if not origin_dispatch_current():
-            return capture
-
-        fingerprint = capture._authority_fingerprint()
-        try:
-            origin_proof = issue_origin(
-                self,
-                identity,
-                capture_identity=object_id(capture),
-                capture_fingerprint=fingerprint,
-            )
-        except identity_error as exc:
-            raise BetfairReadOnlyError(
-                "authenticated Betfair readback origin proof could not be issued"
-            ) from exc
-        if type(origin_proof) is not string_type:
-            raise BetfairReadOnlyError(
-                "authenticated Betfair readback origin proof is invalid"
-            )
-
-        object.__setattr__(capture, "_authority_client", self)
-        object.__setattr__(capture, "_authority_account_identity", identity)
-        object.__setattr__(
-            capture,
-            "_authority_capture_fingerprint",
-            fingerprint,
+        issued[capture_id] = (
+            ref(capture, forget),
+            capture._authority_fingerprint(),
         )
-        object.__setattr__(capture, "_authority_origin_proof", origin_proof)
-        require_executable_authority()
         return capture
 
     def assert_authoritative(self: BetfairExecutionReadbackEnvelope) -> None:
-        require_executable_authority()
+        # Preserve the canonical scope/evidence checks first so any ordinary
+        # tamper is rejected for its exact invariant before origin is considered.
         validate_integrity(self)
-        client = object.__getattribute__(self, "_authority_client")
-        identity = object.__getattribute__(self, "_authority_account_identity")
-        fingerprint = object.__getattribute__(
-            self,
-            "_authority_capture_fingerprint",
-        )
-        origin_proof = object.__getattribute__(self, "_authority_origin_proof")
-        if (
-            type(client) is not client_type
-            or type(identity) is not identity_type
-            or type(fingerprint) is not string_type
-            or type(origin_proof) is not string_type
-        ):
+        record = issued.get(id(self))
+        if record is None or record[0]() is not self:
             raise BetfairReadOnlyError(
-                "execution readback lacks authenticated product-origin authority"
+                "execution readback was not issued by canonical BetfairReadOnlyClient"
             )
-        try:
-            require_identity(identity, client=client)
-        except identity_error as exc:
+        if record[1] != self._authority_fingerprint():
             raise BetfairReadOnlyError(
-                "execution readback authenticated origin is no longer authoritative"
-            ) from exc
-        try:
-            client_venue = object.__getattribute__(client, "_venue_id")
-            client_account = object.__getattribute__(client, "_account_id")
-        except BaseException as exc:
-            raise BetfairReadOnlyError(
-                "execution readback authenticated client scope is unavailable"
-            ) from exc
-        if (
-            client_venue != self.venue_id
-            or client_account != self.account_id
-            or identity.venue_id != self.venue_id
-        ):
-            raise BetfairReadOnlyError(
-                "execution readback authenticated origin scope mismatch"
+                "execution readback changed after canonical adapter capture"
             )
-        if _iso_timestamp(identity.observed_at, "account_identity.observed_at") > _iso_timestamp(
-            self.observed_at,
-            "observed_at",
-        ):
-            raise BetfairReadOnlyError(
-                "execution readback predates authenticated account-context evidence"
-            )
-        if fingerprint != self._authority_fingerprint():
-            raise BetfairReadOnlyError(
-                "execution readback changed after authenticated provider capture"
-            )
-        if not verify_origin(
-            origin_proof,
-            client,
-            identity,
-            capture_identity=object_id(self),
-            capture_fingerprint=fingerprint,
-        ):
-            raise BetfairReadOnlyError(
-                "execution readback lacks authenticated product-origin authority"
-            )
-        require_executable_authority()
-
-    authoritative_read_code = authoritative_read.__code__
-    assert_authoritative_code = assert_authoritative.__code__
-    issue_origin, verify_origin, origin_dispatch_current = bind_origin(
-        authoritative_read_code,
-        (
-            ("raw_read", raw_read),
-            ("require_executable_authority", require_executable_authority),
-            ("resolve_identity", resolve_identity),
-            ("require_identity", require_identity),
-            ("envelope_type", envelope_type),
-        ),
-    )
-    issue_origin_code = issue_origin.__code__
-    verify_origin_code = verify_origin.__code__
-    origin_dispatch_current_code = origin_dispatch_current.__code__
-    origin_dispatch_current_defaults = origin_dispatch_current.__defaults__
-    if (
-        origin_dispatch_current.__closure__ is not None
-        or type(origin_dispatch_current_defaults) is not tuple
-    ):
-        raise BetfairReadOnlyError(
-            "execution readback network predicate is not immutable"
-        )
-    delattr(account_identity, binder_name)
 
     BetfairReadOnlyClient.read_execution_readback = authoritative_read
     BetfairExecutionReadbackEnvelope.assert_authoritative = assert_authoritative

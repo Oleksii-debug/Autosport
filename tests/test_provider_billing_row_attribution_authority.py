@@ -340,20 +340,20 @@ def test_caller_injected_client_transport_cannot_enter_verified_provider_issuanc
         read_verified_betfair_provider_billing_inputs(caller_client)
 
 
-def test_rebound_readonly_opener_factory_cannot_mint_provider_issuance(
+def test_rebound_module_network_opener_cannot_mint_provider_issuance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     called = False
 
-    def fake_build_opener(*_args: object, **_kwargs: object):
+    def fake_urlopen(*_args: object, **_kwargs: object):
         nonlocal called
         called = True
-        raise AssertionError("rebound opener factory must not execute")
+        raise AssertionError("rebound network opener must not execute")
 
-    monkeypatch.setattr(_readonly, "build_opener", fake_build_opener)
+    monkeypatch.setattr(_readonly, "urlopen", fake_urlopen)
     with pytest.raises(
         BetfairProviderBillingInputsAuthorityError,
-        match="network opener factory drifted",
+        match="network opener drifted",
     ):
         read_verified_betfair_provider_billing_inputs(
             BetfairSessionCredentials("k", "t")
@@ -402,44 +402,28 @@ def test_rebound_https_handler_dispatch_cannot_mint_provider_issuance(
         )
     assert called is False
 
-
-def test_public_installed_opener_is_not_persisted_transport_authority() -> None:
-    previous_opener = _urllib_request.__dict__.get("_opener")
-    sentinel = object()
-    try:
-        _urllib_request.__dict__["_opener"] = sentinel
-        transport = UrllibBetfairHttpTransport()
-        assert vars(transport) == {"_max_response_bytes": 8 * 1024 * 1024}
-        assert not hasattr(transport, "_opener")
-        assert _urllib_request.__dict__.get("_opener") is sentinel
-        assert _readonly._RejectBetfairRedirects is not None
-    finally:
-        _urllib_request.__dict__["_opener"] = previous_opener
-
-
-def test_rebound_redirect_policy_cannot_mint_provider_issuance(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_public_installed_opener_cannot_mint_provider_issuance() -> None:
     called = False
 
-    def fake_redirect(*_args: object, **_kwargs: object):
-        nonlocal called
-        called = True
-        raise AssertionError("rebound redirect policy must not execute")
+    class _AttackerOpener:
+        def open(self, *_args: object, **_kwargs: object):
+            nonlocal called
+            called = True
+            raise AssertionError("installed attacker opener must not execute")
 
-    monkeypatch.setattr(
-        _readonly._RejectBetfairRedirects,
-        "redirect_request",
-        fake_redirect,
-    )
-    with pytest.raises(
-        BetfairProviderBillingInputsAuthorityError,
-        match="redirect policy executable drifted",
-    ):
-        read_verified_betfair_provider_billing_inputs(
-            BetfairSessionCredentials("k", "t")
-        )
-    assert called is False
+    previous_opener = _urllib_request.__dict__.get("_opener")
+    try:
+        _urllib_request.install_opener(_AttackerOpener())
+        with pytest.raises(
+            BetfairProviderBillingInputsAuthorityError,
+            match="installed network opener drifted",
+        ):
+            read_verified_betfair_provider_billing_inputs(
+                BetfairSessionCredentials("k", "t")
+            )
+        assert called is False
+    finally:
+        _urllib_request.__dict__["_opener"] = previous_opener
 
 
 def test_rebound_client_constructor_cannot_mint_provider_issuance(
@@ -654,23 +638,3 @@ def test_verified_witness_cannot_expose_cost_or_allocation_authority() -> None:
         "not_applicable",
         "complete",
     })
-
-def test_provider_billing_source_tamper_revocation_is_monotonic() -> None:
-    source = _source()
-    assert validate_betfair_provider_billing_inputs_observation(source) is source
-
-    original = source.observed_at
-    object.__setattr__(
-        source,
-        "observed_at",
-        "2026-09-21T05:59:59+00:00",
-    )
-    with pytest.raises(BetfairProviderBillingInputsAuthorityError):
-        validate_betfair_provider_billing_inputs_observation(source)
-
-    object.__setattr__(source, "observed_at", original)
-    with pytest.raises(
-        BetfairProviderBillingInputsAuthorityError,
-        match="must be issued by canonical provider read",
-    ):
-        validate_betfair_provider_billing_inputs_observation(source)

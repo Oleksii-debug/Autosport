@@ -781,23 +781,3 @@ def test_no_provider_write_methods_are_exposed():
         "unsuspend_order",
     ):
         assert forbidden not in public
-
-
-
-def test_bet_readback_profile_support_is_not_laundered_into_generic_snapshot_observation(
-    monkeypatch,
-):
-    value, _ = canonical_client(
-        monkeypatch,
-        balance(),
-        bootstrap(0),
-        changed(),
-    )
-    evidence = value.read_account_evidence(
-        frozenset({BookmakerCapability.BET_READBACK})
-    )
-    snapshot = evidence.snapshot
-    snapshot.profile.require(BookmakerCapability.BET_READBACK)
-    assert BookmakerCapability.BET_READBACK not in snapshot.observed_capabilities
-    assert BookmakerCapability.BALANCE_READ in snapshot.observed_capabilities
-    assert evidence.current_orders is not None

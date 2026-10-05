@@ -3,14 +3,8 @@
 The ordinary Betfair Accounts API does not expose a stable customer/account identifier
 through ``getAccountDetails``.  This module therefore proves only the narrower fact
 Autosport can actually establish for the personal-developer path: one account-details
-observation is bound to one exact canonical authenticated client/session context in
-this process.
-
-That process-local authority deliberately stops above remote transport origin.  The
-same Python process can substitute I/O below the canonical HTTP/opener stack, so K07
-must not be consumed as proof that account-details bytes causally came from remote
-Betfair.  Remote-provider origin and provider account-details origin remain explicitly
-unproven here and require a separate operational/acquisition authority.
+observation came from one exact canonical authenticated client/session context in this
+process.
 
 The public identity intentionally does not contain application keys, session tokens,
 credential hashes, configured account labels, or a claim of cross-session account
@@ -20,10 +14,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from hashlib import blake2b, sha256
+from hashlib import sha256
 import hmac
 import json
-from operator import attrgetter
 import urllib.request as _urllib_request
 from secrets import token_bytes, token_hex
 from threading import RLock
@@ -41,7 +34,7 @@ from .betfair_account_readonly import (
 VENUE_ID = "betfair"
 IDENTITY_SCOPE = "SESSION_CONTEXT"
 IDENTITY_SCHEMA = "autosport.betfair_authenticated_account_context"
-IDENTITY_SCHEMA_VERSION = 2
+IDENTITY_SCHEMA_VERSION = 1
 _CONTEXT_PREFIX = "betfair-session-context:"
 
 
@@ -54,101 +47,8 @@ class BetfairAccountIdentityMode(str, Enum):
     LICENSED_VENDOR = "LICENSED_VENDOR"
 
 
-def _identity_projection_material(
-    schema: str,
-    schema_version: int,
-    venue_id: str,
-    mode: str,
-    identity_scope: str,
-    session_context_id: str,
-    currency_code: str,
-    account_details_sha256: str,
-    observed_at: str,
-) -> bytes:
-    """Encode K07 identity fields without a mutable JSON codec dependency.
-
-    The length-prefixed field order is versioned by schema and schema_version.
-    This helper deliberately depends only on immutable scalar inputs and Python
-    built-ins; the authority closure pins both its function identity and bytecode.
-    """
-
-    parts = (
-        schema,
-        str(schema_version),
-        venue_id,
-        mode,
-        identity_scope,
-        session_context_id,
-        currency_code,
-        account_details_sha256,
-        observed_at,
-        "false",
-        "false",
-        "false",
-    )
-    encoded = bytearray()
-    for part in parts:
-        raw = part.encode("utf-8")
-        encoded.extend(len(raw).to_bytes(8, "big", signed=False))
-        encoded.extend(raw)
-    return bytes(encoded)
-
-
-def _build_account_identity_meta():
-    """Seal public K07 identity semantics after dataclass construction."""
-
-    sealed_classes: set[type] = set()
-    protected_names = frozenset(
-        {
-            "venue_id",
-            "mode",
-            "identity_scope",
-            "session_context_id",
-            "currency_code",
-            "account_details_sha256",
-            "observed_at",
-            "remote_provider_origin_proven",
-            "provider_account_details_origin_proven",
-            "stable_account_identity_proven",
-            "stable_account_id",
-            "cross_session_equivalence_proven",
-            "identity_id",
-            "_remote_provider_origin_proven_constant",
-            "_provider_account_details_origin_proven_constant",
-            "_stable_account_identity_proven_constant",
-            "_stable_account_id_constant",
-            "_cross_session_equivalence_proven_constant",
-        }
-    )
-
-    class _BetfairAccountIdentityMeta(type):
-        def __setattr__(cls, name: str, value: object) -> None:
-            if cls in sealed_classes and name in protected_names:
-                raise TypeError(
-                    "Betfair account identity authority surface is sealed: " + name
-                )
-            super().__setattr__(name, value)
-
-        def __delattr__(cls, name: str) -> None:
-            if cls in sealed_classes and name in protected_names:
-                raise TypeError(
-                    "Betfair account identity authority surface is sealed: " + name
-                )
-            super().__delattr__(name)
-
-        @classmethod
-        def seal(mcls, cls: type) -> None:
-            sealed_classes.add(cls)
-
-    return _BetfairAccountIdentityMeta
-
-
-_BetfairAccountIdentityMeta = _build_account_identity_meta()
-del _build_account_identity_meta
-
-
 @dataclass(frozen=True, slots=True, weakref_slot=True)
-class BetfairAuthenticatedAccountIdentity(metaclass=_BetfairAccountIdentityMeta):
+class BetfairAuthenticatedAccountIdentity:
     """Ephemeral process-issued identity for one exact authenticated session context."""
 
     venue_id: str
@@ -182,43 +82,34 @@ class BetfairAuthenticatedAccountIdentity(metaclass=_BetfairAccountIdentityMeta)
         _sha256_hex(self.account_details_sha256, "account_details_sha256")
         _canonical_timestamp(self.observed_at)
 
-    _remote_provider_origin_proven_constant = False
-    _provider_account_details_origin_proven_constant = False
-    _stable_account_identity_proven_constant = False
-    _stable_account_id_constant = None
-    _cross_session_equivalence_proven_constant = False
+    @property
+    def stable_account_identity_proven(self) -> bool:
+        return False
 
-    remote_provider_origin_proven = property(
-        attrgetter("_remote_provider_origin_proven_constant")
-    )
-    provider_account_details_origin_proven = property(
-        attrgetter("_provider_account_details_origin_proven_constant")
-    )
-    stable_account_identity_proven = property(
-        attrgetter("_stable_account_identity_proven_constant")
-    )
-    stable_account_id = property(attrgetter("_stable_account_id_constant"))
-    cross_session_equivalence_proven = property(
-        attrgetter("_cross_session_equivalence_proven_constant")
-    )
+    @property
+    def stable_account_id(self) -> None:
+        return None
+
+    @property
+    def cross_session_equivalence_proven(self) -> bool:
+        return False
 
     @property
     def identity_id(self) -> str:
-        material = _identity_projection_material(
-            IDENTITY_SCHEMA,
-            IDENTITY_SCHEMA_VERSION,
-            self.venue_id,
-            self.mode.value,
-            self.identity_scope,
-            self.session_context_id,
-            self.currency_code,
-            self.account_details_sha256,
-            self.observed_at,
-        )
-        return sha256(material).hexdigest()
+        payload = {
+            "schema": IDENTITY_SCHEMA,
+            "schema_version": IDENTITY_SCHEMA_VERSION,
+            "venue_id": self.venue_id,
+            "mode": self.mode.value,
+            "identity_scope": self.identity_scope,
+            "session_context_id": self.session_context_id,
+            "currency_code": self.currency_code,
+            "account_details_sha256": self.account_details_sha256,
+            "observed_at": self.observed_at,
+            "stable_account_identity_proven": False,
+        }
+        return sha256(_canonical_json(payload)).hexdigest()
 
-
-_BetfairAccountIdentityMeta.seal(BetfairAuthenticatedAccountIdentity)
 
 @dataclass(frozen=True, slots=True)
 class _CanonicalClientOrigin:
@@ -257,9 +148,6 @@ def _make_account_identity_authority():
     client_type = BetfairReadOnlyClient
     transport_type = UrllibBetfairHttpTransport
     details_type = BetfairAccountDetailsObservation
-    readonly_module = _readonly_module
-    evidence_type = readonly_module.BetfairEvidence
-    rpc_result_type = readonly_module._RpcResult
     identity_type = BetfairAuthenticatedAccountIdentity
     origin_type = _CanonicalClientOrigin
     context_record_type = _ClientContextRecord
@@ -272,12 +160,10 @@ def _make_account_identity_authority():
     identity_schema = IDENTITY_SCHEMA
     identity_schema_version = IDENTITY_SCHEMA_VERSION
     context_prefix = _CONTEXT_PREFIX
-    identity_projection_material = _identity_projection_material
-    identity_projection_material_code = getattr(
-        identity_projection_material, "__code__", None
-    )
+    readonly_module = _readonly_module
+    json_dumps = json.dumps
     sha256_fn = sha256
-    keyed_digest_fn = blake2b
+    hmac_digest = hmac.digest
     hmac_compare_digest = hmac.compare_digest
     token_hex_fn = token_hex
     weakref_fn = ref
@@ -287,103 +173,10 @@ def _make_account_identity_authority():
     canonical_rpc = client_type._rpc
     canonical_next_request_id = client_type._next_request_id
     canonical_observed_at = client_type._observed_at
-    canonical_transport_init = transport_type.__init__
     canonical_network_post = transport_type.post
-    readonly_build_opener = readonly_module.build_opener
-    redirect_handler_type = readonly_module._RejectBetfairRedirects
-    canonical_redirect_request = redirect_handler_type.redirect_request
-    opener_type = _urllib_request.OpenerDirector
-    http_redirect_handler_type = _urllib_request.HTTPRedirectHandler
-    https_handler_type = _urllib_request.HTTPSHandler
-    abstract_http_handler_type = _urllib_request.AbstractHTTPHandler
-    http_error_processor_type = _urllib_request.HTTPErrorProcessor
-    canonical_opener_open = opener_type.open
-    canonical_opener_internal_open = opener_type._open
-    canonical_opener_call_chain = opener_type._call_chain
-    canonical_opener_error = opener_type.error
-    canonical_https_open = https_handler_type.https_open
-    canonical_https_request = https_handler_type.https_request
-    canonical_do_open = abstract_http_handler_type.do_open
-    canonical_https_response = http_error_processor_type.https_response
-    canonical_details_init = details_type.__init__
-    canonical_details_post_init = details_type.__post_init__
-    canonical_evidence_init = evidence_type.__init__
-    canonical_evidence_post_init = evidence_type.__post_init__
-    canonical_rpc_result_init = rpc_result_type.__init__
+    canonical_urlopen = _urllib_request.urlopen
     canonical_identity_init = identity_type.__init__
     canonical_identity_post_init = identity_type.__post_init__
-    semantic_property_bindings = tuple(
-        (
-            name,
-            descriptor,
-            descriptor.fget,
-            getattr(descriptor.fget, "__code__", None),
-        )
-        for name in (
-            "remote_provider_origin_proven",
-            "provider_account_details_origin_proven",
-            "stable_account_identity_proven",
-            "stable_account_id",
-            "cross_session_equivalence_proven",
-            "identity_id",
-        )
-        for descriptor in (identity_type.__dict__[name],)
-    )
-    readonly_globals = canonical_read_account_details.__globals__
-    function_type = type(canonical_read_account_details)
-    missing_global = object()
-
-    def capture_readonly_dependencies(
-        *roots: object,
-    ) -> tuple[tuple[str, object, object | None], ...]:
-        """Freeze the application-level dependency graph of canonical acquisition functions."""
-        captured: dict[str, tuple[object, object | None]] = {}
-        pending = list(roots)
-        visited: set[int] = set()
-        while pending:
-            candidate = pending.pop()
-            if type(candidate) is not function_type:
-                continue
-            candidate_id = id(candidate)
-            if candidate_id in visited:
-                continue
-            visited.add(candidate_id)
-            if candidate.__globals__ is not readonly_globals:
-                continue
-            for name in candidate.__code__.co_names:
-                if name not in readonly_globals:
-                    continue
-                value = readonly_globals[name]
-                code = (
-                    value.__code__
-                    if type(value) is function_type
-                    and value.__globals__ is readonly_globals
-                    else None
-                )
-                previous = captured.get(name)
-                if previous is not None and (
-                    previous[0] is not value or previous[1] is not code
-                ):
-                    raise identity_error_type(
-                        "canonical Betfair dependency changed during K07 initialization"
-                    )
-                captured[name] = (value, code)
-                if code is not None:
-                    pending.append(value)
-        return tuple(
-            (name, value, code)
-            for name, (value, code) in sorted(captured.items())
-        )
-
-    readonly_dependency_bindings = capture_readonly_dependencies(
-        canonical_client_init,
-        canonical_read_account_details,
-        canonical_rpc,
-        canonical_next_request_id,
-        canonical_observed_at,
-        canonical_transport_init,
-        canonical_network_post,
-    )
 
     lock = RLock()
     canonical_client_origins: WeakKeyDictionary = WeakKeyDictionary()
@@ -429,85 +222,42 @@ def _make_account_identity_authority():
             + b"\x00"
             + credentials.session_token.encode("utf-8")
         )
-        return keyed_digest_fn(
-            material,
-            key=process_hmac_key,
-            digest_size=32,
-        ).digest()
+        return hmac_digest(process_hmac_key, material, "sha256")
 
-    def identity_projection_material_for(
-        value: BetfairAuthenticatedAccountIdentity,
-    ) -> bytes:
+    def issued_identity_digest(value: BetfairAuthenticatedAccountIdentity) -> str:
+        # Authority integrity must not depend on the public identity_id property
+        # or module-level validation/JSON helpers after closure initialization.
+        payload = {
+            "schema": identity_schema,
+            "schema_version": identity_schema_version,
+            "venue_id": value.venue_id,
+            "mode": value.mode.value,
+            "identity_scope": value.identity_scope,
+            "session_context_id": value.session_context_id,
+            "currency_code": value.currency_code,
+            "account_details_sha256": value.account_details_sha256,
+            "observed_at": value.observed_at,
+            "stable_account_identity_proven": False,
+        }
         try:
-            return identity_projection_material(
-                identity_schema,
-                identity_schema_version,
-                value.venue_id,
-                value.mode.value,
-                value.identity_scope,
-                value.session_context_id,
-                value.currency_code,
-                value.account_details_sha256,
-                value.observed_at,
-            )
-        except (AttributeError, TypeError, UnicodeEncodeError, OverflowError) as exc:
+            encoded = json_dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (AttributeError, TypeError, ValueError, UnicodeEncodeError) as exc:
             raise identity_error_type(
-                "account identity projection fields are malformed"
+                "account identity cannot be verified as canonical JSON"
             ) from exc
-
-    def public_identity_digest(
-        value: BetfairAuthenticatedAccountIdentity,
-    ) -> str:
-        return sha256_fn(identity_projection_material_for(value)).hexdigest()
-
-    def issued_identity_digest(
-        value: BetfairAuthenticatedAccountIdentity,
-    ) -> str:
-        # Hidden issuance integrity uses a closure-captured native keyed
-        # BLAKE2b primitive over the same deterministic scalar projection as
-        # the public identity_id. The native type has no mutable Python
-        # bytecode surface, unlike hmac.digest/json.dumps.
-        return keyed_digest_fn(
-            identity_projection_material_for(value),
-            key=process_hmac_key,
-            digest_size=32,
-        ).hexdigest()
-
-    def identity_projection_dependencies_are_current() -> bool:
-        return bool(
-            _identity_projection_material is identity_projection_material
-            and getattr(_identity_projection_material, "__code__", None)
-            is identity_projection_material_code
-            and sha256 is sha256_fn
-            and blake2b is keyed_digest_fn
-            and hmac.compare_digest is hmac_compare_digest
-            and IDENTITY_SCHEMA == identity_schema
-            and IDENTITY_SCHEMA_VERSION == identity_schema_version
-        )
+        return sha256_fn(encoded).hexdigest()
 
     def identity_class_is_current() -> bool:
-        return bool(
-            identity_projection_dependencies_are_current()
-            and identity_type.__init__ is canonical_identity_init
+        return (
+            identity_type.__init__ is canonical_identity_init
             and identity_type.__post_init__ is canonical_identity_post_init
-            and all(
-                identity_type.__dict__.get(name) is descriptor
-                and descriptor.fget is getter
-                and getattr(getter, "__code__", None) is getter_code
-                for name, descriptor, getter, getter_code
-                in semantic_property_bindings
-            )
         )
-
-    def readonly_dependencies_are_current() -> bool:
-        for name, expected, expected_code in readonly_dependency_bindings:
-            current = readonly_globals.get(name, missing_global)
-            if current is not expected:
-                return False
-            if expected_code is not None:
-                if type(current) is not function_type or current.__code__ is not expected_code:
-                    return False
-        return True
 
     def client_class_dispatch_is_current() -> bool:
         return (
@@ -518,21 +268,8 @@ def _make_account_identity_authority():
             and client_type._next_request_id
             is canonical_next_request_id
             and client_type._observed_at is canonical_observed_at
-            and transport_type.__init__ is canonical_transport_init
             and transport_type.post is canonical_network_post
-            and readonly_module.build_opener is readonly_build_opener
-            and redirect_handler_type.redirect_request
-            is canonical_redirect_request
-            and opener_type.open is canonical_opener_open
-            and opener_type._open is canonical_opener_internal_open
-            and opener_type._call_chain is canonical_opener_call_chain
-            and opener_type.error is canonical_opener_error
-            and details_type.__init__ is canonical_details_init
-            and details_type.__post_init__ is canonical_details_post_init
-            and evidence_type.__init__ is canonical_evidence_init
-            and evidence_type.__post_init__ is canonical_evidence_post_init
-            and rpc_result_type.__init__ is canonical_rpc_result_init
-            and readonly_dependencies_are_current()
+            and readonly_module.urlopen is canonical_urlopen
         )
 
     def client_dispatch_is_current(client: BetfairReadOnlyClient) -> bool:
@@ -551,13 +288,7 @@ def _make_account_identity_authority():
             )
         )
 
-    def canonical_network_transport(
-        transport: object,
-        *,
-        origin: _CanonicalClientOrigin | None = None,
-    ) -> bool:
-        """Validate the current #1496 per-request isolated-opener transport."""
-
+    def canonical_network_transport(transport: object) -> bool:
         if not client_class_dispatch_is_current():
             return False
         if type(transport) is not transport_type:
@@ -565,21 +296,10 @@ def _make_account_identity_authority():
         transport_dict = getattr(transport, "__dict__", None)
         if type(transport_dict) is not dict:
             return False
-        # Current #1496 deliberately keeps no opener on the transport instance.
-        # post() creates an isolated no-redirect opener for each request.
         if set(transport_dict) != {"_max_response_bytes"}:
             return False
         max_response_bytes = transport_dict.get("_max_response_bytes")
-        if type(max_response_bytes) is not int or max_response_bytes <= 0:
-            return False
-        if "post" in transport_dict or "__init__" in transport_dict:
-            return False
-        if origin is not None and (
-            type(origin) is not origin_type
-            or origin.transport is not transport
-        ):
-            return False
-        return True
+        return type(max_response_bytes) is int and max_response_bytes > 0
 
     def origin_matches(
         origin: _CanonicalClientOrigin,
@@ -589,10 +309,7 @@ def _make_account_identity_authority():
             if (
                 type(client) is not client_type
                 or not client_dispatch_is_current(client)
-                or not canonical_network_transport(
-                    client._transport,
-                    origin=origin,
-                )
+                or not canonical_network_transport(client._transport)
                 or client._transport is not origin.transport
                 or client._clock is not origin.clock
                 or client._credentials is not origin.credentials
@@ -676,30 +393,10 @@ def _make_account_identity_authority():
                 if record is not None and record.value_ref is dead_ref:
                     issued.pop(identity, None)
 
-        if not identity_projection_dependencies_are_current():
-            raise identity_error_type(
-                "account identity projection dependencies changed before issuance"
-            )
-        hidden_digest = issued_identity_digest(value)
-        expected_public_id = public_identity_digest(value)
-        try:
-            current_public_id = value.identity_id
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise identity_error_type(
-                "account identity public projection cannot be verified"
-            ) from exc
-        if (
-            not identity_projection_dependencies_are_current()
-            or not hmac_compare_digest(expected_public_id, current_public_id)
-        ):
-            raise identity_error_type(
-                "account identity public projection changed before issuance"
-            )
-
         with lock:
             issued[identity] = issued_record_type(
                 value_ref=weakref_fn(value, discard),
-                identity_id=hidden_digest,
+                identity_id=issued_identity_digest(value),
                 client_ref=weakref_fn(client),
                 session_context_id=context.session_context_id,
             )
@@ -763,6 +460,10 @@ def _make_account_identity_authority():
             )
 
         context = context_for(client)
+        if canonical_read_account_details is not client_type.read_account_details:
+            raise identity_error_type(
+                "canonical Betfair account-details read authority changed"
+            )
         try:
             # Invoke the import-time canonical implementation directly. The method
             # itself dispatches through _rpc/_next_request_id/_observed_at, whose
@@ -822,64 +523,41 @@ def _make_account_identity_authority():
         *,
         client: BetfairReadOnlyClient | None = None,
     ) -> bool:
-        """Verify current process-local K07 session-context issuance only."""
         if type(value) is not identity_type or not identity_class_is_current():
             return False
         with lock:
             record = issued.get(id(value))
             if record is None or record.value_ref() is not value:
                 return False
-
-        def revoke() -> None:
-            with lock:
-                current = issued.get(id(value))
-                if current is record:
-                    issued.pop(id(value), None)
-
-        try:
-            current_identity_digest = issued_identity_digest(value)
-            expected_public_id = public_identity_digest(value)
-            current_public_id = value.identity_id
-        except (identity_error_type, AttributeError, TypeError, ValueError):
-            revoke()
-            return False
-        if not identity_projection_dependencies_are_current():
-            return False
-        if not hmac_compare_digest(record.identity_id, current_identity_digest):
-            revoke()
-            return False
-        if not hmac_compare_digest(expected_public_id, current_public_id):
-            revoke()
-            return False
-        issued_client = record.client_ref()
-        if issued_client is None:
-            revoke()
-            return False
-        if client is not None and issued_client is not client:
-            return False
-        context = client_contexts.get(id(issued_client))
-        if (
-            context is None
-            or context.client_ref() is not issued_client
-            or context.session_context_id != record.session_context_id
-        ):
-            revoke()
-            return False
-        valid = context_is_current(
-            context,
-            issued_client,
-            revoke_on_failure=True,
-        )
-        if not valid:
-            revoke()
-        return valid
+            try:
+                current_identity_digest = issued_identity_digest(value)
+            except identity_error_type:
+                return False
+            if not hmac_compare_digest(record.identity_id, current_identity_digest):
+                return False
+            issued_client = record.client_ref()
+            if issued_client is None:
+                return False
+            if client is not None and issued_client is not client:
+                return False
+            context = client_contexts.get(id(issued_client))
+            if (
+                context is None
+                or context.client_ref() is not issued_client
+                or context.session_context_id != record.session_context_id
+            ):
+                return False
+            return context_is_current(
+                context,
+                issued_client,
+                revoke_on_failure=True,
+            )
 
     def require_authoritative(
         value: object,
         *,
         client: BetfairReadOnlyClient | None = None,
     ) -> BetfairAuthenticatedAccountIdentity:
-        """Require current K07 context authority, never remote-provider origin proof."""
         if not is_authoritative(value, client=client):
             raise identity_error_type(
                 "Betfair account identity lacks current authenticated-context authority"

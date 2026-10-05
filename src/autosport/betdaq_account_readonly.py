@@ -654,11 +654,8 @@ class BetdaqAccountReadOnlyClient:
 
         # Currency is required by the canonical position contract, so a balance read is
         # always surfaced rather than silently used as hidden account context.
-        profile_capabilities = frozenset(
+        observed_capabilities = frozenset(
             set(requested_capabilities) | {BookmakerCapability.BALANCE_READ}
-        )
-        observed_capabilities = profile_capabilities - frozenset(
-            {BookmakerCapability.BET_READBACK}
         )
         all_evidence = [balance.evidence]
         if order_book is not None:
@@ -673,7 +670,7 @@ class BetdaqAccountReadOnlyClient:
         )
         facts = tuple(
             BookmakerCapabilityFact(capability, BookmakerCapabilityState.SUPPORTED)
-            for capability in sorted(profile_capabilities, key=lambda item: item.value)
+            for capability in sorted(observed_capabilities, key=lambda item: item.value)
         )
         profile = BookmakerCapabilityProfile(
             context_before.venue_id,

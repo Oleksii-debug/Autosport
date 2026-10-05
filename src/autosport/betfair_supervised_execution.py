@@ -50,6 +50,7 @@ from .supervised_execution import (
 PLACE_ORDERS_METHOD = "SportsAPING/v1.0/placeOrders"
 WRITE_ADAPTER_ID = "betfair-exchange-jsonrpc-supervised-placeorders"
 WRITE_ADAPTER_VERSION = "1"
+_MAX_BETFAIR_SELECTION_ID = "9223372036854775807"
 
 
 class BetfairSupervisedExecutionError(RuntimeError):
@@ -526,17 +527,26 @@ def _validate_betfair_place_action(action: ExecutionAction) -> int:
         raise BetfairSupervisedExecutionError(
             "Betfair supervised write seam currently supports BACK only"
         )
-    try:
-        selection_id = int(action.selection_id)
-    except (TypeError, ValueError) as exc:
-        raise BetfairSupervisedExecutionError(
-            "Betfair selection_id must be canonical positive integer text"
-        ) from exc
-    if str(selection_id) != action.selection_id or selection_id <= 0:
+    raw_selection_id = action.selection_id
+    if (
+        not raw_selection_id.isascii()
+        or not raw_selection_id.isdigit()
+        or raw_selection_id.startswith("0")
+    ):
         raise BetfairSupervisedExecutionError(
             "Betfair selection_id must be canonical positive integer text"
         )
-    return selection_id
+    if (
+        len(raw_selection_id) > len(_MAX_BETFAIR_SELECTION_ID)
+        or (
+            len(raw_selection_id) == len(_MAX_BETFAIR_SELECTION_ID)
+            and raw_selection_id > _MAX_BETFAIR_SELECTION_ID
+        )
+    ):
+        raise BetfairSupervisedExecutionError(
+            "Betfair selection_id exceeds signed-long provider domain"
+        )
+    return int(raw_selection_id)
 
 
 class BetfairSupervisedPlaceOrdersClient:
@@ -609,14 +619,15 @@ class BetfairSupervisedPlaceOrdersClient:
         customer_ref = sha256(
             f"placeOrders:{provider_ref}".encode("utf-8")
         ).hexdigest()[:32]
+        action_payload = ExecutionAction.to_dict(action)
         instruction = {
             "selectionId": selection_id,
             "handicap": 0,
             "side": action.side,
             "orderType": "LIMIT",
             "limitOrder": {
-                "size": str(action.requested_stake),
-                "price": str(action.requested_odds),
+                "size": action_payload["requested_stake"],
+                "price": action_payload["requested_odds"],
                 "persistenceType": "LAPSE",
             },
             "customerOrderRef": provider_ref,
@@ -860,6 +871,14 @@ def _parse_place_orders_response(
         raise BetfairPlaceOrdersAmbiguous(
             "matched placeOrders report lacks positive average price"
         )
+    if (
+        instruction.size_matched > 0
+        and instruction.average_price_matched < action.requested_odds
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "matched placeOrders report average price is below requested "
+            "BACK LIMIT price"
+        )
     return BetfairPlaceExecutionReport(
         bookmaker_id=action.bookmaker_id,
         account_id=action.account_id,
@@ -904,8 +923,8 @@ def read_betfair_supervised_action_readback(
 ) -> BetfairExecutionReadbackEnvelope:
     """Query the exact durable provider order reference used by placeOrders."""
 
-    if type(client) is not BetfairReadOnlyClient:
-        raise TypeError("client must be exact BetfairReadOnlyClient")
+    if not isinstance(client, BetfairReadOnlyClient):
+        raise TypeError("client must be BetfairReadOnlyClient")
     saga = ledger.saga(bound.execution_plan.plan_id)
     action_id = saga.attempt_action_ids.get(attempt_id)
     if action_id is None:
@@ -921,20 +940,13 @@ def read_betfair_supervised_action_readback(
         raise BetfairSupervisedExecutionError(
             "attempt lacks durable provider order reference"
         )
-    capture = client.read_execution_readback(
+    return client.read_execution_readback(
         action_id=action.action_id,
         provider_order_ref=provider_order_ref,
         market_id=action.market_id,
         page_size=page_size,
         max_pages=max_pages,
     )
-    try:
-        capture.assert_authoritative()
-    except BetfairReadOnlyError as exc:
-        raise BetfairSupervisedExecutionError(
-            "supervised Betfair readback lacks authenticated product origin"
-        ) from exc
-    return capture
 
 
 def execute_betfair_supervised_action(

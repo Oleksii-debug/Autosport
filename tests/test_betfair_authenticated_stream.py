@@ -243,11 +243,9 @@ def test_authenticated_freshness_rejects_local_consumer_lag(
     runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
     runtime.read_and_ingest()
     received_ns = runtime._transport_by_identity[identity][2]
-    monkeypatch.setattr(
-        auth.time,
-        "monotonic_ns",
-        lambda: received_ns + 10_001_000_000,
-    )
+    fake_monotonic_ns = lambda: received_ns + 10_001_000_000
+    monkeypatch.setattr(auth, "_MONOTONIC_NS", fake_monotonic_ns)
+    monkeypatch.setattr(auth.time, "monotonic_ns", fake_monotonic_ns)
 
     decision = runtime.evaluate(
         identity,
@@ -277,7 +275,9 @@ def test_positive_decision_is_revoked_when_local_consumer_age_expires(
     runtime.read_and_ingest()
     received_ns = runtime._transport_by_identity[identity][2]
     now_ns = [received_ns + 1_000_000]
-    monkeypatch.setattr(auth.time, "monotonic_ns", lambda: now_ns[0])
+    fake_monotonic_ns = lambda: now_ns[0]
+    monkeypatch.setattr(auth, "_MONOTONIC_NS", fake_monotonic_ns)
+    monkeypatch.setattr(auth.time, "monotonic_ns", fake_monotonic_ns)
 
     decision = runtime.evaluate(
         identity,
@@ -303,11 +303,9 @@ def test_authenticated_freshness_rejects_monotonic_clock_regression(
     runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
     runtime.read_and_ingest()
     received_ns = runtime._transport_by_identity[identity][2]
-    monkeypatch.setattr(
-        auth.time,
-        "monotonic_ns",
-        lambda: received_ns - 1,
-    )
+    fake_monotonic_ns = lambda: received_ns - 1
+    monkeypatch.setattr(auth, "_MONOTONIC_NS", fake_monotonic_ns)
+    monkeypatch.setattr(auth.time, "monotonic_ns", fake_monotonic_ns)
 
     decision = runtime.evaluate(
         identity,
@@ -436,6 +434,33 @@ def test_clock_rebinding_before_runtime_construction_is_rejected(
     monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
 
     with pytest.raises(BetfairAuthenticatedStreamError, match="wall-clock dispatch changed"):
+        BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+
+def test_public_monotonic_clock_rebinding_revokes_positive_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    _transport_value, _runtime, decision = _fresh_decision(monkeypatch)
+    monkeypatch.setattr(auth.time, "monotonic_ns", lambda: 1)
+
+    assert not decision.decision_eligible
+
+
+def test_monotonic_clock_rebinding_before_runtime_construction_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    transport, _ = _transport(monkeypatch, _subscription_status())
+    subscription = _open(transport)
+    monkeypatch.setattr(auth.time, "monotonic_ns", lambda: 1)
+
+    with pytest.raises(
+        BetfairAuthenticatedStreamError,
+        match="monotonic-clock dispatch changed",
+    ):
         BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
 
 

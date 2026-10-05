@@ -333,6 +333,44 @@ class JsonlDecisionLedger:
                 "Decision Ledger persistence authority changed after construction"
             )
 
+    def _sync_parent_directory(self) -> None:
+        if os.name == "nt":
+            return
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        try:
+            directory_fd = os.open(self._absolute_path_authority.parent, flags)
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger parent-directory durability barrier failed"
+            ) from exc
+        try:
+            os.fsync(directory_fd)
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger parent-directory durability barrier failed"
+            ) from exc
+        finally:
+            os.close(directory_fd)
+
+    def _ensure_path_durable(self) -> None:
+        if self._absolute_path_authority.exists():
+            return
+        try:
+            with self._absolute_path_authority.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._sync_parent_directory()
+        except DecisionLedgerIntegrityError:
+            raise
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path durability barrier failed"
+            ) from exc
+
     @staticmethod
     def _require_utf8_text(value: str, *, path: str) -> None:
         try:
@@ -502,6 +540,7 @@ class JsonlDecisionLedger:
                 ) from exc
 
             self._verify_bytes(existing)
+            self._ensure_path_durable()
             material_action_id = payload["payload"].get(
                 MATERIAL_ACTION_ID_PAYLOAD_KEY
             )

@@ -374,6 +374,49 @@ class LayExecutionLiabilityTests(unittest.TestCase):
             self.assertTrue(run.completed)
             self.assertEqual(run.attempts[0].outcome, PaperAttemptOutcome.ACCEPTED)
 
+    def test_verified_observation_is_replaced_by_durable_snapshot_before_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            source_action = _action()
+            observation, registry = _registered_observation(
+                ledger,
+                source_action,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+            )
+            original_verify = paper_reality._impl._verify_observation_authority
+
+            def verify_then_mutate(*, action, observation: object, registry):
+                record = original_verify(
+                    action=action,
+                    observation=observation,
+                    registry=registry,
+                )
+                object.__setattr__(observation, "accepted_odds", Decimal("99.00"))
+                object.__setattr__(observation, "accepted_stake", Decimal("1.00"))
+                return record
+
+            with patch.object(
+                paper_reality._impl,
+                "_verify_observation_authority",
+                verify_then_mutate,
+            ):
+                run = execute_paper_plan(
+                    plan=_plan(source_action),
+                    trigger_id="durable-observation-snapshot",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={source_action.action_id: observation},
+                    evidence_registry=registry,
+                )
+
+            self.assertTrue(run.completed)
+            self.assertEqual(run.attempts[0].execution_odds, Decimal("5.00"))
+            self.assertEqual(run.attempts[0].execution_stake, Decimal("10.00"))
+            self.assertEqual(run.worst_case_exposure, Decimal("40.0000"))
+
     def test_evidence_registry_subclass_cannot_replace_durable_resolver_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

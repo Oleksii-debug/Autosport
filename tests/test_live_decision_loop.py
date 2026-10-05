@@ -3323,6 +3323,42 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+    def test_append_pending_blocks_dependency_registry_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def crash_after_append() -> None:
+                raise RuntimeError("simulated process loss after ledger append")
+
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                post_append_hook=crash_after_append,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                loop.run_cycle()
+
+            self.assertIsNotNone(loop._progress)
+            self.assertEqual(loop._progress.phase, "append_pending")
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "cannot unregister live input while economic progress is unfinished",
+            ):
+                loop.unregister_input("input-a")
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "cannot register live input while economic progress is unfinished",
+            ):
+                loop.register_input("input-b", selection_ids="selection-b")
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+            loop.close()
+
     def test_append_pending_restart_recovers_before_polling_new_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 from decimal import Decimal, DecimalException, Inexact, localcontext
 
@@ -15,6 +16,16 @@ _ORIGINAL_VALIDATE_LIFECYCLE_REACHABILITY = (
     _paper.PaperBook._validate_lifecycle_reachability.__func__
 )
 _ORIGINAL_VALIDATE_LOADED_STATE = _paper.PaperBook._validate_loaded_state.__func__
+
+
+def _paperbook_operation_context(book: _paper.PaperBook):
+    """Reuse canonical PaperBook serialization when that authority is installed."""
+    require_lock = getattr(_paper, "_require_paperbook_operation_lock", None)
+    if require_lock is None:
+        return nullcontext()
+    if not callable(require_lock):
+        raise RuntimeError("PaperBook operation lock authority is invalid")
+    return require_lock(book)
 
 
 def _is_lay_leg(leg: object) -> bool:
@@ -70,7 +81,7 @@ def _validate_ticket_leg(
     return _ORIGINAL_VALIDATE_TICKET_LEG(cls, leg, ticket_id=ticket_id)
 
 
-def _open_ticket(
+def _open_ticket_unlocked(
     self: _paper.PaperBook,
     legs,
     stake,
@@ -163,6 +174,32 @@ def _open_ticket(
     self._lifecycle.append(("open", ticket.ticket_id, (), ()))
     _paper._advance_paperbook_causal_history_open(self, ticket.ticket_id)
     return ticket
+
+
+def _open_ticket(
+    self: _paper.PaperBook,
+    legs,
+    stake,
+    reason: str = "",
+    placed_at: str | None = None,
+    *,
+    provider_source_ids: tuple[str, ...] = (),
+    provider_accounts: tuple[tuple[str, str], ...] = (),
+    bankroll_id: str | None = None,
+    currency: str | None = None,
+) -> PaperTicket:
+    with _paperbook_operation_context(self):
+        return _open_ticket_unlocked(
+            self,
+            legs,
+            stake,
+            reason,
+            placed_at,
+            provider_source_ids=provider_source_ids,
+            provider_accounts=provider_accounts,
+            bankroll_id=bankroll_id,
+            currency=currency,
+        )
 
 
 def _settlement_result(
@@ -431,7 +468,7 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
     cls._validate_lifecycle_reachability(book)
 
 
-def _committed_capital(self: _paper.PaperBook) -> Decimal:
+def _committed_capital_unlocked(self: _paper.PaperBook) -> Decimal:
     _paper._require_ticket_opening_authority(self)
     _paper._require_paperbook_causal_history_authority(self)
     type(self)._validate_loaded_state(self)
@@ -449,6 +486,11 @@ def _committed_capital(self: _paper.PaperBook) -> Decimal:
         ) from exc
     type(self)._require_finite(total, "committed_capital")
     return total
+
+
+def _committed_capital(self: _paper.PaperBook) -> Decimal:
+    with _paperbook_operation_context(self):
+        return _committed_capital_unlocked(self)
 
 
 def _install() -> None:

@@ -10391,6 +10391,48 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
 
 
+    def test_default_provider_source_mutation_during_poll_cannot_persist_market_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            provider = _EmptyProvider()
+            provider.on_read = lambda: setattr(provider, "source_id", "provider-b")
+            strategy = self._strategy_version()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=self._scientific_registry(workspace, strategy),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "source identity changed during live batch read",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(provider.calls, 1)
+            self.assertFalse(loop.progress_path.exists())
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+            loop.close()
+
+
     def test_post_execution_authority_mutation_cannot_publish_committed_progress(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

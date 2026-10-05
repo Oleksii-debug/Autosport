@@ -1924,6 +1924,108 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("60.00"))
         self.assertEqual(book.committed_capital, Decimal("0"))
 
+    def test_live_lay_settlement_bypasses_class_settlement_result_override(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        def hostile(_cls, _ticket, balance, _winners, _voids):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return TicketStatus.LOST, Decimal("0"), balance
+
+        with patch.object(
+            PaperBook,
+            "_settlement_result",
+            classmethod(hostile),
+        ):
+            settled = book.settle(ticket.ticket_id, set())
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(settled.status, TicketStatus.WON)
+        self.assertEqual(settled.payout, Decimal("50.00"))
+        self.assertEqual(book.balance, Decimal("110.00"))
+
+    def test_live_lay_settlement_bypasses_module_causal_advance_override(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        def forbidden(*_args, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            raise AssertionError("module causal settlement override executed")
+
+        with patch.object(
+            paper_module,
+            "_advance_paperbook_causal_history_settle",
+            forbidden,
+        ):
+            settled = book.settle(ticket.ticket_id, set())
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(settled.status, TicketStatus.WON)
+        self.assertEqual(book.balance, Decimal("110.00"))
+        self.assertEqual(book.committed_capital, Decimal("0"))
+
+    def test_live_lay_settlement_rejects_hostile_resolution_iterable_before_iteration(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        class HostileResolution:
+            def __iter__(self):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("hostile resolution iterable executed")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact built-in collection",
+        ):
+            book.settle(ticket.ticket_id, HostileResolution())
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(book.balance, Decimal("60.00"))
+
+    def test_live_lay_settlement_rejects_ticket_id_subclass_before_hash_dispatch(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        class HostileTicketId(str):
+            def __hash__(self):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("ticket id hash hook executed")
+
+        with self.assertRaisesRegex(ValueError, "ticket_id must be an exact string"):
+            book.settle(HostileTicketId(ticket.ticket_id), set())
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(book.balance, Decimal("60.00"))
+
+    def test_live_lay_settlement_rejects_resolution_key_subclass_before_set_rehash(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        class HostileKey(str):
+            def __hash__(self):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("resolution key hash hook executed")
+
+        hostile_key = HostileKey(ticket.legs[0].quote_key)
+        with self.assertRaisesRegex(ValueError, "must be an exact string"):
+            book.settle(ticket.ticket_id, [hostile_key])
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(book.balance, Decimal("60.00"))
+
     def test_lay_void_releases_exact_locked_liability(self):
         book = PaperBook(Decimal("100"))
         ticket = book.open_ticket(

@@ -740,6 +740,23 @@ def execute_paper_plan(
     )
 
     run_id = _impl._run_id(plan, trigger_id, config)
+    # Validate every empirical/configured observation through the exact canonical
+    # attempt constructor before the first durable write. Invalid fill/suspension,
+    # freshness, expiry or stake facts must not strand a RUN_RESERVED record.
+    for sequence, action in enumerate(plan.actions):
+        observation = observations.get(action.action_id)
+        if observation is None:
+            continue
+        _impl._observed_attempt(
+            run_id=run_id,
+            plan=plan,
+            action=action,
+            sequence=sequence,
+            config=config,
+            observation=observation,
+            started_at=started_at,
+        )
+
     ledger.reserve_run(
         run_id=run_id,
         trigger_id=trigger_id,

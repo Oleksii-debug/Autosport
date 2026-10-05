@@ -128,10 +128,10 @@ class HealthGatedMirrorDecisionIndex:
         *,
         max_health_age: timedelta,
     ) -> None:
-        if not isinstance(dependencies, FocusedMirrorDependencyIndex):
-            raise TypeError("dependencies must be a FocusedMirrorDependencyIndex")
-        if not isinstance(health_store, SourceHealthStore):
-            raise TypeError("health_store must be a SourceHealthStore")
+        if type(dependencies) is not FocusedMirrorDependencyIndex:
+            raise TypeError("dependencies must be an exact FocusedMirrorDependencyIndex")
+        if type(health_store) is not SourceHealthStore:
+            raise TypeError("health_store must be an exact SourceHealthStore")
         if type(max_health_age) is not timedelta:
             raise TypeError("max_health_age must be an exact timedelta")
         if max_health_age < timedelta(0):
@@ -349,8 +349,8 @@ class HealthGatedMirrorDecisionIndex:
         boundary = self._as_of(as_of)
         source_ids = tuple(sorted({event.source_id for event in captured.events}))
         if health_boundaries is not None:
-            if not isinstance(health_boundaries, Mapping):
-                raise TypeError("health_boundaries must be a mapping or null")
+            if type(health_boundaries) is not dict:
+                raise TypeError("health_boundaries must be an exact dict or null")
             if any(type(key) is not str for key in health_boundaries):
                 raise TypeError(
                     "health replay boundary mapping keys must be exact strings"

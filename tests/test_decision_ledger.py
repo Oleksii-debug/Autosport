@@ -264,5 +264,51 @@ class DecisionLedgerTests(unittest.TestCase):
             self.assertFalse(path.exists())
 
 
+
+    def test_verified_snapshot_rejects_path_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            ledger.append(self._record())
+            ledger.path = Path(tmp) / "alternate-decisions.jsonl"
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "persistence authority changed",
+            ):
+                ledger.verified_snapshot()
+
+    def test_append_rejects_path_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            ledger.path = Path(tmp) / "alternate-decisions.jsonl"
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "persistence authority changed",
+            ):
+                ledger.append(self._record())
+
+            self.assertFalse((Path(tmp) / "alternate-decisions.jsonl").exists())
+
+    def test_append_economic_rejects_path_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            ledger.path = Path(tmp) / "alternate-decisions.jsonl"
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "persistence authority changed",
+            ):
+                ledger.append_economic(
+                    self._economic_record(decision_id="economic-path-drift"),
+                    self._economic_goal(),
+                )
+
+            self.assertFalse((Path(tmp) / "alternate-decisions.jsonl").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -397,6 +397,14 @@ class _HostileSettlementKey:
         return object.__hash__(self)
 
 
+class _HostileComparableText(str):
+    comparisons = 0
+
+    def __eq__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__eq__(other)
+
+
 class PaperBookLayEconomicsTests(unittest.TestCase):
     @staticmethod
     def _lay_leg() -> TicketLeg:
@@ -408,6 +416,32 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
             sport="football",
             exchange_side="lay",
         )
+
+    def test_lay_public_read_validates_visible_state_before_authority_comparison(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            reason="safe",
+            placed_at=QUOTE_AT,
+        )
+        ticket.strategy_reason = _HostileComparableText("safe")
+        _HostileComparableText.comparisons = 0
+
+        def exact_text(value, label):
+            if type(value) is not str:
+                raise ValueError(f"PaperBook {label} must be a string")
+            return value
+
+        with patch.object(
+            PaperBook,
+            "_require_utf8_string",
+            staticmethod(exact_text),
+        ):
+            with self.assertRaisesRegex(ValueError, "strategy_reason must be a string"):
+                _ = book.committed_capital
+
+        self.assertEqual(_HostileComparableText.comparisons, 0)
 
     def test_lay_lifecycle_rejects_noncanonical_settlement_key_before_rehash(self):
         book = PaperBook(Decimal("100"))

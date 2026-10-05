@@ -112,6 +112,8 @@ class MarketMirror:
         if type(values) is str:
             selected = frozenset({values})
         else:
+            if isinstance(values, str):
+                raise TypeError(f"{name} entries must be exact strings")
             try:
                 materialized = tuple(values)
             except TypeError as exc:

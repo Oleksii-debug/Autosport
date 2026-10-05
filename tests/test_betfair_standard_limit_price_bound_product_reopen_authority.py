@@ -164,3 +164,64 @@ def test_product_verifier_rejects_in_place_store_constructor_code_mutation_befor
 
     assert attacker_called is False
 
+def test_product_verifier_rejects_noncanonical_store_path_handle_before_fspath_hook(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    bound, action, store, ledger, evidence = _case(monkeypatch, tmp_path)
+    attacker_called = False
+
+    class HostilePathLike:
+        def __fspath__(self):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("store path-like hook must never execute")
+
+    object.__setattr__(store, "workspace", HostilePathLike())
+
+    with _active_runtime_profile(tmp_path / "workspace") as runtime_profile:
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="workspace handle is not canonical",
+        ):
+            verify_product_betfair_standard_limit_price_bound(
+                evidence=evidence,
+                ledger=ledger,
+                issuance_store=store,
+                runtime_profile=runtime_profile,
+                execution_plan_id=bound.execution_plan.plan_id,
+                action_id=action.action_id,
+            )
+
+    assert attacker_called is False
+
+
+def test_product_verifier_rejects_noncanonical_ledger_path_handle_before_fspath_hook(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    bound, action, store, ledger, evidence = _case(monkeypatch, tmp_path)
+    attacker_called = False
+
+    class HostilePathLike:
+        def __fspath__(self):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("ledger path-like hook must never execute")
+
+    object.__setattr__(ledger, "path", HostilePathLike())
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="path handle is not canonical",
+        ):
+            verify_product_betfair_standard_limit_price_bound(
+                evidence=evidence,
+                ledger=ledger,
+                issuance_store=store,
+                runtime_profile=runtime_profile,
+                execution_plan_id=bound.execution_plan.plan_id,
+                action_id=action.action_id,
+            )
+
+    assert attacker_called is False
+

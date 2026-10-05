@@ -1191,7 +1191,12 @@ def _require_canonical_evidence_record_surface(
                 raise PaperExecutionIntegrityError(
                     f"evidence {name} must retain exact Decimal authority"
                 )
-            _validate_decimal_text_resource_bound(value)
+            try:
+                _validate_decimal_text_resource_bound(value)
+            except ValueError as exc:
+                raise PaperExecutionIntegrityError(
+                    f"evidence {name} exceeds canonical decimal resource bounds"
+                ) from exc
 
 
 def _require_canonical_attempt_surface(attempt: PaperLegAttempt) -> None:
@@ -1246,7 +1251,12 @@ def _require_canonical_attempt_surface(attempt: PaperLegAttempt) -> None:
                 raise PaperExecutionIntegrityError(
                     f"attempt {name} must retain exact Decimal authority"
                 )
-            _validate_decimal_text_resource_bound(value)
+            try:
+                _validate_decimal_text_resource_bound(value)
+            except ValueError as exc:
+                raise PaperExecutionIntegrityError(
+                    f"attempt {name} exceeds canonical decimal resource bounds"
+                ) from exc
 
 
 class PaperExecutionEvidenceRegistry:

@@ -396,7 +396,7 @@ class BetfairStreamTlsTransport:
         self._max_frame_bytes = max_frame_bytes
         self._socket: _TlsSocket | None = None
         self._receive_buffer = bytearray()
-        self._receive_timing_chunks: list[tuple[int, int]] = []
+        self._receive_timing_chunks: list[tuple[int, int, object]] = []
         self._connection_id: str | None = None
         self._frame_sequence = 0
         self._consecutive_connect_failures = 0
@@ -640,38 +640,46 @@ class BetfairStreamTlsTransport:
             )
         self._receive_buffer.extend(block)
         self._receive_timing_chunks.append(
-            (len(block), received_monotonic_ns)
+            (len(block), received_monotonic_ns, _MONOTONIC_NS)
         )
 
-    def _consume_received_bytes(self, count: int) -> int:
+    def _consume_received_bytes(self, count: int) -> tuple[int, object]:
         if type(count) is not int or count <= 0:
             raise BetfairStreamProtocolError(
                 "Betfair stream receive accounting count must be positive"
             )
         remaining = count
         last_received_monotonic_ns: int | None = None
+        last_clock_witness: object | None = None
         while remaining:
             if not self._receive_timing_chunks:
                 raise BetfairStreamProtocolError(
                     "Betfair stream receive timing accounting is inconsistent"
                 )
-            chunk_size, received_monotonic_ns = self._receive_timing_chunks[0]
+            (
+                chunk_size,
+                received_monotonic_ns,
+                clock_witness,
+            ) = self._receive_timing_chunks[0]
             if chunk_size <= remaining:
                 remaining -= chunk_size
                 last_received_monotonic_ns = received_monotonic_ns
+                last_clock_witness = clock_witness
                 self._receive_timing_chunks.pop(0)
             else:
                 self._receive_timing_chunks[0] = (
                     chunk_size - remaining,
                     received_monotonic_ns,
+                    clock_witness,
                 )
                 last_received_monotonic_ns = received_monotonic_ns
+                last_clock_witness = clock_witness
                 remaining = 0
-        if last_received_monotonic_ns is None:
+        if last_received_monotonic_ns is None or last_clock_witness is None:
             raise BetfairStreamProtocolError(
-                "Betfair stream receive timing accounting produced no timestamp"
+                "Betfair stream receive timing accounting produced no authority"
             )
-        return last_received_monotonic_ns
+        return last_received_monotonic_ns, last_clock_witness
 
     def read_authenticated_frame(self) -> BetfairStreamAuthenticatedFrame:
         """Return one exact frame with process-local authenticated transport-origin proof."""
@@ -694,7 +702,10 @@ class BetfairStreamTlsTransport:
                     )
                 payload_size = marker + 2
                 payload = bytes(self._receive_buffer[:payload_size])
-                received_monotonic_ns = self._consume_received_bytes(payload_size)
+                (
+                    received_monotonic_ns,
+                    received_clock_witness,
+                ) = self._consume_received_bytes(payload_size)
                 del self._receive_buffer[:payload_size]
                 if marker == 0:
                     self._close_with_backoff()
@@ -758,7 +769,7 @@ class BetfairStreamTlsTransport:
         )
         _ISSUED_AUTHENTICATED_FRAMES[issued] = (
             _authenticated_frame_fingerprint(issued),
-            _MONOTONIC_NS,
+            received_clock_witness,
         )
         return issued
 

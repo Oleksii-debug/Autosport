@@ -41,10 +41,14 @@ class EconomicGoalProvenance:
     bankroll_id: str
     contract_sha256: str
 
-    def __post_init__(self) -> None:
-        if self.schema != PROVENANCE_SCHEMA:
+    def __post_init__(
+        self,
+        _schema=PROVENANCE_SCHEMA,
+        _version=PROVENANCE_SCHEMA_VERSION,
+    ) -> None:
+        if self.schema != _schema:
             raise EconomicGoalProvenanceError("unsupported provenance schema")
-        if self.schema_version != PROVENANCE_SCHEMA_VERSION:
+        if self.schema_version != _version:
             raise EconomicGoalProvenanceError("unsupported provenance schema version")
         if not isinstance(self.goal_id, str) or not self.goal_id:
             raise EconomicGoalProvenanceError("goal_id must be a non-empty string")

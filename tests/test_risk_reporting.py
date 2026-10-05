@@ -129,6 +129,40 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertFalse(attacker_called)
 
 
+    def test_equity_locked_capital_rejects_hostile_side_before_equality_hook(self) -> None:
+        attacker_called = False
+
+        class HostileSide(str):
+            def __eq__(self, _other):
+                nonlocal attacker_called
+                attacker_called = True
+                raise AssertionError("hostile side equality must never execute")
+
+        ticket = PaperTicket(
+            ticket_id="hostile-side-ticket",
+            stake=Decimal("10"),
+            legs=(
+                TicketLeg(
+                    event_id="event-hostile",
+                    market_id="market-hostile",
+                    selection_id="selection-hostile",
+                    locked_odds=Decimal("2"),
+                    exchange_side="back",
+                ),
+            ),
+            placed_at="2026-09-21T12:00:00+00:00",
+        )
+        object.__setattr__(ticket.legs[0], "exchange_side", HostileSide("lay"))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exchange side must be exact canonical text",
+        ):
+            risk_reporting._paper_ticket_equity_locked_capital(ticket)
+
+        self.assertFalse(attacker_called)
+
+
     def test_equity_locked_capital_fails_closed_for_lay_until_liability_authority_is_consumed(self) -> None:
         back = PaperTicket(
             ticket_id="back-ticket",

@@ -98,7 +98,11 @@ class ProductEconomicSession:
     authority_generation: int
     product_clock_authoritative: bool
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _sha_validator=_is_sha256,
+        _instant_parser=_parse_instant,
+    ) -> None:
         for field in (
             "workspace_instance_id",
             "session_id",
@@ -126,9 +130,9 @@ class ProductEconomicSession:
                 "product_clock_authoritative must be an exact boolean"
             )
         for field in ("goal_contract_sha256", "opening_paperbook_sha256", "state_sha256"):
-            if not _is_sha256(getattr(self, field)):
+            if not _sha_validator(getattr(self, field)):
                 raise EconomicSessionIntegrityError(f"{field} must be canonical SHA-256")
-        _parse_instant(self.started_at)
+        _instant_parser(self.started_at)
 
     @property
     def session_turnover_authoritative(self) -> bool:

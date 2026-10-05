@@ -685,6 +685,51 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(calls, [])
 
+    def test_cli_contains_malformed_provider_contract_without_workspace_side_effect(self):
+        class MalformedProvider:
+            source_id = "continuous-fixture"
+            read_batch = object()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+
+            def provider_factory(*_args, **_kwargs):
+                return MalformedProvider()
+
+            with patch("builtins.print") as print_mock:
+                code = main(
+                    [str(workspace), "--enable-network-observation", "--public-preview"],
+                    provider_factory=provider_factory,
+                )
+
+            self.assertEqual(code, 5)
+            self.assertFalse(workspace.exists())
+            rendered = "\n".join(
+                " ".join(str(arg) for arg in call.args)
+                for call in print_mock.call_args_list
+            )
+            self.assertIn("continuous_observation=FAIL_CLOSED", rendered)
+            self.assertIn("read_batch must be callable", rendered)
+
+    def test_cli_contains_provider_factory_type_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def provider_factory(*_args, **_kwargs):
+                raise TypeError("provider construction type failure")
+
+            with patch("builtins.print") as print_mock:
+                code = main(
+                    [tmp, "--enable-network-observation", "--public-preview"],
+                    provider_factory=provider_factory,
+                )
+
+            self.assertEqual(code, 2)
+            rendered = "\n".join(
+                " ".join(str(arg) for arg in call.args)
+                for call in print_mock.call_args_list
+            )
+            self.assertIn("continuous_observation=CONFIG_ERROR", rendered)
+            self.assertIn("provider construction type failure", rendered)
+
     def test_cli_provider_factory_error_redacts_configured_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
             secret = "super-secret-key"

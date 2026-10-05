@@ -320,6 +320,32 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         self.assertFalse(store.state_path.exists())
 
 
+    def test_internal_authority_binding_rebinding_matrix_fails_closed(self) -> None:
+        mutations = (
+            ("domain", "forged-economic-session-domain"),
+            ("key", "forged-key"),
+            ("authority_root_selection", None),
+            ("authority_root_binding_path", self.authority_root / "forged-selection.json"),
+            ("workspace_binding_path", self.workspace / "forged-workspace-binding.json"),
+            (
+                "authority_root_activation_path",
+                self.authority_root / "forged-activation.json",
+            ),
+            ("journal_dir", self.authority_root / "forged-journal"),
+            ("records_dir", self.authority_root / "forged-records"),
+        )
+
+        for name, replacement in mutations:
+            with self.subTest(name=name):
+                store = self._store()
+                store.current()
+                setattr(store._authority, name, replacement)
+                with self.assertRaisesRegex(
+                    EconomicSessionIntegrityError,
+                    "authority composition changed after construction",
+                ):
+                    store.current()
+
     def test_internal_authority_root_rebinding_fails_closed(self) -> None:
         store = self._store()
         store.current()

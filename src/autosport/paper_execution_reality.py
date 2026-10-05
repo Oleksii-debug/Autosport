@@ -25,7 +25,7 @@ PaperExecutionEvidenceRecord = _impl.PaperExecutionEvidenceRecord
 ObservedPaperExecution = _impl.ObservedPaperExecution
 PaperLegAttempt = _impl.PaperLegAttempt
 PaperExecutionRun = _impl.PaperExecutionRun
-PaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
+_LegacyPaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
 
 
 def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
@@ -835,6 +835,45 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         )
 
 
+
+class PaperExecutionEvidenceRegistry(_LegacyPaperExecutionEvidenceRegistry):
+    """Evidence resolver permanently bound to one canonical PAPER ledger."""
+
+    def __init__(self, ledger: PaperExecutionLedger) -> None:
+        if type(ledger) is not PaperExecutionLedger:
+            raise TypeError("ledger must be exact PaperExecutionLedger")
+        super().__init__(ledger)
+        self._authority_ledger = ledger
+
+    def _require_authority(self) -> PaperExecutionLedger:
+        if type(self) is not PaperExecutionEvidenceRegistry:
+            raise TypeError(
+                "evidence registry must be exact PaperExecutionEvidenceRegistry"
+            )
+        if (
+            type(self._authority_ledger) is not PaperExecutionLedger
+            or self._ledger is not self._authority_ledger
+        ):
+            raise PaperExecutionStateError(
+                "evidence registry durable ledger authority changed after construction"
+            )
+        return self._authority_ledger
+
+    @property
+    def authority_ledger(self) -> PaperExecutionLedger:
+        return self._require_authority()
+
+    def register(self, record: PaperExecutionEvidenceRecord) -> str:
+        ledger = self._require_authority()
+        _impl._require_canonical_evidence_record_surface(record)
+        ledger.register_observation_evidence(record)
+        return record.evidence_id
+
+    def resolve(self, evidence_id: str) -> PaperExecutionEvidenceRecord:
+        ledger = self._require_authority()
+        return ledger.resolve_observation_evidence(evidence_id)
+
+
 def _synthetic_attempt(
     *,
     run_id: str,
@@ -1168,10 +1207,15 @@ def execute_paper_plan(
         raise PaperExecutionStateError(
             "suspended_action_ids contain action outside execution plan"
         )
-    if observations and type(evidence_registry) is not PaperExecutionEvidenceRegistry:
-        raise PaperExecutionStateError(
-            "configured/empirical observations require the exact durable evidence registry authority"
-        )
+    if observations:
+        if type(evidence_registry) is not PaperExecutionEvidenceRegistry:
+            raise PaperExecutionStateError(
+                "configured/empirical observations require the exact durable evidence registry authority"
+            )
+        if evidence_registry.authority_ledger is not ledger:
+            raise PaperExecutionStateError(
+                "execution evidence registry must be bound to the exact run ledger"
+            )
 
     observation_evidence_ids: dict[str, str] = {}
     for action_id, observation in observations.items():

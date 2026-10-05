@@ -336,12 +336,13 @@ class FocusedMirrorDependencyIndex:
     def registry_state_guard(
         self,
     ) -> Iterator[tuple[tuple[FocusedMirrorDependency, int], ...]]:
-        """Hold the registry lock while a caller validates and publishes bound state."""
-        with self._lock:
-            yield tuple(
-                (dependency, self._dependency_revisions[input_id])
-                for input_id, dependency in self._dependencies.items()
-            )
+        """Hold a mutation-stable registry snapshot using canonical lock order."""
+        with self._mutation_lock:
+            with self._lock:
+                yield tuple(
+                    (dependency, self._dependency_revisions[input_id])
+                    for input_id, dependency in self._dependencies.items()
+                )
 
     def _dependency(self, input_id: str) -> FocusedMirrorDependency:
         normalized_id = self._input_id(input_id)

@@ -37,7 +37,7 @@ The first practical vertical slice is table tennis, while the canonical domain r
 
 Money-moving authority remains fail-closed while its required provider/legal capability, exact receipt/reconciliation, duplicate-prevention, partial-execution recovery, owner-limit and emergency-STOP evidence is incomplete. `REAL_MONEY_EXECUTION=false` is current qualification truth, not a permanent product boundary.
 
-Live observation uses the same canonical market path as replay. Fast ingestion/storage/portfolio math remains deterministic and does not depend on an LLM. AI works over normalized structures and never replaces money arithmetic, quote-freshness, risk or irreversible execution authority.
+Live observation uses the same canonical market path as replay. Decision-visible quotes are additionally fail-closed against durable provider health: the persistent live loop binds the exact source-local health replay horizon into crash recovery and immutable Decision Ledger evidence, so later equal-time health transitions cannot rewrite an earlier decision. A provider-health eligibility change can invalidate affected inputs even when no quote changed; repeated equally-healthy polls do not manufacture new economic decisions. Fast ingestion/storage/portfolio math remains deterministic and does not depend on an LLM. AI works over normalized structures and never replaces money arithmetic, quote-freshness, provider-health, risk or irreversible execution authority.
 
 ### Run
 

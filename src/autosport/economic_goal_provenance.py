@@ -19,6 +19,12 @@ from .economic_goal_store import economic_goal_to_payload
 PROVENANCE_SCHEMA: Final = "autosport.economic_goal_provenance"
 PROVENANCE_SCHEMA_VERSION: Final = 1
 
+_SHA256 = hashlib.sha256
+_JSON_DUMPS = json.dumps
+_GOAL_TO_PAYLOAD = economic_goal_to_payload
+_ECONOMIC_GOAL_TYPE = EconomicGoalContract
+_ECONOMIC_GOAL_ERROR = EconomicGoalContractError
+
 
 class EconomicGoalProvenanceError(ValueError):
     """Raised when economic-goal provenance evidence is malformed or mismatched."""

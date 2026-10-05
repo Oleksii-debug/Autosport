@@ -1143,6 +1143,7 @@ class PersistentLiveDecisionLoop:
                         mirror_updates=updates,
                         max_items=self.bounds.observation_max_items,
                         policy=self.ingestion_policy,
+                        clock=lambda: self._sample_clock().isoformat(),
                     )
                 except ProviderUnavailableError:
                     # A peer may have committed market truth while provider I/O was

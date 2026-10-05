@@ -21,6 +21,40 @@ def _hold_workspace_lock(workspace: str, ready, release) -> None:
 
 
 class WorkspaceEconomicLockTests(unittest.TestCase):
+    def test_custom_lock_filename_is_confined_persistent_and_reusable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = WorkspaceEconomicLock(
+                root,
+                file_name="real.jsonl.writer.lock",
+            )
+
+            with lock:
+                self.assertEqual(
+                    lock.path,
+                    root / "real.jsonl.writer.lock",
+                )
+                self.assertTrue(lock.path.exists())
+
+            first_stat = os.stat(lock.path, follow_symlinks=False)
+            with WorkspaceEconomicLock(
+                root,
+                file_name="real.jsonl.writer.lock",
+            ):
+                second_stat = os.stat(lock.path, follow_symlinks=False)
+                self.assertTrue(os.path.samestat(first_stat, second_stat))
+
+    def test_custom_lock_filename_rejects_path_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for file_name in ("", ".", "..", "../escape.lock"):
+                with self.subTest(file_name=file_name):
+                    with self.assertRaisesRegex(
+                        WorkspaceEconomicLockError,
+                        "canonical basename",
+                    ):
+                        WorkspaceEconomicLock(root, file_name=file_name)
+
     def _start_holder(self, root: Path):
         context = multiprocessing.get_context("spawn")
         ready = context.Event()

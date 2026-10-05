@@ -22,25 +22,278 @@ from . import betdaq_account_readonly as _account
 from .betdaq_account_readonly import (
     ADAPTER_ID,
     BetdaqAccountReadOnlyClient,
+    BetdaqAccountReadOnlyError,
 )
 
 _ECONOMIC_SCHEMA = "autosport.betdaq-economic-readback-v1"
-_READ_METHODS = frozenset(
-    {"GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"}
-)
-_REQUEST_ELEMENT = {
-    "GetOrderDetails": "getOrderDetailsRequest",
-    "ListAccountPostings": "listAccountPostingsRequest",
-    "ListAccountPostingsById": "listAccountPostingsByIdRequest",
-}
 _INTEGER_RE = re.compile(r"[0-9]+\Z")
 _DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
 _CANONICAL_ACCOUNT_HTTPS_POST = _account._CANONICAL_HTTPS_POST
 _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT = _account._require_canonical_account_transport
+_CANONICAL_SECURE_ENDPOINT = _account._SECURE_ENDPOINT
+_CANONICAL_EXTERNAL_NS = _account._EXTERNAL_NS
+_CANONICAL_SOAP11_NS = _account._SOAP11_NS
+_CANONICAL_SOAP12_NS = _account._SOAP12_NS
+_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY = _account._canonical_betdaq_protocol_authority
+_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY_CODE = getattr(
+    _CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY,
+    "__code__",
+    None,
+)
+_CANONICAL_ACCOUNT_CURRENCY = _account._currency
+_CANONICAL_ACCOUNT_CURRENCY_CODE = getattr(_CANONICAL_ACCOUNT_CURRENCY, "__code__", None)
+_CANONICAL_ACCOUNT_CONTEXT_DISPATCH = _account._canonical_account_context_dispatch
+_CANONICAL_ACCOUNT_CONTEXT_DISPATCH_CODE = getattr(
+    _CANONICAL_ACCOUNT_CONTEXT_DISPATCH,
+    "__code__",
+    None,
+)
+_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT = _account._authenticated_account_context
+_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE = getattr(
+    _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT,
+    "__code__",
+    None,
+)
+_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE = _account.BetdaqAuthenticatedAccountContext
+_MAX_XSD_LONG = 9_223_372_036_854_775_807
+_CANONICAL_ACCOUNT_HTTPS_POST_CODE = getattr(_CANONICAL_ACCOUNT_HTTPS_POST, "__code__", None)
+_CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE = getattr(
+    _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT,
+    "__code__",
+    None,
+)
+_TERMINAL_ORDER_STATUS_CODES = _account._TERMINAL_STATUS_CODES
+
+
+def _product_receive_time(
+    _datetime=datetime,
+    _utc=timezone.utc,
+) -> datetime:
+    """Return the product-owned wall-clock instant for one provider acquisition."""
+
+    return _datetime.now(_utc)
+
+
+_PRODUCT_RECEIVE_TIME = _product_receive_time
+_PRODUCT_RECEIVE_TIME_CODE = getattr(_PRODUCT_RECEIVE_TIME, "__code__", None)
+_PRODUCT_RECEIVE_TIME_DEFAULTS = _PRODUCT_RECEIVE_TIME.__defaults__
 
 
 class BetdaqEconomicReadbackError(RuntimeError):
     """BETDAQ settlement/posting readback contract or evidence error."""
+
+
+def _canonical_product_receive_clock(
+    *,
+    _clock=_PRODUCT_RECEIVE_TIME,
+    _clock_code=_PRODUCT_RECEIVE_TIME_CODE,
+    _clock_defaults=_PRODUCT_RECEIVE_TIME_DEFAULTS,
+):
+    """Resolve the exact product-owned receive clock without caller clock trust."""
+
+    live_clock = globals().get("_product_receive_time")
+    aliases = (
+        globals().get("_PRODUCT_RECEIVE_TIME"),
+        globals().get("_PRODUCT_RECEIVE_TIME_CODE"),
+        globals().get("_PRODUCT_RECEIVE_TIME_DEFAULTS"),
+    )
+    expected_aliases = (_clock, _clock_code, _clock_defaults)
+    if (
+        live_clock is not _clock
+        or getattr(live_clock, "__code__", None) is not _clock_code
+        or getattr(_clock, "__code__", None) is not _clock_code
+        or _clock.__defaults__ is not _clock_defaults
+        or aliases != expected_aliases
+    ):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic product clock authority was replaced"
+        )
+    return _clock
+
+
+def _canonical_economic_protocol_authority(
+    *,
+    _account_protocol=_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY,
+    _account_protocol_code=_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY_CODE,
+    _expected=(
+        _CANONICAL_SECURE_ENDPOINT,
+        _CANONICAL_EXTERNAL_NS,
+        _CANONICAL_SOAP11_NS,
+        _CANONICAL_SOAP12_NS,
+    ),
+) -> tuple[str, str, str, str]:
+    """Reuse the shared account wire authority with captured local anchors."""
+
+    live_account_protocol = getattr(
+        _account,
+        "_canonical_betdaq_protocol_authority",
+        None,
+    )
+    aliases = (
+        globals().get("_CANONICAL_SECURE_ENDPOINT"),
+        globals().get("_CANONICAL_EXTERNAL_NS"),
+        globals().get("_CANONICAL_SOAP11_NS"),
+        globals().get("_CANONICAL_SOAP12_NS"),
+    )
+    if (
+        live_account_protocol is not _account_protocol
+        or getattr(live_account_protocol, "__code__", None)
+        is not _account_protocol_code
+        or globals().get("_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY")
+        is not _account_protocol
+        or globals().get("_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY_CODE")
+        is not _account_protocol_code
+        or aliases != _expected
+    ):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic protocol authority was replaced"
+        )
+    try:
+        live = _account_protocol()
+    except BetdaqAccountReadOnlyError:
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic protocol authority was replaced"
+        ) from None
+    if live != _expected:
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic protocol authority was replaced"
+        )
+    return _expected
+
+
+def _canonical_economic_transport_dispatch(
+    *,
+    _post=_CANONICAL_ACCOUNT_HTTPS_POST,
+    _post_code=_CANONICAL_ACCOUNT_HTTPS_POST_CODE,
+    _require=_REQUIRE_CANONICAL_ACCOUNT_TRANSPORT,
+    _require_code=_CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE,
+    _transport_type=_account.UrllibBetdaqSoapTransport,
+):
+    """Return captured shared transport callables after exact live validation."""
+
+    live_post = globals().get("_CANONICAL_ACCOUNT_HTTPS_POST")
+    live_require = globals().get("_REQUIRE_CANONICAL_ACCOUNT_TRANSPORT")
+    account_post = getattr(_account, "_CANONICAL_HTTPS_POST", None)
+    account_require = getattr(_account, "_require_canonical_account_transport", None)
+    class_post = vars(_transport_type).get("post")
+    if (
+        live_post is not _post
+        or live_require is not _require
+        or account_post is not _post
+        or account_require is not _require
+        or class_post is not _post
+        or getattr(_post, "__code__", None) is not _post_code
+        or getattr(_require, "__code__", None) is not _require_code
+        or globals().get("_CANONICAL_ACCOUNT_HTTPS_POST_CODE") is not _post_code
+        or globals().get("_CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE")
+        is not _require_code
+    ):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic transport dispatch was replaced"
+        )
+    return _require, _post
+
+
+def _canonical_authenticated_account_context_dispatch(
+    *,
+    _dispatch=_CANONICAL_ACCOUNT_CONTEXT_DISPATCH,
+    _dispatch_code=_CANONICAL_ACCOUNT_CONTEXT_DISPATCH_CODE,
+    _resolver=_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT,
+    _resolver_code=_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE,
+    _context_type=_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE,
+):
+    """Reuse captured shared account-context authority without alias trust."""
+
+    live_dispatch = getattr(_account, "_canonical_account_context_dispatch", None)
+    local_aliases = (
+        globals().get("_CANONICAL_ACCOUNT_CONTEXT_DISPATCH"),
+        globals().get("_CANONICAL_ACCOUNT_CONTEXT_DISPATCH_CODE"),
+        globals().get("_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT"),
+        globals().get("_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE"),
+        globals().get("_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE"),
+    )
+    expected_aliases = (
+        _dispatch,
+        _dispatch_code,
+        _resolver,
+        _resolver_code,
+        _context_type,
+    )
+    if (
+        live_dispatch is not _dispatch
+        or getattr(live_dispatch, "__code__", None) is not _dispatch_code
+        or local_aliases != expected_aliases
+    ):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ authenticated account context authority was replaced"
+        )
+    try:
+        live_resolver = _dispatch()
+    except BetdaqAccountReadOnlyError:
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ authenticated account context authority was replaced"
+        ) from None
+    live_type = getattr(_account, "BetdaqAuthenticatedAccountContext", None)
+    if (
+        live_resolver is not _resolver
+        or getattr(live_resolver, "__code__", None) is not _resolver_code
+        or live_type is not _context_type
+    ):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ authenticated account context authority was replaced"
+        )
+    return _resolver
+
+
+def _canonical_terminal_order_status_codes(
+    *,
+    _expected=_TERMINAL_ORDER_STATUS_CODES,
+) -> frozenset[int]:
+    """Resolve the captured existing account terminal-order authority."""
+
+    live_codes = globals().get("_TERMINAL_ORDER_STATUS_CODES")
+    account_codes = getattr(_account, "_TERMINAL_STATUS_CODES", None)
+    if (
+        live_codes is not _expected
+        or account_codes is not _expected
+        or type(_expected) is not frozenset
+    ):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ terminal order status authority was replaced"
+        )
+    return _expected
+
+
+def _economic_request_identity(method: str, attributes: dict[str, str]) -> str:
+    """Bind an economic claim to the exact provider READ request that produced it."""
+
+    if method not in ("GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"):
+        raise BetdaqEconomicReadbackError(
+            "method is outside economic READ request-identity allowlist"
+        )
+    if type(attributes) is not dict:
+        raise BetdaqEconomicReadbackError(
+            "economic request identity attributes must be an exact dict"
+        )
+    canonical_attributes: dict[str, str] = {}
+    for key, value in attributes.items():
+        if (
+            type(key) is not str
+            or not key
+            or type(value) is not str
+            or value != value.strip()
+        ):
+            raise BetdaqEconomicReadbackError(
+                "economic request identity attributes are not canonical text"
+            )
+        canonical_attributes[key] = value
+    return _canonical_sha256(
+        {
+            "schema": _ECONOMIC_SCHEMA,
+            "method": method,
+            "attributes": dict(sorted(canonical_attributes.items())),
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +307,11 @@ class BetdaqEconomicEvidence:
     physical_account_identity_proven: bool = False
 
     def __post_init__(self) -> None:
-        if self.method not in _READ_METHODS:
+        if type(self.method) is not str:
+            raise BetdaqEconomicReadbackError(
+                "economic evidence method must be exact text"
+            )
+        if self.method not in ("GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"):
             raise BetdaqEconomicReadbackError("economic evidence method is not read-only")
         _sha256_hex(self.request_identity_sha256, "request_identity_sha256")
         _sha256_hex(self.source_payload_sha256, "source_payload_sha256")
@@ -62,13 +319,23 @@ class BetdaqEconomicEvidence:
             raise BetdaqEconomicReadbackError(
                 "observed_at must use canonical UTC timestamp spelling"
             )
+        context_prefix = "betdaq-auth-context:"
         if (
             type(self.account_context_id) is not str
-            or not self.account_context_id.startswith("betdaq-auth-context:")
+            or not self.account_context_id.startswith(context_prefix)
         ):
             raise BetdaqEconomicReadbackError(
                 "account_context_id is not canonical BETDAQ account context"
             )
+        try:
+            _sha256_hex(
+                self.account_context_id.removeprefix(context_prefix),
+                "account_context_id",
+            )
+        except BetdaqEconomicReadbackError as exc:
+            raise BetdaqEconomicReadbackError(
+                "account_context_id must bind an exact canonical context digest"
+            ) from exc
         if self.authenticated_principal_continuity_proven is not False:
             raise BetdaqEconomicReadbackError(
                 "cross-process authenticated-principal continuity is owned elsewhere"
@@ -90,6 +357,23 @@ class BetdaqEconomicEvidence:
                 "account_context_id": self.account_context_id,
                 "request_identity_sha256": self.request_identity_sha256,
                 "source_payload_sha256": self.source_payload_sha256,
+            }
+        )
+
+    @property
+    def acquisition_id(self) -> str:
+        """Identify one product acquisition without changing replay-stable economics.
+
+        evidence_id identifies the exact authenticated request/provider payload
+        independent of when Autosport re-read it. Causal consumers also need an
+        identity for the product receive/availability observation itself; bind that
+        separately so a later exact replay cannot masquerade as the earlier acquisition.
+        """
+        return "betdaq-economic-acquisition:" + _canonical_sha256(
+            {
+                "schema": _ECONOMIC_SCHEMA,
+                "evidence_id": self.evidence_id,
+                "observed_at": self.observed_at,
             }
         )
 
@@ -125,7 +409,7 @@ class BetdaqOrderSettlementObservation:
         for field in ("order_id", "market_id", "selection_id", "punter_reference_number"):
             _provider_id(getattr(self, field), field)
         _unsigned_byte(self.order_status_code, "order_status_code")
-        _nonnegative_int(self.sequence_number, "sequence_number")
+        _provider_id(self.sequence_number, "sequence_number")
         _unsigned_byte(self.polarity_code, "polarity_code")
         for field in ("issued_at", "last_changed_at", "matching_timestamp"):
             value = getattr(self, field)
@@ -171,14 +455,7 @@ class BetdaqOrderSettlementObservation:
                     "market_settled_at must use canonical UTC timestamp spelling"
                 )
         if self.currency is not None:
-            if (
-                type(self.currency) is not str
-                or not self.currency
-                or self.currency != self.currency.strip()
-            ):
-                raise BetdaqEconomicReadbackError(
-                    "settlement currency must be non-empty trimmed text when proven"
-                )
+            _provider_currency(self.currency, "settlement currency")
         if type(self.denomination_proven) is not bool:
             raise BetdaqEconomicReadbackError("denomination_proven must be bool")
         if type(self.scalar_economic_use_proven) is not bool:
@@ -186,6 +463,18 @@ class BetdaqOrderSettlementObservation:
         if type(self.evidence) is not BetdaqEconomicEvidence:
             raise BetdaqEconomicReadbackError(
                 "order settlement evidence must be canonical BETDAQ economic evidence"
+            )
+        if self.evidence.method != "GetOrderDetails":
+            raise BetdaqEconomicReadbackError(
+                "order settlement evidence method must be GetOrderDetails"
+            )
+        expected_request_identity = _economic_request_identity(
+            "GetOrderDetails",
+            {"OrderId": self.order_id},
+        )
+        if self.evidence.request_identity_sha256 != expected_request_identity:
+            raise BetdaqEconomicReadbackError(
+                "order settlement evidence request identity does not match order_id"
             )
         if self.denomination_proven is not (self.currency is not None):
             raise BetdaqEconomicReadbackError(
@@ -195,8 +484,9 @@ class BetdaqOrderSettlementObservation:
             raise BetdaqEconomicReadbackError(
                 "scalar economic use requires independently proven denomination"
             )
+        terminal_status_codes = _canonical_terminal_order_status_codes()
         expected_final = (
-            self.order_status_code in {4, 5}
+            self.order_status_code in terminal_status_codes
             and self.gross_settlement_amount is not None
             and (
                 self.order_commission is not None
@@ -258,6 +548,7 @@ class BetdaqPostingObservation:
     order_id: str | None
     market_id: str | None
     transaction_id: str
+    currency: str
     evidence: BetdaqEconomicEvidence
 
     def __post_init__(self) -> None:
@@ -265,8 +556,13 @@ class BetdaqPostingObservation:
             raise BetdaqEconomicReadbackError(
                 "posted_at must use canonical UTC timestamp spelling"
             )
-        if type(self.description) is not str:
-            raise BetdaqEconomicReadbackError("description must be text")
+        if (
+            type(self.description) is not str
+            or self.description != self.description.strip()
+        ):
+            raise BetdaqEconomicReadbackError(
+                "description must be trimmed provider text"
+            )
         _finite_decimal(self.amount, "amount")
         _finite_decimal(self.resulting_balance, "resulting_balance")
         _unsigned_byte(self.posting_category, "posting_category")
@@ -274,13 +570,40 @@ class BetdaqPostingObservation:
             _provider_id(self.order_id, "order_id")
         if self.market_id is not None:
             _provider_id(self.market_id, "market_id")
+        if self.posting_category == 1:
+            if self.order_id is None or self.market_id is not None:
+                raise BetdaqEconomicReadbackError(
+                    "Settlement posting requires exact OrderId and no MarketId"
+                )
+        elif self.posting_category == 2:
+            if self.market_id is None or self.order_id is not None:
+                raise BetdaqEconomicReadbackError(
+                    "Commission posting requires exact MarketId and no OrderId"
+                )
+        elif self.posting_category == 3:
+            if self.order_id is not None or self.market_id is not None:
+                raise BetdaqEconomicReadbackError(
+                    "Other posting cannot claim Settlement/Commission handles"
+                )
+        # Future provider enum values remain raw evidence per BETDAQ's schema-
+        # evolution contract; they do not inherit known category semantics.
         _provider_id(self.transaction_id, "transaction_id")
+        _provider_currency(self.currency, "posting currency")
         if type(self.evidence) is not BetdaqEconomicEvidence:
             raise BetdaqEconomicReadbackError(
                 "posting evidence must be canonical BETDAQ economic evidence"
             )
+        if self.evidence.method not in {
+            "ListAccountPostings",
+            "ListAccountPostingsById",
+        }:
+            raise BetdaqEconomicReadbackError(
+                "posting evidence method must be a postings read method"
+            )
 
-    def canonical_dict(self) -> dict[str, object]:
+    def provider_content_dict(self) -> dict[str, object]:
+        """Return immutable provider-row economics without per-call envelope provenance."""
+
         return {
             "posted_at": self.posted_at,
             "description": self.description,
@@ -290,12 +613,41 @@ class BetdaqPostingObservation:
             "order_id": self.order_id,
             "market_id": self.market_id,
             "transaction_id": self.transaction_id,
+            "currency": self.currency,
+        }
+
+    def canonical_dict(self) -> dict[str, object]:
+        return {
+            **self.provider_content_dict(),
             "evidence_id": self.evidence.evidence_id,
         }
 
     @property
+    def transaction_identity(self) -> str:
+        """Stable only inside one authenticated process-local BETDAQ account context.
+
+        A restart may issue a new context. Cross-session account equivalence is a
+        separate authority and is deliberately not inferred from credentials here.
+        """
+
+        return "betdaq-posting-transaction:" + _canonical_sha256(
+            {
+                "account_context_id": self.evidence.account_context_id,
+                "transaction_id": self.transaction_id,
+            }
+        )
+
+    @property
     def observation_id(self) -> str:
-        return "betdaq-posting:" + _canonical_sha256(self.canonical_dict())
+        # Request/window and sibling-row differences are per-call provenance, not
+        # transaction economics. This identity therefore remains stable when BETDAQ
+        # deliberately overlaps a page boundary or the row is re-resolved ById.
+        return "betdaq-posting:" + _canonical_sha256(
+            {
+                "transaction_identity": self.transaction_identity,
+                "provider_content": self.provider_content_dict(),
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,14 +666,13 @@ class BetdaqPostingsReadback:
     evidence: BetdaqEconomicEvidence
 
     def __post_init__(self) -> None:
+        if type(self.method) is not str:
+            raise BetdaqEconomicReadbackError(
+                "postings readback method must be exact text"
+            )
         if self.method not in {"ListAccountPostings", "ListAccountPostingsById"}:
             raise BetdaqEconomicReadbackError("invalid postings readback method")
-        if (
-            type(self.currency) is not str
-            or not self.currency
-            or self.currency != self.currency.strip()
-        ):
-            raise BetdaqEconomicReadbackError("currency must be non-empty trimmed text")
+        _provider_currency(self.currency, "currency")
         for field in ("available_funds", "balance", "credit", "exposure"):
             _finite_decimal(getattr(self, field), field)
         if self.method == "ListAccountPostings":
@@ -335,6 +686,16 @@ class BetdaqPostingsReadback:
             ):
                 raise BetdaqEconomicReadbackError(
                     "postings window bounds must use canonical UTC timestamp spelling"
+                )
+            start_utc = datetime.fromisoformat(
+                self.query_start_at[:-1] + "+00:00"
+            )
+            end_utc = datetime.fromisoformat(
+                self.query_end_at[:-1] + "+00:00"
+            )
+            if start_utc >= end_utc:
+                raise BetdaqEconomicReadbackError(
+                    "postings window start must precede end"
                 )
             if type(self.window_complete) is not bool:
                 raise BetdaqEconomicReadbackError(
@@ -360,23 +721,106 @@ class BetdaqPostingsReadback:
             raise BetdaqEconomicReadbackError(
                 "postings evidence must be canonical BETDAQ economic evidence"
             )
+        if self.evidence.method != self.method:
+            raise BetdaqEconomicReadbackError(
+                "postings evidence method does not match readback method"
+            )
+        request_attributes: dict[str, str]
+        if self.method == "ListAccountPostings":
+            start_value = self.query_start_at
+            end_value = self.query_end_at
+            if type(start_value) is not str or type(end_value) is not str:
+                raise BetdaqEconomicReadbackError(
+                    "postings readback window query is not canonical request text"
+                )
+            request_attributes = {
+                "StartTime": start_value,
+                "EndTime": end_value,
+            }
+        else:
+            transaction_value = self.query_transaction_id
+            if type(transaction_value) is not str:
+                raise BetdaqEconomicReadbackError(
+                    "postings readback transaction query is not canonical request text"
+                )
+            request_attributes = {"TransactionId": transaction_value}
+        expected_request_identity = _economic_request_identity(
+            self.method,
+            request_attributes,
+        )
+        if self.evidence.request_identity_sha256 != expected_request_identity:
+            raise BetdaqEconomicReadbackError(
+                "postings evidence request identity does not match readback query"
+            )
         if type(self.postings) is not tuple:
             raise BetdaqEconomicReadbackError("postings must be an exact immutable tuple")
         seen: dict[str, dict[str, object]] = {}
         for posting in self.postings:
             if type(posting) is not BetdaqPostingObservation:
                 raise BetdaqEconomicReadbackError("postings contain invalid observation")
-            if posting.evidence.evidence_id != self.evidence.evidence_id:
+            if posting.evidence != self.evidence:
                 raise BetdaqEconomicReadbackError(
-                    "posting evidence does not match readback authenticated context"
+                    "posting evidence does not match exact readback acquisition"
                 )
-            canonical = posting.canonical_dict()
+            if posting.currency != self.currency:
+                raise BetdaqEconomicReadbackError(
+                    "posting currency does not match readback currency"
+                )
+            provider_content = posting.provider_content_dict()
             previous = seen.get(posting.transaction_id)
-            if previous is not None and previous != canonical:
+            if previous is not None:
+                if previous != provider_content:
+                    raise BetdaqEconomicReadbackError(
+                        "same BETDAQ transaction id has conflicting economic content"
+                    )
                 raise BetdaqEconomicReadbackError(
-                    "same BETDAQ transaction id has conflicting economic content"
+                    "canonical postings readback must not retain duplicate transaction ids"
                 )
-            seen[posting.transaction_id] = canonical
+            seen[posting.transaction_id] = provider_content
+
+        # Reconstructed/copy-mutated canonical DTOs must retain the same provider
+        # continuation/order laws already enforced at the XML parser boundary. Without
+        # this second boundary check, dataclasses.replace() could reorder valid rows or
+        # move a ById row to/behind its cursor while retaining otherwise valid evidence.
+        if self.method == "ListAccountPostings":
+            previous_posted_at: datetime | None = None
+            for posting in self.postings:
+                posted_at = datetime.fromisoformat(
+                    posting.posted_at[:-1] + "+00:00"
+                )
+                if posted_at < start_utc or posted_at > end_utc:
+                    raise BetdaqEconomicReadbackError(
+                        "canonical ListAccountPostings readback contains posting "
+                        "outside requested window"
+                    )
+                if (
+                    previous_posted_at is not None
+                    and posted_at < previous_posted_at
+                ):
+                    raise BetdaqEconomicReadbackError(
+                        "canonical ListAccountPostings readback is not ordered by "
+                        "increasing PostedAt"
+                    )
+                previous_posted_at = posted_at
+        else:
+            transaction_cursor = int(self.query_transaction_id)
+            previous_transaction_id: int | None = None
+            for posting in self.postings:
+                transaction_id = int(posting.transaction_id)
+                if transaction_id <= transaction_cursor:
+                    raise BetdaqEconomicReadbackError(
+                        "canonical ListAccountPostingsById readback contains "
+                        "transaction at/before cursor"
+                    )
+                if (
+                    previous_transaction_id is not None
+                    and transaction_id <= previous_transaction_id
+                ):
+                    raise BetdaqEconomicReadbackError(
+                        "canonical ListAccountPostingsById readback is not strictly "
+                        "ordered by TransactionId"
+                    )
+                previous_transaction_id = transaction_id
 
     @property
     def readback_id(self) -> str:
@@ -398,6 +842,57 @@ class BetdaqPostingsReadback:
         )
 
 
+def coalesce_posting_replays(
+    *readbacks: BetdaqPostingsReadback,
+) -> tuple[BetdaqPostingObservation, ...]:
+    """Deduplicate repeated provider transactions across exact read responses.
+
+    BETDAQ time-window paging may overlap rows at an equal PostedAt boundary, and
+    ListAccountPostingsById can re-resolve an already observed transaction. Per-call
+    evidence remains attached to the retained observation, but request/response
+    envelope differences cannot create a second economic effect. Conflicting content
+    for the same account-context + TransactionId fails closed. This helper never
+    upgrades window completeness, proves absence of sibling postings, or authorizes
+    scalar aggregation across independent responses.
+    """
+
+    if not readbacks:
+        return ()
+    account_context_id: str | None = None
+    currency: str | None = None
+    seen: dict[str, BetdaqPostingObservation] = {}
+    order: list[str] = []
+    for readback in readbacks:
+        if type(readback) is not BetdaqPostingsReadback:
+            raise BetdaqEconomicReadbackError(
+                "posting replay coalescence requires canonical readbacks"
+            )
+        current_context = readback.evidence.account_context_id
+        if account_context_id is None:
+            account_context_id = current_context
+            currency = readback.currency
+        elif current_context != account_context_id:
+            raise BetdaqEconomicReadbackError(
+                "posting replays belong to different authenticated account contexts"
+            )
+        elif readback.currency != currency:
+            raise BetdaqEconomicReadbackError(
+                "posting replays use different provider currencies"
+            )
+        for posting in readback.postings:
+            identity = posting.transaction_identity
+            previous = seen.get(identity)
+            if previous is not None:
+                if previous.provider_content_dict() != posting.provider_content_dict():
+                    raise BetdaqEconomicReadbackError(
+                        "same BETDAQ transaction id has conflicting economic content"
+                    )
+                continue
+            seen[identity] = posting
+            order.append(identity)
+    return tuple(seen[identity] for identity in order)
+
+
 class BetdaqEconomicReadbackClient:
     """Economic READ companion bound to one canonical authenticated BETDAQ client."""
 
@@ -412,10 +907,11 @@ class BetdaqEconomicReadbackClient:
     def read_order_details(self, order_id: int | str) -> BetdaqOrderSettlementObservation:
         order = _provider_id(order_id, "order_id")
         result, evidence = self._call("GetOrderDetails", {"OrderId": order})
+        _, external_ns, _, _ = _canonical_economic_protocol_authority()
         settlement_nodes = [
             child
             for child in result
-            if child.tag == f"{{{_account._EXTERNAL_NS}}}OrderSettlementInformation"
+            if child.tag == f"{{{external_ns}}}OrderSettlementInformation"
         ]
         if len(settlement_nodes) > 1:
             raise BetdaqEconomicReadbackError(
@@ -443,8 +939,9 @@ class BetdaqEconomicReadbackClient:
             else _optional_timestamp_attr(settlement, "MarketSettledDate")
         )
         status = _unsigned_byte_attr(result, "OrderStatus")
+        terminal_status_codes = _canonical_terminal_order_status_codes()
         final = (
-            status in {4, 5}
+            status in terminal_status_codes
             and gross is not None
             and (order_commission is not None or market_commission is not None)
             and market_settled_at is not None
@@ -529,36 +1026,121 @@ class BetdaqEconomicReadbackClient:
         )
 
     def _call(
-        self, method: str, request_attributes: dict[str, str]
+        self,
+        method: str,
+        request_attributes: dict[str, str],
+        *,
+        _product_clock_dispatch=_canonical_product_receive_clock,
+        _product_clock_dispatch_code=_canonical_product_receive_clock.__code__,
+        _request_builder=_request_xml,
+        _request_builder_code=_request_xml.__code__,
+        _request_builder_defaults=_request_xml.__defaults__,
+        _request_builder_kwdefaults=_request_xml.__kwdefaults__,
     ) -> tuple[ET.Element, BetdaqEconomicEvidence]:
-        if method not in _READ_METHODS:
+        if method not in ("GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"):
             raise BetdaqEconomicReadbackError("method is outside economic READ allowlist")
         client = self._account_client
-        request_identity = _canonical_sha256(
-            {
-                "schema": _ECONOMIC_SCHEMA,
-                "method": method,
-                "attributes": dict(sorted(request_attributes.items())),
-            }
+        if type(request_attributes) is not dict:
+            raise BetdaqEconomicReadbackError(
+                "economic request attributes must be an exact dict"
+            )
+        # Freeze the authority material before any callback or lock acquisition.
+        # The actual SOAP builder receives a private copy of this snapshot, never
+        # the caller-owned mapping used to mint request identity.
+        request_attributes_snapshot = dict(request_attributes)
+        request_identity = _economic_request_identity(
+            method,
+            request_attributes_snapshot,
         )
-        body = _request_xml(client, method, request_attributes)
+
+        def request_builder_current() -> bool:
+            live_builder = globals().get("_request_xml")
+            return (
+                live_builder is _request_builder
+                and getattr(live_builder, "__code__", None) is _request_builder_code
+                and getattr(_request_builder, "__code__", None) is _request_builder_code
+                and getattr(_request_builder, "__defaults__", None)
+                is _request_builder_defaults
+                and getattr(_request_builder, "__kwdefaults__", None)
+                is _request_builder_kwdefaults
+            )
+
+        protocol_authority = _canonical_economic_protocol_authority()
+        secure_endpoint, external_ns, _, _ = protocol_authority
         headers = {
             "Accept": "text/xml",
             "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": f'"{_account._EXTERNAL_NS}{method}"',
+            "SOAPAction": f'"{external_ns}{method}"',
         }
         with client._call_lock:
+            # Snapshot the exact authenticated identity used to construct the secure
+            # request. Evidence must bind to these same values even if another owner
+            # rotates/rebinds the mutable account client while network I/O is in flight.
+            credentials = client._credentials
+            venue_id = client._venue_id
+            live_clock_dispatch = globals().get("_canonical_product_receive_clock")
+            if (
+                live_clock_dispatch is not _product_clock_dispatch
+                or getattr(live_clock_dispatch, "__code__", None)
+                is not _product_clock_dispatch_code
+                or getattr(_product_clock_dispatch, "__code__", None)
+                is not _product_clock_dispatch_code
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "canonical BETDAQ economic product clock authority was replaced"
+                )
+            clock = _product_clock_dispatch()
+            if type(credentials) is not _account.BetdaqCredentials:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ economic read requires canonical credentials"
+                )
+            try:
+                context_resolver = _canonical_authenticated_account_context_dispatch()
+                context_before = context_resolver(credentials, venue_id)
+            except BetdaqEconomicReadbackError:
+                raise
+            except Exception:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ authenticated account context failed canonical validation"
+                ) from None
+            if type(context_before) is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ authenticated account context is not canonical"
+                )
+            if not request_builder_current():
+                raise BetdaqEconomicReadbackError(
+                    "request body does not match exact economic request authority"
+                )
+            body = _request_builder(
+                credentials,
+                method,
+                dict(request_attributes_snapshot),
+            )
+            if not request_builder_current():
+                raise BetdaqEconomicReadbackError(
+                    "request body does not match exact economic request authority"
+                )
             transport = client._transport
             try:
-                _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT(transport)
+                require_transport, https_post = _canonical_economic_transport_dispatch()
+            except BetdaqEconomicReadbackError:
+                # Preserve exact canonical-authority tamper evidence from the
+                # economic dispatcher; do not blur it into an ordinary bad transport.
+                raise
             except Exception:
                 raise BetdaqEconomicReadbackError(
                     "canonical BETDAQ economic evidence requires product-owned HTTPS transport"
                 ) from None
             try:
-                payload = _CANONICAL_ACCOUNT_HTTPS_POST(
+                require_transport(transport)
+            except Exception:
+                raise BetdaqEconomicReadbackError(
+                    "canonical BETDAQ economic evidence requires product-owned HTTPS transport"
+                ) from None
+            try:
+                payload = https_post(
                     transport,
-                    _account._SECURE_ENDPOINT,
+                    secure_endpoint,
                     headers=headers,
                     body=body,
                     timeout_seconds=client._timeout_seconds,
@@ -567,16 +1149,84 @@ class BetdaqEconomicReadbackClient:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ economic read transport failed"
                 ) from None
+            if (
+                client._credentials is not credentials
+                or client._venue_id != venue_id
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ authenticated account context changed during economic acquisition"
+                )
+            if _canonical_economic_protocol_authority() != protocol_authority:
+                raise BetdaqEconomicReadbackError(
+                    "canonical BETDAQ economic protocol authority was replaced"
+                )
+            try:
+                if (
+                    _canonical_authenticated_account_context_dispatch()
+                    is not context_resolver
+                ):
+                    raise BetdaqEconomicReadbackError(
+                        "canonical BETDAQ authenticated account context authority was replaced"
+                    )
+                context_after = context_resolver(credentials, venue_id)
+            except BetdaqEconomicReadbackError:
+                raise
+            except Exception:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ authenticated account context failed canonical validation"
+                ) from None
+            if (
+                type(context_after) is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE
+                or context_after is not context_before
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ authenticated account context changed during economic acquisition"
+                )
+            live_clock_dispatch = globals().get("_canonical_product_receive_clock")
+            if (
+                live_clock_dispatch is not _product_clock_dispatch
+                or getattr(live_clock_dispatch, "__code__", None)
+                is not _product_clock_dispatch_code
+                or _product_clock_dispatch() is not clock
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "canonical BETDAQ economic product clock authority was replaced"
+                )
+            try:
+                observed_value = clock()
+                if (
+                    type(observed_value) is not datetime
+                    or observed_value.tzinfo is None
+                    or observed_value.utcoffset() is None
+                ):
+                    raise ValueError("product clock must return exact timezone-aware datetime")
+                observed_at = (
+                    observed_value.astimezone(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
+            except BetdaqEconomicReadbackError:
+                raise
+            except Exception:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ economic response failed canonical validation"
+                ) from None
+            live_clock_dispatch = globals().get("_canonical_product_receive_clock")
+            if (
+                live_clock_dispatch is not _product_clock_dispatch
+                or getattr(live_clock_dispatch, "__code__", None)
+                is not _product_clock_dispatch_code
+                or _product_clock_dispatch() is not clock
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "canonical BETDAQ economic product clock authority was replaced"
+                )
         if type(payload) is not bytes:
             raise BetdaqEconomicReadbackError(
                 "BETDAQ economic read transport must return bytes"
             )
         try:
             result = _parse_economic_soap_result(payload, method)
-            context = _account._authenticated_account_context(
-                client._credentials, client._venue_id
-            )
-            observed_at = client._observed_at()
         except Exception:
             raise BetdaqEconomicReadbackError(
                 "BETDAQ economic response failed canonical validation"
@@ -586,23 +1236,23 @@ class BetdaqEconomicReadbackClient:
             request_identity_sha256=request_identity,
             source_payload_sha256=sha256(payload).hexdigest(),
             observed_at=observed_at,
-            account_context_id=context.session_context_id,
+            account_context_id=context_before.session_context_id,
         )
         return result, evidence
 
 
 def _request_xml(
-    client: BetdaqAccountReadOnlyClient,
+    credentials: _account.BetdaqCredentials,
     method: str,
     attributes: dict[str, str],
 ) -> bytes:
-    ET.register_namespace("soap", _account._SOAP11_NS)
-    envelope = ET.Element(f"{{{_account._SOAP11_NS}}}Envelope")
-    header = ET.SubElement(envelope, f"{{{_account._SOAP11_NS}}}Header")
-    credentials = client._credentials
+    _, external_ns, soap11_ns, _ = _canonical_economic_protocol_authority()
+    ET.register_namespace("soap", soap11_ns)
+    envelope = ET.Element(f"{{{soap11_ns}}}Envelope")
+    header = ET.SubElement(envelope, f"{{{soap11_ns}}}Header")
     ET.SubElement(
         header,
-        f"{{{_account._EXTERNAL_NS}}}ExternalApiHeader",
+        f"{{{external_ns}}}ExternalApiHeader",
         {
             "version": credentials.version,
             "languageCode": credentials.language_code,
@@ -611,12 +1261,21 @@ def _request_xml(
             "applicationIdentifier": credentials.application_identifier,
         },
     )
-    body = ET.SubElement(envelope, f"{{{_account._SOAP11_NS}}}Body")
-    method_element = ET.SubElement(body, f"{{{_account._EXTERNAL_NS}}}{method}")
-    request_name = _REQUEST_ELEMENT[method]
+    body = ET.SubElement(envelope, f"{{{soap11_ns}}}Body")
+    method_element = ET.SubElement(body, f"{{{external_ns}}}{method}")
+    if method == "GetOrderDetails":
+        request_name = "getOrderDetailsRequest"
+    elif method == "ListAccountPostings":
+        request_name = "listAccountPostingsRequest"
+    elif method == "ListAccountPostingsById":
+        request_name = "listAccountPostingsByIdRequest"
+    else:
+        raise BetdaqEconomicReadbackError(
+            "method is outside economic READ request-element allowlist"
+        )
     ET.SubElement(
         method_element,
-        f"{{{_account._EXTERNAL_NS}}}{request_name}",
+        f"{{{external_ns}}}{request_name}",
         attributes,
     )
     return ET.tostring(envelope, encoding="utf-8", xml_declaration=True)
@@ -624,6 +1283,7 @@ def _request_xml(
 
 def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
     """Parse generated BETDAQ SOAP results without inventing ReturnStatus."""
+    _, external_ns, soap11_ns, soap12_ns = _canonical_economic_protocol_authority()
     upper = payload.upper()
     if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
         raise BetdaqEconomicReadbackError(
@@ -637,8 +1297,8 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
         ) from None
     namespace, local = _split_tag(root.tag)
     if local != "Envelope" or namespace not in {
-        _account._SOAP11_NS,
-        _account._SOAP12_NS,
+        soap11_ns,
+        soap12_ns,
     }:
         raise BetdaqEconomicReadbackError(
             "BETDAQ economic response has invalid SOAP Envelope"
@@ -653,57 +1313,187 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
         child_namespace, child_local = _split_tag(child.tag)
         if child_namespace == namespace and child_local == "Fault":
             raise BetdaqEconomicReadbackError("BETDAQ economic SOAP Fault")
-    expected_response_tag = f"{{{_account._EXTERNAL_NS}}}{method}Response"
+    expected_response_tag = f"{{{external_ns}}}{method}Response"
     body_children = list(body)
     if len(body_children) != 1 or body_children[0].tag != expected_response_tag:
         raise BetdaqEconomicReadbackError(
             f"BETDAQ economic response is not the exact {method}Response body"
         )
     response = body_children[0]
-    expected_result_tag = f"{{{_account._EXTERNAL_NS}}}{method}Result"
+    expected_result_tag = f"{{{external_ns}}}{method}Result"
     response_children = list(response)
     if len(response_children) != 1 or response_children[0].tag != expected_result_tag:
         raise BetdaqEconomicReadbackError(
             f"BETDAQ economic response is not the exact {method}Result wrapper"
         )
     result = response_children[0]
+
+    def require_known_attributes(
+        element: ET.Element,
+        allowed: tuple[str, ...],
+        context: str,
+    ) -> None:
+        unexpected = tuple(
+            sorted(name for name in element.attrib if name not in allowed)
+        )
+        if unexpected:
+            raise BetdaqEconomicReadbackError(
+                f"{context} contains unexpected provider attribute: "
+                + ", ".join(unexpected)
+            )
+
     statuses = [
         child
         for child in result
-        if child.tag == f"{{{_account._EXTERNAL_NS}}}ReturnStatus"
+        if child.tag == f"{{{external_ns}}}ReturnStatus"
     ]
-    if len(statuses) > 1:
+    if len(statuses) != 1:
         raise BetdaqEconomicReadbackError(
-            "BETDAQ economic result has duplicate ReturnStatus"
+            "BETDAQ economic result must contain exactly one ReturnStatus"
         )
-    if statuses:
-        raw_code = statuses[0].attrib.get("Code")
-        if (
-            type(raw_code) is not str
-            or raw_code != raw_code.strip()
-            or not raw_code
-            or not raw_code.lstrip("-").isdigit()
-        ):
-            raise BetdaqEconomicReadbackError(
-                "BETDAQ economic ReturnStatus Code must be provider integer text"
-            )
-        if int(raw_code) != 0:
-            raise BetdaqEconomicReadbackError(
-                f"BETDAQ economic ReturnStatus reported failure code {int(raw_code)}"
-            )
+    require_known_attributes(
+        statuses[0],
+        ("Code", "Description", "CallId"),
+        "BETDAQ ReturnStatus",
+    )
+    raw_code = statuses[0].attrib.get("Code")
+    if (
+        type(raw_code) is not str
+        or raw_code != raw_code.strip()
+        or not raw_code
+        or not raw_code.lstrip("-").isdigit()
+    ):
+        raise BetdaqEconomicReadbackError(
+            "BETDAQ economic ReturnStatus Code must be provider integer text"
+        )
+    if int(raw_code) != 0:
+        raise BetdaqEconomicReadbackError(
+            f"BETDAQ economic ReturnStatus reported failure code {int(raw_code)}"
+        )
 
     allowed_children = {
-        f"{{{_account._EXTERNAL_NS}}}ReturnStatus",
+        f"{{{external_ns}}}ReturnStatus",
         (
-            f"{{{_account._EXTERNAL_NS}}}OrderSettlementInformation"
+            f"{{{external_ns}}}OrderSettlementInformation"
             if method == "GetOrderDetails"
-            else f"{{{_account._EXTERNAL_NS}}}Orders"
+            else f"{{{external_ns}}}Orders"
         ),
     }
+    if method == "GetOrderDetails":
+        # The generated BETDAQ contract documents AuditLog as a sibling of
+        # OrderSettlementInformation. It remains raw/content-bound evidence here;
+        # this economic projection does not infer settlement state from audit entries.
+        audit_log_tag = f"{{{external_ns}}}AuditLog"
+        allowed_children.add(audit_log_tag)
+        if sum(child.tag == audit_log_tag for child in result) > 1:
+            raise BetdaqEconomicReadbackError(
+                "GetOrderDetails has duplicate AuditLog containers"
+            )
     if any(child.tag not in allowed_children for child in result):
         raise BetdaqEconomicReadbackError(
             f"BETDAQ economic {method} result contains unexpected element"
         )
+
+    if method == "GetOrderDetails":
+        require_known_attributes(
+            result,
+            (
+                "SelectionId",
+                "OrderStatus",
+                "IssuedAt",
+                "LastChangedAt",
+                "ExpiresAt",
+                "ValidFrom",
+                "RestrictOrderToBroker",
+                "OrderFillType",
+                "FillOrKillThreshold",
+                "MarketId",
+                "MarketStatus",
+                "RequestedStake",
+                "RequestedPrice",
+                "ExpectedSelectionResetCount",
+                "TotalStake",
+                "UnmatchedStake",
+                "AveragePrice",
+                "MatchingTimeStamp",
+                "Polarity",
+                "WithdrawlRepriceOption",
+                "WithdrawalRepriceOption",
+                "CancelOnInRunning",
+                "CancelIfSelectionReset",
+                "SequenceNumber",
+                "MarketType",
+                "ExpectedWithdrawlSequenceNumber",
+                "ExpectedWithdrawalSequenceNumber",
+                "PunterReferenceNumber",
+            ),
+            "BETDAQ GetOrderDetailsResult",
+        )
+        settlement_tag = (
+            f"{{{external_ns}}}OrderSettlementInformation"
+        )
+        for settlement in result:
+            if settlement.tag == settlement_tag:
+                require_known_attributes(
+                    settlement,
+                    (
+                        "GrossSettlementAmount",
+                        "OrderCommission",
+                        "MarketCommission",
+                        "MarketSettledDate",
+                    ),
+                    "BETDAQ OrderSettlementInformation",
+                )
+    else:
+        result_attributes = (
+            (
+                "Currency",
+                "AvailableFunds",
+                "Balance",
+                "Credit",
+                "Exposure",
+                "HaveAllPostingsBeenReturned",
+            )
+            if method == "ListAccountPostings"
+            else (
+                "Currency",
+                "AvailableFunds",
+                "Balance",
+                "Credit",
+                "Exposure",
+            )
+        )
+        require_known_attributes(
+            result,
+            result_attributes,
+            f"BETDAQ {method}Result",
+        )
+        orders_tag = f"{{{external_ns}}}Orders"
+        order_tag = f"{{{external_ns}}}Order"
+        for container in result:
+            if container.tag != orders_tag:
+                continue
+            require_known_attributes(
+                container,
+                (),
+                "BETDAQ postings Orders",
+            )
+            for posting in container:
+                if posting.tag == order_tag:
+                    require_known_attributes(
+                        posting,
+                        (
+                            "PostedAt",
+                            "Description",
+                            "Amount",
+                            "ResultingBalance",
+                            "PostingCategory",
+                            "OrderId",
+                            "MarketId",
+                            "TransactionId",
+                        ),
+                        "BETDAQ posting row",
+                    )
     return result
 
 
@@ -728,19 +1518,36 @@ def _parse_postings_result(
     query_transaction_id: str | None,
     window_complete: bool | None,
 ) -> BetdaqPostingsReadback:
+    _, external_ns, _, _ = _canonical_economic_protocol_authority()
     containers = [
         child
         for child in result
-        if child.tag == f"{{{_account._EXTERNAL_NS}}}Orders"
+        if child.tag == f"{{{external_ns}}}Orders"
     ]
     if len(containers) != 1:
         raise BetdaqEconomicReadbackError(
             "BETDAQ postings result must contain exactly one Orders element"
         )
+    currency = _required_attr(result, "Currency")
+    # The provider API specification gives two paging-order laws that are
+    # authority-bearing for continuation:
+    # - ListAccountPostings rows are ordered by increasing PostedAt;
+    # - ListAccountPostingsById returns TransactionId values strictly greater than
+    #   the supplied cursor, ordered ascending by TransactionId.
+    # Exact duplicate transaction rows remain idempotent per the canonical #1734
+    # contract; do not invent ResultingBalance adjacency beyond provider evidence.
     deduped: dict[str, BetdaqPostingObservation] = {}
     ordered_ids: list[str] = []
+    previous_posted_at: datetime | None = None
+    previous_transaction_id: int | None = None
+    cursor_transaction_id = (
+        int(query_transaction_id)
+        if method == "ListAccountPostingsById"
+        and query_transaction_id is not None
+        else None
+    )
     for child in containers[0]:
-        if child.tag != f"{{{_account._EXTERNAL_NS}}}Order":
+        if child.tag != f"{{{external_ns}}}Order":
             raise BetdaqEconomicReadbackError(
                 "BETDAQ postings Orders contains unexpected element"
             )
@@ -756,11 +1563,38 @@ def _parse_postings_result(
             order_id=_optional_provider_attr(child, "OrderId"),
             market_id=_optional_provider_attr(child, "MarketId"),
             transaction_id=transaction_id,
+            currency=currency,
             evidence=evidence,
         )
+        if method == "ListAccountPostings":
+            posted_at = datetime.fromisoformat(
+                posting.posted_at[:-1] + "+00:00"
+            )
+            if previous_posted_at is not None and posted_at < previous_posted_at:
+                raise BetdaqEconomicReadbackError(
+                    "ListAccountPostings rows are not ordered by increasing PostedAt"
+                )
+            previous_posted_at = posted_at
+        else:
+            numeric_transaction_id = int(transaction_id)
+            if (
+                cursor_transaction_id is None
+                or numeric_transaction_id <= cursor_transaction_id
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "ListAccountPostingsById returned transaction at/before cursor"
+                )
+            if (
+                previous_transaction_id is not None
+                and numeric_transaction_id < previous_transaction_id
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "ListAccountPostingsById rows are not ordered ascending by TransactionId"
+                )
+            previous_transaction_id = numeric_transaction_id
         previous = deduped.get(transaction_id)
         if previous is not None:
-            if previous.canonical_dict() != posting.canonical_dict():
+            if previous.provider_content_dict() != posting.provider_content_dict():
                 raise BetdaqEconomicReadbackError(
                     "same BETDAQ transaction id has conflicting economic content"
                 )
@@ -772,7 +1606,7 @@ def _parse_postings_result(
         query_start_at=query_start_at,
         query_end_at=query_end_at,
         query_transaction_id=query_transaction_id,
-        currency=_required_attr(result, "Currency"),
+        currency=currency,
         available_funds=_decimal_attr(result, "AvailableFunds"),
         balance=_decimal_attr(result, "Balance"),
         credit=_decimal_attr(result, "Credit"),
@@ -801,10 +1635,37 @@ def _optional_provider_attr(element: ET.Element, name: str) -> str | None:
     return _provider_id(raw, name)
 
 
+def _provider_currency(
+    value: str,
+    field: str,
+    *,
+    _currency=_CANONICAL_ACCOUNT_CURRENCY,
+    _currency_code=_CANONICAL_ACCOUNT_CURRENCY_CODE,
+) -> str:
+    live_currency = getattr(_account, "_currency", None)
+    if (
+        live_currency is not _currency
+        or getattr(live_currency, "__code__", None) is not _currency_code
+        or globals().get("_CANONICAL_ACCOUNT_CURRENCY") is not _currency
+        or globals().get("_CANONICAL_ACCOUNT_CURRENCY_CODE") is not _currency_code
+    ):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ currency validator was replaced"
+        )
+    try:
+        return _currency(value)
+    except BetdaqAccountReadOnlyError:
+        raise BetdaqEconomicReadbackError(
+            f"{field} must be canonical 3-letter uppercase provider currency"
+        ) from None
+
+
 def _provider_id(value: int | str, field: str) -> str:
     if type(value) is int:
-        if value < 0:
-            raise BetdaqEconomicReadbackError(f"{field} must be non-negative")
+        if value < 0 or value > _MAX_XSD_LONG:
+            raise BetdaqEconomicReadbackError(
+                f"{field} must fit non-negative provider xsd:long"
+            )
         return str(value)
     if (
         type(value) is not str
@@ -817,6 +1678,10 @@ def _provider_id(value: int | str, field: str) -> str:
         )
     if len(value) > 1 and value.startswith("0"):
         raise BetdaqEconomicReadbackError(f"{field} must not contain leading zeroes")
+    if int(value) > _MAX_XSD_LONG:
+        raise BetdaqEconomicReadbackError(
+            f"{field} must fit non-negative provider xsd:long"
+        )
     return value
 
 

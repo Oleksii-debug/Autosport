@@ -1404,6 +1404,9 @@ class _AdversarialMethod(str):
     def __eq__(self, _other):
         raise AssertionError("method subclass equality must not execute")
 
+    def __hash__(self):
+        raise AssertionError("method subclass hash must not execute")
+
 
 class _AdversarialDecimal(Decimal):
     def is_finite(self):

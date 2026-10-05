@@ -97,13 +97,13 @@ def _build_capability():
         return text
 
     def positive_int(value: object, field: str) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise error_cls(f"{field} must be a positive integer")
+        if type(value) is not int or value <= 0:
+            raise error_cls(f"{field} must be a positive exact integer")
         return value
 
     def nonnegative_int(value: object, field: str) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise error_cls(f"{field} must be a non-negative integer")
+        if type(value) is not int or value < 0:
+            raise error_cls(f"{field} must be a non-negative exact integer")
         return value
 
     def statement_record_count(value: object) -> int:
@@ -290,7 +290,10 @@ def _build_capability():
                         "provider_transaction_id requires provider_charge_class"
                     )
             else:
-                if self.provider_charge_class != transaction_charge_marker:
+                if (
+                    type(self.provider_charge_class) is not str
+                    or self.provider_charge_class != transaction_charge_marker
+                ):
                     raise error_cls("unsupported provider charge class")
                 positive_int(
                     self.provider_transaction_id,

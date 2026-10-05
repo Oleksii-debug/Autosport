@@ -56,12 +56,15 @@ def _init(self: PaperExecutionAdoptionRuntime, *args, **kwargs) -> None:
         self.max_quote_age,
         self._execution_lock,
         self._prepared_authorities,
+        self._TICKET_MARKER,
+        self._EXPOSURE_SCOPE_EVENT_TYPE,
+        self._EXPOSURE_SCOPE_SCHEMA,
     )
 
 
 def _require_runtime_authority(self: PaperExecutionAdoptionRuntime) -> None:
     witness = _RUNTIME_WITNESSES.get(id(self))
-    if witness is None or len(witness) != 9 or witness[0] is not self:
+    if witness is None or len(witness) != 12 or witness[0] is not self:
         raise PaperExecutionAdoptionError(
             "PAPER adoption runtime authority witness is unavailable"
         )
@@ -75,6 +78,9 @@ def _require_runtime_authority(self: PaperExecutionAdoptionRuntime) -> None:
         max_quote_age,
         execution_lock,
         prepared_authorities,
+        ticket_marker,
+        exposure_scope_event_type,
+        exposure_scope_schema,
     ) = witness
     if self.book is not book or self.ledger is not ledger or self.config is not config:
         raise PaperExecutionAdoptionError(
@@ -89,6 +95,9 @@ def _require_runtime_authority(self: PaperExecutionAdoptionRuntime) -> None:
         or self.max_quote_age is not max_quote_age
         or self._execution_lock is not execution_lock
         or self._prepared_authorities is not prepared_authorities
+        or self._TICKET_MARKER != ticket_marker
+        or self._EXPOSURE_SCOPE_EVENT_TYPE != exposure_scope_event_type
+        or self._EXPOSURE_SCOPE_SCHEMA != exposure_scope_schema
     ):
         raise PaperExecutionAdoptionError(
             "PAPER adoption runtime configuration changed after construction"

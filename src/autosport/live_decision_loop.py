@@ -1269,6 +1269,10 @@ class PersistentLiveDecisionLoop:
                     "live dependency rollback changed canonical selectors"
                 )
             self._input_specs[spec.input_id] = spec
+        # Rebuilding the focused registry creates fresh incarnation tokens. Any
+        # process-local intent/freshness cache was derived from the pre-failure
+        # incarnations and must be re-established before another economic decision.
+        self._needs_cache_rebuild = True
 
     def register_input(
         self,

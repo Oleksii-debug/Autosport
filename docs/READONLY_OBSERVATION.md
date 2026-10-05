@@ -51,6 +51,16 @@ The textual output includes source id, health state, received/accepted/rejected 
 
 Accessible live quote rows expose sport and exchange side in addition to event/market/selection identity, odds and source time. Missing optional identity dimensions are announced explicitly rather than silently omitted.
 
+## Continuous observation safety boundary
+
+The bounded continuous collector preserves the same persist-first market authority as one-shot observation. Its retry and polling waits are causal timing boundaries: a non-stopping waiter must consume the requested monotonic delay before another provider acquisition is allowed. This applies to ordinary polling intervals, same-process provider-unavailable backoff and restart-earned provider backoff. A stop signal may terminate a wait immediately; it never authorizes another provider call.
+
+The operator status JSON is non-authoritative projection only. Its path must be disjoint from the workspace root, Market Store files and SQLite sidecars, SourceHealthStore files/locks/temporary paths, and the independent monotonic-authority tree. Ancestor, descendant and symlink aliases are treated as collisions so status publication cannot create a directory or file that poisons a durable authority path.
+
+Provider/source/run identifiers, operational cursors and quality flags used by this path must remain canonical text without control characters. Malformed operational metadata fails closed before it can become durable health evidence or forge additional lines in operator-facing status output.
+
+A provider-unavailable retry is permitted only when durable SourceHealthStore evidence confirms the typed failure streak. If that confirmation read fails, collection terminates as a local health-read failure, preserves the provider outage as the primary diagnostic, and performs no retry.
+
 ## Windows GUI live snapshot
 
 The Windows GUI exposes one manual read-only refresh at a time. The mode is explicitly selected as either:

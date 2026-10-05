@@ -1772,6 +1772,22 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
 
+    def test_lay_open_without_explicit_time_bypasses_mutated_clock_dispatch(self):
+        book = PaperBook(Decimal("100"))
+        hostile_calls = 0
+
+        def forbidden():
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return "2099-01-01T00:00:00+00:00"
+
+        with patch.object(paper_module, "utc_now_iso", forbidden):
+            ticket = book.open_ticket([self._lay_leg()], Decimal("10"))
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertNotEqual(ticket.placed_at, "2099-01-01T00:00:00+00:00")
+        self.assertEqual(book.balance, Decimal("60.00"))
+
     def test_lay_open_class_debit_override_cannot_replace_liability_reserve_authority(self):
         book = PaperBook(Decimal("100"))
         hostile_calls = 0

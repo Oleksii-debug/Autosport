@@ -272,6 +272,12 @@ class PaperExecutionAdoptionRuntime:
             raise ValueError("effective max_quote_age must be positive")
         self._book_authority = self.book
         self._ledger_authority = self.ledger
+        self._ledger_path_authority = self.ledger.path
+        self._ledger_absolute_path_authority = self.ledger.path.absolute()
+        self._ledger_lock_path_authority = self.ledger._lock_path
+        self._ledger_anchor_path_authority = self.ledger._anchor_path
+        self._ledger_lock_authority = self.ledger._lock
+        self._paper_book_absolute_path_authority = self.paper_book_path.absolute()
         self._config_authority = self.config
         self._config_fingerprint_authority = self.config.fingerprint
         self._paper_book_path_authority = self.paper_book_path
@@ -286,6 +292,20 @@ class PaperExecutionAdoptionRuntime:
         if self.ledger is not self._ledger_authority:
             raise PaperExecutionAdoptionError(
                 "PAPER execution ledger authority changed after construction"
+            )
+        if (
+            self.ledger.path != self._ledger_path_authority
+            or self.ledger.path.absolute() != self._ledger_absolute_path_authority
+            or self.ledger._lock_path != self._ledger_lock_path_authority
+            or self.ledger._anchor_path != self._ledger_anchor_path_authority
+            or self.ledger._lock is not self._ledger_lock_authority
+        ):
+            raise PaperExecutionAdoptionError(
+                "PAPER execution ledger persistence authority changed after construction"
+            )
+        if self.paper_book_path.absolute() != self._paper_book_absolute_path_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution PaperBook path resolution changed after construction"
             )
         if self.config is not self._config_authority:
             raise PaperExecutionAdoptionError(

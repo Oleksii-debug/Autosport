@@ -73,6 +73,52 @@ def _metadata_from_evidence(
     }
 
 
+def _durable_open_quote(
+    event: MarketEvent,
+    identity: BetfairQuoteIdentity,
+) -> ProviderQuote:
+    """Reconstruct the exact provider-level open state represented by durable current."""
+
+    expected_event_id = _event_token(identity.market_id)
+    expected_market_id = f"{BETFAIR_STREAM_SOURCE_ID}:{identity.market_id}"
+    expected_selection_id = _identity_token(identity)
+    expected_exchange_side = (
+        identity.side.value
+        if identity.side in {BetfairQuoteSide.BACK, BetfairQuoteSide.LAY}
+        else None
+    )
+    if event.event_id != expected_event_id:
+        raise ValueError("durable Betfair bridge event identity mismatch")
+    if event.market_id != expected_market_id:
+        raise ValueError("durable Betfair bridge market identity mismatch")
+    if event.selection_id != expected_selection_id:
+        raise ValueError("durable Betfair bridge selection identity mismatch")
+    if event.exchange_side != expected_exchange_side:
+        raise ValueError("durable Betfair bridge exchange-side identity mismatch")
+    if event.status != "open":
+        raise ValueError("durable Betfair bridge open reconstruction requires open status")
+    if event.metadata.get("durable_disposition") != "open":
+        raise ValueError("durable Betfair bridge open disposition metadata mismatch")
+    if identity.price is None or event.decimal_odds != identity.price:
+        raise ValueError("durable Betfair bridge odds do not match quote identity")
+
+    return ProviderQuote(
+        provider_event_id=expected_event_id,
+        provider_market_id=identity.market_id,
+        provider_selection_id=expected_selection_id,
+        decimal_odds=event.decimal_odds,
+        observed_ts=event.observed_ts,
+        sequence=event.sequence,
+        market_type=event.market_type,
+        status="open",
+        source_ts=event.source_ts,
+        score_state=event.score_state,
+        metadata=dict(event.metadata),
+        sport=event.sport,
+        exchange_side=event.exchange_side,
+    )
+
+
 def _identity_from_metadata(metadata: object) -> BetfairQuoteIdentity:
     if type(metadata) is not dict or metadata.get("schema") != _SCHEMA:
         raise ValueError(
@@ -176,25 +222,26 @@ class BetfairAuthenticatedMarketProvider:
             if event.sequence > max_sequence:
                 max_sequence = event.sequence
             identity = _identity_from_metadata(event.metadata)
+            expected_event_id = _event_token(identity.market_id)
             expected_market_id = f"{BETFAIR_STREAM_SOURCE_ID}:{identity.market_id}"
+            expected_selection_id = _identity_token(identity)
+            if event.event_id != expected_event_id:
+                raise ValueError("durable Betfair bridge event identity mismatch")
             if event.market_id != expected_market_id:
                 raise ValueError("durable Betfair bridge market identity mismatch")
-            if event.status != "open":
+            if event.selection_id != expected_selection_id:
+                raise ValueError("durable Betfair bridge selection identity mismatch")
+            disposition = event.metadata.get("durable_disposition")
+            if event.status == "open":
+                provider_quote = _durable_open_quote(event, identity)
+            elif event.status == "closed":
+                if disposition != "closed":
+                    raise ValueError(
+                        "durable Betfair bridge closed disposition metadata mismatch"
+                    )
                 continue
-            provider_quote = ProviderQuote(
-                provider_event_id=_event_token(identity.market_id),
-                provider_market_id=identity.market_id,
-                provider_selection_id=_identity_token(identity),
-                decimal_odds=event.decimal_odds,
-                observed_ts=event.observed_ts,
-                sequence=event.sequence,
-                market_type=event.market_type,
-                status="open",
-                source_ts=event.source_ts,
-                metadata=dict(event.metadata),
-                sport=event.sport,
-                exchange_side=event.exchange_side,
-            )
+            else:
+                raise ValueError("durable Betfair bridge status is not canonical")
             if identity in restored:
                 raise ValueError("durable Betfair bridge contains duplicate open identity")
             restored[identity] = provider_quote
@@ -217,25 +264,44 @@ class BetfairAuthenticatedMarketProvider:
             raise TypeError("current must be an exact dict of canonical market events")
 
         max_sequence = 0
-        durable_open: dict[BetfairQuoteIdentity, int] = {}
+        durable_open: dict[BetfairQuoteIdentity, ProviderQuote] = {}
         for key, event in current.items():
             if type(key) is not tuple or len(key) != 2:
                 raise ValueError("durable current key must be (source_id, quote_key)")
             if type(event) is not MarketEvent:
                 raise TypeError("durable current values must be exact MarketEvent")
+            if key != (event.source_id, event.quote_key):
+                raise ValueError("durable current key does not match canonical MarketEvent key")
             if event.source_id != BETFAIR_STREAM_SOURCE_ID:
                 continue
             identity = _identity_from_metadata(event.metadata)
             if type(event.sequence) is not int or event.sequence < 1:
                 raise ValueError("durable Betfair bridge sequence must be a positive int")
             max_sequence = max(max_sequence, event.sequence)
+            expected_event_id = _event_token(identity.market_id)
+            expected_market_id = f"{BETFAIR_STREAM_SOURCE_ID}:{identity.market_id}"
+            expected_selection_id = _identity_token(identity)
+            if event.event_id != expected_event_id:
+                raise ValueError("durable Betfair bridge event identity mismatch")
+            if event.market_id != expected_market_id:
+                raise ValueError("durable Betfair bridge market identity mismatch")
+            if event.selection_id != expected_selection_id:
+                raise ValueError("durable Betfair bridge selection identity mismatch")
+            disposition = event.metadata.get("durable_disposition")
             if event.status == "open":
-                durable_open[identity] = event.sequence
+                provider_quote = _durable_open_quote(event, identity)
+                if identity in durable_open:
+                    raise ValueError("durable Betfair bridge contains duplicate open identity")
+                durable_open[identity] = provider_quote
+            elif event.status == "closed":
+                if disposition != "closed":
+                    raise ValueError(
+                        "durable Betfair bridge closed disposition metadata mismatch"
+                    )
+            else:
+                raise ValueError("durable Betfair bridge status is not canonical")
 
-        memory_open = {
-            identity: quote.sequence
-            for identity, quote in self._open_by_identity.items()
-        }
+        memory_open = dict(self._open_by_identity)
         if max_sequence != self._sequence or durable_open != memory_open:
             raise RuntimeError(
                 "durable Betfair current projection diverged from consumed stream state; "

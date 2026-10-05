@@ -20,6 +20,7 @@ from .ingestion import IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthState, SourceHealthStore
 from .integrity import ensure_durable_file, sha256_file
 from .market_bus import MarketEventBus
+from .market_mirror import MarketMirror
 from .outcome_trust import (
     OutcomeLineageBinding,
     outcome_lineage_binding_from_dataset,
@@ -333,12 +334,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         )
         stats = engine.poll_once(provider, max_items=max_items)
         source_id = stats.source_id
-        current = tuple(
-            sorted(
-                (event for event in self.store.current().values() if event.source_id == source_id),
-                key=lambda event: event.quote_key,
-            )
-        )
+        current = MarketMirror.from_store(self.store).causal_view(
+            source_ids=source_id,
+        ).events
         return ObservationResult(stats, self.source_health.get(source_id), current)
 
     def _capture_economic_authority(

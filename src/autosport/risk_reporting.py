@@ -80,6 +80,7 @@ class ProductIssuedPaperEquityPath:
     minimum_equity_point_id: str
     availability_complete: bool
     settled_history_complete: bool
+    money_scope_complete: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +106,7 @@ class ProductIssuedPaperDrawdownEvidence:
     max_drawdown_trough_id: str | None
     availability_complete: bool
     settled_history_complete: bool
+    money_scope_complete: bool
     evidence_sha256: str
 
 
@@ -133,6 +135,7 @@ class PaperRiskReport:
     equity_path_point_count: int
     equity_path_availability_complete: bool
     settled_history_complete: bool
+    money_scope_complete: bool
     history_view: str
     historical_as_known_supported: bool
     goal_id: str
@@ -178,6 +181,7 @@ def _equity_path_payload(
     points: tuple[PaperEquityPathPoint, ...],
     availability_complete: bool,
     settled_history_complete: bool,
+    money_scope_complete: bool,
 ) -> dict[str, object]:
     return {
         "schema": EQUITY_PATH_SCHEMA,
@@ -193,6 +197,7 @@ def _equity_path_payload(
         "initial_equity": _decimal_text(initial_equity, "initial_equity"),
         "availability_complete": availability_complete,
         "settled_history_complete": settled_history_complete,
+        "money_scope_complete": money_scope_complete,
         "points": [
             {
                 "sequence": point.sequence,
@@ -329,6 +334,11 @@ def build_product_issued_paper_equity_path(
     settled_history_complete = all(
         ticket.status is not TicketStatus.OPEN for ticket in book.tickets.values()
     )
+    money_scope_complete = all(
+        ticket.bankroll_id == goal_snapshot.bankroll_id
+        and ticket.currency == goal_snapshot.currency
+        for ticket in book.tickets.values()
+    )
     payload = _equity_path_payload(
         goal_snapshot=goal_snapshot,
         goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
@@ -337,6 +347,7 @@ def build_product_issued_paper_equity_path(
         points=point_tuple,
         availability_complete=availability_complete,
         settled_history_complete=settled_history_complete,
+        money_scope_complete=money_scope_complete,
     )
     path_sha256 = hashlib.sha256(
         json.dumps(
@@ -367,6 +378,7 @@ def build_product_issued_paper_equity_path(
         minimum_equity_point_id=minimum_point.point_id,
         availability_complete=availability_complete,
         settled_history_complete=settled_history_complete,
+        money_scope_complete=money_scope_complete,
     )
 
 
@@ -445,6 +457,10 @@ def verified_settled_minimum_equity(
         raise ValueError(
             "minimum equity requires all economically material PAPER tickets settled"
         )
+    if not resolved.money_scope_complete:
+        raise ValueError(
+            "minimum equity requires exact bankroll and currency provenance"
+        )
     return resolved.minimum_equity, resolved.minimum_equity_point_id
 
 
@@ -479,6 +495,7 @@ def _drawdown_evidence_payload(
         "max_drawdown_trough_id": maximum.trough_id,
         "availability_complete": path.availability_complete,
         "settled_history_complete": path.settled_history_complete,
+        "money_scope_complete": path.money_scope_complete,
     }
 
 
@@ -519,6 +536,7 @@ def build_product_issued_paper_drawdown_evidence(
         max_drawdown_trough_id=maximum.trough_id,
         availability_complete=path.availability_complete,
         settled_history_complete=path.settled_history_complete,
+        money_scope_complete=path.money_scope_complete,
         evidence_sha256=evidence_sha256,
     )
 
@@ -659,6 +677,10 @@ def resolve_durable_verified_settled_minimum_equity(
     if not resolved.settled_history_complete:
         raise ValueError(
             "minimum equity requires all economically material PAPER tickets settled"
+        )
+    if not resolved.money_scope_complete:
+        raise ValueError(
+            "minimum equity requires exact bankroll and currency provenance"
         )
     return (
         resolved.minimum_equity,
@@ -896,6 +918,7 @@ def build_paper_risk_report(
         equity_path_point_count=equity_path.point_count,
         equity_path_availability_complete=equity_path.availability_complete,
         settled_history_complete=equity_path.settled_history_complete,
+        money_scope_complete=equity_path.money_scope_complete,
         history_view=equity_path.history_view,
         historical_as_known_supported=equity_path.historical_as_known_supported,
         goal_id=goal_snapshot.goal_id,

@@ -647,6 +647,86 @@ def _reject_nonfinite_json_constant(value: str) -> None:
     raise ValueError(f"PaperBook snapshot contains non-finite JSON constant: {value}")
 
 
+def _make_paperbook_snapshot_entry_dispatch_authority():
+    raw_snapshot_descriptor = None
+    raw_snapshot_function = None
+    raw_snapshot_code = None
+    load_bytes_descriptor = None
+    load_bytes_function = None
+    load_bytes_code = None
+    snapshot_path_descriptor = None
+    snapshot_path_function = None
+    snapshot_path_code = None
+
+    def install(canonical_type: type) -> None:
+        nonlocal raw_snapshot_descriptor, raw_snapshot_function, raw_snapshot_code
+        nonlocal load_bytes_descriptor, load_bytes_function, load_bytes_code
+        nonlocal snapshot_path_descriptor, snapshot_path_function, snapshot_path_code
+        if raw_snapshot_descriptor is not None:
+            raise RuntimeError("PaperBook snapshot entry dispatch authority already installed")
+        raw_snapshot_descriptor = canonical_type.__dict__["_from_raw_snapshot"]
+        load_bytes_descriptor = canonical_type.__dict__["load_bytes"]
+        snapshot_path_descriptor = canonical_type.__dict__["_canonical_snapshot_path"]
+        if type(raw_snapshot_descriptor) is not classmethod:
+            raise TypeError("PaperBook raw snapshot decoder must remain a classmethod")
+        if type(load_bytes_descriptor) is not classmethod:
+            raise TypeError("PaperBook byte loader must remain a classmethod")
+        if type(snapshot_path_descriptor) is not staticmethod:
+            raise TypeError("PaperBook snapshot path helper must remain a staticmethod")
+        raw_snapshot_function = raw_snapshot_descriptor.__func__
+        load_bytes_function = load_bytes_descriptor.__func__
+        snapshot_path_function = snapshot_path_descriptor.__func__
+        raw_snapshot_code = raw_snapshot_function.__code__
+        load_bytes_code = load_bytes_function.__code__
+        snapshot_path_code = snapshot_path_function.__code__
+
+    def decode_raw(canonical_type: type, raw: object):
+        if raw_snapshot_descriptor is None or raw_snapshot_function is None or raw_snapshot_code is None:
+            raise RuntimeError("PaperBook raw snapshot dispatch authority is unavailable")
+        if canonical_type.__dict__.get("_from_raw_snapshot") is not raw_snapshot_descriptor:
+            raise ValueError("PaperBook raw snapshot decoder dispatch changed")
+        if raw_snapshot_function.__code__ is not raw_snapshot_code:
+            raise ValueError("PaperBook raw snapshot decoder authority changed")
+        result = raw_snapshot_function(canonical_type, raw)
+        if raw_snapshot_function.__code__ is not raw_snapshot_code:
+            raise ValueError("PaperBook raw snapshot decoder authority changed")
+        return result
+
+    def decode_bytes(canonical_type: type, payload: bytes):
+        if load_bytes_descriptor is None or load_bytes_function is None or load_bytes_code is None:
+            raise RuntimeError("PaperBook byte loader dispatch authority is unavailable")
+        if canonical_type.__dict__.get("load_bytes") is not load_bytes_descriptor:
+            raise ValueError("PaperBook byte loader dispatch changed")
+        if load_bytes_function.__code__ is not load_bytes_code:
+            raise ValueError("PaperBook byte loader authority changed")
+        result = load_bytes_function(canonical_type, payload)
+        if load_bytes_function.__code__ is not load_bytes_code:
+            raise ValueError("PaperBook byte loader authority changed")
+        return result
+
+    def canonical_path(canonical_type: type, path: object):
+        if snapshot_path_descriptor is None or snapshot_path_function is None or snapshot_path_code is None:
+            raise RuntimeError("PaperBook snapshot path dispatch authority is unavailable")
+        if canonical_type.__dict__.get("_canonical_snapshot_path") is not snapshot_path_descriptor:
+            raise ValueError("PaperBook snapshot path dispatch changed")
+        if snapshot_path_function.__code__ is not snapshot_path_code:
+            raise ValueError("PaperBook snapshot path authority changed")
+        result = snapshot_path_function(path)
+        if snapshot_path_function.__code__ is not snapshot_path_code:
+            raise ValueError("PaperBook snapshot path authority changed")
+        return result
+
+    return install, decode_raw, decode_bytes, canonical_path
+
+
+(
+    _install_paperbook_snapshot_entry_dispatch_authority,
+    _decode_canonical_paperbook_raw_snapshot,
+    _decode_canonical_paperbook_bytes,
+    _canonical_paperbook_snapshot_path,
+) = _make_paperbook_snapshot_entry_dispatch_authority()
+
+
 def _seal_paperbook_open_transition_authority(method):
     """Inject closure-captured write authorities into open_ticket."""
     method_code = method.__code__
@@ -741,8 +821,14 @@ def _seal_paperbook_json_decode_authority(method):
     duplicate_hook_code = duplicate_hook.__code__
     constant_hook = _reject_nonfinite_json_constant
     constant_hook_code = constant_hook.__code__
+    raw_snapshot_decode = _decode_canonical_paperbook_raw_snapshot
+    raw_snapshot_decode_code = raw_snapshot_decode.__code__
     type_authority = _require_paperbook_type_authority
     type_authority_code = type_authority.__code__
+    canonical_load_bytes = _decode_canonical_paperbook_bytes
+    canonical_load_bytes_code = canonical_load_bytes.__code__
+    canonical_snapshot_path = _canonical_paperbook_snapshot_path
+    canonical_snapshot_path_code = canonical_snapshot_path.__code__
 
     def require_type(target: object) -> None:
         if type_authority.__code__ is not type_authority_code:
@@ -782,7 +868,15 @@ def _seal_paperbook_json_decode_authority(method):
             raise ValueError("PaperBook duplicate-key authority changed")
         if constant_hook.__code__ is not constant_hook_code:
             raise ValueError("PaperBook non-finite constant authority changed")
-        result = method(cls, *args, _json_decode=decode, **kwargs)
+        if raw_snapshot_decode.__code__ is not raw_snapshot_decode_code:
+            raise ValueError("PaperBook raw snapshot dispatch authority changed")
+        result = method(
+            cls,
+            *args,
+            _json_decode=decode,
+            _raw_snapshot_decode=raw_snapshot_decode,
+            **kwargs,
+        )
         if method.__code__ is not method_code:
             raise ValueError("PaperBook JSON decode callable authority changed")
         return result
@@ -847,6 +941,10 @@ def _seal_paperbook_snapshot_install_authority(method):
     install_causal_code = install_causal.__code__
     type_authority = _require_paperbook_type_authority
     type_authority_code = type_authority.__code__
+    canonical_load_bytes = _decode_canonical_paperbook_bytes
+    canonical_load_bytes_code = canonical_load_bytes.__code__
+    canonical_snapshot_path = _canonical_paperbook_snapshot_path
+    canonical_snapshot_path_code = canonical_snapshot_path.__code__
 
     def require_type(target: object) -> None:
         if type_authority.__code__ is not type_authority_code:
@@ -876,7 +974,18 @@ def _seal_paperbook_snapshot_install_authority(method):
             raise ValueError("PaperBook opening install authority changed")
         if install_causal.__code__ is not install_causal_code:
             raise ValueError("PaperBook causal-history install authority changed")
-        result = method(cls, *args, _snapshot_authority_install=install, **kwargs)
+        if canonical_load_bytes.__code__ is not canonical_load_bytes_code:
+            raise ValueError("PaperBook byte loader dispatch authority changed")
+        if canonical_snapshot_path.__code__ is not canonical_snapshot_path_code:
+            raise ValueError("PaperBook snapshot path dispatch authority changed")
+        result = method(
+            cls,
+            *args,
+            _snapshot_authority_install=install,
+            _canonical_load_bytes=canonical_load_bytes,
+            _snapshot_path=canonical_snapshot_path,
+            **kwargs,
+        )
         if method.__code__ is not method_code:
             raise ValueError("PaperBook snapshot install callable authority changed")
         return result
@@ -2139,6 +2248,7 @@ class PaperBook:
         payload: bytes,
         *,
         _json_decode=None,
+        _raw_snapshot_decode=None,
     ) -> "PaperBook":
         if type(payload) is not bytes:
             raise TypeError("PaperBook.load_bytes payload must be canonical bytes")
@@ -2150,7 +2260,7 @@ class PaperBook:
             raw = _json_decode(text)
         except RecursionError as exc:
             raise ValueError("PaperBook snapshot JSON nesting is too deep") from exc
-        return cls._from_raw_snapshot(raw)
+        return _raw_snapshot_decode(cls, raw)
 
     @classmethod
     @_seal_paperbook_snapshot_install_authority
@@ -2159,8 +2269,11 @@ class PaperBook:
         path: str | Path,
         *,
         _snapshot_authority_install=None,
+        _canonical_load_bytes=None,
+        _snapshot_path=None,
     ) -> "PaperBook":
-        book = cls.load_bytes(cls._canonical_snapshot_path(path).read_bytes())
+        destination = _snapshot_path(cls, path)
+        book = _canonical_load_bytes(cls, destination.read_bytes())
         _snapshot_authority_install(book)
         return book
 
@@ -2170,6 +2283,9 @@ class PaperBook:
 # cannot redirect cls/self helper dispatch into attacker-controlled validation.
 _install_paperbook_type_authority(PaperBook)
 del _install_paperbook_type_authority
+
+_install_paperbook_snapshot_entry_dispatch_authority(PaperBook)
+del _install_paperbook_snapshot_entry_dispatch_authority
 
 # Install the exact classmethod implementation only after PaperBook exists.
 # Public runtime guards already capture the require-function closure above;

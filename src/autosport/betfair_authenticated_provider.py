@@ -145,6 +145,7 @@ class BetfairAuthenticatedMarketProvider:
         self._open_by_identity: dict[BetfairQuoteIdentity, ProviderQuote] = {}
         self._pending: tuple[ProviderQuote, ...] = ()
         self._pending_offset = 0
+        self._pending_authority_revoked = False
 
     @property
     def durable_bound(self) -> bool:
@@ -341,20 +342,30 @@ class BetfairAuthenticatedMarketProvider:
         if self._pending_offset >= len(self._pending):
             self._pending = self._build_transition()
             self._pending_offset = 0
+            self._pending_authority_revoked = any(
+                quote.status != "open" for quote in self._pending
+            )
 
         start = self._pending_offset
         stop = min(len(self._pending), start + max_items)
         quotes = self._pending[start:stop]
         self._pending_offset = stop
         truncated = stop < len(self._pending)
+        authority_revoked = self._pending_authority_revoked
         if not truncated:
             self._pending = ()
             self._pending_offset = 0
+            self._pending_authority_revoked = False
 
+        flags: list[str] = []
+        if authority_revoked:
+            flags.append("BETFAIR_AUTHORITY_REVOKED")
+        if truncated:
+            flags.append("TRUNCATED_BATCH")
         page_cursor = quotes[-1].sequence if quotes else self._sequence
         return ProviderBatch(
             self.source_id,
             quotes,
             cursor=str(page_cursor),
-            quality_flags=("TRUNCATED_BATCH",) if truncated else (),
+            quality_flags=tuple(flags),
         )

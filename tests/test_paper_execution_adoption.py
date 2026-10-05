@@ -86,6 +86,18 @@ class _HostileExchangeSide(str):
         return super().__eq__(other)
 
 
+class _HostileProtocolText(str):
+    comparisons = 0
+
+    def __eq__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__ne__(other)
+
+
 def action(
     action_id: str,
     *,
@@ -442,6 +454,38 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             finally:
                 PaperExecutionAdoptionRuntime._TICKET_MARKER = canonical_marker
 
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_hostile_protocol_marker_is_rejected_without_comparison_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("hostile-protocol-marker", side="BACK"),
+            )
+            canonical_marker = PaperExecutionAdoptionRuntime._TICKET_MARKER
+            _HostileProtocolText.comparisons = 0
+
+            try:
+                PaperExecutionAdoptionRuntime._TICKET_MARKER = _HostileProtocolText(
+                    canonical_marker
+                )
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "runtime configuration changed after construction",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="hostile-protocol-marker",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+            finally:
+                PaperExecutionAdoptionRuntime._TICKET_MARKER = canonical_marker
+
+            self.assertEqual(_HostileProtocolText.comparisons, 0)
+            self.assertEqual(ledger.events(), [])
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
 

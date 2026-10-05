@@ -659,12 +659,37 @@ def _synthetic_attempt(
     )
 
 
+def _require_canonical_execution_plan_surface(plan: ExecutionPlan) -> None:
+    if type(plan) is not ExecutionPlan:
+        raise TypeError("plan must be exact ExecutionPlan")
+    for name in (
+        "plan_id",
+        "bookmaker_profile_version",
+        "decision_id",
+        "approval_id",
+        "created_at",
+    ):
+        if type(getattr(plan, name)) is not str:
+            raise PaperExecutionStateError(
+                f"execution plan {name} must retain exact canonical text authority"
+            )
+    if type(plan.schema_version) is not int:
+        raise PaperExecutionStateError(
+            "execution plan schema_version must retain canonical integer authority"
+        )
+    if type(plan.actions) is not tuple or not plan.actions:
+        raise PaperExecutionStateError(
+            "execution plan actions must retain canonical tuple authority"
+        )
+
+
 def _validate_lay_execution_surface(
     *,
     plan: ExecutionPlan,
     observations: Mapping[str, ObservedPaperExecution],
     suspended_action_ids: frozenset[str],
 ) -> None:
+    _require_canonical_execution_plan_surface(plan)
     for action in plan.actions:
         _impl._require_canonical_action_surface(action)
         if action.side not in {"BACK", "LAY"}:

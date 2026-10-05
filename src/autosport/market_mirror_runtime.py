@@ -258,6 +258,11 @@ class FocusedMirrorDependencyIndex:
         with self._lock:
             return tuple(self._dependencies)
 
+    def registry_snapshot(self) -> tuple[FocusedMirrorDependency, ...]:
+        """Return one atomic immutable snapshot of the focused dependency registry."""
+        with self._lock:
+            return tuple(self._dependencies.values())
+
     def _dependency(self, input_id: str) -> FocusedMirrorDependency:
         normalized_id = self._input_id(input_id)
         with self._lock:

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from autosport import _paper_execution_reality_legacy as _legacy_reality
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
@@ -109,6 +110,59 @@ def _empirical_acceptance(
     registry = PaperExecutionEvidenceRegistry(ledger)
     registry.register(record)
     return record.as_observation(), registry
+
+
+def test_direct_reserve_rejects_noncanonical_run_id_before_durable_write() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        current_plan = _plan(_action("direct-run-id", side="BACK"))
+        current_config = _config()
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="run_id does not match canonical",
+        ):
+            ledger.reserve_run(
+                run_id="caller-selected-run-id",
+                trigger_id="direct-run-id",
+                plan=current_plan,
+                config=current_config,
+                started_at=STARTED_AT,
+                observation_evidence_ids={},
+            )
+
+        assert ledger.events() == []
+
+
+def test_direct_reserve_rejects_mapping_subclass_before_durable_write() -> None:
+    class HostileEvidenceMap(dict):
+        pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        current_plan = _plan(_action("direct-evidence-map", side="BACK"))
+        current_config = _config()
+        trigger_id = "direct-evidence-map"
+        run_id = _legacy_reality._run_id(
+            current_plan,
+            trigger_id,
+            current_config,
+        )
+
+        with pytest.raises(
+            TypeError,
+            match="exact dict",
+        ):
+            ledger.reserve_run(
+                run_id=run_id,
+                trigger_id=trigger_id,
+                plan=current_plan,
+                config=current_config,
+                started_at=STARTED_AT,
+                observation_evidence_ids=HostileEvidenceMap(),
+            )
+
+        assert ledger.events() == []
 
 
 def test_mutated_config_identity_fails_before_fingerprint_or_reservation() -> None:

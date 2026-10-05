@@ -275,3 +275,39 @@ def test_runtime_tick_identity_guard_rejects_session_drift() -> None:
             expected_source_id="source-1",
             expected_session_id="different-session",
         )
+
+
+def test_runtime_status_identity_guard_rejects_string_subclass_source() -> None:
+    from autosport.product_gui_worker import _require_runtime_status_identity
+
+    class HostileSourceId(str):
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("source subtype equality must not execute")
+
+    status = _status(SessionState.RUNNING, cycles=0)
+    object.__setattr__(status, "source_id", HostileSourceId("source-1"))
+
+    with pytest.raises(ProductEntrypointError):
+        _require_runtime_status_identity(
+            status,
+            expected_source_id="source-1",
+            expected_state=SessionState.RUNNING,
+        )
+
+
+def test_runtime_tick_identity_guard_rejects_string_subclass_source() -> None:
+    from autosport.product_gui_worker import _require_runtime_tick_identity
+
+    class HostileSourceId(str):
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("source subtype equality must not execute")
+
+    tick = _tick()
+    object.__setattr__(tick, "source_id", HostileSourceId("source-1"))
+
+    with pytest.raises(ProductEntrypointError):
+        _require_runtime_tick_identity(
+            tick,
+            expected_source_id="source-1",
+            expected_session_id="session-1",
+        )

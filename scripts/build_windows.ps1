@@ -390,6 +390,7 @@ root = pathlib.Path(sys.argv[1])
 manifest = json.loads(sys.argv[2])
 required = {
     "scripts/package_windows.py",
+    "src/autosport/workspace_lock.py",
     "src/autosport/release_package.py",
     "src/autosport/data_tool_package.py",
 }
@@ -426,6 +427,7 @@ def load_module(name, relative):
     setattr(package, name.rsplit(".", 1)[1], module)
     return module
 
+load_module("autosport.workspace_lock", "src/autosport/workspace_lock.py")
 load_module("autosport.release_package", "src/autosport/release_package.py")
 load_module("autosport.data_tool_package", "src/autosport/data_tool_package.py")
 script_path, script_data = payloads["scripts/package_windows.py"]

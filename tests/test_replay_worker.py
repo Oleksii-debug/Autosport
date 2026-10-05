@@ -325,7 +325,10 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertTrue(worker.start(task))
         failed = self._terminal(worker)
         self.assertIsNone(failed.result)
-        self.assertEqual(failed.error, "BaseException: rendered safely")
+        self.assertEqual(
+            failed.error,
+            "BaseException: exception details unavailable",
+        )
         self.assertFalse(worker.busy)
 
         sentinel = object()

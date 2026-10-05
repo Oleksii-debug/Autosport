@@ -906,6 +906,69 @@ class LiveObservationTests(unittest.TestCase):
             )
         )
 
+    def test_sqlite_retry_clears_inflight_when_reset_descriptor_lookup_fails(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+        )
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            @property
+            def reset_pending_snapshot(self):
+                raise RuntimeError("reset descriptor failed")
+
+        class Engine:
+            def poll_once(self, provider, max_items: int = 1000):
+                provider.read_batch(max_items=max_items)
+                raise sqlite3.OperationalError("database-locked")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "database-locked") as raised:
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertFalse(wrapped.has_inflight)
+        self.assertTrue(
+            any(
+                "provider pending-snapshot reset also failed: "
+                "RuntimeError: reset descriptor failed" in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+
+    def test_rejected_read_reset_descriptor_failure_preserves_primary_error(self):
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                return object()
+
+            @property
+            def reset_pending_snapshot(self):
+                raise RuntimeError("reset descriptor failed")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(TypeError, "exact ProviderBatch") as raised:
+            wrapped.read_batch(max_items=1)
+
+        self.assertFalse(wrapped.has_inflight)
+        self.assertTrue(
+            any(
+                "provider rejected-read snapshot reset lookup also failed: "
+                "RuntimeError: reset descriptor failed" in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+
     def test_sqlite_retry_preserves_primary_failure_when_provider_reset_fails(self):
         batch = ProviderBatch(
             source_id="live-fixture",

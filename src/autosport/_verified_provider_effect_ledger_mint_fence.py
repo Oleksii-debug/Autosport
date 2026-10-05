@@ -28,6 +28,7 @@ def _install_verified_provider_effect_ledger_mint_fence() -> None:
     ledger_type = RealExecutionLedger
     raw_append = ledger_type._append
     raw_writer = ledger_type._bind_verified_provider_effect_evidence
+    event_type = EventType
     evidence_type = VerifiedProviderEffectEvidence
     binding_type = VerifiedProviderEffectBindingView
     verify = assert_verified_provider_evidence_authoritative
@@ -57,6 +58,13 @@ def _install_verified_provider_effect_ledger_mint_fence() -> None:
         attempt_id: str | None,
         payload: dict[str, object],
     ) -> None:
+        # The underlying private append historically only dereferenced ``kind.value``.
+        # A caller-defined object could therefore masquerade as the reserved durable
+        # event while bypassing an Enum-member identity comparison.  All canonical
+        # ledger writers use exact EventType members, so reject any polymorphic kind
+        # before deciding whether the provider-effect grant is required.
+        if type(kind) is not event_type:
+            raise integrity_error("execution ledger event type must be exact EventType")
         if kind is verified_kind:
             active = getattr(gate, "active", None)
             if active is None:

@@ -299,6 +299,7 @@ class FocusedMirrorDependencyIndex:
             dependencies = tuple(
                 dependency for dependency, _revision in dependency_state
             )
+            registry_revision = self._registry_revision
 
         if batch.full_refresh_required:
             captured = self._mirror.view()
@@ -348,6 +349,12 @@ class FocusedMirrorDependencyIndex:
 
         affected: list[str] = []
         with self._lock:
+            if self._registry_revision != registry_revision:
+                # The drained invalidation was classified against a registry that
+                # ceased to exist while canonical mirror truth was being read.
+                # Returning every live input is conservative but prevents a same-ID
+                # replacement/reincarnation from silently consuming the batch.
+                return tuple(self._dependencies)
             for dependency, dependency_revision in dependency_state:
                 if (
                     self._dependencies.get(dependency.input_id) != dependency

@@ -662,6 +662,39 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertNotIn(secret, raw)
             self.assertIn("[REDACTED]", raw)
 
+    def test_reporter_runtime_failure_cannot_abort_durable_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            provider = SequenceProvider([_batch(_quote(), cursor="first")])
+            calls = []
+
+            def broken_reporter(message):
+                calls.append(message)
+                raise RuntimeError("display backend unavailable")
+
+            result = run_continuous_observation(
+                provider,
+                self._config(workspace, max_cycles=1),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                waiter=lambda _seconds: False,
+                reporter=broken_reporter,
+            )
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.successful_cycles, 1)
+            self.assertEqual(provider.calls, 1)
+            self.assertGreaterEqual(len(calls), 3)
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+            status = json.loads(
+                (workspace / "continuous_observation_status.json").read_text("utf-8")
+            )
+            self.assertEqual(status["state"], "stopped")
+
     def test_status_publication_failure_happens_before_provider_network_io(self):
         with tempfile.TemporaryDirectory() as tmp:
             provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])

@@ -8,6 +8,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 import autosport._paper_execution_lay_adoption_guard as lay_guard
+import autosport.paper_execution_adoption as adoption_module
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
@@ -224,6 +225,44 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(ledger.events(), [])
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_binding_mutation_after_execution_cannot_redirect_materialized_exposure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("post-run-binding-mutation", side="BACK")
+            current_prepared = prepared(runtime, current)
+            binding = current_prepared.exposure_bindings[0]
+            original_execute = adoption_module.execute_paper_plan
+
+            def execute_then_mutate(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(binding, "bankroll_id", "redirected-bankroll")
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                execute_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "binding authority changed after mint",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="post-run-binding-mutation",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            run_events = [
+                event
+                for event in ledger.events()
+                if event["event_type"] == "RUN_COMPLETED"
+            ]
+            self.assertEqual(len(run_events), 1)
 
     def test_post_mint_binding_mutation_fails_before_durable_scope_publication(self):
         with tempfile.TemporaryDirectory() as tmp:

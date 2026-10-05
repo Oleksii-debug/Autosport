@@ -431,7 +431,6 @@ class FocusedMirrorDependencyIndex:
                     raise KeyError(
                         f"unknown focused mirror input {normalized_id!r}"
                     ) from exc
-                registry_revision = self._registry_revision
 
             result = reader(dependency)
 
@@ -441,14 +440,12 @@ class FocusedMirrorDependencyIndex:
                     raise KeyError(
                         f"unknown focused mirror input {normalized_id!r}"
                     )
-                if (
-                    self._registry_revision == registry_revision
-                    and current_dependency == dependency
-                ):
+                if current_dependency == dependency:
                     return result
-            # Registry truth changed while the dependency-bearing read was in
-            # flight. Retry against the now-authoritative selectors rather than
-            # returning a result from an incarnation that no longer exists.
+            # The target dependency changed while the dependency-bearing read was
+            # in flight. Retry against its now-authoritative selectors rather than
+            # returning a result from an incarnation that no longer exists. Churn
+            # in unrelated registrations does not invalidate this selector read.
 
     def _stable_live_decision_view(
         self,

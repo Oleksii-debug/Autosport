@@ -8,6 +8,7 @@ import tk_uia
 
 from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
+from .product_windows_gui import PRODUCT_RUNTIME_AUTOMATION_IDS, ProductWindowsAutosportApp
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 from .windows_layout import OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS, WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
@@ -28,6 +29,11 @@ _REQUIRED_PATTERNS = {
     AUTOMATION_IDS["live_quotes"]: set(),
     AUTOMATION_IDS["evaluation"]: set(),
     WINDOWS_BANKROLL_AUTOMATION_ID: {"VALUE"},
+    PRODUCT_RUNTIME_AUTOMATION_IDS["start"]: {"INVOKE"},
+    PRODUCT_RUNTIME_AUTOMATION_IDS["stop"]: {"INVOKE"},
+    PRODUCT_RUNTIME_AUTOMATION_IDS["status"]: {"VALUE"},
+    PRODUCT_RUNTIME_AUTOMATION_IDS["source"]: {"VALUE"},
+    PRODUCT_RUNTIME_AUTOMATION_IDS["source_save"]: {"INVOKE"},
     WINDOWS_SHELL_AUTOMATION_IDS["navigation"]: {"VALUE"},
     WINDOWS_SHELL_AUTOMATION_IDS["state"]: {"VALUE"},
     WINDOWS_SHELL_AUTOMATION_IDS["open"]: {"INVOKE"},
@@ -61,6 +67,11 @@ _EXPECTED_ROLES = {
     AUTOMATION_IDS["live_quotes"]: "LIST",
     AUTOMATION_IDS["evaluation"]: "LIST",
     WINDOWS_BANKROLL_AUTOMATION_ID: "TEXT",
+    PRODUCT_RUNTIME_AUTOMATION_IDS["start"]: "PUSH_BUTTON",
+    PRODUCT_RUNTIME_AUTOMATION_IDS["stop"]: "PUSH_BUTTON",
+    PRODUCT_RUNTIME_AUTOMATION_IDS["status"]: "TEXT",
+    PRODUCT_RUNTIME_AUTOMATION_IDS["source"]: "COMBO_BOX",
+    PRODUCT_RUNTIME_AUTOMATION_IDS["source_save"]: "PUSH_BUTTON",
     WINDOWS_SHELL_AUTOMATION_IDS["navigation"]: "COMBO_BOX",
     WINDOWS_SHELL_AUTOMATION_IDS["state"]: "TEXT",
     WINDOWS_SHELL_AUTOMATION_IDS["open"]: "PUSH_BUTTON",
@@ -132,6 +143,14 @@ def _bankroll_summary_is_readonly(app: WindowsAutosportApp) -> bool:
     return _readonly_entry(getattr(app, "bank_summary", None))
 
 
+def _product_runtime_status_is_readonly(
+    app: ProductWindowsAutosportApp,
+) -> bool:
+    """Bind product runtime status evidence to its actual readonly widget."""
+
+    return _readonly_entry(getattr(app, "product_status_entry", None))
+
+
 def _shell_state_is_readonly(app: WindowsAutosportApp) -> bool:
     """Bind shell presentation-state evidence to its actual Tk readonly state."""
     return _readonly_entry(getattr(app, "shell_state", None))
@@ -191,6 +210,7 @@ def summarize_description(
     description: Any,
     *,
     bankroll_readonly: bool | None = None,
+    product_runtime_status_readonly: bool | None = None,
     shell_state_readonly: bool | None = None,
     owner_economic_state_readonly: bool | None = None,
     workbench_result_readonly: bool | None = None,
@@ -259,6 +279,17 @@ def summarize_description(
                 f"automation_id={WINDOWS_BANKROLL_AUTOMATION_ID}: bankroll summary is not runtime readonly"
             )
 
+    product_status_id = PRODUCT_RUNTIME_AUTOMATION_IDS["status"]
+    if product_status_id in controls:
+        controls[product_status_id]["read_only"] = (
+            product_runtime_status_readonly is True
+        )
+        if product_runtime_status_readonly is not True:
+            failures.append(
+                f"automation_id={product_status_id}: "
+                "product runtime status is not runtime readonly"
+            )
+
     shell_state_id = WINDOWS_SHELL_AUTOMATION_IDS["state"]
     if shell_state_id in controls:
         controls[shell_state_id]["read_only"] = shell_state_readonly is True
@@ -309,11 +340,11 @@ def summarize_description(
 def run_accessibility_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    app: WindowsAutosportApp | None = None
+    app: ProductWindowsAutosportApp | None = None
     owner_dialog: Any | None = None
     dialog: Any | None = None
     try:
-        app = WindowsAutosportApp()
+        app = ProductWindowsAutosportApp()
         app.update_idletasks()
         app.update()
         # Snapshot the already-enabled main window before opening later Toplevels.
@@ -338,6 +369,7 @@ def run_accessibility_audit(output_path: str | Path) -> int:
                 dialog_description,
             ),
             bankroll_readonly=_bankroll_summary_is_readonly(app),
+            product_runtime_status_readonly=_product_runtime_status_is_readonly(app),
             shell_state_readonly=_shell_state_is_readonly(app),
             owner_economic_state_readonly=_owner_economic_state_is_readonly(app),
             workbench_result_readonly=_disabled_text_is_readonly(controls.get("result")),

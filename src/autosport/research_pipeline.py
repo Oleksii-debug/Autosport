@@ -642,6 +642,19 @@ class DeterministicResearchCritic:
                 selected_hashes = tuple(item.content_sha256 for item in included)
                 if len(included) < self.policy.minimum_evidence_per_leg:
                     reasons.append("insufficient causal evidence linked by forecast hash")
+                blocked_included = sorted(
+                    {
+                        flag
+                        for item in included
+                        for flag in item.quality_flags
+                        if flag in self.policy.blocked_quality_flags
+                    }
+                )
+                if blocked_included:
+                    reasons.append(
+                        "blocked data-quality flags in forecast evidence: "
+                        + ",".join(blocked_included)
+                    )
 
                 if not available:
                     reasons.append("no evidence was available by decision time")
@@ -655,15 +668,6 @@ class DeterministicResearchCritic:
                         reasons.append("latest evidence hash is absent from ForecastRecord")
                     if latest.decimal_odds != leg.decimal_odds:
                         reasons.append("candidate odds do not match latest evidence")
-                    blocked = sorted(
-                        set(latest.quality_flags).intersection(
-                            self.policy.blocked_quality_flags
-                        )
-                    )
-                    if blocked:
-                        reasons.append(
-                            "blocked data-quality flags: " + ",".join(blocked)
-                        )
                     if self.policy.require_market_snapshot_hash:
                         if forecast.market_snapshot_hash is None:
                             reasons.append("ForecastRecord lacks market snapshot hash")

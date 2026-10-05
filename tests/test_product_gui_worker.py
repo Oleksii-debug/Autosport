@@ -418,3 +418,71 @@ def test_worker_rejects_workspace_path_subclass_before_fspath_dispatch(
         )
 
     assert worker.busy is False
+
+
+def test_runtime_status_guard_rejects_cycle_count_subclass() -> None:
+    from autosport.product_gui_worker import _require_runtime_status_identity
+
+    class HostileInt(int):
+        def __lt__(self, _other: object) -> bool:
+            raise AssertionError("cycle subtype comparison must not execute")
+
+    status = _status(SessionState.RUNNING, cycles=0)
+    object.__setattr__(status, "cycles_completed", HostileInt(0))
+
+    with pytest.raises(ProductEntrypointError):
+        _require_runtime_status_identity(
+            status,
+            expected_source_id="source-1",
+            expected_state=SessionState.RUNNING,
+        )
+
+
+def test_runtime_tick_guard_rejects_collection_subclass() -> None:
+    from autosport.product_gui_worker import _require_runtime_tick_identity
+
+    class HostileTuple(tuple):
+        def __len__(self) -> int:
+            raise AssertionError("tuple subtype length must not execute")
+
+    tick = _tick()
+    object.__setattr__(
+        tick,
+        "committed_delta_ids",
+        HostileTuple(tick.committed_delta_ids),
+    )
+
+    with pytest.raises(ProductEntrypointError):
+        _require_runtime_tick_identity(
+            tick,
+            expected_source_id="source-1",
+            expected_session_id="session-1",
+        )
+
+
+def test_runtime_tick_guard_rejects_invalid_cycle_index() -> None:
+    from autosport.product_gui_worker import _require_runtime_tick_identity
+
+    tick = _tick()
+    object.__setattr__(tick, "cycle_index", 0)
+
+    with pytest.raises(ProductEntrypointError):
+        _require_runtime_tick_identity(
+            tick,
+            expected_source_id="source-1",
+            expected_session_id="session-1",
+        )
+
+
+def test_runtime_status_guard_rejects_unbounded_last_success() -> None:
+    from autosport.product_gui_worker import _require_runtime_status_identity
+
+    status = _status(SessionState.RUNNING, cycles=1)
+    object.__setattr__(status, "last_success_at", "x" * 129)
+
+    with pytest.raises(ProductEntrypointError):
+        _require_runtime_status_identity(
+            status,
+            expected_source_id="source-1",
+            expected_state=SessionState.RUNNING,
+        )

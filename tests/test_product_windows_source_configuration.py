@@ -397,3 +397,25 @@ def test_worker_start_failure_does_not_mask_session_reopen_failure(
         ProductWindowsAutosportApp.start_product_runtime(surface)
 
     assert surface.product_status.value == "recovery-required"
+
+
+def test_failed_prior_session_teardown_does_not_relabel_or_quarantine_product_root(
+    tmp_path: Path,
+) -> None:
+    surface = _start_surface(tmp_path)
+    prior_workspace = tmp_path / "strategy-workspace"
+    surface._active_workspace = prior_workspace
+    blocked: list[Path] = []
+    surface._block_workspace_for_recovery = blocked.append
+    surface._hide_uncertain_economic_state = lambda _message: False
+
+    with patch(
+        "autosport.product_windows_gui.load_operator_source_configuration",
+        return_value=_configured(),
+    ):
+        ProductWindowsAutosportApp.start_product_runtime(surface)
+
+    assert surface.product_worker.started == []
+    assert surface._active_workspace == prior_workspace
+    assert blocked == []
+    assert "не вдалося безпечно закрити" in surface.product_status.value

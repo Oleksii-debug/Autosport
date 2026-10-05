@@ -591,6 +591,14 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     evaluated_at_ms=evaluated_at_ms,
                 )
             frame_sha, received_monotonic_ns, frame_sequence = frame_binding
+            evidence = self._freshness.resolve(identity)
+            if (
+                evidence is None
+                or evidence.evidence_id != structural.evidence_id
+                or evidence.provider_conflate_ms
+                != self._subscription.requested_conflate_ms
+            ):
+                return False
             market_id = identity.market_id
             if "EX_MARKET_DEF" not in self._subscription.market_data_fields:
                 return BetfairAuthenticatedFreshnessDecision(
@@ -644,6 +652,24 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 return BetfairAuthenticatedFreshnessDecision(
                     verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
                     reason="configured Betfair app key class is not LIVE",
+                    evidence_id=structural.evidence_id,
+                    subscription_id=self._subscription.subscription_id,
+                    transport_frame_sha256=frame_sha,
+                    evaluated_at_ms=evaluated_at_ms,
+                )
+            evidence = self._freshness.resolve(identity)
+            if (
+                evidence is None
+                or evidence.evidence_id != structural.evidence_id
+                or evidence.provider_conflate_ms
+                != self._subscription.requested_conflate_ms
+            ):
+                return BetfairAuthenticatedFreshnessDecision(
+                    verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
+                    reason=(
+                        "provider-reported conflation does not match the "
+                        "authenticated subscription request"
+                    ),
                     evidence_id=structural.evidence_id,
                     subscription_id=self._subscription.subscription_id,
                     transport_frame_sha256=frame_sha,

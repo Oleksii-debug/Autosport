@@ -6,6 +6,7 @@ from autosport.betdaq_catalogue_binding import (
     BetdaqCatalogueEvidence,
     BetdaqLiveCatalogueResolver,
 )
+from autosport.betdaq_readonly_live_provider import BetdaqLiveReadOnlyProvider
 from autosport.betdaq_rate_governor import (
     BetdaqBlacklistStatus,
     BetdaqRateAdmission,
@@ -16,15 +17,17 @@ from autosport.betdaq_readonly_provider import BetdaqMarketBinding
 from autosport.domain import MarketType
 
 
-def _admission() -> BetdaqRateAdmission:
+def _admission(
+    method: str = "GetEventSubTreeNoSelections",
+) -> BetdaqRateAdmission:
     return BetdaqRateAdmission(
         governor_id="fixture-governor",
         policy_revision="fixture-policy",
         policy_fingerprint="1" * 64,
         documented_policy_sha256="2" * 64,
         tier=BetdaqRateTier.DEFAULT,
-        method="GetEventSubTreeNoSelections",
-        rate_policy_key="GetEventSubTreeNoSelections",
+        method=method,
+        rate_policy_key=method,
         priority=BetdaqRatePriority.BACKGROUND_READ,
         sequence=1,
         admitted_monotonic=1.0,
@@ -87,6 +90,22 @@ class _MissingAdmissionTransport:
         raise TimeoutError("transient dispatch without governor evidence")
 
 
+class _AdmissionOnlyTransport:
+    def __init__(self, admission: BetdaqRateAdmission) -> None:
+        self.last_rate_admission = admission
+
+
+def _live_provider_with_admission(
+    admission: BetdaqRateAdmission,
+) -> BetdaqLiveReadOnlyProvider:
+    # Bypass network-bearing construction only to isolate the evidence-binding method.
+    provider = object.__new__(BetdaqLiveReadOnlyProvider)
+    transport = _AdmissionOnlyTransport(admission)
+    provider.transport = transport
+    provider._live_transport = transport
+    return provider
+
+
 def test_catalogue_retry_rejects_reused_rate_admission() -> None:
     transport = _ReusedAdmissionTransport()
 
@@ -119,3 +138,17 @@ def test_catalogue_evidence_requires_trimmed_provider_call_id() -> None:
 def test_catalogue_evidence_rejects_provider_time_after_receipt() -> None:
     with pytest.raises(ValueError, match="cannot follow catalogue receipt"):
         _catalogue_evidence(provider_created_at="2026-10-05T06:00:02Z")
+
+
+def test_live_getprices_evidence_rejects_catalogue_admission() -> None:
+    provider = _live_provider_with_admission(_admission())
+
+    with pytest.raises(ValueError, match="GetPrices acquisition bound wrong rate admission"):
+        provider._rate_admission_receipt()
+
+
+def test_live_getprices_evidence_accepts_getprices_admission() -> None:
+    admission = _admission("GetPrices")
+    provider = _live_provider_with_admission(admission)
+
+    assert provider._rate_admission_receipt() == admission.receipt_sha256

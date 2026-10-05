@@ -5,9 +5,14 @@ import inspect
 
 import pytest
 
+from autosport.betfair_standard_limit_price_bound import (
+    resolve_betfair_standard_limit_price_bound,
+)
 from autosport.campaign_cost_evidence import CostClass, REQUIRED_COST_CLASSES
+from autosport.real_execution_ledger import RealExecutionLedger
 import autosport.prospective_applicable_cost as subject
 from prospective_applicable_cost_test_support import canonical_applicable_cost_case
+from test_supervised_plan_issuance import _active_runtime_profile, _issue
 
 
 def _resolve_real():
@@ -268,6 +273,53 @@ def test_schema_v3_known_zero_slippage_requires_product_source_identity():
         match="source family|source authority|requires evidence",
     ):
         subject._SEALED_RESOLUTION_VALIDATOR(source_less)
+
+
+def test_product_slippage_resolver_rejects_verified_source_from_different_intent_and_plan(
+    monkeypatch,
+    tmp_path,
+):
+    bound, approval, issuance_store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(issuance_store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        with _active_runtime_profile(issuance_store.workspace) as runtime_profile:
+            with pytest.raises(
+                subject.ProspectiveApplicableCostError,
+                match="intent mismatch|portfolio plan mismatch",
+            ):
+                subject.resolve_prospective_applicable_costs_with_betfair_standard_limit(
+                    intent=intent,
+                    plan=plan,
+                    router_store=router_store,
+                    model_request_id=request.request_id,
+                    decision_at=decision_at,
+                    slippage_evidence=evidence,
+                    ledger=ledger,
+                    issuance_store=issuance_store,
+                    runtime_profile=runtime_profile,
+                    execution_plan_id=bound.execution_plan.plan_id,
+                    action_id=action.action_id,
+                )
 
 
 def test_product_slippage_resolver_does_not_accept_caller_money_or_known_zero_flags():

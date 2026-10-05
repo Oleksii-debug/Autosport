@@ -409,6 +409,45 @@ class LiveObservationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_open_store_poll_rejects_equal_string_subclass_source_substitution(self):
+        class SourceId(str):
+            pass
+
+        class MutatingProvider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.source_id = SourceId("live-fixture")
+                return ProviderBatch(
+                    source_id="live-fixture",
+                    quotes=(),
+                    cursor="cursor-1",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "source identity changed during live batch read",
+                ):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        MutatingProvider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
+                store.close()
+
     def test_open_store_poll_rejects_provider_source_mutation_during_read_before_persistence(self):
         class MutatingProvider:
             def __init__(self) -> None:

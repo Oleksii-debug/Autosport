@@ -532,7 +532,7 @@ class ContinuousObservationTests(unittest.TestCase):
                 ]
             )
             with self.assertRaisesRegex(
-                RuntimeError,
+                ValueError,
                 "waiter returned before provider backoff elapsed",
             ):
                 run_continuous_observation(

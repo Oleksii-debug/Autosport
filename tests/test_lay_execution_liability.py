@@ -2898,5 +2898,36 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(book._lifecycle, [])
 
 
+    def test_lay_open_rejects_in_place_bankroll_debit_code_mutation_before_execution(self):
+        book = PaperBook(Decimal("100"))
+        debit = lay_guard._ORIGINAL_DEBIT_BALANCE
+        original_code = debit.__code__
+        attacker_calls = 0
+
+        def hostile_debit(_cls, balance, _amount):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            return balance
+
+        try:
+            debit.__code__ = hostile_debit.__code__
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical debit authority changed",
+            ):
+                book.open_ticket(
+                    [self._lay_leg()],
+                    Decimal("10"),
+                    placed_at=QUOTE_AT,
+                )
+        finally:
+            debit.__code__ = original_code
+
+        self.assertEqual(attacker_calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book._lifecycle, [])
+
+
 if __name__ == "__main__":
     unittest.main()

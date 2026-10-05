@@ -74,7 +74,7 @@ def _exact_snapshot(
     evidence: BetfairStandardLimitPriceBoundEvidence,
 ) -> tuple[tuple[str, type[object], object], ...]:
     if type(evidence) is not BetfairStandardLimitPriceBoundEvidence:
-        raise BetfairStandardLimitPriceBoundError(
+        raise error_cls(
             "price-bound evidence must be the exact canonical evidence type"
         )
 
@@ -83,7 +83,7 @@ def _exact_snapshot(
         try:
             value = object.__getattribute__(evidence, field)
         except (AttributeError, TypeError) as exc:
-            raise BetfairStandardLimitPriceBoundError(
+            raise error_cls(
                 "price-bound evidence is incomplete"
             ) from exc
         comparable: object = str(value) if type(value) is Decimal else value
@@ -99,11 +99,11 @@ def _require_execution_state_continuity(
     """Require ledger continuity without allowing ledger rows to mint provenance."""
 
     if type(ledger) is not RealExecutionLedger:
-        raise BetfairStandardLimitPriceBoundError(
+        raise error_cls(
             "ledger must be the exact canonical RealExecutionLedger type"
         )
     if type(bound) is not BoundSupervisedExecutionPlan:
-        raise BetfairStandardLimitPriceBoundError(
+        raise error_cls(
             "issued bound must be the exact canonical BoundSupervisedExecutionPlan type"
         )
 
@@ -111,11 +111,11 @@ def _require_execution_state_continuity(
     try:
         saga = RealExecutionLedger.saga(ledger, bound.execution_plan.plan_id)
     except KeyError as exc:
-        raise BetfairStandardLimitPriceBoundError(
+        raise error_cls(
             "product-issued execution plan is not durably reserved"
         ) from exc
     if saga.plan_fingerprint != bound.execution_plan.fingerprint:
-        raise BetfairStandardLimitPriceBoundError(
+        raise error_cls(
             "durable execution-plan fingerprint mismatches product issuance"
         )
     if not RealExecutionLedger.supervised_approval_is_active(
@@ -124,7 +124,7 @@ def _require_execution_state_continuity(
         approval_id=bound.execution_plan.approval_id,
         approval_fingerprint=bound.approval_fingerprint,
     ):
-        raise BetfairStandardLimitPriceBoundError(
+        raise error_cls(
             "durable supervised approval is missing or revoked"
         )
 
@@ -142,7 +142,7 @@ def _require_issuance_time_provider_request(
         if item.get("action_id") == expected.action_id
     ]
     if len(matches) != 1:
-        raise BetfairStandardLimitPriceBoundError(
+        raise error_cls(
             "Betfair request identity was not durably proven at plan issuance"
         )
     durable = matches[0]
@@ -155,7 +155,7 @@ def _require_issuance_time_provider_request(
         "write_adapter_version": expected.write_adapter_version,
     }
     if durable != expected_request:
-        raise BetfairStandardLimitPriceBoundError(
+        raise error_cls(
             "durable issuance-time Betfair request identity changed"
         )
 
@@ -165,6 +165,14 @@ def _build_product_verifier():
 
     resolver = _price_bound_module.resolve_betfair_standard_limit_price_bound
     resolver_code = resolver.__code__
+    error_cls = BetfairStandardLimitPriceBoundError
+    evidence_cls = BetfairStandardLimitPriceBoundEvidence
+    issuance_store_cls = SupervisedPlanIssuanceStore
+    issuance_error_cls = SupervisedPlanIssuanceError
+    ledger_cls = RealExecutionLedger
+    bound_cls = BoundSupervisedExecutionPlan
+    decimal_cls = Decimal
+    evidence_fields = tuple(_EVIDENCE_FIELDS)
 
     direct_helpers = (
         ("resolver text", "_text", _price_bound_module._text),
@@ -199,13 +207,19 @@ def _build_product_verifier():
     bound_verify_code = bound_verify.__code__
     bound_action_for = BoundSupervisedExecutionPlan.action_for
     bound_action_for_code = bound_action_for.__code__
+    issuance_load = issuance_store_cls.load
+    issuance_load_code = issuance_load.__code__
+    ledger_saga = ledger_cls.saga
+    ledger_saga_code = ledger_saga.__code__
+    ledger_approval_active = ledger_cls.supervised_approval_is_active
+    ledger_approval_active_code = ledger_approval_active.__code__
 
     def require_canonical_resolver_authority() -> None:
         if (
             _price_bound_module.resolve_betfair_standard_limit_price_bound is not resolver
             or resolver.__code__ is not resolver_code
         ):
-            raise BetfairStandardLimitPriceBoundError(
+            raise error_cls(
                 "canonical Betfair price-bound resolver authority changed"
             )
         for label, name, function, code in helper_witnesses:
@@ -213,7 +227,7 @@ def _build_product_verifier():
                 getattr(_price_bound_module, name, None) is not function
                 or function.__code__ is not code
             ):
-                raise BetfairStandardLimitPriceBoundError(
+                raise error_cls(
                     f"canonical Betfair price-bound {label} authority changed"
                 )
         if (
@@ -222,7 +236,7 @@ def _build_product_verifier():
             or _price_bound_module.BetfairSupervisedPlaceOrdersClient.place_action
             is not captured_place_action
         ):
-            raise BetfairStandardLimitPriceBoundError(
+            raise error_cls(
                 "canonical Betfair placeOrders writer authority changed"
             )
         if (
@@ -233,8 +247,99 @@ def _build_product_verifier():
             or BoundSupervisedExecutionPlan.action_for is not bound_action_for
             or bound_action_for.__code__ is not bound_action_for_code
         ):
-            raise BetfairStandardLimitPriceBoundError(
+            raise error_cls(
                 "canonical Betfair bound-plan dependency authority changed"
+            )
+
+    def require_verifier_dependency_authority() -> None:
+        if (
+            issuance_load.__code__ is not issuance_load_code
+            or ledger_saga.__code__ is not ledger_saga_code
+            or ledger_approval_active.__code__ is not ledger_approval_active_code
+        ):
+            raise error_cls(
+                "canonical Betfair verifier dependency authority changed"
+            )
+
+    def exact_snapshot(
+        evidence: BetfairStandardLimitPriceBoundEvidence,
+    ) -> tuple[tuple[str, type[object], object], ...]:
+        if type(evidence) is not evidence_cls:
+            raise error_cls(
+                "price-bound evidence must be the exact canonical evidence type"
+            )
+        snapshot: list[tuple[str, type[object], object]] = []
+        for field in evidence_fields:
+            try:
+                value = object.__getattribute__(evidence, field)
+            except (AttributeError, TypeError) as exc:
+                raise error_cls("price-bound evidence is incomplete") from exc
+            comparable: object = str(value) if type(value) is decimal_cls else value
+            snapshot.append((field, type(value), comparable))
+        return tuple(snapshot)
+
+    def require_execution_state_continuity(
+        *,
+        ledger: RealExecutionLedger,
+        bound: BoundSupervisedExecutionPlan,
+    ) -> None:
+        if type(ledger) is not ledger_cls:
+            raise error_cls(
+                "ledger must be the exact canonical RealExecutionLedger type"
+            )
+        if type(bound) is not bound_cls:
+            raise error_cls(
+                "issued bound must be the exact canonical BoundSupervisedExecutionPlan type"
+            )
+        require_verifier_dependency_authority()
+        bound_verify(bound)
+        try:
+            saga = ledger_saga(ledger, bound.execution_plan.plan_id)
+        except KeyError as exc:
+            raise error_cls(
+                "product-issued execution plan is not durably reserved"
+            ) from exc
+        if saga.plan_fingerprint != bound.execution_plan.fingerprint:
+            raise error_cls(
+                "durable execution-plan fingerprint mismatches product issuance"
+            )
+        if not ledger_approval_active(
+            ledger,
+            plan_id=bound.execution_plan.plan_id,
+            approval_id=bound.execution_plan.approval_id,
+            approval_fingerprint=bound.approval_fingerprint,
+        ):
+            raise error_cls(
+                "durable supervised approval is missing or revoked"
+            )
+        require_verifier_dependency_authority()
+
+    def require_issuance_time_provider_request(
+        *,
+        issued_requests: tuple[dict[str, object], ...],
+        expected: BetfairStandardLimitPriceBoundEvidence,
+    ) -> None:
+        matches = [
+            item
+            for item in issued_requests
+            if item.get("action_id") == object.__getattribute__(expected, "action_id")
+        ]
+        if len(matches) != 1:
+            raise error_cls(
+                "Betfair request identity was not durably proven at plan issuance"
+            )
+        durable = matches[0]
+        expected_request = {
+            "action_id": object.__getattribute__(expected, "action_id"),
+            "bookmaker_id": object.__getattribute__(expected, "bookmaker_id"),
+            "account_id": object.__getattribute__(expected, "account_id"),
+            "instruction_sha256": object.__getattribute__(expected, "instruction_sha256"),
+            "write_adapter_id": object.__getattribute__(expected, "write_adapter_id"),
+            "write_adapter_version": object.__getattribute__(expected, "write_adapter_version"),
+        }
+        if durable != expected_request:
+            raise error_cls(
+                "durable issuance-time Betfair request identity changed"
             )
 
     def verify_betfair_standard_limit_price_bound(
@@ -255,44 +360,47 @@ def _build_product_verifier():
         fail closed instead of turning common-mode agreement into provider authority.
         """
 
-        if type(issuance_store) is not SupervisedPlanIssuanceStore:
-            raise BetfairStandardLimitPriceBoundError(
+        if type(issuance_store) is not issuance_store_cls:
+            raise error_cls(
                 "issuance_store must be the exact canonical SupervisedPlanIssuanceStore type"
             )
 
         # Fail before durable issuance reload can re-resolve provider-request
-        # identity through the shared canonical resolver object. An in-place
-        # __code__ mutation changes that object for every imported alias, so
-        # witnessing the graph only after load() would execute hostile code
-        # before this verifier had a chance to reject the mutation.
+        # identity through the shared canonical resolver object. The verifier's
+        # own continuity/snapshot helpers are closure-local so later module-global
+        # rebinding cannot remove provenance or approval gates.
         require_canonical_resolver_authority()
+        require_verifier_dependency_authority()
         try:
-            issued = SupervisedPlanIssuanceStore.load(
+            issued = issuance_load(
                 issuance_store,
                 execution_plan_id,
             )
-        except SupervisedPlanIssuanceError as exc:
-            raise BetfairStandardLimitPriceBoundError(
+        except issuance_error_cls as exc:
+            raise error_cls(
                 "durable product supervised-plan issuance is missing or invalid"
             ) from exc
         bound = issued.bound
-        _require_execution_state_continuity(ledger=ledger, bound=bound)
+        require_execution_state_continuity(ledger=ledger, bound=bound)
 
         require_canonical_resolver_authority()
+        require_verifier_dependency_authority()
         expected = resolver(
             bound=bound,
             action_id=action_id,
         )
         require_canonical_resolver_authority()
+        require_verifier_dependency_authority()
 
-        _require_issuance_time_provider_request(
+        require_issuance_time_provider_request(
             issued_requests=issued.provider_requests,
             expected=expected,
         )
-        if _exact_snapshot(evidence) != _exact_snapshot(expected):
-            raise BetfairStandardLimitPriceBoundError(
+        if exact_snapshot(evidence) != exact_snapshot(expected):
+            raise error_cls(
                 "price-bound evidence does not match fresh canonical re-resolution"
             )
+        require_verifier_dependency_authority()
         return expected
 
     verify_betfair_standard_limit_price_bound.__name__ = (

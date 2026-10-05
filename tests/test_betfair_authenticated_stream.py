@@ -129,6 +129,7 @@ def _mcm(
                 "con": False,
                 "marketDefinition": {
                     "status": "OPEN",
+                    "bettingType": "ODDS",
                     "runners": runner_definitions,
                 },
                 "rc": runner_changes,
@@ -157,7 +158,7 @@ def _delta_mcm(
                 "id": "1.A",
                 "img": False,
                 "con": False,
-                "marketDefinition": {"status": "OPEN"},
+                "marketDefinition": {"status": "OPEN", "bettingType": "ODDS"},
                 "rc": [{"id": 1, "hc": 0, "ltp": price}],
             }
         ],
@@ -183,7 +184,7 @@ def _market_status_mcm(
                 "id": "1.A",
                 "img": False,
                 "con": False,
-                "marketDefinition": {"status": status},
+                "marketDefinition": {"status": status, "bettingType": "ODDS"},
                 "rc": [],
             }
         ],
@@ -211,6 +212,7 @@ def _runner_status_mcm(
                 "con": False,
                 "marketDefinition": {
                     "status": "OPEN",
+                    "bettingType": "ODDS",
                     "runners": [
                         {
                             "id": 1,
@@ -1400,6 +1402,7 @@ def test_duplicate_runner_definition_poison_closes_generation(
                 "con": False,
                 "marketDefinition": {
                     "status": "OPEN",
+                    "bettingType": "ODDS",
                     "runners": [
                         {"id": 1, "hc": 0, "status": "ACTIVE"},
                         {"id": 1, "hc": 0, "status": "REMOVED"},
@@ -1450,6 +1453,7 @@ def test_market_authority_state_bound_overflow_closes_generation(
                 "con": False,
                 "marketDefinition": {
                     "status": "OPEN",
+                    "bettingType": "ODDS",
                     "runners": [{"id": 1, "hc": 0, "status": "ACTIVE"}],
                 },
                 "rc": [{"id": 1, "hc": 0, "ltp": 2.0}],
@@ -1550,6 +1554,7 @@ def test_provider_conflation_change_revokes_existing_live_decision(
                 "con": False,
                 "marketDefinition": {
                     "status": "OPEN",
+                    "bettingType": "ODDS",
                     "runners": [
                         {"id": 1, "hc": 0, "status": "ACTIVE"},
                     ],
@@ -1747,3 +1752,100 @@ def test_removed_runner_drops_active_runner_authority_state_for_endurance(
 
     assert runner_key not in runtime._runner_status_by_key
     assert runner_key not in runtime._runner_active_sequence
+
+
+def test_line_market_never_becomes_odds_live_decision_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    payload = {
+        "op": "mcm",
+        "id": 7,
+        "ct": "SUB_IMAGE",
+        "initialClk": "i1",
+        "clk": "c1",
+        "pt": publish_time_ms,
+        "conflateMs": 0,
+        "heartbeatMs": 5000,
+        "mc": [
+            {
+                "id": "1.A",
+                "img": True,
+                "con": False,
+                "marketDefinition": {
+                    "status": "OPEN",
+                    "bettingType": "LINE",
+                    "lineMinUnit": 10.0,
+                    "lineMaxUnit": 20.0,
+                    "lineInterval": 0.5,
+                    "runners": [
+                        {"id": 1, "hc": 0, "status": "ACTIVE"},
+                    ],
+                },
+                "rc": [{"id": 1, "hc": 0, "ltp": 10.5}],
+            }
+        ],
+    }
+    frame = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status() + frame,
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+
+    assert decision.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert "betting type is not supported" in decision.reason
+    assert not decision.decision_eligible
+
+
+def test_missing_market_betting_type_poison_closes_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    payload = {
+        "op": "mcm",
+        "id": 7,
+        "ct": "SUB_IMAGE",
+        "initialClk": "i1",
+        "clk": "c1",
+        "pt": publish_time_ms,
+        "conflateMs": 0,
+        "heartbeatMs": 5000,
+        "mc": [
+            {
+                "id": "1.A",
+                "img": True,
+                "con": False,
+                "marketDefinition": {
+                    "status": "OPEN",
+                    "runners": [
+                        {"id": 1, "hc": 0, "status": "ACTIVE"},
+                    ],
+                },
+                "rc": [{"id": 1, "hc": 0, "ltp": 2.0}],
+            }
+        ],
+    }
+    frame = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status() + frame,
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+    with pytest.raises(
+        BetfairAuthenticatedStreamError,
+        match="bettingType is unsupported",
+    ):
+        runtime.read_and_ingest()
+
+    assert fake.closed
+    assert not transport.is_authenticated

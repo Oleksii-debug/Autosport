@@ -348,3 +348,34 @@ def test_valid_source_save_uses_stable_registry_identity(tmp_path: Path) -> None
     )
     assert surface.product_source.value == "Parlay API — настільний теніс"
     assert "збережено" in surface.product_status.value
+
+
+def test_product_stop_restores_prior_active_strategy_session(tmp_path: Path) -> None:
+    calls: list[tuple[str, object]] = []
+    restored_session = object()
+    research_plan = object()
+    surface = SimpleNamespace(
+        _product_close_pending=False,
+        session=None,
+        _active_strategy_id="research-plan-v1",
+        _active_research_plan=research_plan,
+        _recovery_view=object(),
+        _active_workspace=tmp_path / "stale",
+        workspace=tmp_path / "workspace",
+        product_status=_Value(),
+        status=_Value(),
+        bank=_Value(),
+        _open_session=lambda strategy_id, plan: (
+            calls.append((strategy_id, plan)) or restored_session
+        ),
+        _bank_text=lambda: "bank",
+        _refresh_tickets=lambda: None,
+        _block_workspace_for_recovery=lambda _workspace: None,
+        _append_log=lambda _message: None,
+    )
+
+    assert ProductWindowsAutosportApp._restore_base_session_after_product(surface)
+
+    assert calls == [("research-plan-v1", research_plan)]
+    assert surface.session is restored_session
+    assert surface._recovery_view is None

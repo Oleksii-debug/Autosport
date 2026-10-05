@@ -165,10 +165,14 @@ class ObservationResult:
     current_quotes: tuple[MarketEvent, ...]
 
     def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
         if type(self.stats) is not IngestionStats:
             raise TypeError("observation stats must be an exact IngestionStats")
         if type(self.health) is not SourceHealthState:
             raise TypeError("observation health must be an exact SourceHealthState")
+        self.health.validate()
         if type(self.current_quotes) is not tuple:
             raise TypeError("observation current_quotes must be an exact tuple")
         if any(type(event) is not MarketEvent for event in self.current_quotes):

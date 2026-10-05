@@ -1,11 +1,16 @@
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from autosport.ingestion import IngestionEngine
 from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
+from autosport.live_observation import poll_open_market_store_once
 from autosport.market_bus import MarketEventBus
+from autosport.market_mirror import MarketMirror
+from autosport.market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from autosport.parlayapi_provider import HttpJsonResponse, ParlayApiTableTennisProvider
+from autosport.providers import ProviderBatch, ProviderQuote
 from autosport.storage import SQLiteMarketStore
 
 
@@ -66,6 +71,92 @@ class ProviderTruncationTests(unittest.TestCase):
             self.assertEqual(state.status, "degraded")
             self.assertEqual(state.quality_flags, ("TRUNCATED_BATCH",))
             market.close()
+
+
+    def test_early_causal_degradation_survives_truncated_snapshot_drain(self):
+        class TwoChunkProvider:
+            source_id = "fixture:two-chunk"
+
+            def __init__(self):
+                self.calls = 0
+
+            def read_batch(self, max_items=1000):
+                del max_items
+                self.calls += 1
+                if self.calls == 1:
+                    return ProviderBatch(
+                        self.source_id,
+                        (
+                            ProviderQuote(
+                                provider_event_id="event-1",
+                                provider_market_id="winner",
+                                provider_selection_id="future",
+                                decimal_odds=Decimal("2.0"),
+                                observed_ts="2026-09-12T20:00:03+00:00",
+                                sequence=1,
+                            ),
+                        ),
+                        cursor="1",
+                        quality_flags=("TRUNCATED_BATCH",),
+                    )
+                return ProviderBatch(
+                    self.source_id,
+                    (
+                        ProviderQuote(
+                            provider_event_id="event-1",
+                            provider_market_id="winner",
+                            provider_selection_id="valid",
+                            decimal_odds=Decimal("2.1"),
+                            observed_ts="2026-09-12T20:00:02+00:00",
+                            sequence=2,
+                        ),
+                    ),
+                    cursor="2",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            market = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                health = SourceHealthStore(Path(tmp) / "source-health.json")
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(market))
+                provider = TwoChunkProvider()
+
+                stats = poll_open_market_store_once(
+                    market,
+                    health,
+                    provider,
+                    mirror_updates=updates,
+                    max_items=1,
+                    policy=IngestionPolicy(
+                        max_batch_size=10,
+                        stale_after_seconds=60,
+                        max_future_skew_seconds=5,
+                    ),
+                    clock=lambda: "2026-09-12T20:00:02+00:00",
+                )
+
+                self.assertEqual(provider.calls, 2)
+                self.assertEqual(stats.received, 2)
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.rejected, 1)
+                self.assertEqual(
+                    stats.quality_flags,
+                    ("FUTURE_OBSERVATION_TIMESTAMP",),
+                )
+                state = health.get(provider.source_id)
+                self.assertEqual(state.status, "degraded")
+                self.assertEqual(
+                    state.quality_flags,
+                    ("FUTURE_OBSERVATION_TIMESTAMP",),
+                )
+                persisted = market.events()
+                self.assertEqual(len(persisted), 1)
+                self.assertEqual(
+                    persisted[0].selection_id,
+                    "fixture:two-chunk:valid",
+                )
+            finally:
+                market.close()
 
 
 if __name__ == "__main__":

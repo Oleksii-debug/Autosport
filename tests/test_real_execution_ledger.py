@@ -1953,7 +1953,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ledger.mark_submitted(
                 "try-digest",
                 submitted_at=SUBMITTED_AT,
-                submitted_request_sha256=digest,
+                request_sha256=digest,
             )
 
             restarted = RealExecutionLedger(path)
@@ -2001,17 +2001,17 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ledger.mark_submitted(
                 "try-conflicting-digest",
                 submitted_at=SUBMITTED_AT,
-                submitted_request_sha256="c" * 64,
+                request_sha256="c" * 64,
             )
 
             with self.assertRaisesRegex(
                 ExecutionIdentityConflict,
-                "different submitted request digest",
+                "different request identity",
             ):
                 ledger.mark_submitted(
                     "try-conflicting-digest",
                     submitted_at=SUBMITTED_AT,
-                    submitted_request_sha256="d" * 64,
+                    request_sha256="d" * 64,
                 )
 
             view = ledger.verified_execution_view("p1")
@@ -2035,7 +2035,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ledger.mark_submitted(
                 "try-tampered-submit",
                 submitted_at=SUBMITTED_AT,
-                submitted_request_sha256="b" * 64,
+                request_sha256="b" * 64,
             )
 
             lines = [

@@ -300,3 +300,37 @@ def test_guard_rejects_in_place_base_resolver_code_mutation():
                 _require(asserted, case)
         finally:
             resolver.__code__ = original_code
+
+
+def test_guard_rejects_in_place_betfair_cost_resolver_code_mutation():
+    with canonical_applicable_cost_case() as case:
+        intent, plan, store, request, decision_at = case
+        asserted = _canonical(case)
+        resolver = guard.resolve_prospective_applicable_costs_with_betfair_standard_limit
+        original_code = resolver.__code__
+
+        def attacker_resolver(**_kwargs):
+            raise AssertionError("mutated Betfair resolver body must never execute")
+
+        try:
+            resolver.__code__ = attacker_resolver.__code__
+            with pytest.raises(
+                cost.ProspectiveApplicableCostError,
+                match="Betfair applicable-cost resolver authority changed",
+            ):
+                guard.require_canonical_prospective_applicable_costs_with_betfair_standard_limit(
+                    asserted,
+                    intent=intent,
+                    plan=plan,
+                    router_store=store,
+                    model_request_id=request.request_id,
+                    decision_at=decision_at,
+                    slippage_evidence=None,
+                    ledger=None,
+                    issuance_store=None,
+                    runtime_profile=None,
+                    execution_plan_id="blocked-before-source-validation",
+                    action_id="blocked-before-source-validation",
+                )
+        finally:
+            resolver.__code__ = original_code

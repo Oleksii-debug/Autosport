@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -892,6 +893,49 @@ class PaperRiskReportingTests(unittest.TestCase):
             "product-issued authority is unavailable",
         ):
             build_product_issued_paper_equity_path(book, self._goal())
+
+    def test_durable_resolver_detects_equal_risk_hash_different_paper_state(self) -> None:
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg(86, sport="soccer"),),
+            Decimal("10"),
+            placed_at="2026-09-21T16:40:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        goal = self._goal()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            first_path = workspace / "paper-first.json"
+            second_path = workspace / "paper-second.json"
+            book.save(first_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            raw = json.loads(first_path.read_text(encoding="utf-8"))
+            raw["tickets"][0]["legs"][0]["sport"] = "tennis"
+            second_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            first = PaperBook.load(first_path)
+            second = PaperBook.load(second_path)
+            self.assertEqual(
+                PaperRiskPolicy.risk_of_ruin_portfolio_sha256(first),
+                PaperRiskPolicy.risk_of_ruin_portfolio_sha256(second),
+            )
+            self.assertNotEqual(first.tickets, second.tickets)
+
+            with patch.object(PaperBook, "load", side_effect=(first, second)):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "durable PaperBook changed during equity-path resolution",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(first_path),
+                        workspace=str(workspace),
+                    )
 
     def test_durable_resolver_rejects_goal_change_after_final_book_read(self) -> None:
         book = PaperBook("100")

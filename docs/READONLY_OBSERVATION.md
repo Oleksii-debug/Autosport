@@ -61,6 +61,18 @@ Provider/source/run identifiers, operational cursors and quality flags used by t
 
 A provider-unavailable retry is permitted only when durable SourceHealthStore evidence confirms the typed failure streak. If that confirmation read fails, collection terminates as a local health-read failure, preserves the provider outage as the primary diagnostic, and performs no retry.
 
+## Authenticated Betfair Stream durable bridge
+
+The reserved source ID `betfair_exchange_stream` is accepted by generic observation only through `BetfairAuthenticatedMarketProvider`. A provider that merely exposes that source ID is rejected before acquisition or persistence.
+
+The bridge must bind to the target Market Store's exact current projection before its first read. That binding restores the durable sequence floor and any previously persisted open Betfair identities. On subsequent polls the in-memory consumed-stream state is re-proved against SQLite before another frame is read; divergence fails closed and requires a fresh authenticated runtime rather than guessing across an uncertain persistence boundary.
+
+Only publications that remain decision-eligible under the canonical authenticated subscription/freshness runtime are emitted as `status="open"` provider quotes. Loss of authority after provider 503, market suspension/closure, runner deactivation/removal, image replacement, timing/ladder/semantic epoch change, or quote removal is materialized as a strictly higher-sequence `status="closed"` tombstone using the prior durable quote identity. This lets the append-only Market Store and MarketMirror revoke stale actionability without deleting audit history.
+
+Bounded transitions use `TRUNCATED_BATCH` pages when needed. Each page cursor names only the highest sequence actually returned in that page; it never advertises later transition entries that have not crossed the persistence boundary yet.
+
+This bridge remains observation-only. It grants no order placement, account, settlement, funding, withdrawal, or real-money execution authority.
+
 ## Windows GUI live snapshot
 
 The Windows GUI exposes one manual read-only refresh at a time. The mode is explicitly selected as either:

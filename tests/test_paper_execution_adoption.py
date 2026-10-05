@@ -1669,5 +1669,54 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertIsNot(runtime.ledger, ledger)
 
 
+    def test_multi_accept_batch_insufficient_bankroll_is_atomic_in_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            a1 = action("atomic-a1", stake="60.00")
+            a2 = action("atomic-a2", stake="60.00")
+            current_prepared = prepared(runtime, a1, a2)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "accepted PAPER batch cannot be materialized atomically",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-atomic-batch",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(book.committed_capital, Decimal("0"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse((Path(tmp) / "paper-book.json").exists())
+
+    def test_multi_accept_lay_batch_preflights_aggregate_liability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            # Each 20 @ 4.0 LAY consumes 60 liability. The second accepted fill
+            # would exceed the 100 bankroll if live mutation happened first.
+            a1 = action("atomic-lay-a1", odds="4.00", stake="20.00", side="LAY")
+            a2 = action("atomic-lay-a2", odds="4.00", stake="20.00", side="LAY")
+            current_prepared = prepared(runtime, a1, a2)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "accepted PAPER batch cannot be materialized atomically",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-atomic-lay-batch",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(book.committed_capital, Decimal("0"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse((Path(tmp) / "paper-book.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -51,6 +51,8 @@ _CANONICAL_PAPERBOOK_SETTLEMENT_RESULT = PaperBook._settlement_result
 _CANONICAL_RISK_PORTFOLIO_SHA256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256
 _CANONICAL_RISK_EXACT_POSITIVE_SUM = PaperRiskPolicy._exact_positive_sum
 _CANONICAL_RISK_DECIMAL_CONTEXT = PaperRiskPolicy._decimal_context
+_CANONICAL_RISK_HISTORICAL_METRICS = PaperRiskPolicy._historical_risk_metrics
+_CANONICAL_RISK_GOAL_HISTORY_ROOMS = PaperRiskPolicy._goal_history_rooms
 _CANONICAL_REQUIRE_TICKET_OPENING_AUTHORITY = _require_ticket_opening_authority
 _CANONICAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _require_paperbook_causal_history_authority
 
@@ -1147,8 +1149,8 @@ def build_paper_risk_report(
     if before_sha256 is None:
         raise ValueError("canonical PAPER risk state cannot be reported")
 
-    metrics = PaperRiskPolicy._historical_risk_metrics(book)
-    rooms = PaperRiskPolicy._goal_history_rooms(book, goal_snapshot)
+    metrics = _CANONICAL_RISK_HISTORICAL_METRICS(book)
+    rooms = _CANONICAL_RISK_GOAL_HISTORY_ROOMS(book, goal_snapshot)
     equity_path = build_product_issued_paper_equity_path(book, goal_snapshot)
     drawdown_evidence = build_product_issued_paper_drawdown_evidence(
         book,

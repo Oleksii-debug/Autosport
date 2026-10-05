@@ -52,6 +52,10 @@ For each `source_id`, `SourceHealthStore` persists:
 - monotonic latest source timestamp;
 - current quality flags.
 
-A provider exception is recorded as a failure and then re-raised. Health tracking does not hide acquisition or persistence errors.
+A provider exception is recorded as a failure and then re-raised. Health tracking does not hide acquisition or persistence errors. If recording provider-failure health itself fails, the original provider/validation exception remains primary and the health-persistence failure is secondary diagnostic/cause evidence.
+
+Market persistence and health persistence are separate commit boundaries. Once a market batch has committed, a later source-health publication failure is surfaced as `CommittedIngestionHealthError`, including interrupt-class failures. Live observation treats that type as already-durable market truth: it retires the in-flight batch and never replays committed events merely to repair health publication.
+
+For an actual SQLite market-transaction failure before commit, the bounded live wrapper may retry the same cached provider batch. Provider source identity is revalidated before cached reuse. If identity changed, cached local state is cleared fail-closed and provider reset hooks are not dispatched under the foreign identity.
 
 This layer is deterministic and contains no LLM. It creates no real-money execution capability.

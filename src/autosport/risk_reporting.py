@@ -414,6 +414,29 @@ def verify_product_issued_paper_equity_path(
     return resolved
 
 
+def verified_settled_minimum_equity(
+    book: PaperBook,
+    goal: EconomicGoalContract,
+    evidence: ProductIssuedPaperEquityPath,
+) -> tuple[Decimal, str]:
+    """Return the exact minimum only from a complete re-verified settled path.
+
+    This is a causal capital-history fact, not a probability estimate and not
+    risk approval. Positive risk-of-ruin issuance remains owned by #967.
+    """
+
+    resolved = verify_product_issued_paper_equity_path(book, goal, evidence)
+    if not resolved.availability_complete:
+        raise ValueError(
+            "minimum equity requires complete durable availability chronology"
+        )
+    if not resolved.settled_history_complete:
+        raise ValueError(
+            "minimum equity requires all economically material PAPER tickets settled"
+        )
+    return resolved.minimum_equity, resolved.minimum_equity_point_id
+
+
 def _drawdown_evidence_payload(
     *,
     path: ProductIssuedPaperEquityPath,

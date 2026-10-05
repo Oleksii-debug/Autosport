@@ -1654,3 +1654,42 @@ def test_provider_503_revokes_live_authority_without_disconnect_until_new_quote(
     assert recovered.evidence_id != initial.evidence_id
     assert transport.is_authenticated
     assert not fake.closed
+
+
+def test_mutating_delayed_identity_to_live_cannot_escalate_authenticated_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status() + _mcm(pt=publish_time_ms),
+        key_class="DELAYED",
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    object.__setattr__(transport.identity, "app_key_class", "LIVE")
+    assert transport.identity.app_key_class == "LIVE"
+    assert transport.authenticated_app_key_class is None
+
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=200_000),
+    )
+    assert decision.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert "authenticated Betfair app key class is not LIVE" in decision.reason
+    assert not decision.decision_eligible
+
+
+def test_mutating_live_identity_after_positive_decision_revokes_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport, _runtime, decision = _fresh_decision(monkeypatch)
+    assert transport.authenticated_app_key_class == "LIVE"
+    assert decision.decision_eligible
+
+    object.__setattr__(transport.identity, "app_key_class", "DELAYED")
+
+    assert transport.authenticated_app_key_class is None
+    assert not decision.decision_eligible

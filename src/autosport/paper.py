@@ -559,7 +559,7 @@ class PaperBook:
 
         status = TicketStatus.VOID if not effective_legs else TicketStatus.WON
         try:
-            with localcontext(_paper_decimal_context()):
+            with localcontext(_paper_decimal_context()) as context:
                 effective_odds = Decimal("1")
                 for leg in effective_legs:
                     effective_odds *= leg.locked_odds
@@ -571,6 +571,8 @@ class PaperBook:
                     )
                 new_balance = balance + payout
                 cls._require_finite(new_balance, f"balance after settling ticket {ticket.ticket_id}")
+                if context.flags[Inexact]:
+                    raise ValueError("PaperBook settlement arithmetic loses Decimal precision")
                 if payout != 0 and new_balance == balance:
                     raise ValueError("PaperBook settlement payout loses all Decimal balance effect")
         except DecimalException as exc:

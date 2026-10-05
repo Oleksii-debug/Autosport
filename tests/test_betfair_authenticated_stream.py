@@ -1901,3 +1901,157 @@ def test_non_odds_price_models_do_not_gain_live_decision_authority(
     assert not decision.decision_eligible
     assert transport.is_authenticated
     assert not fake.closed
+
+
+def test_duplicate_sub_image_market_keeps_unique_highest_provider_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+
+    def market_copy(version: int, price: float) -> dict[str, object]:
+        return {
+            "id": "1.A",
+            "img": True,
+            "con": False,
+            "marketDefinition": {
+                "status": "OPEN",
+                "bettingType": "ODDS",
+                "version": version,
+                "runners": [
+                    {"id": 1, "hc": 0, "status": "ACTIVE"},
+                ],
+            },
+            "rc": [{"id": 1, "hc": 0, "ltp": price}],
+        }
+
+    payload = {
+        "op": "mcm",
+        "id": 7,
+        "ct": "SUB_IMAGE",
+        "initialClk": "i1",
+        "clk": "c1",
+        "pt": publish_time_ms,
+        "conflateMs": 0,
+        "heartbeatMs": 5000,
+        "mc": [
+            market_copy(10, 2.0),
+            market_copy(11, 2.2),
+        ],
+    }
+    frame = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status() + frame,
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+    evidence = runtime.read_and_ingest()
+
+    assert len(evidence) == 1
+    assert evidence[0].quote.price == Decimal("2.2")
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert decision.decision_eligible
+    assert transport.is_authenticated
+    assert not fake.closed
+
+
+def test_duplicate_sub_image_equal_version_is_ambiguous_and_closes_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+
+    def market_copy(price: float) -> dict[str, object]:
+        return {
+            "id": "1.A",
+            "img": True,
+            "con": False,
+            "marketDefinition": {
+                "status": "OPEN",
+                "bettingType": "ODDS",
+                "version": 10,
+                "runners": [
+                    {"id": 1, "hc": 0, "status": "ACTIVE"},
+                ],
+            },
+            "rc": [{"id": 1, "hc": 0, "ltp": price}],
+        }
+
+    payload = {
+        "op": "mcm",
+        "id": 7,
+        "ct": "SUB_IMAGE",
+        "initialClk": "i1",
+        "clk": "c1",
+        "pt": publish_time_ms,
+        "conflateMs": 0,
+        "heartbeatMs": 5000,
+        "mc": [market_copy(2.0), market_copy(2.2)],
+    }
+    frame = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status() + frame,
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+    with pytest.raises(
+        BetfairAuthenticatedStreamError,
+        match="ambiguous equal version",
+    ):
+        runtime.read_and_ingest()
+
+    assert fake.closed
+    assert not transport.is_authenticated
+
+
+def test_duplicate_market_ids_in_delta_are_not_silently_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    duplicate_delta = {
+        "op": "mcm",
+        "id": 7,
+        "clk": "c2",
+        "pt": publish_time_ms + 1,
+        "mc": [
+            {
+                "id": "1.A",
+                "img": False,
+                "con": False,
+                "rc": [{"id": 1, "hc": 0, "ltp": 2.1}],
+            },
+            {
+                "id": "1.A",
+                "img": False,
+                "con": False,
+                "rc": [{"id": 1, "hc": 0, "ltp": 2.2}],
+            },
+        ],
+    }
+    delta_frame = (
+        json.dumps(duplicate_delta, separators=(",", ":")).encode("utf-8")
+        + b"\r\n"
+    )
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + delta_frame,
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    with pytest.raises(
+        BetfairAuthenticatedStreamError,
+        match="only recoverable in SUB_IMAGE",
+    ):
+        runtime.read_and_ingest()
+
+    assert fake.closed
+    assert not transport.is_authenticated

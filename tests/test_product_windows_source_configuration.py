@@ -5,11 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from autosport.continuous_session import ContinuousSessionStatus, SessionState
 from autosport.operator_source_configuration import (
     OperatorSourceConfiguration,
     OperatorSourceConfigurationError,
 )
 from autosport.operator_source_registry import resolve_product_source_entry
+from autosport.product_gui_worker import ProductGuiMessage
 from autosport.product_windows_gui import (
     ProductWindowsAutosportApp,
     _bind_product_workspace_environment,
@@ -56,6 +58,9 @@ def _start_surface(tmp_path: Path) -> SimpleNamespace:
     }
     surface._product_source_id_to_display = {
         "parlayapi-table-tennis": display
+    }
+    surface._product_provider_id_to_display = {
+        "parlayapi:table_tennis": display
     }
     surface.product_status = _Value()
     surface.status = _Value()
@@ -197,6 +202,63 @@ def test_start_passes_closed_registry_identity_to_product_worker(
     )
     assert call["initial_bankroll"] == "10000"
     assert surface._active_workspace == surface.workspace
+
+
+def _started_message(source_id: str) -> ProductGuiMessage:
+    return ProductGuiMessage(
+        kind="STARTED",
+        status=ContinuousSessionStatus(
+            session_id="session-1",
+            source_id=source_id,
+            state=SessionState.RUNNING,
+            cycles_completed=0,
+            last_success_at=None,
+            last_error_code=None,
+            last_full_refresh_at=None,
+            settlement_evidence=(),
+        ),
+    )
+
+
+def test_started_status_uses_localized_source_label_not_machine_identity(
+    tmp_path: Path,
+) -> None:
+    surface = _start_surface(tmp_path)
+    logs: list[str] = []
+    surface._append_log = logs.append
+
+    ProductWindowsAutosportApp._apply_product_message(
+        surface,
+        _started_message("parlayapi:table_tennis"),
+    )
+
+    assert "Parlay API — настільний теніс" in surface.product_status.value
+    assert "parlayapi:table_tennis" not in surface.product_status.value
+    assert logs == [surface.product_status.value]
+
+
+def test_unexpected_started_source_stops_and_quarantines_without_identity_leak(
+    tmp_path: Path,
+) -> None:
+    surface = _start_surface(tmp_path)
+    stop_reasons: list[str] = []
+    blocked: list[Path] = []
+    logs: list[str] = []
+    surface.product_worker.request_stop = lambda reason: (
+        stop_reasons.append(reason) or True
+    )
+    surface._block_workspace_for_recovery = blocked.append
+    surface._append_log = logs.append
+
+    ProductWindowsAutosportApp._apply_product_message(
+        surface,
+        _started_message("unexpected:provider"),
+    )
+
+    assert stop_reasons == ["source_identity_mismatch"]
+    assert blocked == [surface.workspace]
+    assert "unexpected:provider" not in surface.product_status.value
+    assert logs == [surface.product_status.value]
 
 
 def test_source_configuration_change_is_blocked_while_runtime_busy(

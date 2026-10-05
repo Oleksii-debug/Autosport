@@ -2048,60 +2048,76 @@ class PersistentLiveDecisionLoop:
         owns_history_store = False
         try:
             for input_id in input_ids:
-                history_fallback = self.dependencies.requires_current_history_fallback(
-                    input_id,
-                    as_of=as_of,
-                )
-                if history_fallback:
-                    if (
-                        self._decision_market_history_frozen
-                        and self._decision_market_frontier_as_of == as_of
-                    ):
-                        if self._decision_market_history is None:
-                            raise LiveDecisionProgressError(
-                                "decision frontier did not freeze required market history"
-                            )
-                        history_events = self._decision_market_history
-                    else:
-                        if history_store is None:
-                            history_store = self._default_market_store
-                            if history_store is None:
-                                history_store = SQLiteMarketStore(
-                                    self.workspace / "market.db"
+                while True:
+                    dependency_revision = self.dependencies.dependency_revision(
+                        input_id
+                    )
+                    history_fallback = (
+                        self.dependencies.requires_current_history_fallback(
+                            input_id,
+                            as_of=as_of,
+                        )
+                    )
+                    if history_fallback:
+                        if (
+                            self._decision_market_history_frozen
+                            and self._decision_market_frontier_as_of == as_of
+                        ):
+                            if self._decision_market_history is None:
+                                raise LiveDecisionProgressError(
+                                    "decision frontier did not freeze required market history"
                                 )
-                                owns_history_store = True
-                        if history_events is None:
-                            history_events = tuple(
-                                history_store.events_with_append_generation()
-                            )
-                    (
-                        snapshot,
-                        next_history_availability,
-                    ) = self.dependencies.decision_state_from_proven_history(
-                        input_id,
-                        history_events,
-                        as_of=as_of,
-                        max_age=self.max_quote_age,
-                    )
-                else:
-                    snapshot = reader(
-                        input_id,
-                        as_of=as_of,
-                        max_age=self.max_quote_age,
-                    )
-                    next_history_availability = None
+                            history_events = self._decision_market_history
+                        else:
+                            if history_store is None:
+                                history_store = self._default_market_store
+                                if history_store is None:
+                                    history_store = SQLiteMarketStore(
+                                        self.workspace / "market.db"
+                                    )
+                                    owns_history_store = True
+                            if history_events is None:
+                                history_events = tuple(
+                                    history_store.events_with_append_generation()
+                                )
+                        (
+                            snapshot,
+                            next_history_availability,
+                        ) = self.dependencies.decision_state_from_proven_history(
+                            input_id,
+                            history_events,
+                            as_of=as_of,
+                            max_age=self.max_quote_age,
+                        )
+                    else:
+                        snapshot = reader(
+                            input_id,
+                            as_of=as_of,
+                            max_age=self.max_quote_age,
+                        )
+                        next_history_availability = (
+                            self._next_availability_deadline(input_id, as_of)
+                        )
+
+                    if (
+                        self.dependencies.dependency_revision(input_id)
+                        == dependency_revision
+                    ):
+                        break
+                    # The focused selector changed between history classification
+                    # and snapshot/deadline materialization. Retry the complete
+                    # decision read so a replacement that requires durable-history
+                    # fallback cannot be evaluated through latest-only mirror truth.
+
                 snapshots[input_id] = snapshot
                 self._input_market_sha256[input_id] = _canonical_json_sha256(
                     [event.to_dict() for event in snapshot.events]
                 )
                 self._record_freshness_deadline(input_id, snapshot)
-                if history_fallback:
-                    self._set_availability_deadline(
-                        input_id,
-                        next_history_availability,
-                    )
-                else:
-                    self._record_availability_deadline(input_id, as_of)
+                self._set_availability_deadline(
+                    input_id,
+                    next_history_availability,
+                )
         finally:
             if owns_history_store and history_store is not None:
                 history_store.close()
@@ -2171,12 +2187,12 @@ class PersistentLiveDecisionLoop:
                 (deadline, input_id, generation),
             )
 
-    def _record_availability_deadline(
+    def _next_availability_deadline(
         self,
         input_id: str,
         as_of: datetime,
-    ) -> None:
-        """Schedule the next transition when future causal evidence becomes knowable."""
+    ) -> datetime | None:
+        """Return when future causal evidence next becomes knowable."""
 
         boundary = as_of.astimezone(timezone.utc)
         deadlines: list[datetime] = []
@@ -2189,10 +2205,7 @@ class PersistentLiveDecisionLoop:
             if boundary < available_at:
                 deadlines.append(available_at)
 
-        self._set_availability_deadline(
-            input_id,
-            min(deadlines) if deadlines else None,
-        )
+        return min(deadlines) if deadlines else None
 
     def _activate_available_inputs(
         self,

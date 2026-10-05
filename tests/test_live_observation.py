@@ -251,6 +251,29 @@ class LiveObservationTests(unittest.TestCase):
 
             self.assertFalse(root.exists())
 
+    def test_workspace_observer_rejects_generic_betfair_stream_spoof_before_workspace_creation(self):
+        class Provider:
+            source_id = "betfair_exchange_stream"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "spoofed-betfair"
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "requires the canonical authenticated stream-to-provider bridge",
+            ):
+                observe_workspace_once(
+                    root,
+                    Provider(),
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(root.exists())
+
     def test_workspace_observer_rejects_backpressure_overflow_before_workspace_creation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "invalid-backpressure"
@@ -316,6 +339,38 @@ class LiveObservationTests(unittest.TestCase):
                         mirror_updates=updates,
                         max_items=2,
                         policy=IngestionPolicy(max_batch_size=1),
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
+                store.close()
+
+    def test_open_store_poll_rejects_generic_betfair_stream_spoof_before_read(self):
+        class Provider:
+            source_id = "betfair_exchange_stream"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(
+                    MarketMirror.from_store(store)
+                )
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "requires the canonical authenticated stream-to-provider bridge",
+                ):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        Provider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
                     )
                 self.assertEqual(store.events(), ())
                 self.assertEqual(updates.mirror.view().events, ())

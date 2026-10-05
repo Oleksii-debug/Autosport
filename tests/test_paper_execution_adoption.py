@@ -911,6 +911,43 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.balance, Decimal("70.00"))
             self.assertEqual(book.committed_capital, Decimal("30.00"))
 
+    def test_lay_recovery_reproves_minted_authority_after_ledger_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            pre_action_book = PaperBook("100.00")
+            current = action("lay-recovery-ledger-callback", odds="5.00", stake="10.00", side="LAY")
+            current_prepared = prepared(runtime, current)
+
+            runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-recovery-ledger-callback",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            original_load_run = ledger.load_run
+            binding = current_prepared.exposure_bindings[0]
+
+            def load_then_mutate(*args, **kwargs):
+                run = original_load_run(*args, **kwargs)
+                object.__setattr__(binding, "bankroll_id", "mutated-after-ledger-read")
+                return run
+
+            with patch.object(ledger, "load_run", load_then_mutate):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "authority changed after mint",
+                ):
+                    runtime.assert_recoverable_book_state(
+                        pre_action_book=pre_action_book,
+                        prepared=current_prepared,
+                        trigger_id="trigger-lay-recovery-ledger-callback",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("60.00"))
+
     def test_empirical_lay_recovery_replays_durable_observation_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

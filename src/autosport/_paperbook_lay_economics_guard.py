@@ -26,6 +26,114 @@ _ORIGINAL_VALIDATE_LIFECYCLE_ENTRY = _paper.PaperBook._validate_lifecycle_entry.
 _ORIGINAL_VALIDATE_SETTLED_AT = _paper.PaperBook._validate_settled_at.__func__
 
 
+def _require_exact_text(
+    value: object,
+    label: str,
+    *,
+    allow_empty: bool = False,
+    forbid_quote_key_delimiter: bool = False,
+) -> str:
+    if type(value) is not str:
+        raise ValueError(f"PaperBook {label} must be an exact string")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"PaperBook {label} must be valid UTF-8 text") from exc
+    if not allow_empty and (not value or value.strip() != value):
+        raise ValueError(f"PaperBook {label} must be a non-empty trimmed string")
+    if forbid_quote_key_delimiter and "|" in value:
+        raise ValueError(
+            f"PaperBook {label} must not contain quote-key delimiter '|'"
+        )
+    return value
+
+
+def _validate_exact_timestamp(value: object, label: str) -> str:
+    text = _require_exact_text(value, label)
+    try:
+        _paper.parse_iso_timestamp(text)
+    except ValueError as exc:
+        raise ValueError(
+            f"PaperBook {label} must be a timezone-aware ISO timestamp"
+        ) from exc
+    return text
+
+
+def _validate_exact_ticket_provenance(
+    provider_source_ids: object,
+    provider_accounts: object,
+    bankroll_id: object,
+    currency: object,
+) -> tuple[
+    tuple[str, ...],
+    tuple[tuple[str, str], ...],
+    str | None,
+    str | None,
+]:
+    if type(provider_source_ids) is not tuple:
+        raise ValueError("PaperBook provider_source_ids must be a canonical tuple")
+    canonical_sources = tuple(
+        _require_exact_text(source_id, "provider_source_id")
+        for source_id in provider_source_ids
+    )
+    if (
+        canonical_sources != tuple(sorted(canonical_sources))
+        or len(canonical_sources) != len(set(canonical_sources))
+    ):
+        raise ValueError("PaperBook provider_source_ids must be sorted and unique")
+
+    if type(provider_accounts) is not tuple:
+        raise ValueError("PaperBook provider_accounts must be a canonical tuple")
+    canonical_accounts_list: list[tuple[str, str]] = []
+    for binding in provider_accounts:
+        if type(binding) is not tuple or len(binding) != 2:
+            raise ValueError(
+                "PaperBook provider_accounts must contain (source_id, account_id) tuples"
+            )
+        source_id, account_id = binding
+        canonical_accounts_list.append(
+            (
+                _require_exact_text(source_id, "provider account source_id"),
+                _require_exact_text(account_id, "provider account_id"),
+            )
+        )
+    canonical_accounts = tuple(canonical_accounts_list)
+    if (
+        canonical_accounts != tuple(sorted(canonical_accounts))
+        or len(canonical_accounts) != len(set(canonical_accounts))
+    ):
+        raise ValueError("PaperBook provider_accounts must be sorted and unique")
+    account_sources = tuple(source_id for source_id, _ in canonical_accounts)
+    if len(account_sources) != len(set(account_sources)):
+        raise ValueError(
+            "PaperBook provider_accounts may bind at most one account_id per provider source"
+        )
+    if canonical_accounts and frozenset(account_sources) != frozenset(canonical_sources):
+        raise ValueError(
+            "PaperBook provider_accounts must cover provider_source_ids exactly"
+        )
+
+    if (bankroll_id is None) != (currency is None):
+        raise ValueError(
+            "PaperBook bankroll_id and currency provenance must be supplied together"
+        )
+    if bankroll_id is None:
+        return canonical_sources, canonical_accounts, None, None
+
+    canonical_bankroll = _require_exact_text(bankroll_id, "bankroll_id")
+    canonical_currency = _require_exact_text(currency, "currency")
+    if (
+        len(canonical_currency) != 3
+        or not canonical_currency.isascii()
+        or not canonical_currency.isalpha()
+        or canonical_currency != canonical_currency.upper()
+    ):
+        raise ValueError(
+            "PaperBook currency provenance must be a three-letter uppercase ASCII code"
+        )
+    return canonical_sources, canonical_accounts, canonical_bankroll, canonical_currency
+
+
 def _paperbook_operation_context(book: _paper.PaperBook):
     """Reuse canonical PaperBook serialization when that authority is installed."""
     require_lock = getattr(_paper, "_require_paperbook_operation_lock", None)
@@ -104,13 +212,42 @@ def _validate_ticket_leg(
     ticket_id: str | None = None,
 ) -> TicketLeg:
     if _is_lay_leg(leg):
-        validated = _ORIGINAL_VALIDATE_TICKET_LEG(
-            cls,
-            replace(leg, exchange_side="back"),
-            ticket_id=ticket_id,
+        suffix = f" for ticket {ticket_id}" if ticket_id is not None else ""
+        _require_exact_text(
+            leg.event_id,
+            f"event_id{suffix}",
+            forbid_quote_key_delimiter=True,
         )
-        if validated.exchange_side != "back":
-            raise RuntimeError("PaperBook canonical leg validator changed unexpectedly")
+        _require_exact_text(
+            leg.market_id,
+            f"market_id{suffix}",
+            forbid_quote_key_delimiter=True,
+        )
+        _require_exact_text(
+            leg.selection_id,
+            f"selection_id{suffix}",
+            forbid_quote_key_delimiter=True,
+        )
+        if leg.sport is not None:
+            sport = _require_exact_text(
+                leg.sport,
+                f"sport{suffix}",
+                forbid_quote_key_delimiter=True,
+            )
+            if sport != sport.lower() or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+                for character in sport
+            ):
+                raise ValueError(
+                    "PaperBook ticket sport must be a lowercase canonical sport identity"
+                )
+        if type(leg.locked_odds) is not Decimal:
+            raise ValueError(
+                f"PaperBook locked_odds{suffix} must be an exact Decimal"
+            )
+        _ORIGINAL_REQUIRE_FINITE(leg.locked_odds, f"locked_odds{suffix}")
+        if leg.locked_odds <= 1:
+            raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
         return leg
     return _ORIGINAL_VALIDATE_TICKET_LEG(cls, leg, ticket_id=ticket_id)
 
@@ -181,18 +318,17 @@ def _open_ticket_unlocked(
     )
     new_balance = _ORIGINAL_DEBIT_BALANCE(_paper.PaperBook, self.balance, locked_capital)
 
-    ticket_placed_at = _ORIGINAL_VALIDATE_PLACED_AT(
-        _paper.PaperBook,
+    ticket_placed_at = _validate_exact_timestamp(
         placed_at if placed_at is not None else _paper.utc_now_iso(),
+        "placed_at",
     )
-    _ORIGINAL_REQUIRE_UTF8_STRING(reason, "strategy_reason")
+    _require_exact_text(reason, "strategy_reason", allow_empty=True)
     (
         provider_source_ids,
         provider_accounts,
         bankroll_id,
         currency,
-    ) = _ORIGINAL_VALIDATE_TICKET_PROVENANCE(
-        _paper.PaperBook,
+    ) = _validate_exact_ticket_provenance(
         provider_source_ids,
         provider_accounts,
         bankroll_id,
@@ -369,12 +505,14 @@ def _validate_lifecycle_reachability(cls, book: _paper.PaperBook) -> None:
                 f"PaperBook ticket {ticket_id} settled_at is inconsistent with lifecycle provenance"
             )
         if settlement_time is not None:
-            _ORIGINAL_VALIDATE_SETTLED_AT(
-                _paper.PaperBook,
+            settlement_text = _validate_exact_timestamp(
                 settlement_time,
-                ticket.placed_at,
-                snapshot=True,
+                "snapshot settled_at",
             )
+            if _paper.parse_iso_timestamp(settlement_text) < _paper.parse_iso_timestamp(
+                ticket.placed_at
+            ):
+                raise ValueError("PaperBook settled_at must not precede placed_at")
         winners = set(winners_raw)
         voids = set(voids_raw)
         status, payout, replay_balance = _settlement_result(
@@ -427,32 +565,30 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
         raise ValueError("PaperBook tickets must be a canonical ticket mapping")
 
     for ticket_key, ticket in book.tickets.items():
-        _ORIGINAL_REQUIRE_CANONICAL_TEXT(ticket_key, "ticket mapping key")
+        _require_exact_text(ticket_key, "ticket mapping key")
         if type(ticket) is not PaperTicket:
             raise ValueError("PaperBook tickets must contain canonical PaperTicket values")
-        _ORIGINAL_REQUIRE_CANONICAL_TEXT(ticket.ticket_id, "ticket_id")
+        _require_exact_text(ticket.ticket_id, "ticket_id")
         if ticket_key != ticket.ticket_id:
             raise ValueError("PaperBook ticket mapping key must match ticket_id")
-        _ORIGINAL_VALIDATE_PLACED_AT(
-            _paper.PaperBook,
-            ticket.placed_at,
-            snapshot=True,
-        )
+        _validate_exact_timestamp(ticket.placed_at, "snapshot placed_at")
         if ticket.settled_at is not None:
-            _ORIGINAL_VALIDATE_SETTLED_AT(
-                _paper.PaperBook,
+            settled_at = _validate_exact_timestamp(
                 ticket.settled_at,
-                ticket.placed_at,
-                snapshot=True,
+                "snapshot settled_at",
             )
+            if _paper.parse_iso_timestamp(settled_at) < _paper.parse_iso_timestamp(
+                ticket.placed_at
+            ):
+                raise ValueError("PaperBook settled_at must not precede placed_at")
         if ticket.status is TicketStatus.OPEN and ticket.settled_at is not None:
             raise ValueError("PaperBook snapshot open ticket cannot have settled_at")
-        _ORIGINAL_REQUIRE_UTF8_STRING(
+        _require_exact_text(
             ticket.strategy_reason,
             "snapshot strategy_reason",
+            allow_empty=True,
         )
-        _ORIGINAL_VALIDATE_TICKET_PROVENANCE(
-            _paper.PaperBook,
+        _validate_exact_ticket_provenance(
             ticket.provider_source_ids,
             ticket.provider_accounts,
             ticket.bankroll_id,

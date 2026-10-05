@@ -83,6 +83,19 @@ class _HostileComparableString(str):
         return super().__eq__(other)
 
 
+class _HostilePaperBook(PaperBook):
+    hash_calls = 0
+    equality_calls = 0
+
+    def __hash__(self) -> int:
+        type(self).hash_calls += 1
+        return object.__hash__(self)
+
+    def __eq__(self, other: object) -> bool:
+        type(self).equality_calls += 1
+        return self is other
+
+
 class PaperBookSnapshotIntegrityTests(unittest.TestCase):
     def _snapshot(self, raw: dict) -> Path:
         root = Path(self._tmp.name)
@@ -125,6 +138,26 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
 
 
 
+
+    def test_hidden_authority_registries_do_not_execute_paperbook_hash_or_equality(self):
+        _HostilePaperBook.hash_calls = 0
+        _HostilePaperBook.equality_calls = 0
+
+        book = _HostilePaperBook("100")
+        self.assertEqual(_HostilePaperBook.hash_calls, 0)
+        self.assertEqual(_HostilePaperBook.equality_calls, 0)
+
+        leg = TicketLeg(
+            "event-hostile-book-identity",
+            "market-hostile-book-identity",
+            "selection-hostile-book-identity",
+            locked_odds=Decimal("2"),
+        )
+        ticket = book.open_ticket([leg], "10")
+        self.assertEqual(book.committed_stake, Decimal("10"))
+        self.assertEqual(book.tickets[ticket.ticket_id].stake, Decimal("10"))
+        self.assertEqual(_HostilePaperBook.hash_calls, 0)
+        self.assertEqual(_HostilePaperBook.equality_calls, 0)
 
     def test_constructor_rejects_arbitrary_decimal_input_before_str(self):
         _HostileStringConvertible.calls = 0

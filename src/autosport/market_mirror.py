@@ -364,12 +364,19 @@ class MarketMirror:
             # the dataclass is frozen; this closes SQLite-COMMIT -> mirror-apply TOCTOU.
             return self.apply(accepted[0])
 
-        # If this mirror already reached this sequence (or a later one), applying a
-        # storage duplicate cannot advance live state: same-sequence retries remain
-        # idempotent and lower sequences remain stale. Avoid an O(history) trusted
-        # reread on the ordinary duplicate-poll path.
-        if prior is not None and prior.sequence >= admitted_event.sequence:
-            return self.apply(admitted_event)
+        # A strictly older duplicate cannot advance authority. A same-sequence
+        # duplicate may use the fast path only when this mirror already carries
+        # decision-causal authority for that key; otherwise trusted durable
+        # append-generation evidence is required before provenance can change.
+        if prior is not None:
+            key = self._key(admitted_event)
+            if prior.sequence > admitted_event.sequence:
+                return self.apply(admitted_event)
+            if (
+                prior.sequence == admitted_event.sequence
+                and key in self._decision_causal_keys
+            ):
+                return self.apply(admitted_event)
 
         # Storage intentionally treats a retry of one source-local sequence as the
         # same provider observation even when local receipt clocks changed. On a

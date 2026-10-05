@@ -861,6 +861,9 @@ class PersistentLiveDecisionLoop:
         self._paper_execution_model_fingerprint_authority = (
             None if paper_execution is None else paper_execution.config.fingerprint
         )
+        self._paper_execution_max_quote_age_authority = (
+            None if paper_execution is None else paper_execution.max_quote_age
+        )
         self.ingestion_policy = ingestion_policy
         self._ingestion_policy_authority = ingestion_policy
         self._ingestion_policy_semantics_authority = (
@@ -2779,6 +2782,13 @@ class PersistentLiveDecisionLoop:
         ):
             raise LiveDecisionProgressError(
                 "PAPER execution model authority changed after construction"
+            )
+        if (
+            self.paper_execution.max_quote_age
+            != self._paper_execution_max_quote_age_authority
+        ):
+            raise LiveDecisionProgressError(
+                "PAPER execution quote-age authority changed after construction"
             )
 
     def _persist_plan(

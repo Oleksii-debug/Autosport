@@ -218,6 +218,24 @@ class BetdaqLiveCatalogueResolver:
             ).encode("utf-8")
         ).hexdigest()
         receipts: list[str] = []
+
+        def record_rate_admission() -> None:
+            admission = getattr(self._transport, "last_rate_admission", None)
+            if type(admission) is not BetdaqRateAdmission:
+                raise TypeError(
+                    "BETDAQ event-tree acquisition requires canonical BetdaqRateAdmission"
+                )
+            if admission.method != "GetEventSubTreeNoSelections":
+                raise ValueError(
+                    "BETDAQ event-tree acquisition bound wrong rate admission"
+                )
+            receipt = admission.receipt_sha256
+            if receipt in receipts:
+                raise ValueError(
+                    "BETDAQ event-tree acquisition reused rate admission"
+                )
+            receipts.append(receipt)
+
         payload: bytes | None = None
         for attempt in range(1, self._max_attempts + 1):
             try:
@@ -230,17 +248,11 @@ class BetdaqLiveCatalogueResolver:
                 TimeoutError,
                 ConnectionError,
             ) as exc:
-                admission = getattr(self._transport, "last_rate_admission", None)
-                if type(admission) is BetdaqRateAdmission:
-                    if admission.method != "GetEventSubTreeNoSelections":
-                        raise ValueError(
-                            "BETDAQ event-tree acquisition bound wrong rate admission"
-                        ) from exc
-                    if (
-                        not receipts
-                        or receipts[-1] != admission.receipt_sha256
-                    ):
-                        receipts.append(admission.receipt_sha256)
+                # A retry is authorized only when this exact failed dispatch has its
+                # own canonical governor admission. Missing or reused admissions make
+                # the acquisition evidence incomplete and must fail closed rather than
+                # laundering an older receipt into a later attempt.
+                record_rate_admission()
                 if attempt == self._max_attempts:
                     raise ProviderUnavailableError(
                         "BETDAQ event catalogue unavailable after "
@@ -250,17 +262,7 @@ class BetdaqLiveCatalogueResolver:
 
             if type(candidate) is not bytes:
                 raise TypeError("BETDAQ event-tree transport must return bytes")
-            admission = getattr(self._transport, "last_rate_admission", None)
-            if type(admission) is not BetdaqRateAdmission:
-                raise TypeError(
-                    "BETDAQ event-tree acquisition requires canonical BetdaqRateAdmission"
-                )
-            if admission.method != "GetEventSubTreeNoSelections":
-                raise ValueError(
-                    "BETDAQ event-tree acquisition bound wrong rate admission"
-                )
-            if not receipts or receipts[-1] != admission.receipt_sha256:
-                receipts.append(admission.receipt_sha256)
+            record_rate_admission()
             payload = candidate
             break
 

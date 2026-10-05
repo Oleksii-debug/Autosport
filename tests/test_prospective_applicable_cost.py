@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from decimal import Decimal
 import inspect
 
@@ -505,3 +507,111 @@ def test_applicable_cost_resolver_ignores_hash_constructor_global_rebinding(monk
 
     assert attacker_called is False
     subject._SEALED_RESOLUTION_VALIDATOR(result)
+
+
+def test_resolver_rejects_mutated_nested_risk_context_before_hostile_attribute_read():
+    attacker_called = False
+
+    class HostileRiskContext:
+        def __getattribute__(self, _name):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("hostile nested risk-context hook must never execute")
+
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        original = object.__getattribute__(intent, "risk_context")
+        try:
+            object.__setattr__(intent, "risk_context", HostileRiskContext())
+            with pytest.raises(
+                subject.ProspectiveApplicableCostError,
+                match="exact canonical ProposedTicketRiskContext",
+            ):
+                subject.resolve_prospective_applicable_costs(
+                    intent=intent,
+                    plan=plan,
+                    router_store=router_store,
+                    model_request_id=request.request_id,
+                    decision_at=decision_at,
+                )
+        finally:
+            object.__setattr__(intent, "risk_context", original)
+
+    assert attacker_called is False
+
+
+def test_resolver_rejects_datetime_subclass_before_timezone_hook_executes():
+    attacker_called = False
+
+    class HostileDatetime(datetime):
+        def astimezone(self, *_args, **_kwargs):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("datetime subclass hook must never execute")
+
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        hostile = HostileDatetime.fromisoformat(decision_at.isoformat())
+        with pytest.raises(
+            subject.ProspectiveApplicableCostError,
+            match="timezone-aware datetime/ISO-8601",
+        ):
+            subject.resolve_prospective_applicable_costs(
+                intent=intent,
+                plan=plan,
+                router_store=router_store,
+                model_request_id=request.request_id,
+                decision_at=hostile,
+            )
+
+    assert attacker_called is False
+
+
+def test_resolver_validates_plan_identity_elements_before_hostile_equality():
+    attacker_called = False
+
+    class HostileDigest(str):
+        def __eq__(self, _other):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("hostile plan digest equality must never execute")
+
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        original = object.__getattribute__(plan, "intent_sha256s")
+        mutated = tuple(
+            HostileDigest(value) if index == 0 else value
+            for index, value in enumerate(original)
+        )
+        try:
+            object.__setattr__(plan, "intent_sha256s", mutated)
+            with pytest.raises(
+                subject.ProspectiveApplicableCostError,
+                match="portfolio plan intent_sha256 must be a non-empty canonical string",
+            ):
+                subject.resolve_prospective_applicable_costs(
+                    intent=intent,
+                    plan=plan,
+                    router_store=router_store,
+                    model_request_id=request.request_id,
+                    decision_at=decision_at,
+                )
+        finally:
+            object.__setattr__(plan, "intent_sha256s", original)
+
+    assert attacker_called is False

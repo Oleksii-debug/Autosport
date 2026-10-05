@@ -18,6 +18,7 @@ from .real_execution_ledger import _validate_decimal_text_resource_bound
 
 _ORIGINAL_DECIMAL = _impl._decimal
 _ORIGINAL_DECIMAL_TEXT = _impl._decimal_text
+_ORIGINAL_EVIDENCE_TO_DICT = _impl.PaperExecutionEvidenceRecord.to_dict
 _RESOURCE_VALIDATOR = _validate_decimal_text_resource_bound
 
 _HELPER_WITNESSES = tuple(
@@ -31,6 +32,7 @@ _HELPER_WITNESSES = tuple(
     for helper in (
         _ORIGINAL_DECIMAL,
         _ORIGINAL_DECIMAL_TEXT,
+        _ORIGINAL_EVIDENCE_TO_DICT,
         _RESOURCE_VALIDATOR,
     )
 )
@@ -81,6 +83,23 @@ def _bounded_decimal_text(
     return _serialize(value)
 
 
+def _bounded_evidence_to_dict(
+    self: _impl.PaperExecutionEvidenceRecord,
+    _serialize=_ORIGINAL_EVIDENCE_TO_DICT,
+    _validate=_RESOURCE_VALIDATOR,
+    _require=_require_helpers,
+) -> dict[str, object]:
+    """Preflight every accepted economic field before formatting any sibling."""
+    _require()
+    for value in (self.accepted_odds, self.accepted_stake):
+        if value is None:
+            continue
+        if type(value) is not Decimal:
+            raise ValueError("PAPER execution Decimal must be exact")
+        _validate(value)
+    return _serialize(self)
+
+
 def _install() -> None:
     if getattr(_impl, "_autosport_decimal_resource_guard_installed", False):
         return
@@ -88,8 +107,11 @@ def _install() -> None:
         raise RuntimeError("PAPER execution Decimal parser changed before resource guard")
     if _impl._decimal_text is not _ORIGINAL_DECIMAL_TEXT:
         raise RuntimeError("PAPER execution Decimal serializer changed before resource guard")
+    if _impl.PaperExecutionEvidenceRecord.to_dict is not _ORIGINAL_EVIDENCE_TO_DICT:
+        raise RuntimeError("PAPER execution evidence serializer changed before resource guard")
     _impl._decimal = _bounded_decimal
     _impl._decimal_text = _bounded_decimal_text
+    _impl.PaperExecutionEvidenceRecord.to_dict = _bounded_evidence_to_dict
     _impl._autosport_decimal_resource_guard_installed = True
 
 

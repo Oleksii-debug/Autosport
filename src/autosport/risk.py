@@ -32,6 +32,16 @@ _CANONICAL_MARKET_EVENT_QUOTE_KEY = vars(MarketEvent)["quote_key"].fget
 if _CANONICAL_TICKET_LEG_QUOTE_KEY is None or _CANONICAL_MARKET_EVENT_QUOTE_KEY is None:
     raise RuntimeError("canonical quote-key property roots are unavailable")
 
+# Capture the exact PaperBook economic/state graph consumed by risk. These bound
+# roots prevent later class-attribute rebinding from redirecting validation or
+# settlement arithmetic after the risk module has established its authority graph.
+_CANONICAL_PAPERBOOK_TYPE = PaperBook
+_CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
+_CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY = PaperBook._validate_lifecycle_entry
+_CANONICAL_PAPERBOOK_DEBIT_BALANCE = PaperBook._debit_balance
+_CANONICAL_PAPERBOOK_SETTLEMENT_RESULT = PaperBook._settlement_result
+_CANONICAL_PAPERBOOK_OPEN_TICKET = PaperBook.open_ticket
+
 
 def _verify_product_risk_of_ruin_authority(
     registry_path: str | Path | None,
@@ -804,13 +814,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
     def _book_state(
         cls, book: PaperBook
     ) -> tuple[Decimal, Decimal, Decimal, int] | None:
-        if type(book) is not PaperBook:
+        if type(book) is not _CANONICAL_PAPERBOOK_TYPE:
             return None
         try:
             # Validate the exact canonical PaperBook before reading any mutable
             # ticket attributes. This prevents subclass/attribute hooks in a
             # caller-mutated ticket mapping from executing before rejection.
-            PaperBook._validate_loaded_state(book)
+            _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
             tickets = book.tickets
             initial_bankroll = book.initial_bankroll
             balance = book.balance
@@ -835,10 +845,10 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
     def risk_of_ruin_portfolio_sha256(cls, book: PaperBook) -> str | None:
         """Hash the exact validated PaperBook state used by ruin evidence."""
 
-        if type(book) is not PaperBook:
+        if type(book) is not _CANONICAL_PAPERBOOK_TYPE:
             return None
         try:
-            PaperBook._validate_loaded_state(book)
+            _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
             tickets: list[dict[str, object]] = []
             for ticket_id in sorted(book.tickets):
                 ticket = book.tickets[ticket_id]
@@ -873,9 +883,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 )
             lifecycle = []
             for raw_entry in book._lifecycle:
-                action, ticket_id, winners, voids = PaperBook._validate_lifecycle_entry(
-                    raw_entry
-                )
+                action, ticket_id, winners, voids = _CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY(raw_entry)
                 lifecycle.append(
                     {
                         "action": action,
@@ -1234,7 +1242,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         """
 
         try:
-            PaperBook._validate_loaded_state(book)
+            _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
             if realized_loss_window is not None:
                 window_start, window_end = realized_loss_window
                 if (
@@ -1261,22 +1269,20 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
 
             for raw_entry in book._lifecycle:
                 action, ticket_id, winners_raw, voids_raw = (
-                    PaperBook._validate_lifecycle_entry(raw_entry)
+                    _CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY(raw_entry)
                 )
                 ticket = book.tickets.get(ticket_id)
                 if ticket is None:
                     return None
 
                 if action == "open":
-                    replay_balance = PaperBook._debit_balance(
-                        replay_balance, ticket.stake
-                    )
+                    replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(replay_balance, ticket.stake)
                     replay_committed = cls._exact_positive_sum(
                         (replay_committed, ticket.stake)
                     )
                     turnover = cls._exact_positive_sum((turnover, ticket.stake))
                 else:
-                    _, payout, replay_balance = PaperBook._settlement_result(
+                    _, payout, replay_balance = _CANONICAL_PAPERBOOK_SETTLEMENT_RESULT(
                         ticket,
                         replay_balance,
                         set(winners_raw),
@@ -1800,13 +1806,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
     def _shadow_book_for_allocation(book: PaperBook) -> PaperBook | None:
         """Clone canonical paper state for pure sequential allocation checks."""
         try:
-            PaperBook._validate_loaded_state(book)
-            shadow = PaperBook(book.initial_bankroll)
+            _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
+            shadow = _CANONICAL_PAPERBOOK_TYPE(book.initial_bankroll)
             shadow.balance = book.balance
             shadow.tickets = dict(book.tickets)
             shadow._lifecycle = list(book._lifecycle)
             shadow._settlement_times = dict(book._settlement_times)
-            PaperBook._validate_loaded_state(shadow)
+            _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(shadow)
         except (ArithmeticError, AttributeError, TypeError, ValueError):
             return None
         return shadow
@@ -2051,7 +2057,10 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 continue
 
             try:
-                shadow.open_ticket(
+                _CANONICAL_PAPERBOOK_OPEN_TICKET(
+
+                    shadow,
+
                     context.legs,
                     amount,
                     reason=f"risk-vector-reservation:{index}",

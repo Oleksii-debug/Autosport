@@ -233,6 +233,7 @@ class PaperExecutionAdoptionRuntime:
         # copied, reconstructed, or caller-authored PreparedPaperExecution values do
         # not carry execution authority. Restart re-mints from canonical inputs.
         self._prepared_authorities: dict[int, PreparedPaperExecution] = {}
+        self._prepared_book_states: dict[int, PaperBook] = {}
         if self.paper_book_path.exists():
             durable_book = PaperBook.load(self.paper_book_path)
             self._assert_same_book_state(
@@ -272,13 +273,31 @@ class PaperExecutionAdoptionRuntime:
     def _mint_prepared(self, prepared: PreparedPaperExecution) -> PreparedPaperExecution:
         if not isinstance(prepared, PreparedPaperExecution):
             raise TypeError("prepared must be PreparedPaperExecution")
-        self._prepared_authorities[id(prepared)] = prepared
+        with self._execution_lock:
+            pre_run_book = copy.deepcopy(self.book)
+            if not self._same_book_state(self.book, pre_run_book):
+                raise PaperExecutionAdoptionError(
+                    "PaperBook changed during execution preparation"
+                )
+            self._prepared_authorities[id(prepared)] = prepared
+            self._prepared_book_states[id(prepared)] = pre_run_book
         return prepared
 
     def _require_minted(self, prepared: PreparedPaperExecution) -> None:
         if self._prepared_authorities.get(id(prepared)) is not prepared:
             raise PaperExecutionAdoptionError(
                 "prepared execution was not minted by this runtime from canonical authority"
+            )
+
+    def _require_fresh_prepared_book_state(
+        self,
+        prepared: PreparedPaperExecution,
+    ) -> None:
+        self._require_minted(prepared)
+        expected = self._prepared_book_states.get(id(prepared))
+        if expected is None or not self._same_book_state(self.book, expected):
+            raise PaperExecutionAdoptionError(
+                "PaperBook changed after execution preparation"
             )
 
     def prepare(
@@ -884,6 +903,13 @@ class PaperExecutionAdoptionRuntime:
         if type(materialize_exposure) is not bool:
             raise TypeError("materialize_exposure must be bool")
         expected_run_id = self.expected_run_id(prepared, trigger_id)
+        run_events_before = self.ledger.events(expected_run_id)
+        fresh_run = not any(
+            event["event_type"] == "RUN_RESERVED"
+            for event in run_events_before
+        )
+        if fresh_run:
+            self._require_fresh_prepared_book_state(prepared)
         if (
             observations is None
             and evidence_registry is None
@@ -917,6 +943,8 @@ class PaperExecutionAdoptionRuntime:
             raise PaperExecutionAdoptionError(
                 "canonical execution returned unexpected run identity"
             )
+        if fresh_run and materialize_exposure:
+            self._require_fresh_prepared_book_state(prepared)
         if not materialize_exposure:
             return PaperExecutionAdoptionResult(run=run, ticket_ids=())
 

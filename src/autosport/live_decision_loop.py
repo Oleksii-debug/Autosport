@@ -2691,6 +2691,13 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "live observation authority changed after construction"
             )
+        if self._default_health_store is not None:
+            try:
+                self._default_health_store.assert_persistence_authority()
+            except RuntimeError as exc:
+                raise LiveDecisionProgressError(
+                    "live source-health persistence authority changed after construction"
+                ) from exc
         if self._provider_authority is not None:
             if self.provider is not self._provider_authority:
                 raise LiveDecisionProgressError(

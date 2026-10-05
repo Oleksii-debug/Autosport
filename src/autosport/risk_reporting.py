@@ -467,16 +467,12 @@ def build_product_issued_paper_equity_path(
     if points[-1].equity != current_equity:
         raise ValueError("canonical PAPER equity path current equity is inconsistent")
 
-    after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
-    after_source_sha256 = _paper_equity_source_state_sha256(book)
-    if after_sha256 is None or after_sha256 != before_sha256:
-        raise ValueError("canonical PAPER risk state changed during equity-path issuance")
-    if after_source_sha256 != before_source_sha256:
-        raise ValueError("canonical PAPER source state changed during equity-path issuance")
-    if provenance_for(goal) != goal_snapshot_provenance:
-        raise ValueError("canonical economic goal changed during equity-path issuance")
-
+    # Capture every mutable PaperBook-derived output before the final source
+    # digest fence. After that fence, evidence assembly must use locals only so
+    # a concurrent mutation cannot mix a newer completion/scope fact into a
+    # path committed to the older source-state digest.
     point_tuple = tuple(points)
+    initial_equity = book.initial_bankroll
     settled_history_complete = all(
         ticket.status is not TicketStatus.OPEN for ticket in book.tickets.values()
     )
@@ -485,6 +481,15 @@ def build_product_issued_paper_equity_path(
         and ticket.currency == goal_snapshot.currency
         for ticket in book.tickets.values()
     )
+
+    after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    after_source_sha256 = _paper_equity_source_state_sha256(book)
+    if after_sha256 is None or after_sha256 != before_sha256:
+        raise ValueError("canonical PAPER risk state changed during equity-path issuance")
+    if after_source_sha256 != before_source_sha256:
+        raise ValueError("canonical PAPER source state changed during equity-path issuance")
+    if provenance_for(goal) != goal_snapshot_provenance:
+        raise ValueError("canonical economic goal changed during equity-path issuance")
     # Current PaperBook persistence owns the opening numeric balance but does not
     # durably bind that opening capital to EconomicGoal.bankroll_id/currency.
     # Ticket-level provenance cannot retroactively mint that owner-capital
@@ -510,7 +515,7 @@ def build_product_issued_paper_equity_path(
         goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
         portfolio_risk_state_sha256=after_sha256,
         paperbook_source_state_sha256=after_source_sha256,
-        initial_equity=book.initial_bankroll,
+        initial_equity=initial_equity,
         points=point_tuple,
         availability_complete=availability_complete,
         settled_history_complete=settled_history_complete,
@@ -544,7 +549,7 @@ def build_product_issued_paper_equity_path(
         paperbook_source_state_sha256=after_source_sha256,
         history_view=HISTORY_VIEW_RESTATED_CURRENT,
         historical_as_known_supported=False,
-        initial_equity=book.initial_bankroll,
+        initial_equity=initial_equity,
         points=point_tuple,
         point_count=len(point_tuple),
         path_sha256=path_sha256,

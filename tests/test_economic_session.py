@@ -661,6 +661,62 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                 finally:
                     setattr(economic_session, helper_name, original)
 
+    def test_explicit_goal_transition_closes_predecessor_and_publishes_successor(self) -> None:
+        store = self._store()
+        first = store.current()
+        EconomicGoalStore(self.workspace).persist_automatic_successor(
+            _goal(revision=2, max_turnover="5")
+        )
+        self.clock.set("2026-10-05T13:00:00Z")
+
+        second = self._store().transition_to_current_goal(first)
+
+        self.assertNotEqual(second.session_id, first.session_id)
+        self.assertEqual(second.goal_revision, 2)
+        self.assertEqual(second.authority_generation, 2)
+        self.assertEqual(second.started_at, "2026-10-05T13:00:00Z")
+        self.assertEqual(second.predecessor_session_id, first.session_id)
+        self.assertEqual(second.predecessor_state_sha256, first.state_sha256)
+        self.assertEqual(second.predecessor_ended_at, second.started_at)
+        self.assertEqual(self._store().current(), second)
+
+    def test_explicit_transition_rejects_unchanged_goal_without_state_change(self) -> None:
+        store = self._store()
+        first = store.current()
+
+        with self.assertRaisesRegex(
+            EconomicSessionMismatchError,
+            "EconomicGoal is unchanged",
+        ):
+            self._store().transition_to_current_goal(first)
+
+        self.assertEqual(self._store().current(), first)
+
+    def test_stale_predecessor_cannot_publish_over_current_successor(self) -> None:
+        first = self._store().current()
+        EconomicGoalStore(self.workspace).persist_automatic_successor(
+            _goal(revision=2, max_turnover="5")
+        )
+        self.clock.set("2026-10-05T13:00:00Z")
+        second = self._store().transition_to_current_goal(first)
+        EconomicGoalStore(self.workspace).persist_automatic_successor(
+            _goal(revision=3, max_turnover="4")
+        )
+        self.clock.set("2026-10-05T14:00:00Z")
+
+        with self.assertRaisesRegex(
+            EconomicSessionMismatchError,
+            "predecessor does not match current durable session",
+        ):
+            self._store().transition_to_current_goal(first)
+
+        with self.assertRaisesRegex(
+            EconomicSessionMismatchError,
+            "changed without explicit economic-session transition",
+        ):
+            self._store().current()
+        self.assertEqual(second.authority_generation, 2)
+
     def test_default_clock_session_is_positive_boundary_authority(self) -> None:
         store = ProductEconomicSessionStore(
             self.workspace,

@@ -374,6 +374,35 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertEqual(calls, 0)
 
+    def test_pure_helper_rebinding_fails_before_execution(self) -> None:
+        import autosport.economic_session as economic_session
+
+        for helper_name in (
+            "_clock_instant",
+            "_state_sha256",
+            "_semantic_binding",
+            "_tx_id",
+            "_canonical_json_bytes",
+            "_read_regular_bytes",
+            "_decode_state",
+        ):
+            with self.subTest(helper_name=helper_name):
+                store = self._store()
+                original = getattr(economic_session, helper_name)
+
+                def forbidden(*_args, **_kwargs):
+                    raise AssertionError(f"hostile {helper_name} executed")
+
+                setattr(economic_session, helper_name, forbidden)
+                try:
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.current()
+                finally:
+                    setattr(economic_session, helper_name, original)
+
     def test_default_clock_session_is_positive_boundary_authority(self) -> None:
         store = ProductEconomicSessionStore(
             self.workspace,

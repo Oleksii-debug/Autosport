@@ -215,16 +215,31 @@ def test_transition_is_bounded_and_marks_truncated_batches(
     )
     provider.bind_durable_current({})
 
+    identities = tuple(
+        BetfairQuoteIdentity(
+            BETFAIR_STREAM_SOURCE_ID,
+            "1.23456789",
+            101 + index,
+            Decimal("0"),
+            BetfairQuoteSide.BACK,
+            Decimal("2"),
+        )
+        for index in range(3)
+    )
     quotes = tuple(
         ProviderQuote(
-            provider_event_id=f"event-{index}",
-            provider_market_id="1.23456789",
-            provider_selection_id=f"selection-{index}",
+            provider_event_id=_event_token(identity.market_id),
+            provider_market_id=identity.market_id,
+            provider_selection_id=_identity_token(identity),
             decimal_odds=Decimal("2"),
             observed_ts="2026-10-05T12:00:00+00:00",
             sequence=index + 1,
+            status="open",
+            source_ts="2026-10-05T11:59:59+00:00",
+            metadata=_metadata(identity, evidence_id=f"evidence-{index}"),
+            exchange_side="back",
         )
-        for index in range(3)
+        for index, identity in enumerate(identities)
     )
     monkeypatch.setattr(provider, "_build_transition", lambda: quotes)
 
@@ -421,3 +436,57 @@ def test_restart_binding_preserves_last_traded_identity_without_embedded_price()
     provider.assert_durable_current(current)
 
     assert provider._open_by_identity[identity].decimal_odds == Decimal("2.5")
+
+
+def test_truncated_transition_advances_bridge_state_only_for_exposed_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+    provider.bind_durable_current({})
+
+    identities = tuple(
+        BetfairQuoteIdentity(
+            BETFAIR_STREAM_SOURCE_ID,
+            "1.23456789",
+            201 + index,
+            Decimal("0"),
+            BetfairQuoteSide.BACK,
+            Decimal("2"),
+        )
+        for index in range(3)
+    )
+    quotes = tuple(
+        ProviderQuote(
+            provider_event_id=_event_token(identity.market_id),
+            provider_market_id=identity.market_id,
+            provider_selection_id=_identity_token(identity),
+            decimal_odds=Decimal("2"),
+            observed_ts="2026-10-05T12:00:00+00:00",
+            sequence=index + 1,
+            status="open",
+            source_ts="2026-10-05T11:59:59+00:00",
+            metadata=_metadata(identity, evidence_id=f"page-evidence-{index}"),
+            exchange_side="back",
+        )
+        for index, identity in enumerate(identities)
+    )
+    monkeypatch.setattr(provider, "_build_transition", lambda: quotes)
+
+    first = provider.read_batch(1)
+
+    assert first.cursor == "1"
+    assert first.quality_flags == ("TRUNCATED_BATCH",)
+    assert provider._sequence == 1
+    assert set(provider._open_by_identity) == {identities[0]}
+    assert provider._pending_offset == 1
+
+    second = provider.read_batch(1)
+
+    assert second.cursor == "2"
+    assert second.quality_flags == ("TRUNCATED_BATCH",)
+    assert provider._sequence == 2
+    assert set(provider._open_by_identity) == {identities[0], identities[1]}
+    assert identities[2] not in provider._open_by_identity

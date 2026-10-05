@@ -199,6 +199,55 @@ def _derive_run_economics(
     )
 
 
+
+def _canonical_observation_evidence_ids(
+    observation_evidence_ids: Mapping[str, str],
+    *,
+    action_ids: tuple[str, ...],
+) -> dict[str, str]:
+    if type(observation_evidence_ids) is not dict:
+        raise TypeError("observation_evidence_ids must be an exact dict[str, str]")
+    canonical: dict[str, str] = {}
+    for action_id, evidence_id in observation_evidence_ids.items():
+        if type(action_id) is not str or not action_id or action_id.strip() != action_id:
+            raise TypeError("observation evidence action ids must be canonical strings")
+        if type(evidence_id) is not str or not evidence_id or evidence_id.strip() != evidence_id:
+            raise TypeError("observation evidence ids must be canonical strings")
+        canonical[action_id] = evidence_id
+    if set(canonical) - set(action_ids):
+        raise PaperExecutionStateError(
+            "observation evidence contains action outside execution plan"
+        )
+    return dict(sorted(canonical.items()))
+
+
+def _canonical_run_reservation_inputs(
+    *,
+    run_id: str,
+    trigger_id: str,
+    plan: ExecutionPlan,
+    config: PaperExecutionModelConfig,
+    started_at: str,
+    observation_evidence_ids: Mapping[str, str],
+) -> tuple[str, str, tuple[str, ...], dict[str, str]]:
+    _require_canonical_execution_plan_surface(plan)
+    _require_canonical_execution_config_surface(config)
+    run_id = _impl._text(run_id, "run_id")
+    trigger_id = _impl._text(trigger_id, "trigger_id")
+    _impl._timestamp(started_at, "started_at")
+    canonical_run_id = _impl._run_id(plan, trigger_id, config)
+    if run_id != canonical_run_id:
+        raise PaperExecutionStateError(
+            "run_id does not match canonical plan/trigger/config identity"
+        )
+    action_ids = tuple(action.action_id for action in plan.actions)
+    evidence_ids = _canonical_observation_evidence_ids(
+        observation_evidence_ids,
+        action_ids=action_ids,
+    )
+    return run_id, trigger_id, action_ids, evidence_ids
+
+
 class PaperExecutionLedger(_impl.PaperExecutionLedger):
     """PAPER ledger with mechanically derived completion economics."""
 
@@ -213,11 +262,25 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         observation_evidence_ids: Mapping[str, str],
         suspended_action_ids: frozenset[str] = frozenset(),
     ) -> None:
+        if type(self) is not PaperExecutionLedger:
+            raise TypeError("ledger must be exact PaperExecutionLedger")
+        (
+            run_id,
+            trigger_id,
+            action_ids,
+            observation_evidence_ids,
+        ) = _canonical_run_reservation_inputs(
+            run_id=run_id,
+            trigger_id=trigger_id,
+            plan=plan,
+            config=config,
+            started_at=started_at,
+            observation_evidence_ids=observation_evidence_ids,
+        )
         if type(suspended_action_ids) is not frozenset or any(
             type(item) is not str for item in suspended_action_ids
         ):
             raise TypeError("suspended_action_ids must be a frozenset[str]")
-        action_ids = tuple(action.action_id for action in plan.actions)
         if suspended_action_ids - set(action_ids):
             raise PaperExecutionStateError(
                 "suspended_action_ids contain action outside execution plan"
@@ -229,7 +292,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             "model_fingerprint": config.fingerprint,
             "started_at": started_at,
             "action_ids": list(action_ids),
-            "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
+            "observation_evidence_ids": observation_evidence_ids,
         }
         payload = {
             **base_payload,
@@ -403,6 +466,21 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         observation_evidence_ids: Mapping[str, str],
         suspended_action_ids: frozenset[str] | None = None,
     ) -> PaperExecutionRun | None:
+        if type(self) is not PaperExecutionLedger:
+            raise TypeError("ledger must be exact PaperExecutionLedger")
+        (
+            run_id,
+            trigger_id,
+            action_ids,
+            observation_evidence_ids,
+        ) = _canonical_run_reservation_inputs(
+            run_id=run_id,
+            trigger_id=trigger_id,
+            plan=plan,
+            config=config,
+            started_at=started_at,
+            observation_evidence_ids=observation_evidence_ids,
+        )
         events = self.events(run_id)
         if not events:
             return None
@@ -415,8 +493,8 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             "plan_fingerprint": plan.fingerprint,
             "model_fingerprint": config.fingerprint,
             "started_at": started_at,
-            "action_ids": [action.action_id for action in plan.actions],
-            "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
+            "action_ids": list(action_ids),
+            "observation_evidence_ids": observation_evidence_ids,
         }
         durable_reserve = reserve[0]["payload"]
         if "suspended_action_ids" in durable_reserve:
@@ -426,7 +504,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 or any(type(item) is not str for item in raw_suspended)
                 or raw_suspended != sorted(set(raw_suspended))
                 or set(raw_suspended)
-                - {action.action_id for action in plan.actions}
+                - set(action_ids)
             ):
                 raise PaperExecutionIntegrityError(
                     "durable suspended_action_ids are invalid"
@@ -463,7 +541,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             )
         )
         derived = _derive_run_economics(
-            tuple(action.action_id for action in plan.actions),
+            action_ids,
             attempts,
         )
 

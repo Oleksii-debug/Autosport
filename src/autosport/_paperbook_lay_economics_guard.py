@@ -37,6 +37,7 @@ _ORIGINAL_VALIDATE_LIFECYCLE_ENTRY = _paper.PaperBook._validate_lifecycle_entry.
 _ORIGINAL_VALIDATE_SETTLED_AT = _paper.PaperBook._validate_settled_at.__func__
 _ORIGINAL_PARSE_ISO_TIMESTAMP = _paper.parse_iso_timestamp
 _ORIGINAL_UTC_NOW_ISO = _paper.utc_now_iso
+_ORIGINAL_UUID4 = _paper.uuid.uuid4
 _ORIGINAL_PAPER_DECIMAL_CONTEXT = _paper._paper_decimal_context
 _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY = _paper._require_ticket_opening_authority
 _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _paper._require_paperbook_causal_history_authority
@@ -403,7 +404,7 @@ def _open_ticket_unlocked(
     )
 
     ticket = _PAPER_TICKET_TYPE(
-        ticket_id=str(_paper.uuid.uuid4()),
+        ticket_id=str(_ORIGINAL_UUID4()),
         stake=amount,
         legs=ticket_legs,
         placed_at=ticket_placed_at,

@@ -111,6 +111,91 @@ def _empirical_acceptance(
     return record.as_observation(), registry
 
 
+def test_mutated_config_identity_fails_before_fingerprint_or_reservation() -> None:
+    class HostileModelId(str):
+        calls = 0
+
+        def __hash__(self) -> int:
+            type(self).calls += 1
+            return super().__hash__()
+
+        def __eq__(self, other: object) -> bool:
+            type(self).calls += 1
+            return super().__eq__(other)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        lay = _action("config-hostile", side="LAY")
+        config = _config()
+        HostileModelId.calls = 0
+        object.__setattr__(
+            config,
+            "model_id",
+            HostileModelId(config.model_id),
+        )
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="model_id must retain exact canonical text authority",
+        ):
+            execute_paper_plan(
+                plan=_plan(lay),
+                trigger_id="config-hostile",
+                config=config,
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=frozenset({lay.action_id}),
+            )
+
+        assert HostileModelId.calls == 0
+        assert ledger.events() == []
+
+
+def test_mutated_config_range_fails_before_reservation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        lay = _action("config-range", side="LAY")
+        config = _config()
+        object.__setattr__(config, "max_quote_age_ms", 0)
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="max_quote_age_ms must remain positive",
+        ):
+            execute_paper_plan(
+                plan=_plan(lay),
+                trigger_id="config-range",
+                config=config,
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=frozenset({lay.action_id}),
+            )
+
+        assert ledger.events() == []
+
+
+class _LedgerSubclass(PaperExecutionLedger):
+    pass
+
+
+def test_ledger_subclass_cannot_replace_durable_authority() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _LedgerSubclass(Path(tmp) / "paper-execution.jsonl")
+        lay = _action("ledger-subclass", side="LAY")
+
+        with pytest.raises(TypeError, match="exact PaperExecutionLedger"):
+            execute_paper_plan(
+                plan=_plan(lay),
+                trigger_id="ledger-subclass",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=frozenset({lay.action_id}),
+            )
+
+        assert ledger.events() == []
+
+
 def test_mutated_plan_identity_fails_before_fingerprint_or_reservation() -> None:
     class HostilePlanId(str):
         calls = 0

@@ -48,6 +48,34 @@ class StaticProvider:
 
 
 class IngestionHealthTests(unittest.TestCase):
+    def test_provider_dtos_reject_string_subclass_identity_fields(self):
+        class Text(str):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "source_id must be an exact str"):
+            ProviderBatch(Text("source-a"), ())
+        with self.assertRaisesRegex(TypeError, "cursor must be an exact str"):
+            ProviderBatch("source-a", (), cursor=Text("cursor-1"))
+        with self.assertRaisesRegex(TypeError, "provider_event_id must be an exact str"):
+            ProviderQuote(
+                provider_event_id=Text("event-1"),
+                provider_market_id="winner",
+                provider_selection_id="alice",
+                decimal_odds=Decimal("2.0"),
+                observed_ts="2026-09-12T12:00:00+00:00",
+                sequence=1,
+            )
+        with self.assertRaisesRegex(TypeError, "status must be an exact str"):
+            ProviderQuote(
+                provider_event_id="event-1",
+                provider_market_id="winner",
+                provider_selection_id="alice",
+                decimal_odds=Decimal("2.0"),
+                observed_ts="2026-09-12T12:00:00+00:00",
+                sequence=1,
+                status=Text("open"),
+            )
+
     def test_ingestion_rejects_substituted_provider_identity_and_batch_types(self):
         class Text(str):
             pass

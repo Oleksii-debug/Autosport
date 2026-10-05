@@ -119,21 +119,22 @@ def test_noncanonical_lay_in_multi_leg_plan_fails_before_reservation(side: str) 
 
 
 @pytest.mark.parametrize("side", ("lay", " LAY "))
-def test_noncanonical_single_leg_empirical_lay_uses_same_liability_classification(side: str) -> None:
+def test_noncanonical_single_leg_lay_fails_before_run_reservation(side: str) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
         lay = _action("lay", side=side)
         observation, registry = _empirical_acceptance(ledger, lay)
+        before = len(ledger.events())
 
-        result = execute_paper_plan(
-            plan=_plan(lay),
-            trigger_id=f"single-{side!r}",
-            config=_config(),
-            ledger=ledger,
-            started_at=STARTED_AT,
-            observations={lay.action_id: observation},
-            evidence_registry=registry,
-        )
+        with pytest.raises(PaperExecutionStateError, match="canonical LAY"):
+            execute_paper_plan(
+                plan=_plan(lay),
+                trigger_id=f"single-{side!r}",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={lay.action_id: observation},
+                evidence_registry=registry,
+            )
 
-        assert result.worst_case_exposure == 40
-        assert result.attempts[0].side == side
+        assert len(ledger.events()) == before

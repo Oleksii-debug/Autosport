@@ -409,6 +409,10 @@ def _build_canonical_authority():
     error_cls = ProspectiveApplicableCostError
     intent_cls = OpportunityIntent
     plan_cls = PortfolioPlan
+    intent_sha_getter = intent_cls.intent_sha256.fget
+    intent_sha_getter_code = intent_sha_getter.__code__
+    plan_sha_getter = plan_cls.plan_sha256.fget
+    plan_sha_getter_code = plan_sha_getter.__code__
     opportunity_cls = Opportunity
     risk_context_cls = ProposedTicketRiskContext
     router_store_cls = ModelComputeRouterStore
@@ -879,7 +883,20 @@ def _build_canonical_authority():
                 "portfolio plan decision_ts does not match OpportunityIntent proposal_ts"
             )
 
-        intent_sha256 = sha256(intent.intent_sha256, "intent.intent_sha256")
+        if (
+            intent_cls.intent_sha256.fget is not intent_sha_getter
+            or intent_sha_getter.__code__ is not intent_sha_getter_code
+        ):
+            raise error_cls("canonical OpportunityIntent digest authority changed")
+        intent_sha256 = sha256(
+            intent_sha_getter(intent),
+            "intent.intent_sha256",
+        )
+        if (
+            intent_cls.intent_sha256.fget is not intent_sha_getter
+            or intent_sha_getter.__code__ is not intent_sha_getter_code
+        ):
+            raise error_cls("canonical OpportunityIntent digest authority changed")
         intent_id = text(
             object.__getattribute__(intent, "intent_id"),
             "intent.intent_id",
@@ -912,7 +929,20 @@ def _build_canonical_authority():
         index = matches[0]
         if canonical_plan_ids[index] != intent_id:
             raise error_cls("canonical PortfolioPlan intent_id/intent_sha256 binding mismatch")
-        portfolio_plan_sha256 = sha256(plan.plan_sha256, "portfolio plan plan_sha256")
+        if (
+            plan_cls.plan_sha256.fget is not plan_sha_getter
+            or plan_sha_getter.__code__ is not plan_sha_getter_code
+        ):
+            raise error_cls("canonical PortfolioPlan digest authority changed")
+        portfolio_plan_sha256 = sha256(
+            plan_sha_getter(plan),
+            "portfolio plan plan_sha256",
+        )
+        if (
+            plan_cls.plan_sha256.fget is not plan_sha_getter
+            or plan_sha_getter.__code__ is not plan_sha_getter_code
+        ):
+            raise error_cls("canonical PortfolioPlan digest authority changed")
         canonical_request_id = text(model_request_id, "model_request_id")
 
         if model_resolver.__code__ is not model_resolver_code:

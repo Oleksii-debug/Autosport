@@ -362,7 +362,12 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             return
 
         workspace = Path(self.workspace)
-        if self._workspace_requires_recovery(workspace):
+        restore_workspace = Path(self._active_workspace)
+        if (
+            self._workspace_requires_recovery(workspace)
+            or self._workspace_requires_recovery(restore_workspace)
+        ):
+            self._active_workspace = restore_workspace
             message = product_text("ui.product_runtime.status.recovery_required")
             self.product_status.set(message)
             self.status.set(message)
@@ -413,7 +418,6 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.bell()
             return
 
-        restore_workspace = Path(self._active_workspace)
         self._product_restore_workspace = None
         if not self._hide_uncertain_economic_state(
             product_text("ui.product_runtime.status.starting")

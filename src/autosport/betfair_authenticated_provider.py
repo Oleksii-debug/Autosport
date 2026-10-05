@@ -79,9 +79,11 @@ def _durable_open_quote(
 ) -> ProviderQuote:
     """Reconstruct the exact provider-level open state represented by durable current."""
 
-    expected_event_id = _event_token(identity.market_id)
+    provider_event_id = _event_token(identity.market_id)
+    provider_selection_id = _identity_token(identity)
+    expected_event_id = f"{BETFAIR_STREAM_SOURCE_ID}:{provider_event_id}"
     expected_market_id = f"{BETFAIR_STREAM_SOURCE_ID}:{identity.market_id}"
-    expected_selection_id = _identity_token(identity)
+    expected_selection_id = f"{BETFAIR_STREAM_SOURCE_ID}:{provider_selection_id}"
     expected_exchange_side = (
         identity.side.value
         if identity.side in {BetfairQuoteSide.BACK, BetfairQuoteSide.LAY}
@@ -103,9 +105,9 @@ def _durable_open_quote(
         raise ValueError("durable Betfair bridge odds do not match quote identity")
 
     return ProviderQuote(
-        provider_event_id=expected_event_id,
+        provider_event_id=provider_event_id,
         provider_market_id=identity.market_id,
-        provider_selection_id=expected_selection_id,
+        provider_selection_id=provider_selection_id,
         decimal_odds=event.decimal_odds,
         observed_ts=event.observed_ts,
         sequence=event.sequence,
@@ -228,9 +230,13 @@ class BetfairAuthenticatedMarketProvider:
             if event.sequence > max_sequence:
                 max_sequence = event.sequence
             identity = _identity_from_metadata(event.metadata)
-            expected_event_id = _event_token(identity.market_id)
+            provider_event_id = _event_token(identity.market_id)
+            provider_selection_id = _identity_token(identity)
+            expected_event_id = f"{BETFAIR_STREAM_SOURCE_ID}:{provider_event_id}"
             expected_market_id = f"{BETFAIR_STREAM_SOURCE_ID}:{identity.market_id}"
-            expected_selection_id = _identity_token(identity)
+            expected_selection_id = (
+                f"{BETFAIR_STREAM_SOURCE_ID}:{provider_selection_id}"
+            )
             if event.event_id != expected_event_id:
                 raise ValueError("durable Betfair bridge event identity mismatch")
             if event.market_id != expected_market_id:
@@ -297,9 +303,13 @@ class BetfairAuthenticatedMarketProvider:
             if type(event.sequence) is not int or event.sequence < 1:
                 raise ValueError("durable Betfair bridge sequence must be a positive int")
             max_sequence = max(max_sequence, event.sequence)
-            expected_event_id = _event_token(identity.market_id)
+            provider_event_id = _event_token(identity.market_id)
+            provider_selection_id = _identity_token(identity)
+            expected_event_id = f"{BETFAIR_STREAM_SOURCE_ID}:{provider_event_id}"
             expected_market_id = f"{BETFAIR_STREAM_SOURCE_ID}:{identity.market_id}"
-            expected_selection_id = _identity_token(identity)
+            expected_selection_id = (
+                f"{BETFAIR_STREAM_SOURCE_ID}:{provider_selection_id}"
+            )
             if event.event_id != expected_event_id:
                 raise ValueError("durable Betfair bridge event identity mismatch")
             if event.market_id != expected_market_id:

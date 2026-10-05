@@ -620,6 +620,16 @@ class LiveObservationTests(unittest.TestCase):
             )
             self.assertEqual(len(invalidations.changed_keys), 3)
 
+    def test_worker_rejects_noncallable_task_before_claiming_slot(self):
+        worker = OneShotObservationWorker()
+
+        with self.assertRaisesRegex(TypeError, "task must be callable"):
+            worker.start(None)
+
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+
     def test_worker_refuses_second_start_until_terminal_message_is_consumed(self):
         # Build the real observation result outside the worker timing window. This
         # test owns the worker single-flight/message-consumption contract; SQLite

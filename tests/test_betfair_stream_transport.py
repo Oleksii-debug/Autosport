@@ -1058,3 +1058,61 @@ def test_concurrent_connect_fails_closed_before_second_network_open(
     assert "connection_id" not in outcome
     assert isinstance(outcome.get("error"), stream.BetfairStreamTransportError)
     assert transport.is_authenticated is False
+
+
+def test_authenticated_frame_readers_are_serialized_over_shared_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = b'{"op":"mcm","clk":"a"}\r\n'
+    second = b'{"op":"mcm","clk":"b"}\r\n'
+    fake = connected_socket(tail=first + second)
+    transport = make_transport(monkeypatch, fake)
+    transport.connect()
+
+    first_consume_entered = Event()
+    allow_first_consume = Event()
+    second_done = Event()
+    results: list[stream.BetfairStreamAuthenticatedFrame] = []
+    errors: list[BaseException] = []
+    original_consume = transport._consume_received_bytes
+    consume_calls = 0
+
+    def blocking_consume(count: int):
+        nonlocal consume_calls
+        consume_calls += 1
+        if consume_calls == 1:
+            first_consume_entered.set()
+            assert allow_first_consume.wait(timeout=2.0)
+        return original_consume(count)
+
+    monkeypatch.setattr(transport, "_consume_received_bytes", blocking_consume)
+
+    def read_one(*, mark_done: bool = False) -> None:
+        try:
+            results.append(transport.read_authenticated_frame())
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if mark_done:
+                second_done.set()
+
+    first_reader = Thread(target=read_one, name="betfair-read-first")
+    first_reader.start()
+    assert first_consume_entered.wait(timeout=2.0)
+
+    second_reader = Thread(
+        target=lambda: read_one(mark_done=True),
+        name="betfair-read-second",
+    )
+    second_reader.start()
+    assert not second_done.wait(timeout=0.05)
+
+    allow_first_consume.set()
+    first_reader.join(timeout=2.0)
+    second_reader.join(timeout=2.0)
+
+    assert not first_reader.is_alive()
+    assert not second_reader.is_alive()
+    assert errors == []
+    assert [frame.payload for frame in results] == [first, second]
+    assert [frame.frame_sequence for frame in results] == [1, 2]

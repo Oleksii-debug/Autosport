@@ -163,7 +163,7 @@ def _decode_request(body: object) -> dict[str, object]:
 
 @dataclass(frozen=True, slots=True, init=False)
 class BetfairStandardLayLimitPriceBoundEvidence:
-    """Product-issued evidence for the prospective ordinary-LAY price ceiling."""
+    """Resolver-derived assertion for the prospective ordinary-LAY price ceiling.\n\n    The value is not a bearer capability. Positive consumption must re-resolve\n    the exact request bytes through require_betfair_standard_lay_limit_price_bound().\n    """
 
     request_sha256: str
     market_id: str
@@ -191,7 +191,7 @@ class BetfairStandardLayLimitPriceBoundEvidence:
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         raise BetfairStandardLayLimitPriceBoundError(
-            "BetfairStandardLayLimitPriceBoundEvidence is issued only by the canonical resolver"
+            "BetfairStandardLayLimitPriceBoundEvidence is constructed only by the canonical resolver"
         )
 
     def _validate(self) -> None:
@@ -481,3 +481,33 @@ def resolve_betfair_standard_lay_limit_price_bound(
         price_ceiling_odds=requested_odds,
         persistence_type=persistence_type,
     )
+
+def require_betfair_standard_lay_limit_price_bound(
+    request_body: bytes,
+    evidence: object,
+) -> BetfairStandardLayLimitPriceBoundEvidence:
+    """Return fresh canonical authority only after exact request re-resolution.
+
+    The evidence value is assertion/transport data. Even an exact-class object
+    built through object.__new__ cannot become positive authority by itself:
+    this function resolves the supplied request bytes again and requires complete
+    canonical evidence equivalence before returning the freshly resolved object.
+    """
+
+    if type(evidence) is not BetfairStandardLayLimitPriceBoundEvidence:
+        raise BetfairStandardLayLimitPriceBoundError(
+            "LAY price-bound assertion must use the exact canonical evidence type"
+        )
+    canonical = resolve_betfair_standard_lay_limit_price_bound(request_body)
+    try:
+        asserted = evidence.to_dict()
+        resolved = canonical.to_dict()
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise BetfairStandardLayLimitPriceBoundError(
+            "LAY price-bound assertion is invalid"
+        ) from exc
+    if asserted != resolved:
+        raise BetfairStandardLayLimitPriceBoundError(
+            "LAY price-bound assertion does not match exact request re-resolution"
+        )
+    return canonical

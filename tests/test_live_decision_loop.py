@@ -9362,5 +9362,161 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+
+    def test_post_append_hook_cannot_redirect_paper_execution_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            model = PaperExecutionModelConfig(
+                model_id="post-append-ledger-authority",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="post-append-ledger-authority",
+                seed="post-append-ledger-authority",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            canonical_ledger = PaperExecutionLedger(
+                workspace / "paper-execution.jsonl"
+            )
+            foreign_ledger = PaperExecutionLedger(
+                workspace / "foreign-paper-execution.jsonl"
+            )
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=canonical_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-post-append-ledger-authority",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                authority=authority,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            def redirect_after_decision_append() -> None:
+                execution.ledger = foreign_ledger
+
+            loop.post_append_hook = redirect_after_decision_append
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "execution ledger authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(canonical_ledger.events(), ())
+            self.assertEqual(foreign_ledger.events(), ())
+            progress = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(progress["phase"], "append_pending")
+            loop.close()
+
+
+    def test_post_append_hook_cannot_change_paper_execution_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            model = PaperExecutionModelConfig(
+                model_id="post-append-model-authority",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="post-append-model-authority",
+                seed="post-append-model-authority",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            canonical_ledger = PaperExecutionLedger(
+                workspace / "paper-execution.jsonl"
+            )
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=canonical_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-post-append-model-authority",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                authority=authority,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            replacement_model = PaperExecutionModelConfig(
+                model_id=model.model_id,
+                model_version="2",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source=model.evidence_source,
+                seed=model.seed,
+                max_quote_age_ms=model.max_quote_age_ms,
+                min_delay_ms=model.min_delay_ms,
+                max_delay_ms=model.max_delay_ms,
+                rejected_bps=model.rejected_bps,
+                partial_bps=model.partial_bps,
+                unknown_bps=model.unknown_bps,
+                partial_fill_bps=model.partial_fill_bps,
+                max_slippage_bps=model.max_slippage_bps,
+            )
+
+            def mutate_model_after_decision_append() -> None:
+                execution.config = replacement_model
+
+            loop.post_append_hook = mutate_model_after_decision_append
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "execution model authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(canonical_ledger.events(), ())
+            progress = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(progress["phase"], "append_pending")
+            loop.close()
+
 if __name__ == "__main__":
     unittest.main()

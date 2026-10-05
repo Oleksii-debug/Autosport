@@ -1249,7 +1249,7 @@ class PersistentLiveDecisionLoop:
             and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
         ):
             raise LiveDecisionProgressError(
-                "cannot register live input while economic progress is unfinished"
+                "cannot mutate live dependency registry while a decision is unfinished"
             )
         normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
         candidate = _InputSpec(
@@ -1295,7 +1295,7 @@ class PersistentLiveDecisionLoop:
             and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
         ):
             raise LiveDecisionProgressError(
-                "cannot unregister live input while economic progress is unfinished"
+                "cannot mutate live dependency registry while a decision is unfinished"
             )
         normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
         existing = self._input_specs.get(normalized_id)

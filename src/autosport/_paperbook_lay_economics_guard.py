@@ -16,6 +16,11 @@ _ORIGINAL_VALIDATE_LIFECYCLE_REACHABILITY = (
     _paper.PaperBook._validate_lifecycle_reachability.__func__
 )
 _ORIGINAL_VALIDATE_LOADED_STATE = _paper.PaperBook._validate_loaded_state.__func__
+_ORIGINAL_REQUIRE_FINITE = _paper.PaperBook._require_finite
+_ORIGINAL_DEBIT_BALANCE = _paper.PaperBook._debit_balance.__func__
+_ORIGINAL_VALIDATE_PLACED_AT = _paper.PaperBook._validate_placed_at.__func__
+_ORIGINAL_REQUIRE_UTF8_STRING = _paper.PaperBook._require_utf8_string
+_ORIGINAL_VALIDATE_TICKET_PROVENANCE = _paper.PaperBook._validate_ticket_provenance.__func__
 
 
 def _paperbook_operation_context(book: _paper.PaperBook):
@@ -43,7 +48,7 @@ def _canonical_open_stake(book: _paper.PaperBook, stake) -> Decimal:
     if parser is not None:
         return parser(stake, "stake")
     amount = Decimal(str(stake))
-    type(book)._require_finite(amount, "stake")
+    _ORIGINAL_REQUIRE_FINITE(amount, "stake")
     return amount
 
 
@@ -164,18 +169,20 @@ def _open_ticket_unlocked(
         odds=leg.locked_odds,
         exchange_side="LAY",
     )
-    new_balance = type(self)._debit_balance(self.balance, locked_capital)
+    new_balance = _ORIGINAL_DEBIT_BALANCE(_paper.PaperBook, self.balance, locked_capital)
 
-    ticket_placed_at = type(self)._validate_placed_at(
-        placed_at if placed_at is not None else _paper.utc_now_iso()
+    ticket_placed_at = _ORIGINAL_VALIDATE_PLACED_AT(
+        _paper.PaperBook,
+        placed_at if placed_at is not None else _paper.utc_now_iso(),
     )
-    type(self)._require_utf8_string(reason, "strategy_reason")
+    _ORIGINAL_REQUIRE_UTF8_STRING(reason, "strategy_reason")
     (
         provider_source_ids,
         provider_accounts,
         bankroll_id,
         currency,
-    ) = type(self)._validate_ticket_provenance(
+    ) = _ORIGINAL_VALIDATE_TICKET_PROVENANCE(
+        _paper.PaperBook,
         provider_source_ids,
         provider_accounts,
         bankroll_id,
@@ -513,7 +520,7 @@ def _committed_capital_unlocked(self: _paper.PaperBook) -> Decimal:
         raise ValueError(
             "PaperBook committed capital arithmetic is not representable"
         ) from exc
-    _paper.PaperBook._require_finite(total, "committed_capital")
+    _ORIGINAL_REQUIRE_FINITE(total, "committed_capital")
     return total
 
 

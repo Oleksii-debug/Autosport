@@ -1364,6 +1364,10 @@ class AutosportWebController:
                     f"{reason}; циклів {product_message.status.cycles_completed}."
                 )
                 self._ok(self.product_runtime_status)
+                # A clean terminal STOP retires the current-run identity only
+                # after the terminal status has been bound and validated.  A later
+                # run may legitimately have a new session/source identity.
+                self._product_runtime_identity = None
                 self._refresh_economic_projection()
                 # The live runtime portfolio snapshot has been retired. Do not
                 # present it beside the newly reopened durable bank/ticket state.

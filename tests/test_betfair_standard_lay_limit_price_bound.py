@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+import autosport.betfair_standard_lay_limit_price_bound as lay_bound_module
 from autosport.betfair_standard_lay_limit_price_bound import (
     BetfairStandardLayLimitPriceBoundError,
     BetfairStandardLayLimitPriceBoundEvidence,
@@ -119,6 +120,45 @@ def test_evidence_serialization_is_deterministic_and_truth_bounded() -> None:
     assert first["fill_proven"] is False
     assert first["real_money_execution_proven"] is False
 
+
+def test_require_ignores_public_resolver_and_evidence_method_rebinding(monkeypatch) -> None:
+    body = _body()
+    evidence = resolve_betfair_standard_lay_limit_price_bound(body)
+    calls = {"resolver": 0, "to_dict": 0, "validate": 0}
+
+    def hostile_resolver(*args, **kwargs):
+        calls["resolver"] += 1
+        raise AssertionError("live resolver dispatch reached authority consumer")
+
+    def hostile_to_dict(*args, **kwargs):
+        calls["to_dict"] += 1
+        raise AssertionError("live evidence serializer dispatch reached authority consumer")
+
+    def hostile_validate(*args, **kwargs):
+        calls["validate"] += 1
+        raise AssertionError("live evidence validator dispatch reached authority consumer")
+
+    monkeypatch.setattr(
+        lay_bound_module,
+        "resolve_betfair_standard_lay_limit_price_bound",
+        hostile_resolver,
+    )
+    monkeypatch.setattr(
+        BetfairStandardLayLimitPriceBoundEvidence,
+        "to_dict",
+        hostile_to_dict,
+    )
+    monkeypatch.setattr(
+        BetfairStandardLayLimitPriceBoundEvidence,
+        "_validate",
+        hostile_validate,
+    )
+
+    canonical = require_betfair_standard_lay_limit_price_bound(body, evidence)
+
+    assert canonical is not evidence
+    assert canonical.request_sha256 == evidence.request_sha256
+    assert calls == {"resolver": 0, "to_dict": 0, "validate": 0}
 
 def test_forged_exact_evidence_cannot_authorize_without_request_re_resolution() -> None:
     body = _body()

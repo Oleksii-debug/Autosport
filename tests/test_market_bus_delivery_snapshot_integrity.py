@@ -101,6 +101,78 @@ class MarketEventBusDeliverySnapshotIntegrityTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_subscriber_base_exception_is_wrapped_after_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                event = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "alice",
+                        "decimal_odds": "2.0",
+                        "observed_ts": "2026-09-14T00:00:00+00:00",
+                        "source_id": "source-1",
+                        "sequence": 1,
+                    }
+                )
+
+                def interrupt(_delivered: MarketEvent) -> None:
+                    raise SystemExit("subscriber-stop")
+
+                bus.subscribe(interrupt)
+
+                with self.assertRaises(MarketEventDeliveryError) as raised:
+                    bus.publish(event)
+
+                self.assertEqual(raised.exception.accepted_count, 1)
+                self.assertEqual(len(store.events()), 1)
+                self.assertEqual(len(raised.exception.exceptions), 1)
+                failure = raised.exception.exceptions[0]
+                self.assertIsInstance(failure, RuntimeError)
+                self.assertIn("SystemExit: subscriber-stop", str(failure))
+            finally:
+                store.close()
+
+    def test_unprintable_subscriber_base_exception_remains_typed_delivery_failure(self) -> None:
+        class UnprintableInterrupt(BaseException):
+            def __str__(self) -> str:
+                raise RuntimeError("stringification-failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                event = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "alice",
+                        "decimal_odds": "2.0",
+                        "observed_ts": "2026-09-14T00:00:00+00:00",
+                        "source_id": "source-1",
+                        "sequence": 1,
+                    }
+                )
+
+                def interrupt(_delivered: MarketEvent) -> None:
+                    raise UnprintableInterrupt()
+
+                bus.subscribe(interrupt)
+
+                with self.assertRaises(MarketEventDeliveryError) as raised:
+                    bus.publish(event)
+
+                self.assertEqual(raised.exception.accepted_count, 1)
+                self.assertEqual(len(store.events()), 1)
+                self.assertIn(
+                    "UnprintableInterrupt: <unprintable exception>",
+                    str(raised.exception.exceptions[0]),
+                )
+            finally:
+                store.close()
+
     def test_lazy_batch_producer_cannot_rewrite_already_persisted_delivery_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteMarketStore(Path(tmp) / "market.db")

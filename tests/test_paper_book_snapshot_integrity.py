@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import time
@@ -397,6 +398,53 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
                 "ticket-subclass-status",
             )
 
+
+    def test_save_fsyncs_parent_directory_after_atomic_replace_when_supported(self):
+        book = PaperBook("100")
+        destination = Path(self._tmp.name) / "durable-snapshot.json"
+        events: list[str] = []
+
+        def record_fsync(descriptor: int) -> None:
+            events.append("directory-fsync" if descriptor == 4242 else "file-fsync")
+
+        def record_replace(source: object, target: object) -> None:
+            events.append("replace")
+
+        with (
+            patch("autosport.paper.os.O_DIRECTORY", 0x10000, create=True),
+            patch("autosport.paper.os.open", return_value=4242) as open_mock,
+            patch("autosport.paper.os.close") as close_mock,
+            patch("autosport.paper.os.fsync", side_effect=record_fsync),
+            patch("autosport.paper.os.replace", side_effect=record_replace),
+        ):
+            book.save(destination)
+
+        self.assertIn("file-fsync", events)
+        self.assertIn("replace", events)
+        self.assertIn("directory-fsync", events)
+        self.assertLess(events.index("file-fsync"), events.index("replace"))
+        self.assertLess(events.index("replace"), events.index("directory-fsync"))
+        open_mock.assert_called_once_with(
+            destination.parent,
+            os.O_RDONLY | 0x10000,
+        )
+        close_mock.assert_called_once_with(4242)
+
+    def test_save_surfaces_directory_fsync_failure_after_atomic_replace(self):
+        book = PaperBook("100")
+        destination = Path(self._tmp.name) / "directory-fsync-failure.json"
+
+        with patch.object(
+            PaperBook,
+            "_fsync_snapshot_directory",
+            side_effect=OSError("directory fsync failed"),
+        ):
+            with self.assertRaisesRegex(OSError, "directory fsync failed"):
+                book.save(destination)
+
+        self.assertTrue(destination.exists())
+        restored = PaperBook.load(destination)
+        self.assertEqual(restored.balance, Decimal("100"))
 
     def test_save_rejects_snapshot_path_subclass_before_fspath(self):
         _HostilePathSubclass.fspath_calls = 0

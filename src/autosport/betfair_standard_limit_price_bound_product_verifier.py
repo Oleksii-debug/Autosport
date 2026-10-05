@@ -37,7 +37,12 @@ def _build_product_entrypoint():
     canonical_profile_type = _runtime_profile.TrustedRuntimeCodeProfile
     canonical_profile_error = _runtime_profile.TrustedRuntimeCodeProfileError
     canonical_store_type = SupervisedPlanIssuanceStore
+    canonical_store_init = canonical_store_type.__init__
+    canonical_store_init_code = canonical_store_init.__code__
     canonical_ledger_type = RealExecutionLedger
+    canonical_ledger_init = canonical_ledger_type.__init__
+    canonical_ledger_init_code = canonical_ledger_init.__code__
+    path_factory = Path
 
     def authority_graph_unchanged() -> bool:
         return (
@@ -49,6 +54,10 @@ def _build_product_entrypoint():
             and canonical_require_runtime.__code__ is canonical_require_runtime_code
             and _runtime_profile.TrustedRuntimeCodeProfile is canonical_profile_type
             and _runtime_profile.TrustedRuntimeCodeProfileError is canonical_profile_error
+            and canonical_store_type.__init__ is canonical_store_init
+            and canonical_store_init.__code__ is canonical_store_init_code
+            and canonical_ledger_type.__init__ is canonical_ledger_init
+            and canonical_ledger_init.__code__ is canonical_ledger_init_code
         )
 
     def require_runtime(
@@ -99,7 +108,7 @@ def _build_product_entrypoint():
 
         profile = require_runtime(runtime_profile)
         try:
-            workspace = Path(profile.workspace).resolve(strict=False)
+            workspace = path_factory(profile.workspace).resolve(strict=False)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise BetfairStandardLimitPriceBoundError(
                 "canonical product runtime workspace is invalid"
@@ -114,7 +123,7 @@ def _build_product_entrypoint():
                 "product issuance store is not canonical"
             )
         try:
-            store_workspace = Path(issuance_store.workspace).resolve(strict=False)
+            store_workspace = path_factory(issuance_store.workspace).resolve(strict=False)
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store is outside the active runtime workspace"
@@ -133,7 +142,7 @@ def _build_product_entrypoint():
                 "execution ledger is not canonical"
             )
         try:
-            ledger_path = Path(ledger.path).resolve(strict=False)
+            ledger_path = path_factory(ledger.path).resolve(strict=False)
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
             raise BetfairStandardLimitPriceBoundError(
                 "execution ledger is outside the active runtime workspace"

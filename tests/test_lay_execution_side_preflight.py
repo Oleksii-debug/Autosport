@@ -167,6 +167,67 @@ def test_direct_reserve_rejects_mapping_subclass_before_durable_write() -> None:
         assert ledger.events() == []
 
 
+def test_direct_record_attempt_requires_durable_reservation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        source = PaperExecutionLedger(Path(tmp) / "source.jsonl")
+        current_plan = _plan(_action("direct-attempt", side="BACK"))
+        current_config = _config()
+        run = execute_paper_plan(
+            plan=current_plan,
+            trigger_id="direct-attempt",
+            config=current_config,
+            ledger=source,
+            started_at=STARTED_AT,
+        )
+        attempt = run.attempts[0]
+        target = PaperExecutionLedger(Path(tmp) / "target.jsonl")
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="requires exactly one durable reservation",
+        ):
+            target.record_attempt(attempt)
+
+        assert target.events() == []
+
+
+def test_direct_record_attempt_must_match_reserved_action_prefix() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        source = PaperExecutionLedger(Path(tmp) / "source.jsonl")
+        current_plan = _plan(_action("reserved-action", side="BACK"))
+        current_config = _config()
+        trigger_id = "reserved-action"
+        run = execute_paper_plan(
+            plan=current_plan,
+            trigger_id=trigger_id,
+            config=current_config,
+            ledger=source,
+            started_at=STARTED_AT,
+        )
+        attempt = run.attempts[0]
+        object.__setattr__(attempt, "action_id", "different-action")
+
+        target = PaperExecutionLedger(Path(tmp) / "target.jsonl")
+        run_id = _legacy_reality._run_id(current_plan, trigger_id, current_config)
+        target.reserve_run(
+            run_id=run_id,
+            trigger_id=trigger_id,
+            plan=current_plan,
+            config=current_config,
+            started_at=STARTED_AT,
+            observation_evidence_ids={},
+        )
+        events_before = target.events()
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="action_id does not match durable reserved action",
+        ):
+            target.record_attempt(attempt)
+
+        assert target.events() == events_before
+
+
 def test_direct_complete_rejects_list_pending_ids_before_ledger_read() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

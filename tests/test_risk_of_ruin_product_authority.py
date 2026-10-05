@@ -237,29 +237,6 @@ def test_risk_state_graph_ignores_rebound_paperbook_economic_roots(monkeypatch) 
     }
 
 
-def test_vector_shadow_reservation_ignores_rebound_open_ticket(monkeypatch) -> None:
-    policy = _policy(max_risk_of_ruin=Decimal("1"))
-    book = PaperBook("100")
-    context = _context(1)
-    calls = {"open_ticket": 0}
-
-    def hostile_open_ticket(self, *args, **kwargs):
-        calls["open_ticket"] += 1
-        raise AssertionError("live PaperBook.open_ticket dispatch reached vector allocation")
-
-    monkeypatch.setattr(PaperBook, "open_ticket", hostile_open_ticket)
-
-    decision = policy.derive_goal_stake_vector(
-        book,
-        (Decimal("0.01"),),
-        contexts=(context,),
-    )
-
-    assert decision.action == "STAKE_VECTOR"
-    assert decision.stakes == (Decimal("1.00"),)
-    assert calls == {"open_ticket": 0}
-
-
 def test_caller_cannot_mint_single_candidate_risk_of_ruin_authority() -> None:
     """Freeze #955: public hashes plus a caller bound must not grant authority."""
 

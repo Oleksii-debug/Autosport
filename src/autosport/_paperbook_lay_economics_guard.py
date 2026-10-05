@@ -17,6 +17,7 @@ _ORIGINAL_VALIDATE_LIFECYCLE_REACHABILITY = (
 )
 _ORIGINAL_VALIDATE_LOADED_STATE = _paper.PaperBook._validate_loaded_state.__func__
 _ORIGINAL_REQUIRE_FINITE = _paper.PaperBook._require_finite
+_ORIGINAL_REQUIRE_CANONICAL_TEXT = _paper.PaperBook._require_canonical_text
 _ORIGINAL_DEBIT_BALANCE = _paper.PaperBook._debit_balance.__func__
 _ORIGINAL_VALIDATE_PLACED_AT = _paper.PaperBook._validate_placed_at.__func__
 _ORIGINAL_REQUIRE_UTF8_STRING = _paper.PaperBook._require_utf8_string
@@ -409,8 +410,8 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
     if not _book_has_canonical_lay_ticket(book):
         return _ORIGINAL_VALIDATE_LOADED_STATE(cls, book)
 
-    cls._require_finite(book.initial_bankroll, "initial_bankroll")
-    cls._require_finite(book.balance, "balance")
+    _ORIGINAL_REQUIRE_FINITE(book.initial_bankroll, "initial_bankroll")
+    _ORIGINAL_REQUIRE_FINITE(book.balance, "balance")
     if book.initial_bankroll <= 0:
         raise ValueError("PaperBook snapshot initial_bankroll must be positive")
     if book.balance < 0:
@@ -419,26 +420,32 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
         raise ValueError("PaperBook tickets must be a canonical ticket mapping")
 
     for ticket_key, ticket in book.tickets.items():
-        cls._require_canonical_text(ticket_key, "ticket mapping key")
+        _ORIGINAL_REQUIRE_CANONICAL_TEXT(ticket_key, "ticket mapping key")
         if type(ticket) is not PaperTicket:
             raise ValueError("PaperBook tickets must contain canonical PaperTicket values")
-        cls._require_canonical_text(ticket.ticket_id, "ticket_id")
+        _ORIGINAL_REQUIRE_CANONICAL_TEXT(ticket.ticket_id, "ticket_id")
         if ticket_key != ticket.ticket_id:
             raise ValueError("PaperBook ticket mapping key must match ticket_id")
-        cls._validate_placed_at(ticket.placed_at, snapshot=True)
+        _ORIGINAL_VALIDATE_PLACED_AT(
+            _paper.PaperBook,
+            ticket.placed_at,
+            snapshot=True,
+        )
         if ticket.settled_at is not None:
-            cls._validate_settled_at(
+            _ORIGINAL_VALIDATE_SETTLED_AT(
+                _paper.PaperBook,
                 ticket.settled_at,
                 ticket.placed_at,
                 snapshot=True,
             )
         if ticket.status is TicketStatus.OPEN and ticket.settled_at is not None:
             raise ValueError("PaperBook snapshot open ticket cannot have settled_at")
-        cls._require_utf8_string(
+        _ORIGINAL_REQUIRE_UTF8_STRING(
             ticket.strategy_reason,
             "snapshot strategy_reason",
         )
-        cls._validate_ticket_provenance(
+        _ORIGINAL_VALIDATE_TICKET_PROVENANCE(
+            _paper.PaperBook,
             ticket.provider_source_ids,
             ticket.provider_accounts,
             ticket.bankroll_id,
@@ -448,8 +455,8 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
             raise ValueError(
                 "PaperBook snapshot ticket status must be canonical TicketStatus"
             )
-        cls._require_finite(ticket.stake, f"stake for ticket {ticket.ticket_id}")
-        cls._require_finite(ticket.payout, f"payout for ticket {ticket.ticket_id}")
+        _ORIGINAL_REQUIRE_FINITE(ticket.stake, f"stake for ticket {ticket.ticket_id}")
+        _ORIGINAL_REQUIRE_FINITE(ticket.payout, f"payout for ticket {ticket.ticket_id}")
         if ticket.stake <= 0:
             raise ValueError("PaperBook snapshot ticket stake must be positive")
         if ticket.payout < 0:

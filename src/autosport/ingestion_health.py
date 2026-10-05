@@ -395,6 +395,8 @@ class SourceHealthStore:
 
     def assert_persistence_authority(self) -> None:
         self._assert_persistence_authority()
+        if self._path_authority.exists() or self._path_authority.is_symlink():
+            self._assert_target_shape()
 
     @staticmethod
     def _state_from_payload(payload: dict, *, normalize_failed_flags: bool = True) -> SourceHealthState:

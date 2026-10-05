@@ -843,6 +843,43 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.balance, Decimal("70.00"))
             self.assertEqual(book.committed_capital, Decimal("30.00"))
 
+    def test_empirical_lay_recovery_replays_durable_observation_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            pre_action_book = PaperBook("100.00")
+            current = action("lay-recovery-evidence", odds="5.00", stake="10.00", side="LAY")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-recovery-evidence",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            runtime.assert_recoverable_book_state(
+                pre_action_book=pre_action_book,
+                prepared=current_prepared,
+                trigger_id="trigger-lay-recovery-evidence",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(book.balance, Decimal("60.00"))
+            self.assertEqual(book.committed_capital, Decimal("40.00"))
+            self.assertEqual(len(book.tickets), 1)
+
     def test_empirical_accepted_lay_restart_reuses_same_durable_exposure(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

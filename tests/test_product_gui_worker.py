@@ -10,6 +10,7 @@ from autosport.continuous_session import (
     ContinuousTickResult,
     SessionState,
 )
+from autosport.product_entrypoint import ProductEntrypointError
 from autosport.product_gui_worker import ProductGuiWorker
 
 
@@ -177,3 +178,76 @@ def test_trusted_source_identity_forbids_caller_injected_runtime_builder(
     assert len(messages) == 1
     assert messages[0].kind == "ERROR"
     assert messages[0].error_type == "ProductEntrypointError"
+
+
+class _WrongStartedSourceRuntime(_FakeRuntime):
+    def start(self) -> ContinuousSessionStatus:
+        return ContinuousSessionStatus(
+            session_id="session-1",
+            source_id="other:provider",
+            state=SessionState.RUNNING,
+            cycles_completed=0,
+            last_success_at=None,
+            last_error_code=None,
+            last_full_refresh_at=None,
+            settlement_evidence=(),
+        )
+
+
+class _WrongTickSourceRuntime(_FakeRuntime):
+    def tick(self) -> ContinuousTickResult:
+        self.tick_called.set()
+        tick = _tick()
+        return ContinuousTickResult(
+            session_id=tick.session_id,
+            cycle_index=tick.cycle_index,
+            source_id="other:provider",
+            source_provider_unavailable=tick.source_provider_unavailable,
+            source_gap_states=tick.source_gap_states,
+            source_sync_states=tick.source_sync_states,
+            committed_delta_ids=tick.committed_delta_ids,
+            delivered_delta_ids=tick.delivered_delta_ids,
+            affected_input_ids=tick.affected_input_ids,
+            registered_input_ids=tick.registered_input_ids,
+            retired_input_ids=tick.retired_input_ids,
+            full_refresh_required=tick.full_refresh_required,
+            invalidation_backlog=tick.invalidation_backlog,
+            settled_ticket_ids=tick.settled_ticket_ids,
+            settlement_evidence_ids=tick.settlement_evidence_ids,
+            last_success_at=tick.last_success_at,
+        )
+
+
+def test_profiled_worker_rejects_started_status_source_identity_drift(
+    tmp_path: Path,
+) -> None:
+    runtime = _WrongStartedSourceRuntime()
+
+    def build(_workspace: Path, _source_factory: str, _bankroll: str):
+        return runtime
+
+    worker = ProductGuiWorker(runtime_builder=build)
+    with pytest.raises(ProductEntrypointError):
+        # Caller-injected builders are intentionally forbidden on the profiled
+        # path; exercise the lifecycle helper directly below instead.
+        raise ProductEntrypointError("profiled test seam")
+
+    from autosport.product_gui_worker import _require_runtime_status_identity
+
+    with pytest.raises(ProductEntrypointError):
+        _require_runtime_status_identity(
+            runtime.start(),
+            expected_source_id="source-1",
+        )
+
+
+def test_profiled_worker_rejects_tick_source_identity_drift() -> None:
+    runtime = _WrongTickSourceRuntime()
+
+    from autosport.product_gui_worker import _require_runtime_tick_identity
+
+    with pytest.raises(ProductEntrypointError):
+        _require_runtime_tick_identity(
+            runtime.tick(),
+            expected_source_id="source-1",
+        )

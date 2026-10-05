@@ -9246,5 +9246,34 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
 
 
+
+
+    def test_constructor_rejects_noncanonical_live_decision_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical live workspace Decision Ledger",
+            ):
+                PersistentLiveDecisionLoop(
+                    workspace,
+                    loop_id="live-test-loop",
+                    mode=LiveDecisionMode.PAPER,
+                    book=PaperBook("1000"),
+                    authority=self._authority(),
+                    intent_factory=_EmptyIntentFactory(),
+                    scientific_registry=self._scientific_registry(
+                        workspace,
+                        self._strategy_version(),
+                    ),
+                    decision_ledger=JsonlDecisionLedger(
+                        workspace / "alternate-decisions.jsonl"
+                    ),
+                    observation_runner=_DurableObserver(workspace, [()]),
+                    max_quote_age=timedelta(seconds=5),
+                    clock=_ManualClock(self.START),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

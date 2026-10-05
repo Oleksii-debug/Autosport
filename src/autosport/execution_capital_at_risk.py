@@ -345,6 +345,9 @@ def _install_ledger_read_authority():
     verified_plan_view_type = execution_view_globals["VerifiedExecutionPlanView"]
     attempt_read_view_type = execution_view_globals["ExecutionAttemptReadView"]
     provider_evidence_view_type = execution_view_globals["ProviderEvidenceBindingView"]
+    verified_provider_effect_view_type = execution_view_globals[
+        "VerifiedProviderEffectBindingView"
+    ]
     execution_attempt_type = execution_view_globals["ExecutionAttempt"]
     execution_action_type = execution_view_globals["ExecutionAction"]
     external_acknowledgement_type = execution_view_globals["ExternalAcknowledgement"]
@@ -355,6 +358,7 @@ def _install_ledger_read_authority():
         ("VerifiedExecutionPlanView", verified_plan_view_type),
         ("ExecutionAttemptReadView", attempt_read_view_type),
         ("ProviderEvidenceBindingView", provider_evidence_view_type),
+        ("VerifiedProviderEffectBindingView", verified_provider_effect_view_type),
         ("ExecutionAttempt", execution_attempt_type),
         ("ExecutionAction", execution_action_type),
         ("ExternalAcknowledgement", external_acknowledgement_type),
@@ -414,6 +418,7 @@ def _install_ledger_read_authority():
         verified_plan_view_type,
         attempt_read_view_type,
         provider_evidence_view_type,
+        verified_provider_effect_view_type,
         execution_attempt_type,
         execution_action_type,
         external_acknowledgement_type,
@@ -621,6 +626,14 @@ def _install_ledger_read_authority():
                     "canonical provider evidence view type authority changed"
                 )
             if (
+                item.verified_provider_effect is not None
+                and type(item.verified_provider_effect)
+                is not verified_provider_effect_view_type
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "canonical verified provider-effect view type authority changed"
+                )
+            if (
                 item.acknowledgement is not None
                 and type(item.acknowledgement)
                 is not external_acknowledgement_type
@@ -735,30 +748,35 @@ def _requested_limit_capital(attempt: ExecutionAttemptReadView) -> Decimal:
 
 
 def _accepted_capital(attempt: ExecutionAttemptReadView) -> Decimal:
-    acknowledgement = attempt.acknowledgement
-    if acknowledgement is None:
-        raise ExecutionCapitalAtRiskError(
-            "accepted/PARTIAL state lacks durable acknowledgement"
-        )
-    if acknowledgement.status not in {
+    """Return provider-origin confirmed BACK capital, never acknowledgement-only money."""
+
+    effect = attempt.verified_provider_effect
+    if effect is None:
+        # A durable ACK can advance execution state, but #2090 deliberately keeps
+        # acknowledged economics distinct from canonically verified provider effect.
+        # Until that stronger origin fact exists, all requested BACK stake remains
+        # contingent even for ACCEPTED/PARTIAL state.
+        return Decimal(0)
+    if effect.status not in {
         AcknowledgementStatus.ACCEPTED,
         AcknowledgementStatus.PARTIAL,
     }:
         raise ExecutionCapitalAtRiskError(
-            "accepted/PARTIAL state conflicts with acknowledgement status"
+            "verified provider effect has invalid accepted/PARTIAL status"
         )
-    if (
-        acknowledgement.accepted_stake is None
-        or acknowledgement.accepted_odds is None
-    ):
+    if effect.status.value != attempt.state.value:
         raise ExecutionCapitalAtRiskError(
-            "accepted/PARTIAL acknowledgement lacks exact stake/odds"
+            "verified provider effect status conflicts with durable attempt state"
         )
     if attempt.action.side != "BACK":
         raise ExecutionCapitalAtRiskUnsupported(
             "accepted provider liability is unsupported outside Betfair BACK"
         )
-    return acknowledgement.accepted_stake
+    if effect.accepted_stake > attempt.action.requested_stake:
+        raise ExecutionCapitalAtRiskError(
+            "verified provider accepted stake exceeds requested BACK stake"
+        )
+    return effect.accepted_stake
 
 
 def _attempt_risk(attempt: ExecutionAttemptReadView) -> AttemptCapitalAtRisk:
@@ -778,12 +796,9 @@ def _attempt_risk(attempt: ExecutionAttemptReadView) -> AttemptCapitalAtRisk:
         maximum = requested
     elif attempt.state in {AttemptState.ACCEPTED, AttemptState.PARTIAL}:
         confirmed = _accepted_capital(attempt)
-        acknowledgement = attempt.acknowledgement
-        assert acknowledgement is not None
-        assert acknowledgement.accepted_stake is not None
         contingent = _subtract_nonnegative(
             action.requested_stake,
-            acknowledgement.accepted_stake,
+            confirmed,
         )
         maximum = _add(confirmed, contingent)
     elif attempt.state in {

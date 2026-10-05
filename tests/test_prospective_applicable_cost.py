@@ -714,3 +714,24 @@ def test_resolver_rejects_plan_digest_property_rebinding_before_getter_executes(
             )
 
     assert attacker_called is False
+
+
+
+def test_slippage_source_digest_matches_canonical_non_ascii_encoding(
+    monkeypatch,
+    tmp_path,
+):
+    bound, _approval, _issuance_store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    object.__setattr__(evidence, "account_id", "рахунок-1")
+    canonical_evidence_id = evidence.evidence_id
+    closure = inspect.getclosurevars(
+        subject.resolve_prospective_applicable_costs_with_betfair_standard_limit
+    )
+    sealed_digest = closure.nonlocals["slippage_evidence_id"]
+
+    assert sealed_digest(evidence) == canonical_evidence_id

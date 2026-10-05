@@ -414,6 +414,46 @@ class FocusedMirrorDependencyIndex:
             "selection_ids": dependency.selection_ids,
         }
 
+    def _stable_live_decision_view(
+        self,
+        input_id: str,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> MirrorSnapshot:
+        """Read selector-based live truth only from a stable registry incarnation."""
+        normalized_id = self._input_id(input_id)
+        while True:
+            with self._lock:
+                try:
+                    dependency = self._dependencies[normalized_id]
+                except KeyError as exc:
+                    raise KeyError(
+                        f"unknown focused mirror input {normalized_id!r}"
+                    ) from exc
+                registry_revision = self._registry_revision
+
+            snapshot = self._mirror.active_view(
+                as_of=as_of,
+                max_age=max_age,
+                **self._selectors(dependency),
+            )
+
+            with self._lock:
+                current_dependency = self._dependencies.get(normalized_id)
+                if current_dependency is None:
+                    raise KeyError(
+                        f"unknown focused mirror input {normalized_id!r}"
+                    )
+                if (
+                    self._registry_revision == registry_revision
+                    and current_dependency == dependency
+                ):
+                    return snapshot
+            # Registry truth changed while the mirror read was in flight. Retry
+            # against the now-authoritative selectors instead of returning a
+            # snapshot from a dependency incarnation that no longer exists.
+
     def matching_keys(self, input_id: str) -> tuple[MirrorQuoteKey, ...]:
         """Return immutable quote identities known to match one registered input."""
         normalized_id = self._input_id(input_id)
@@ -594,11 +634,10 @@ class FocusedMirrorDependencyIndex:
         max_age: timedelta,
     ) -> MirrorSnapshot:
         """Read one canonical focused view without depending on invalidation drains."""
-        dependency = self._dependency(input_id)
-        return self._mirror.active_view(
+        return self._stable_live_decision_view(
+            input_id,
             as_of=as_of,
             max_age=max_age,
-            **self._selectors(dependency),
         )
 
     def incremental_decision_view(
@@ -640,11 +679,13 @@ class FocusedMirrorDependencyIndex:
             raise KeyError(f"unknown focused mirror input {normalized_id!r}")
         if not registry_stable or current_dependency != dependency:
             # Never return a bounded snapshot captured against selectors that ceased
-            # to be authoritative while the mirror read was in flight.
-            return self._mirror.active_view(
+            # to be authoritative while the mirror read was in flight. The fallback
+            # itself is revision-stamped because the registry can change again while
+            # the full selector-based mirror read is in flight.
+            return self._stable_live_decision_view(
+                normalized_id,
                 as_of=as_of,
                 max_age=max_age,
-                **self._selectors(current_dependency),
             )
         if index_revision is not None and bounded.revision == index_revision:
             return bounded

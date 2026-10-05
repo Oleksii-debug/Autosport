@@ -626,7 +626,8 @@ def _build_canonical_authority():
                     "this cost class cannot carry source authority in schema v3"
                 )
             return
-        if source_family != expected_source:
+        canonical_source_family = text(source_family, "source_family")
+        if canonical_source_family != expected_source:
             raise error_cls("cost component source family does not match canonical authority")
         if source_evidence_id is None or source_sha256 is None:
             raise error_cls("canonical source authority requires evidence id and SHA-256")

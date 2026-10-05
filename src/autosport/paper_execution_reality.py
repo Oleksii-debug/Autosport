@@ -1353,6 +1353,12 @@ def _validate_lay_execution_surface(
         )
 
 
+
+_CANONICAL_LEDGER_RESERVE_RUN = PaperExecutionLedger.reserve_run
+_CANONICAL_LEDGER_LOAD_RUN = PaperExecutionLedger.load_run
+_CANONICAL_LEDGER_RECORD_ATTEMPT = PaperExecutionLedger.record_attempt
+_CANONICAL_LEDGER_COMPLETE_RUN = PaperExecutionLedger.complete_run
+
 def execute_paper_plan(
     *,
     plan: ExecutionPlan,
@@ -1444,7 +1450,8 @@ def execute_paper_plan(
             started_at=started_at,
         )
 
-    ledger.reserve_run(
+    _CANONICAL_LEDGER_RESERVE_RUN(
+        ledger,
         run_id=run_id,
         trigger_id=trigger_id,
         plan=plan,
@@ -1453,7 +1460,8 @@ def execute_paper_plan(
         observation_evidence_ids=observation_evidence_ids,
         suspended_action_ids=suspended_action_ids,
     )
-    existing = ledger.load_run(
+    existing = _CANONICAL_LEDGER_LOAD_RUN(
+        ledger,
         run_id=run_id,
         trigger_id=trigger_id,
         plan=plan,
@@ -1468,7 +1476,8 @@ def execute_paper_plan(
 
     attempts = list(existing.attempts)
     if attempts and attempts[-1].outcome is not PaperAttemptOutcome.ACCEPTED:
-        ledger.complete_run(
+        _CANONICAL_LEDGER_COMPLETE_RUN(
+            ledger,
             run_id=run_id,
             pending_action_ids=existing.pending_action_ids,
             recovery_decision=(
@@ -1478,7 +1487,8 @@ def execute_paper_plan(
             ),
             worst_case_exposure=existing.worst_case_exposure,
         )
-        result = ledger.load_run(
+        result = _CANONICAL_LEDGER_LOAD_RUN(
+            ledger,
             run_id=run_id,
             trigger_id=trigger_id,
             plan=plan,
@@ -1523,7 +1533,7 @@ def execute_paper_plan(
                 started_at=started_at,
                 suspended=action.action_id in suspended_action_ids,
             )
-        ledger.record_attempt(attempt)
+        _CANONICAL_LEDGER_RECORD_ATTEMPT(ledger, attempt)
         attempts.append(attempt)
 
         if attempt.outcome in {
@@ -1553,13 +1563,15 @@ def execute_paper_plan(
                 if worst_case_exposure > 0
                 else RecoveryDecision.NO_EXPOSURE
             )
-            ledger.complete_run(
+            _CANONICAL_LEDGER_COMPLETE_RUN(
+            ledger,
                 run_id=run_id,
                 pending_action_ids=pending,
                 recovery_decision=recovery,
                 worst_case_exposure=worst_case_exposure,
             )
-            result = ledger.load_run(
+            result = _CANONICAL_LEDGER_LOAD_RUN(
+            ledger,
                 run_id=run_id,
                 trigger_id=trigger_id,
                 plan=plan,
@@ -1571,13 +1583,15 @@ def execute_paper_plan(
             assert result is not None
             return result
 
-    ledger.complete_run(
+    _CANONICAL_LEDGER_COMPLETE_RUN(
+        ledger,
         run_id=run_id,
         pending_action_ids=(),
         recovery_decision=RecoveryDecision.NONE,
         worst_case_exposure=worst_case_exposure,
     )
-    result = ledger.load_run(
+    result = _CANONICAL_LEDGER_LOAD_RUN(
+        ledger,
         run_id=run_id,
         trigger_id=trigger_id,
         plan=plan,

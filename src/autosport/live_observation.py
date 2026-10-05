@@ -194,7 +194,19 @@ class _ReplayableBatchProvider:
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         if self._inflight is None:
+            if getattr(self._provider, "source_id", None) != self.source_id:
+                raise RuntimeError(
+                    "provider source identity changed before live batch read"
+                )
             batch = self._provider.read_batch(max_items=max_items)
+            if getattr(self._provider, "source_id", None) != self.source_id:
+                raise RuntimeError(
+                    "provider source identity changed during live batch read"
+                )
+            if batch.source_id != self.source_id:
+                raise RuntimeError(
+                    "provider batch source identity conflicts with live provider authority"
+                )
             if self._carried_quality_flags:
                 batch = ProviderBatch(
                     source_id=batch.source_id,

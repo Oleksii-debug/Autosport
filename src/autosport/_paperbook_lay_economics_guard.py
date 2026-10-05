@@ -38,6 +38,7 @@ _ORIGINAL_VALIDATE_SETTLED_AT = _paper.PaperBook._validate_settled_at.__func__
 _ORIGINAL_PARSE_ISO_TIMESTAMP = _paper.parse_iso_timestamp
 _ORIGINAL_UTC_NOW_ISO = _paper.utc_now_iso
 _ORIGINAL_UUID4 = _paper.uuid.uuid4
+_CANONICAL_UUID4 = _ORIGINAL_UUID4
 _ORIGINAL_UUID4_CODE = _ORIGINAL_UUID4.__code__
 _ORIGINAL_UUID_TYPE = _paper.uuid.UUID
 _ORIGINAL_PAPER_DECIMAL_CONTEXT = _paper._paper_decimal_context
@@ -405,10 +406,16 @@ def _open_ticket_unlocked(
         currency,
     )
 
-    if _ORIGINAL_UUID4.__code__ is not _ORIGINAL_UUID4_CODE:
+    if (
+        _ORIGINAL_UUID4 is not _CANONICAL_UUID4
+        or _ORIGINAL_UUID4.__code__ is not _ORIGINAL_UUID4_CODE
+    ):
         raise ValueError("PaperBook canonical ticket-id generator authority changed")
     ticket_uuid = _ORIGINAL_UUID4()
-    if _ORIGINAL_UUID4.__code__ is not _ORIGINAL_UUID4_CODE:
+    if (
+        _ORIGINAL_UUID4 is not _CANONICAL_UUID4
+        or _ORIGINAL_UUID4.__code__ is not _ORIGINAL_UUID4_CODE
+    ):
         raise ValueError("PaperBook canonical ticket-id generator authority changed")
     if type(ticket_uuid) is not _ORIGINAL_UUID_TYPE:
         raise ValueError("PaperBook canonical ticket-id generator returned non-canonical UUID")

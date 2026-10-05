@@ -136,3 +136,27 @@ def test_failed_writer_verification_does_not_leak_raw_append_grant(tmp_path) -> 
 
     assert after.sha256 == before.sha256
     assert after.event_count == before.event_count
+
+
+def test_polymorphic_event_kind_cannot_bypass_verified_effect_reservation(tmp_path) -> None:
+    ledger = _submitted_ledger(tmp_path)
+    before = ledger.verified_snapshot()
+
+    class ForgedVerifiedEffectKind:
+        value = EventType.VERIFIED_PROVIDER_EFFECT_BOUND.value
+
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="event type must be exact EventType",
+    ):
+        ledger._append(
+            ForgedVerifiedEffectKind(),  # type: ignore[arg-type]
+            "plan-1",
+            "action-1",
+            "attempt-1",
+            _raw_effect_payload(),
+        )
+
+    after = ledger.verified_snapshot()
+    assert after.sha256 == before.sha256
+    assert after.event_count == before.event_count

@@ -455,15 +455,15 @@ def test_applicable_cost_resolver_rejects_in_place_json_serializer_code_mutation
     def attacker_serializer(*_args, **_kwargs):
         return "{}"
 
-    try:
-        serializer.__code__ = attacker_serializer.__code__
-        with canonical_applicable_cost_case() as (
-            intent,
-            plan,
-            router_store,
-            request,
-            decision_at,
-        ):
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        try:
+            serializer.__code__ = attacker_serializer.__code__
             with pytest.raises(
                 subject.ProspectiveApplicableCostError,
                 match="JSON proof serializer authority changed",
@@ -475,8 +475,8 @@ def test_applicable_cost_resolver_rejects_in_place_json_serializer_code_mutation
                     model_request_id=request.request_id,
                     decision_at=decision_at,
                 )
-    finally:
-        serializer.__code__ = original_code
+        finally:
+            serializer.__code__ = original_code
 
 
 def test_applicable_cost_resolver_ignores_hash_constructor_global_rebinding(monkeypatch):
@@ -487,7 +487,6 @@ def test_applicable_cost_resolver_ignores_hash_constructor_global_rebinding(monk
         attacker_called = True
         raise AssertionError("rebound hashlib.sha256 must never execute")
 
-    monkeypatch.setattr(subject.hashlib, "sha256", attacker_sha256)
     with canonical_applicable_cost_case() as (
         intent,
         plan,
@@ -495,6 +494,7 @@ def test_applicable_cost_resolver_ignores_hash_constructor_global_rebinding(monk
         request,
         decision_at,
     ):
+        monkeypatch.setattr(subject.hashlib, "sha256", attacker_sha256)
         result = subject.resolve_prospective_applicable_costs(
             intent=intent,
             plan=plan,

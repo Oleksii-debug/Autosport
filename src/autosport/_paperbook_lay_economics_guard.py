@@ -48,7 +48,14 @@ def _canonical_open_stake(book: _paper.PaperBook, stake) -> Decimal:
 
 
 def _is_lay_leg(leg: object) -> bool:
-    return type(leg) is TicketLeg and leg.exchange_side == "lay"
+    # This predicate runs before the canonical PaperBook leg validator in several
+    # dispatch paths. Never invoke caller-controlled equality on a mutated frozen
+    # TicketLeg while deciding which economic authority owns validation.
+    return (
+        type(leg) is TicketLeg
+        and type(leg.exchange_side) is str
+        and leg.exchange_side == "lay"
+    )
 
 
 def _book_has_canonical_lay_ticket(book: object) -> bool:

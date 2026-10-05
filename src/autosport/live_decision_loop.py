@@ -5002,11 +5002,11 @@ class PersistentLiveDecisionLoop:
             committed_market_history=committed_market_history,
         )
         payload_version = existing.payload.get("schema_version")
-        if payload_version not in {1, 2}:
+        if payload_version not in {1, 2, 3}:
             raise DecisionLedgerIntegrityError(
                 "committed live decision has unsupported schema_version"
             )
-        if payload_version == 2:
+        if payload_version in {2, 3}:
             expected_payload_keys = {
                 "schema",
                 "schema_version",
@@ -5023,6 +5023,8 @@ class PersistentLiveDecisionLoop:
                 "plan",
                 MATERIAL_ACTION_ID_PAYLOAD_KEY,
             }
+            if payload_version == 3:
+                expected_payload_keys.add("health_boundaries")
             if any(stake > 0 for stake in durable_plan.stakes):
                 expected_payload_keys.add("paper_execution")
             if set(existing.payload) != expected_payload_keys:
@@ -5040,7 +5042,7 @@ class PersistentLiveDecisionLoop:
             "decision_context_sha256": progress.decision_context_sha256,
             "plan_sha256": progress.plan_sha256,
         }
-        if payload_version == 2:
+        if payload_version in {2, 3}:
             _, committed_decision_time = _canonical_timestamp(
                 "committed decision_ts",
                 progress.decision_ts,
@@ -5071,6 +5073,20 @@ class PersistentLiveDecisionLoop:
                     "intent_provenance_sha256": provenance.provenance_sha256,
                 }
             )
+            if payload_version == 3:
+                expected_health_boundaries = [
+                    boundary.to_dict()
+                    for boundary in progress.health_boundaries
+                ]
+                if (
+                    existing.payload.get("health_boundaries")
+                    != expected_health_boundaries
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision provider-health evidence conflicts "
+                        "with durable progress"
+                    )
+                context_payload["health_boundaries"] = expected_health_boundaries
 
         expected_context_hash = _canonical_json_sha256(context_payload)
         expected_decision_id = f"live-{expected_context_hash}"

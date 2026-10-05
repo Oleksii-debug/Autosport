@@ -27,6 +27,10 @@ from .paper import PaperBook
 # authority-bearing decision path.
 _CANONICAL_MARKET_EVENT_TO_DICT = MarketEvent.to_dict
 _CANONICAL_MARKET_EVENT_FROM_DICT = MarketEvent.from_dict
+_CANONICAL_TICKET_LEG_QUOTE_KEY = vars(TicketLeg)["quote_key"].fget
+_CANONICAL_MARKET_EVENT_QUOTE_KEY = vars(MarketEvent)["quote_key"].fget
+if _CANONICAL_TICKET_LEG_QUOTE_KEY is None or _CANONICAL_MARKET_EVENT_QUOTE_KEY is None:
+    raise RuntimeError("canonical quote-key property roots are unavailable")
 
 
 def _verify_product_risk_of_ruin_authority(
@@ -404,9 +408,10 @@ class ProposedTicketRiskContext:
                 _validate_proposed_ticket_leg(leg)
             except (AttributeError, TypeError, ValueError) as exc:
                 raise ValueError("proposed ticket context contains an invalid leg") from exc
-            if leg.quote_key in leg_keys:
+            leg_key = _CANONICAL_TICKET_LEG_QUOTE_KEY(leg)
+            if leg_key in leg_keys:
                 raise ValueError("proposed ticket context contains duplicate leg identity")
-            leg_keys.add(leg.quote_key)
+            leg_keys.add(leg_key)
 
         if type(self.quotes) is not tuple:
             raise ValueError("proposed ticket quotes must be a tuple")
@@ -433,9 +438,10 @@ class ProposedTicketRiskContext:
                 raise ValueError("proposed ticket context contains an invalid quote") from exc
             if _CANONICAL_MARKET_EVENT_TO_DICT(validated_quote) != serialized_quote:
                 raise ValueError("proposed ticket context contains a non-canonical quote")
-            if quote.quote_key in quote_keys:
+            quote_key = _CANONICAL_MARKET_EVENT_QUOTE_KEY(quote)
+            if quote_key in quote_keys:
                 raise ValueError("proposed ticket context contains duplicate quote identity")
-            quote_keys.add(quote.quote_key)
+            quote_keys.add(quote_key)
 
         if quote_keys and quote_keys != leg_keys:
             raise ValueError(
@@ -905,8 +911,11 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             return None
         try:
             quotes = [
-                quote.to_dict()
-                for quote in sorted(context.quotes, key=lambda item: item.quote_key)
+                _CANONICAL_MARKET_EVENT_TO_DICT(quote)
+                for quote in sorted(
+                    context.quotes,
+                    key=_CANONICAL_MARKET_EVENT_QUOTE_KEY,
+                )
             ]
             legs = [
                 {
@@ -917,7 +926,10 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     "sport": leg.sport,
                     "exchange_side": leg.exchange_side,
                 }
-                for leg in sorted(context.legs, key=lambda item: item.quote_key)
+                for leg in sorted(
+                    context.legs,
+                    key=_CANONICAL_TICKET_LEG_QUOTE_KEY,
+                )
             ]
             return _sha256_payload(
                 {
@@ -1615,10 +1627,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
 
         try:
             _, proposal_time = _canonical_context_timestamp("proposal_ts", context.proposal_ts)
-            quotes_by_key = {quote.quote_key: quote for quote in context.quotes}
+            quotes_by_key = {
+                _CANONICAL_MARKET_EVENT_QUOTE_KEY(quote): quote
+                for quote in context.quotes
+            }
             with localcontext(PaperRiskPolicy._decimal_context()):
                 for leg in context.legs:
-                    quote = quotes_by_key[leg.quote_key]
+                    quote = quotes_by_key[_CANONICAL_TICKET_LEG_QUOTE_KEY(leg)]
                     quote_ts = quote.source_ts if quote.source_ts is not None else quote.observed_ts
                     _, quote_time = _canonical_context_timestamp("quote timestamp", quote_ts)
                     age_delta = proposal_time - quote_time
@@ -1899,7 +1914,9 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             )
 
         candidate_identities = [
-            tuple(sorted(leg.quote_key for leg in context.legs))
+            tuple(
+                sorted(_CANONICAL_TICKET_LEG_QUOTE_KEY(leg) for leg in context.legs)
+            )
             for context in contexts
         ]
         if len(candidate_identities) != len(set(candidate_identities)):
@@ -2007,7 +2024,10 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             )
 
         def candidate_key(index: int) -> tuple[Decimal, tuple[str, ...], int]:
-            quote_keys = tuple(leg.quote_key for leg in contexts[index].legs)
+            quote_keys = tuple(
+                _CANONICAL_TICKET_LEG_QUOTE_KEY(leg)
+                for leg in contexts[index].legs
+            )
             return (-parsed_signals[index], quote_keys, index)
 
         stakes = [Decimal("0") for _ in contexts]

@@ -22,6 +22,8 @@ def _validate_source_id(source_id: object) -> str:
         raise ValueError("source_id must be non-empty and trimmed")
     if "|" in source_id:
         raise ValueError("source_id must not contain reserved identity delimiter '|'")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in source_id):
+        raise ValueError("source_id must not contain control characters")
     return source_id
 
 
@@ -32,6 +34,8 @@ def _validate_provider_component(value: object, name: str) -> str:
         raise ValueError(f"{name} must be non-empty and trimmed")
     if "|" in value:
         raise ValueError(f"{name} must not contain reserved identity delimiter '|'")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError(f"{name} must not contain control characters")
     return value
 
 
@@ -57,6 +61,8 @@ def _validate_provider_text(value: object, name: str) -> str:
         raise TypeError(f"{name} must be an exact str")
     if not value or value != value.strip():
         raise ValueError(f"{name} must be non-empty and trimmed")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError(f"{name} must not contain control characters")
     return value
 
 
@@ -199,8 +205,12 @@ class ProviderBatch:
         for flag in self.quality_flags:
             if type(flag) is not str:
                 raise TypeError("provider batch quality flag must be str")
-            if not flag or flag != flag.strip():
-                raise ValueError("provider batch quality flag must be non-empty and trimmed")
+            if (
+                not flag
+                or flag != flag.strip()
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in flag)
+            ):
+                raise ValueError("provider batch quality flag must be canonical text")
         if len(set(self.quality_flags)) != len(self.quality_flags):
             raise ValueError("duplicate provider batch quality flag")
 

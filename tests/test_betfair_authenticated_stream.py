@@ -242,6 +242,37 @@ def _runner_status_mcm(
     return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
 
 
+def _market_ladder_mcm(
+    ladder_type: str,
+    *,
+    pt: int,
+    clk: str,
+) -> bytes:
+    payload = {
+        "op": "mcm",
+        "id": 7,
+        "clk": clk,
+        "pt": pt,
+        "mc": [
+            {
+                "id": "1.A",
+                "img": False,
+                "con": False,
+                "marketDefinition": {
+                    "status": "OPEN",
+                    "bettingType": "ODDS",
+                    "priceLadderDefinition": {"type": ladder_type},
+                    "runners": [
+                        {"id": 1, "hc": 0, "status": "ACTIVE"},
+                    ],
+                },
+                "rc": [],
+            }
+        ],
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+
+
 def _heartbeat_mcm(
     *,
     pt: int,
@@ -2183,3 +2214,60 @@ def test_missing_price_ladder_definition_never_becomes_live_authority(
     assert not decision.decision_eligible
     assert transport.is_authenticated
     assert not fake.closed
+
+
+def test_price_ladder_change_revokes_old_quote_until_new_price_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(
+            pt=publish_time_ms,
+            runners=[{"id": 1, "hc": 0, "ltp": 2.0}],
+            ladder_type="CLASSIC",
+        )
+        + _market_ladder_mcm(
+            "FINEST",
+            pt=publish_time_ms + 1,
+            clk="c2",
+        )
+        + _delta_mcm(
+            pt=publish_time_ms + 2,
+            clk="c3",
+            price=2.01,
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    initial = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert initial.decision_eligible
+
+    runtime.read_and_ingest()
+
+    assert not initial.decision_eligible
+    after_ladder_change = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert (
+        after_ladder_change.verdict
+        is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    )
+    assert "predates the current Betfair market-price semantics" in (
+        after_ladder_change.reason
+    )
+    assert not after_ladder_change.decision_eligible
+
+    runtime.read_and_ingest()
+    refreshed = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert refreshed.decision_eligible
+    assert refreshed.evidence_id != initial.evidence_id

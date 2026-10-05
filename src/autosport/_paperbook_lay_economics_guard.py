@@ -24,6 +24,12 @@ _ORIGINAL_REQUIRE_UTF8_STRING = _paper.PaperBook._require_utf8_string
 _ORIGINAL_VALIDATE_TICKET_PROVENANCE = _paper.PaperBook._validate_ticket_provenance.__func__
 _ORIGINAL_VALIDATE_LIFECYCLE_ENTRY = _paper.PaperBook._validate_lifecycle_entry.__func__
 _ORIGINAL_VALIDATE_SETTLED_AT = _paper.PaperBook._validate_settled_at.__func__
+_ORIGINAL_PARSE_ISO_TIMESTAMP = _paper.parse_iso_timestamp
+_ORIGINAL_PAPER_DECIMAL_CONTEXT = _paper._paper_decimal_context
+_ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY = _paper._require_ticket_opening_authority
+_ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _paper._require_paperbook_causal_history_authority
+_ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY = _paper._record_ticket_opening_authority
+_ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN = _paper._advance_paperbook_causal_history_open
 
 
 def _require_exact_text(
@@ -51,7 +57,7 @@ def _require_exact_text(
 def _validate_exact_timestamp(value: object, label: str) -> str:
     text = _require_exact_text(value, label)
     try:
-        _paper.parse_iso_timestamp(text)
+        _ORIGINAL_PARSE_ISO_TIMESTAMP(text)
     except ValueError as exc:
         raise ValueError(
             f"PaperBook {label} must be a timezone-aware ISO timestamp"
@@ -331,8 +337,8 @@ def _open_ticket_unlocked(
     if type(self._settlement_times) is not dict:
         raise ValueError("PaperBook settlement-time witness must be a canonical mapping")
     _validate_loaded_state(_paper.PaperBook, self)
-    _paper._require_ticket_opening_authority(self)
-    _paper._require_paperbook_causal_history_authority(self)
+    _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY(self)
+    _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY(self)
 
     leg = ticket_legs[0]
     _validate_ticket_leg(_paper.PaperBook, leg)
@@ -374,11 +380,11 @@ def _open_ticket_unlocked(
         bankroll_id=bankroll_id,
         currency=currency,
     )
-    _paper._record_ticket_opening_authority(self, ticket)
+    _ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY(self, ticket)
     self.balance = new_balance
     self.tickets[ticket.ticket_id] = ticket
     self._lifecycle.append(("open", ticket.ticket_id, (), ()))
-    _paper._advance_paperbook_causal_history_open(self, ticket.ticket_id)
+    _ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN(self, ticket.ticket_id)
     return ticket
 
 
@@ -446,7 +452,7 @@ def _settlement_result(
     else:
         status = TicketStatus.WON
         try:
-            with localcontext(_paper._paper_decimal_context()) as context:
+            with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
                 payout = locked_capital + ticket.stake
                 if context.flags[Inexact]:
                     raise ValueError("PaperBook LAY payout loses Decimal precision")
@@ -457,7 +463,7 @@ def _settlement_result(
 
     _ORIGINAL_REQUIRE_FINITE(payout, f"settlement payout for ticket {ticket.ticket_id}")
     try:
-        with localcontext(_paper._paper_decimal_context()) as context:
+        with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
             new_balance = balance + payout
             if context.flags[Inexact]:
                 raise ValueError("PaperBook LAY balance credit loses Decimal precision")
@@ -536,7 +542,7 @@ def _validate_lifecycle_reachability(cls, book: _paper.PaperBook) -> None:
                 settlement_time,
                 "snapshot settled_at",
             )
-            if _paper.parse_iso_timestamp(settlement_text) < _paper.parse_iso_timestamp(
+            if _ORIGINAL_PARSE_ISO_TIMESTAMP(settlement_text) < _ORIGINAL_PARSE_ISO_TIMESTAMP(
                 ticket.placed_at
             ):
                 raise ValueError("PaperBook settled_at must not precede placed_at")
@@ -604,7 +610,7 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
                 ticket.settled_at,
                 "snapshot settled_at",
             )
-            if _paper.parse_iso_timestamp(settled_at) < _paper.parse_iso_timestamp(
+            if _ORIGINAL_PARSE_ISO_TIMESTAMP(settled_at) < _ORIGINAL_PARSE_ISO_TIMESTAMP(
                 ticket.placed_at
             ):
                 raise ValueError("PaperBook settled_at must not precede placed_at")
@@ -667,7 +673,7 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
             expected_payout = locked_capital
         elif ticket.status is TicketStatus.WON:
             try:
-                with localcontext(_paper._paper_decimal_context()) as context:
+                with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
                     expected_payout = locked_capital + ticket.stake
                     if context.flags[Inexact]:
                         raise ValueError(
@@ -689,10 +695,10 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
 
 def _committed_capital_unlocked(self: _paper.PaperBook) -> Decimal:
     _validate_loaded_state(_paper.PaperBook, self)
-    _paper._require_ticket_opening_authority(self)
-    _paper._require_paperbook_causal_history_authority(self)
+    _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY(self)
+    _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY(self)
     try:
-        with localcontext(_paper._paper_decimal_context()) as context:
+        with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
             total = Decimal("0")
             for ticket in self.tickets.values():
                 if ticket.status is TicketStatus.OPEN:

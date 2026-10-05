@@ -1027,5 +1027,67 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                     self.fail("replacement PaperBook must not be entered")
 
 
+
+    def test_minted_execution_rejects_in_place_intent_evidence_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            object.__setattr__(
+                capability,
+                "intent_evidence_json",
+                '{"schema":"tampered-intent-evidence"}',
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution semantics changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
+
+    def test_minted_execution_rejects_in_place_exposure_binding_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            object.__setattr__(
+                capability,
+                "exposure_bindings",
+                (
+                    PaperExposureBinding(
+                        action_id="a1",
+                        sport="soccer",
+                        bankroll_id="other-bankroll",
+                        currency="EUR",
+                    ),
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution semantics changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
+
+    def test_minted_execution_rejects_in_place_execution_plan_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            original = capability.execution_plan
+            replacement = ExecutionPlan(
+                plan_id=original.plan_id,
+                bookmaker_profile_version=original.bookmaker_profile_version,
+                decision_id=original.decision_id,
+                approval_id=original.approval_id,
+                created_at=original.created_at,
+                actions=(action("a1", stake="99.00"),),
+            )
+            object.__setattr__(capability, "execution_plan", replacement)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution semantics changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
+
+
 if __name__ == "__main__":
     unittest.main()

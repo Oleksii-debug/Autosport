@@ -279,11 +279,11 @@ def _reversible_url_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
 
 
 def _normalize_percent_escape_case(value: str) -> str:
-    """Canonicalize only percent-hex case while preserving literal text case."""
+    """Canonicalize percent-hex case across bounded nested URL spellings."""
 
     return re.sub(
-        r"%[0-9A-Fa-f]{2}",
-        lambda match: "%" + match.group(0)[1:].upper(),
+        r"%(?:25)*(?:[0-9A-Fa-f]{2})",
+        lambda match: match.group(0).upper(),
         value,
     )
 
@@ -618,6 +618,13 @@ def _redact_operator_mapping_key(
                     _global_remaining_nodes=_global_remaining_nodes,
                 )
             )
+            if (
+                type(part) is tuple
+                and safe_part == REDACTED
+                and part_is_sensitive
+                and part_was_transformed
+            ):
+                return REDACTED, True, True
             safe_parts.append(safe_part)
             key_is_sensitive = key_is_sensitive or part_is_sensitive
             key_was_transformed = key_was_transformed or part_was_transformed
@@ -837,7 +844,7 @@ def _safe_exception_args_detail(
     if type(args) is not tuple:
         return unavailable_detail
     if not args:
-        return ""
+        return unavailable_detail
 
     rendered = tuple(_safe_exception_scalar_text(value) for value in args)
     if any(value is None for value in rendered):

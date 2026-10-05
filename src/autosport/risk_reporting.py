@@ -42,6 +42,18 @@ DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY = "REALIZED_SETTLED_EQUITY_DRAWDOWN"
 RISK_OF_RUIN_STATUS_UNKNOWN = "UNKNOWN_REQUIRES_PROVENANCE_BOUND_EVIDENCE"
 _INITIAL_EQUITY_POINT_ID = "paper-initial-bankroll"
 
+# Product-issued equity evidence must not re-enter mutable class/module dispatch
+# after this module has established its canonical replay authorities.
+_CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
+_CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY = PaperBook._validate_lifecycle_entry
+_CANONICAL_PAPERBOOK_DEBIT_BALANCE = PaperBook._debit_balance
+_CANONICAL_PAPERBOOK_SETTLEMENT_RESULT = PaperBook._settlement_result
+_CANONICAL_RISK_PORTFOLIO_SHA256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256
+_CANONICAL_RISK_EXACT_POSITIVE_SUM = PaperRiskPolicy._exact_positive_sum
+_CANONICAL_RISK_DECIMAL_CONTEXT = PaperRiskPolicy._decimal_context
+_CANONICAL_REQUIRE_TICKET_OPENING_AUTHORITY = _require_ticket_opening_authority
+_CANONICAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _require_paperbook_causal_history_authority
+
 
 @dataclass(frozen=True, slots=True)
 class _HistoricalMaxDrawdown:
@@ -208,7 +220,7 @@ def _paper_equity_source_state_sha256(book: PaperBook) -> str:
     if type(book) is not PaperBook:
         raise TypeError("book must be canonical PaperBook")
     _require_product_issued_paper_state(book)
-    PaperBook._validate_loaded_state(book)
+    _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
 
     tickets: list[dict[str, object]] = []
     for ticket_id in sorted(book.tickets):
@@ -248,7 +260,7 @@ def _paper_equity_source_state_sha256(book: PaperBook) -> str:
 
     lifecycle: list[dict[str, object]] = []
     for raw_entry in book._lifecycle:
-        action, ticket_id, winners, voids = PaperBook._validate_lifecycle_entry(
+        action, ticket_id, winners, voids = _CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY(
             raw_entry
         )
         lifecycle.append(
@@ -344,8 +356,8 @@ def _require_product_issued_paper_state(book: PaperBook) -> None:
     """Require the detached authorities that make mutable PAPER state product-issued."""
 
     try:
-        _require_ticket_opening_authority(book)
-        _require_paperbook_causal_history_authority(book)
+        _CANONICAL_REQUIRE_TICKET_OPENING_AUTHORITY(book)
+        _CANONICAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY(book)
     except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError("canonical PAPER product-issued authority is unavailable") from exc
 
@@ -378,13 +390,13 @@ def build_product_issued_paper_equity_path(
     ):
         raise ValueError("canonical economic goal changed during equity-path issuance")
 
-    before_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    before_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
     before_source_sha256 = _paper_equity_source_state_sha256(book)
     if before_sha256 is None:
         raise ValueError("canonical PAPER risk state cannot issue an equity path")
 
     try:
-        PaperBook._validate_loaded_state(book)
+        _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
         replay_balance = book.initial_bankroll
         replay_committed = Decimal("0")
         points: list[PaperEquityPathPoint] = [
@@ -406,35 +418,35 @@ def build_product_issued_paper_equity_path(
         availability_complete = False
         for index, raw_entry in enumerate(book._lifecycle):
             action, ticket_id, winners_raw, voids_raw = (
-                PaperBook._validate_lifecycle_entry(raw_entry)
+                _CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY(raw_entry)
             )
             ticket = book.tickets.get(ticket_id)
             if ticket is None:
                 raise ValueError("PAPER lifecycle references missing ticket")
             if action == "open":
-                replay_balance = PaperBook._debit_balance(
+                replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(
                     replay_balance,
                     ticket.stake,
                 )
-                replay_committed = PaperRiskPolicy._exact_positive_sum(
+                replay_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
                     (replay_committed, ticket.stake)
                 )
                 available_at = ticket.placed_at
             else:
-                _, _, replay_balance = PaperBook._settlement_result(
+                _, _, replay_balance = _CANONICAL_PAPERBOOK_SETTLEMENT_RESULT(
                     ticket,
                     replay_balance,
                     set(winners_raw),
                     set(voids_raw),
                 )
-                with localcontext(PaperRiskPolicy._decimal_context()):
+                with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
                     replay_committed = replay_committed - ticket.stake
                 if replay_committed < 0:
                     raise ValueError("PAPER lifecycle committed stake became negative")
                 available_at = ticket.settled_at
                 if available_at is None:
                     availability_complete = False
-            equity = PaperRiskPolicy._exact_positive_sum(
+            equity = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
                 (replay_balance, replay_committed)
             )
             points.append(
@@ -452,14 +464,14 @@ def build_product_issued_paper_equity_path(
     except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
         raise ValueError("canonical PAPER equity path cannot be resolved") from exc
 
-    current_committed = PaperRiskPolicy._exact_positive_sum(
+    current_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
         tuple(
             ticket.stake
             for ticket in book.tickets.values()
             if ticket.status is TicketStatus.OPEN
         )
     )
-    current_equity = PaperRiskPolicy._exact_positive_sum(
+    current_equity = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
         (book.balance, current_committed)
     )
     if replay_balance != book.balance or replay_committed != current_committed:
@@ -482,7 +494,7 @@ def build_product_issued_paper_equity_path(
         for ticket in book.tickets.values()
     )
 
-    after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    after_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
     after_source_sha256 = _paper_equity_source_state_sha256(book)
     if after_sha256 is None or after_sha256 != before_sha256:
         raise ValueError("canonical PAPER risk state changed during equity-path issuance")
@@ -584,14 +596,14 @@ def _historical_max_drawdown_from_path(
             running_peak = equity
             running_peak_id = point.point_id
             continue
-        with localcontext(PaperRiskPolicy._decimal_context()):
+        with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
             drawdown = running_peak - equity
         if drawdown < 0:
             raise ValueError("canonical PAPER equity path has negative drawdown")
         if drawdown > maximum:
             maximum = drawdown
             if running_peak > 0:
-                ratio_context = PaperRiskPolicy._decimal_context()
+                ratio_context = _CANONICAL_RISK_DECIMAL_CONTEXT()
                 ratio_context.traps[Inexact] = False
                 with localcontext(ratio_context):
                     maximum_fraction = drawdown / running_peak
@@ -809,8 +821,8 @@ def _same_canonical_paperbook_state(left: PaperBook, right: PaperBook) -> bool:
     try:
         _require_product_issued_paper_state(left)
         _require_product_issued_paper_state(right)
-        PaperBook._validate_loaded_state(left)
-        PaperBook._validate_loaded_state(right)
+        _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(left)
+        _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(right)
     except (AttributeError, RuntimeError, TypeError, ValueError):
         return False
     return (
@@ -854,11 +866,11 @@ def _durable_source_pair(
     if provenance_for(goal_after) != goal_before_provenance:
         raise ValueError("durable economic goal changed during equity-path resolution")
 
-    before_state = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    before_state = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
     if before_state is None:
         raise ValueError("durable PaperBook cannot issue canonical equity-path evidence")
     book_after = PaperBook.load(paper_path)
-    after_state = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book_after)
+    after_state = _CANONICAL_RISK_PORTFOLIO_SHA256(book_after)
     if (
         after_state is None
         or after_state != before_state
@@ -977,7 +989,7 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
     """
 
     try:
-        PaperBook._validate_loaded_state(book)
+        _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
         replay_balance = book.initial_bankroll
         replay_committed = Decimal("0")
         running_peak = book.initial_bankroll
@@ -991,33 +1003,33 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
 
         for index, raw_entry in enumerate(book._lifecycle):
             action, ticket_id, winners_raw, voids_raw = (
-                PaperBook._validate_lifecycle_entry(raw_entry)
+                _CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY(raw_entry)
             )
             ticket = book.tickets.get(ticket_id)
             if ticket is None:
                 return None
 
             if action == "open":
-                replay_balance = PaperBook._debit_balance(
+                replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(
                     replay_balance,
                     ticket.stake,
                 )
-                replay_committed = PaperRiskPolicy._exact_positive_sum(
+                replay_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
                     (replay_committed, ticket.stake)
                 )
             else:
-                _, _, replay_balance = PaperBook._settlement_result(
+                _, _, replay_balance = _CANONICAL_PAPERBOOK_SETTLEMENT_RESULT(
                     ticket,
                     replay_balance,
                     set(winners_raw),
                     set(voids_raw),
                 )
-                with localcontext(PaperRiskPolicy._decimal_context()):
+                with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
                     replay_committed = replay_committed - ticket.stake
                 if replay_committed < 0:
                     return None
 
-            equity = PaperRiskPolicy._exact_positive_sum(
+            equity = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
                 (replay_balance, replay_committed)
             )
             point_id = _lifecycle_point_id(index, action, ticket_id)
@@ -1026,7 +1038,7 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
                 running_peak_id = point_id
                 continue
 
-            with localcontext(PaperRiskPolicy._decimal_context()):
+            with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
                 drawdown = running_peak - equity
             if drawdown < 0:
                 return None
@@ -1037,7 +1049,7 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
                     # enforcement arithmetic. Preserve the canonical risk precision,
                     # exponent bounds and rounding while allowing the deterministic
                     # rounded representation required for recurring ratios.
-                    ratio_context = PaperRiskPolicy._decimal_context()
+                    ratio_context = _CANONICAL_RISK_DECIMAL_CONTEXT()
                     ratio_context.traps[Inexact] = False
                     with localcontext(ratio_context):
                         maximum_fraction = drawdown / running_peak
@@ -1046,14 +1058,14 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
                 maximum_peak_id = running_peak_id
                 maximum_trough_id = point_id
 
-        current_committed = PaperRiskPolicy._exact_positive_sum(
+        current_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
             tuple(
                 ticket.stake
                 for ticket in book.tickets.values()
                 if ticket.status is TicketStatus.OPEN
             )
         )
-        current_equity = PaperRiskPolicy._exact_positive_sum(
+        current_equity = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
             (book.balance, current_committed)
         )
     except (ArithmeticError, AttributeError, TypeError, ValueError):
@@ -1131,7 +1143,7 @@ def build_paper_risk_report(
         raise ValueError("canonical economic goal changed during reporting")
 
     before_source_sha256 = _paper_equity_source_state_sha256(book)
-    before_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    before_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
     if before_sha256 is None:
         raise ValueError("canonical PAPER risk state cannot be reported")
 
@@ -1160,7 +1172,7 @@ def build_paper_risk_report(
         peak_equity=drawdown_evidence.peak_equity,
     )
     after_source_sha256 = _paper_equity_source_state_sha256(book)
-    after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    after_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
     if (
         metrics is None
         or rooms is None
@@ -1181,7 +1193,7 @@ def build_paper_risk_report(
 
     _, _, drawdown_loss_room, _ = rooms
     try:
-        with localcontext(PaperRiskPolicy._decimal_context()):
+        with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
             current_drawdown_amount = metrics.peak_equity - metrics.current_equity
     except DecimalException as exc:
         raise ValueError("canonical PAPER drawdown is not exactly representable") from exc

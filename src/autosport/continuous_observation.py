@@ -287,10 +287,17 @@ def run_continuous_observation(
     only after bounded backoff. Local durability or ambiguous committed-health errors
     stop the run immediately rather than replaying an uncertain durable boundary.
     """
-    if not hasattr(provider, "read_batch") or not isinstance(getattr(provider, "source_id", None), str):
+    if not hasattr(provider, "read_batch"):
         raise TypeError("provider must satisfy MarketProvider")
-    if not provider.source_id or provider.source_id != provider.source_id.strip():
-        raise ValueError("provider source_id must be non-empty and trimmed")
+    provider_source_id = getattr(provider, "source_id", None)
+    if type(provider_source_id) is not str:
+        raise TypeError("provider source_id must be an exact string")
+    if (
+        not provider_source_id
+        or provider_source_id != provider_source_id.strip()
+        or "|" in provider_source_id
+    ):
+        raise ValueError("provider source_id must be canonical")
 
     root = config.workspace
     root.mkdir(parents=True, exist_ok=True)
@@ -304,7 +311,7 @@ def run_continuous_observation(
     if not isinstance(current_run_id, str) or not current_run_id or current_run_id != current_run_id.strip():
         raise ValueError("run_id must be a non-empty trimmed string")
     started_at = wall_clock()
-    state = _LoopState(current_run_id, provider.source_id, started_at)
+    state = _LoopState(current_run_id, provider_source_id, started_at)
     stopper = stop_event or threading.Event()
     wait = waiter or stopper.wait
 

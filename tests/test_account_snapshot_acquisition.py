@@ -150,7 +150,7 @@ def test_caller_cannot_swap_canonical_client_or_store_after_initialization(
     )
     assert len(calls) == 3
     assert acquired.receipt.source_authority_proven is False
-    assert acquired.source_authority_proven is True
+    assert acquired.source_authority_proven is False
     acquirer.verify(acquired.snapshot, acquired.receipt)
     assert (
         acquirer.resolve(acquired.receipt.acquisition_id).receipt
@@ -185,7 +185,7 @@ def test_class_level_snapshot_reader_rebinding_cannot_mint_authority(
     assert len(calls) == 3
     assert acquired.snapshot.balance is not None
     assert acquired.receipt.source_authority_proven is False
-    assert acquired.source_authority_proven is True
+    assert acquired.source_authority_proven is False
 
 
 def test_live_receipt_mutation_revokes_provider_origin_authority(
@@ -200,7 +200,7 @@ def test_live_receipt_mutation_revokes_provider_origin_authority(
         _balance_capabilities(),
         acquisition_id="receipt-content-mutation",
     )
-    assert acquired.source_authority_proven is True
+    assert acquired.source_authority_proven is False
 
     object.__setattr__(
         acquired.receipt,
@@ -211,7 +211,7 @@ def test_live_receipt_mutation_revokes_provider_origin_authority(
     assert acquired.source_authority_proven is False
     with pytest.raises(
         AccountSnapshotAcquisitionError,
-        match="not issued by live canonical provider acquisition",
+        match="lacks live canonical provider-origin authority",
     ):
         assert_account_snapshot_acquisition_authoritative(acquired)
 
@@ -229,7 +229,7 @@ def test_live_snapshot_content_mutation_revokes_provider_origin_authority(
         acquisition_id="snapshot-content-mutation",
     )
     assert acquired.snapshot.balance is not None
-    assert acquired.source_authority_proven is True
+    assert acquired.source_authority_proven is False
 
     forged_balance = replace(
         acquired.snapshot.balance,
@@ -244,7 +244,7 @@ def test_live_snapshot_content_mutation_revokes_provider_origin_authority(
     assert acquired.source_authority_proven is False
     with pytest.raises(
         AccountSnapshotAcquisitionError,
-        match="not issued by live canonical provider acquisition",
+        match="lacks live canonical provider-origin authority",
     ):
         assert_account_snapshot_acquisition_authoritative(acquired)
 
@@ -265,7 +265,7 @@ def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
     assert acquired.snapshot.balance is not None
     assert acquired.snapshot.balance.available_balance == Decimal("100.1")
     assert acquired.receipt.source_authority_proven is False
-    assert acquired.source_authority_proven is True
+    assert acquired.source_authority_proven is False
     assert acquired.receipt.provider_account_identity_proven is True
     assert acquired.receipt.grants_execution_authority is False
     assert acquired.receipt.grants_settlement_authority is False
@@ -282,10 +282,14 @@ def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
     assert resolved.source_authority_proven is False
     with pytest.raises(
         AccountSnapshotAcquisitionError,
-        match="not issued by live canonical provider acquisition",
+        match="lacks live canonical provider-origin authority",
     ):
         assert_account_snapshot_acquisition_authoritative(resolved)
-    assert_account_snapshot_acquisition_authoritative(acquired)
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="lacks live canonical provider-origin authority",
+    ):
+        assert_account_snapshot_acquisition_authoritative(acquired)
     reopened.verify(resolved.snapshot, resolved.receipt)
 
     persisted = b"".join(
@@ -298,7 +302,7 @@ def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
     assert b"DEVAPP-SECRET-SENTINEL" not in persisted
 
 
-def test_retry_identity_is_idempotent_but_new_read_preserves_identical_content(
+def test_retry_identity_cannot_reissue_origin_but_new_read_preserves_identical_content(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -312,12 +316,15 @@ def test_retry_identity_is_idempotent_but_new_read_preserves_identical_content(
     assert len(first_calls) == 3
 
     retry_calls = _install_transport(monkeypatch, [])
-    retry = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
-        _balance_capabilities(),
-        acquisition_id="read-attempt-1",
-    )
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="durable acquisition cannot reissue provider-origin authority",
+    ):
+        BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+            _balance_capabilities(),
+            acquisition_id="read-attempt-1",
+        )
     assert retry_calls == []
-    assert retry == first
 
     second_calls = _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
     second = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(

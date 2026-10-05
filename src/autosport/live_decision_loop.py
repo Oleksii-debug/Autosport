@@ -817,6 +817,13 @@ class PersistentLiveDecisionLoop:
                 raise ValueError(
                     "paper_execution must persist the canonical live workspace PaperBook"
                 )
+            canonical_execution_ledger_path = (
+                self.workspace / "paper-execution.jsonl"
+            )
+            if paper_execution.ledger.path != canonical_execution_ledger_path:
+                raise ValueError(
+                    "paper_execution must use the canonical live workspace execution ledger"
+                )
         self.paper_execution = paper_execution
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age

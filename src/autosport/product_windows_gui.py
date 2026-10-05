@@ -95,6 +95,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
         self._product_close_pending = False
         self._product_last_stop: ProductGuiMessage | None = None
         self._product_expected_provider_source_id: str | None = None
+        self._product_restore_workspace: Path | None = None
         super().__init__()
 
     @property
@@ -412,6 +413,8 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.bell()
             return
 
+        restore_workspace = Path(self._active_workspace)
+        self._product_restore_workspace = None
         if not self._hide_uncertain_economic_state(
             product_text("ui.product_runtime.status.starting")
         ):
@@ -426,6 +429,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
         # Publish the root product workspace only after the exact prior economic
         # session closed successfully.  Teardown failure remains bound to the
         # session workspace quarantined by the base GUI.
+        self._product_restore_workspace = restore_workspace
         self._active_workspace = workspace
         self._recovery_view = None
         self._product_expected_provider_source_id = (
@@ -483,14 +487,44 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             return True
         if self.session is not None:
             return True
+
+        restore_workspace = self.__dict__.get("_product_restore_workspace")
+        if (
+            restore_workspace is not None
+            and self._workspace_requires_recovery(Path(restore_workspace))
+        ):
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
+            message = product_text(
+                "ui.product_runtime.status.recovery_required"
+            )
+            self.product_status.set(message)
+            self.status.set(message)
+            self._append_log(message)
+            return False
+
         try:
-            self.session = self._open_session(
+            restored = self._open_session(
                 self._active_strategy_id,
                 self._active_research_plan,
             )
+            if (
+                restore_workspace is not None
+                and Path(restored.workspace) != Path(restore_workspace)
+            ):
+                try:
+                    restored.close()
+                finally:
+                    raise RuntimeError(
+                        "restored economic session workspace identity changed"
+                    )
+            self.session = restored
         except Exception:
             self.session = None
-            self._block_workspace_for_recovery(Path(self.workspace))
+            if restore_workspace is not None:
+                self._block_workspace_for_recovery(Path(restore_workspace))
+            else:
+                self._block_workspace_for_recovery(Path(self.workspace))
             self.bank.set(self._bank_text())
             self._refresh_tickets()
             message = product_text(
@@ -500,8 +534,10 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.status.set(message)
             self._append_log(message)
             return False
+
+        self._product_restore_workspace = None
         self._recovery_view = None
-        self._active_workspace = Path(self.workspace)
+        self._active_workspace = Path(restored.workspace)
         self.bank.set(self._bank_text())
         self._refresh_tickets()
         message = product_text(

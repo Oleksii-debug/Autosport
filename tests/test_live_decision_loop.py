@@ -10273,5 +10273,60 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+
+    def test_cycle_entry_rejects_live_intent_factory_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.intent_factory = _EmptyIntentFactory()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "live intent factory authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertFalse(loop.progress_path.exists())
+            loop.close()
+
+    def test_cycle_entry_rejects_live_intent_factory_strategy_identity_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            factory.strategy_version_id = "live-test-strategy-v2"
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "live intent factory strategy identity changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertFalse(loop.progress_path.exists())
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

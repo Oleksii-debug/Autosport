@@ -956,7 +956,7 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            first_path = workspace / "paper-first.json"
+            first_path = workspace / "paper_book.json"
             second_path = workspace / "paper-second.json"
             book.save(first_path)
             EconomicGoalStore(workspace).initialize_owner(goal)

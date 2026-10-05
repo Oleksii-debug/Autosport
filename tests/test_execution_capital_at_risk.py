@@ -12,6 +12,7 @@ from autosport.execution_capital_at_risk import (
     ExecutionCapitalAtRiskError,
     ExecutionCapitalAtRiskStale,
     ExecutionCapitalAtRiskUnsupported,
+    _attempt_risk,
     _subtract,
     resolve_execution_capital_at_risk,
 )
@@ -24,6 +25,7 @@ from autosport.real_execution_ledger import (
     ExecutionStateError,
     RealExecutionLedger,
     ReconciliationSnapshot,
+    VerifiedProviderEffectBindingView,
 )
 
 
@@ -150,7 +152,7 @@ def test_unknown_back_keeps_full_requested_capital_contingent(tmp_path) -> None:
     evidence.assert_issued_current(ledger)
 
 
-def test_partial_back_splits_confirmed_and_unresolved_without_double_count(
+def test_unverified_partial_ack_keeps_full_requested_capital_contingent(
     tmp_path,
 ) -> None:
     ledger, plan = _ledger(tmp_path, _action(stake="10"))
@@ -165,15 +167,15 @@ def test_partial_back_splits_confirmed_and_unresolved_without_double_count(
     evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
     attempt = evidence.attempts[0]
 
-    assert attempt.confirmed_open_capital == Decimal("4")
-    assert attempt.contingent_unknown_capital == Decimal("6")
+    assert attempt.confirmed_open_capital == Decimal("0")
+    assert attempt.contingent_unknown_capital == Decimal("10")
     assert attempt.max_plausible_capital_at_risk == Decimal("10")
-    assert evidence.confirmed_open_capital == Decimal("4")
-    assert evidence.contingent_unknown_capital == Decimal("6")
+    assert evidence.confirmed_open_capital == Decimal("0")
+    assert evidence.contingent_unknown_capital == Decimal("10")
     assert evidence.max_plausible_capital_at_risk == Decimal("10")
 
 
-def test_accepted_back_confirms_full_requested_capital_under_current_writer_contract(
+def test_unverified_accepted_ack_keeps_full_requested_capital_contingent(
     tmp_path,
 ) -> None:
     ledger, plan = _ledger(tmp_path, _action(stake="10"))
@@ -187,9 +189,72 @@ def test_accepted_back_confirms_full_requested_capital_under_current_writer_cont
 
     evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
 
-    assert evidence.confirmed_open_capital == Decimal("10")
-    assert evidence.contingent_unknown_capital == Decimal("0")
+    assert evidence.confirmed_open_capital == Decimal("0")
+    assert evidence.contingent_unknown_capital == Decimal("10")
     assert evidence.max_plausible_capital_at_risk == Decimal("10")
+
+
+def test_verified_provider_effect_can_split_confirmed_and_contingent_back_capital(
+    tmp_path,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    _attempt(ledger, plan)
+    _ack(
+        ledger,
+        status=AcknowledgementStatus.PARTIAL,
+        accepted_stake="4",
+        accepted_odds="2.2",
+    )
+    view = ledger.verified_execution_view(plan.plan_id).attempts[0]
+    verified = VerifiedProviderEffectBindingView(
+        evidence_id="e" * 64,
+        observed_at=ACKNOWLEDGED_AT,
+        source_payload_sha256="f" * 64,
+        external_receipt_id="receipt-attempt-1",
+        status=AcknowledgementStatus.PARTIAL,
+        accepted_odds=Decimal("2.2"),
+        accepted_stake=Decimal("4"),
+        provider_order_ref=None,
+    )
+
+    # This directly tests private arithmetic only. Canonical resolver admission of
+    # verified_provider_effect remains owned by RealExecutionLedger's origin verifier.
+    risk = _attempt_risk(replace(view, verified_provider_effect=verified))
+
+    assert risk.confirmed_open_capital == Decimal("4")
+    assert risk.contingent_unknown_capital == Decimal("6")
+    assert risk.max_plausible_capital_at_risk == Decimal("10")
+
+
+def test_verified_provider_effect_status_must_match_durable_attempt_state(
+    tmp_path,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    _attempt(ledger, plan)
+    _ack(
+        ledger,
+        status=AcknowledgementStatus.ACCEPTED,
+        accepted_stake="10",
+        accepted_odds="2",
+    )
+    view = ledger.verified_execution_view(plan.plan_id).attempts[0]
+    conflicting = VerifiedProviderEffectBindingView(
+        evidence_id="e" * 64,
+        observed_at=ACKNOWLEDGED_AT,
+        source_payload_sha256="f" * 64,
+        external_receipt_id="receipt-attempt-1",
+        status=AcknowledgementStatus.PARTIAL,
+        accepted_odds=Decimal("2"),
+        accepted_stake=Decimal("4"),
+        provider_order_ref=None,
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="status conflicts with durable attempt state",
+    ):
+        _attempt_risk(replace(view, verified_provider_effect=conflicting))
+
 
 
 def test_generic_rejected_ack_is_not_provider_origin_release_authority(

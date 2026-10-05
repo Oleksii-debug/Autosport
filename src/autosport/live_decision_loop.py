@@ -1787,24 +1787,27 @@ class PersistentLiveDecisionLoop:
                 "cannot derive canonical PaperBook decision context"
             )
         provenance = self.intent_provenance
-        return _canonical_json_sha256(
-            {
-                "schema": "autosport.live_decision_runtime_context",
-                "schema_version": 2,
-                "mode": self.mode.value,
-                "intent_strategy_version_id": provenance.strategy_version_id,
-                "intent_model_version_id": provenance.model_version_id,
-                "intent_provenance_sha256": provenance.provenance_sha256,
-                "economic_goal_contract_sha256": provenance_for(
-                    self.authority.contract
-                ).contract_sha256,
-                "risk_policy_sha256": self.authority.risk_policy.provenance_sha256,
-                "book_state_sha256": book_state_sha256,
-                "max_quote_age_seconds": str(
-                    _timedelta_decimal_seconds(self.max_quote_age)
-                ),
-            }
-        )
+        context_payload = {
+            "schema": "autosport.live_decision_runtime_context",
+            "schema_version": 2,
+            "mode": self.mode.value,
+            "intent_strategy_version_id": provenance.strategy_version_id,
+            "intent_model_version_id": provenance.model_version_id,
+            "intent_provenance_sha256": provenance.provenance_sha256,
+            "economic_goal_contract_sha256": provenance_for(
+                self.authority.contract
+            ).contract_sha256,
+            "risk_policy_sha256": self.authority.risk_policy.provenance_sha256,
+            "book_state_sha256": book_state_sha256,
+            "max_quote_age_seconds": str(
+                _timedelta_decimal_seconds(self.max_quote_age)
+            ),
+        }
+        if self.paper_execution is not None:
+            context_payload["paper_execution_model_fingerprint"] = (
+                self.paper_execution.config.fingerprint
+            )
+        return _canonical_json_sha256(context_payload)
 
     def _decision_context_sha256(self) -> str:
         return self._decision_context_sha256_for_book(self.book)

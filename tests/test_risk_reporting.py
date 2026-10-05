@@ -1324,6 +1324,69 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertFalse(report.money_scope_complete)
         self.assertFalse(report.opening_capital_authority_complete)
 
+    def test_current_equity_evidence_never_claims_frozen_historical_reresolution(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(89),),
+            Decimal("10"),
+            placed_at="2026-09-21T17:30:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T17:35:00+00:00",
+        )
+        goal = self._goal()
+
+        path = build_product_issued_paper_equity_path(book, goal)
+        drawdown = build_product_issued_paper_drawdown_evidence(book, goal)
+        report = build_paper_risk_report(book, goal)
+
+        self.assertFalse(path.frozen_scope_complete)
+        self.assertFalse(path.historical_reresolution_complete)
+        self.assertFalse(drawdown.frozen_scope_complete)
+        self.assertFalse(drawdown.historical_reresolution_complete)
+        self.assertFalse(report.frozen_scope_complete)
+        self.assertFalse(report.historical_reresolution_complete)
+
+    def test_later_history_invalidates_old_current_snapshot_evidence(self) -> None:
+        book = PaperBook("100")
+        first = book.open_ticket(
+            (self._leg(90),),
+            Decimal("10"),
+            placed_at="2026-09-21T17:40:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            first.ticket_id,
+            set(),
+            settled_at="2026-09-21T17:45:00+00:00",
+        )
+        goal = self._goal()
+        old = build_product_issued_paper_equity_path(book, goal)
+
+        second = book.open_ticket(
+            (self._leg(91),),
+            Decimal("5"),
+            placed_at="2026-09-21T17:50:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            second.ticket_id,
+            set(),
+            settled_at="2026-09-21T17:55:00+00:00",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "equity-path evidence does not match canonical product state",
+        ):
+            verify_product_issued_paper_equity_path(book, goal, old)
+
     def test_paper_equity_path_never_claims_correction_lineage_completeness(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket(

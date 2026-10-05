@@ -3474,87 +3474,32 @@ class PersistentLiveDecisionLoop:
                 atomic_write_json(self.inputs_path, payload)
 
     def _ledger_end_offset(self) -> int:
-        path = self.decision_ledger.path
-        try:
-            with path.open("rb") as handle:
-                handle.seek(0, 2)
-                size = handle.tell()
-                if size:
-                    handle.seek(-1, 2)
-                    if handle.read(1) != b"\n":
-                        raise DecisionLedgerIntegrityError(
-                            "Decision Ledger has an unterminated final record"
-                        )
-                return size
-        except FileNotFoundError:
-            return 0
-        except OSError as exc:
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger end offset is unreadable"
-            ) from exc
+        snapshot = self.decision_ledger.verified_snapshot_if_exists()
+        return len(snapshot.payload)
 
     def _verified_latest_ledger_record(
         self,
         *,
         replay_run_id: str | None = None,
     ) -> tuple[int, DecisionRecord] | None:
-        """Read verified ledger records backwards until the requested lineage is found."""
+        """Read the latest requested lineage from one verified ledger snapshot."""
 
         if replay_run_id is not None:
             _canonical_text("replay_run_id", replay_run_id)
-        path = self.decision_ledger.path
-        try:
-            with path.open("rb") as handle:
-                handle.seek(0, 2)
-                size = handle.tell()
-                if size == 0:
-                    return None
-                handle.seek(size - 1)
-                if handle.read(1) != b"\n":
-                    raise DecisionLedgerIntegrityError(
-                        "Decision Ledger has an unterminated final record"
-                    )
-
-                end = size - 1
-                while end >= 0:
-                    position = end
-                    pieces: list[bytes] = []
-                    offset = 0
-                    while position > 0:
-                        start = max(0, position - 8192)
-                        handle.seek(start)
-                        chunk = handle.read(position - start)
-                        marker = chunk.rfind(b"\n")
-                        if marker >= 0:
-                            offset = start + marker + 1
-                            pieces.append(chunk[marker + 1 :])
-                            break
-                        pieces.append(chunk)
-                        position = start
-                    else:
-                        offset = 0
-
-                    line = b"".join(reversed(pieces)) + b"\n"
-                    if line == b"\n":
-                        raise DecisionLedgerIntegrityError(
-                            "Decision Ledger contains a blank final record"
-                        )
-                    JsonlDecisionLedger._verify_bytes(line)
-                    envelope = json.loads(line.decode("utf-8"))
-                    record = DecisionRecord(
-                        **JsonlDecisionLedger._validate_record(envelope["record"])
-                    )
-                    if replay_run_id is None or record.replay_run_id == replay_run_id:
-                        return offset, record
-                    if offset == 0:
-                        return None
-                    end = offset - 1
-        except FileNotFoundError:
+        payload = self.decision_ledger.verified_snapshot_if_exists().payload
+        if not payload:
             return None
-        except OSError as exc:
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger final record is unreadable"
-            ) from exc
+
+        lines = payload.splitlines(keepends=True)
+        offset = len(payload)
+        for line in reversed(lines):
+            offset -= len(line)
+            envelope = json.loads(line.decode("utf-8"))
+            record = DecisionRecord(
+                **JsonlDecisionLedger._validate_record(envelope["record"])
+            )
+            if replay_run_id is None or record.replay_run_id == replay_run_id:
+                return offset, record
         return None
 
     def _verified_ledger_record_at_offset(
@@ -3563,31 +3508,24 @@ class PersistentLiveDecisionLoop:
     ) -> DecisionRecord | None:
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise LiveDecisionProgressError("ledger_offset must be a non-negative integer")
-        path = self.decision_ledger.path
-        try:
-            with path.open("rb") as handle:
-                handle.seek(0, 2)
-                size = handle.tell()
-                if offset > size:
-                    raise DecisionLedgerIntegrityError(
-                        "reserved Decision Ledger offset is beyond durable bytes"
-                    )
-                if offset == size:
-                    return None
-                handle.seek(offset)
-                line = handle.readline()
-        except FileNotFoundError:
-            if offset == 0:
-                return None
+        payload = self.decision_ledger.verified_snapshot_if_exists().payload
+        size = len(payload)
+        if offset > size:
             raise DecisionLedgerIntegrityError(
-                "reserved Decision Ledger offset refers to a missing ledger"
+                "reserved Decision Ledger offset is beyond durable bytes"
             )
-        except OSError as exc:
+        if offset == size:
+            return None
+        if offset > 0 and payload[offset - 1 : offset] != b"\n":
             raise DecisionLedgerIntegrityError(
-                "reserved Decision Ledger record is unreadable"
-            ) from exc
-
-        JsonlDecisionLedger._verify_bytes(line)
+                "reserved Decision Ledger offset is not a record boundary"
+            )
+        end = payload.find(b"\n", offset)
+        if end < 0:
+            raise DecisionLedgerIntegrityError(
+                "reserved Decision Ledger record is unterminated"
+            )
+        line = payload[offset : end + 1]
         envelope = json.loads(line.decode("utf-8"))
         record = JsonlDecisionLedger._validate_record(envelope["record"])
         return DecisionRecord(**record)

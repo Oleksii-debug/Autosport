@@ -163,7 +163,11 @@ def _decode_request(body: object) -> dict[str, object]:
 
 @dataclass(frozen=True, slots=True, init=False)
 class BetfairStandardLayLimitPriceBoundEvidence:
-    """Resolver-derived assertion for the prospective ordinary-LAY price ceiling.\n\n    The value is not a bearer capability. Positive consumption must re-resolve\n    the exact request bytes through require_betfair_standard_lay_limit_price_bound().\n    """
+    """Resolver-derived assertion for the prospective ordinary-LAY price ceiling.
+
+    The value is not a bearer capability. Positive consumption must re-resolve
+    the exact request bytes through require_betfair_standard_lay_limit_price_bound().
+    """
 
     request_sha256: str
     market_id: str
@@ -191,7 +195,8 @@ class BetfairStandardLayLimitPriceBoundEvidence:
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         raise BetfairStandardLayLimitPriceBoundError(
-            "BetfairStandardLayLimitPriceBoundEvidence is constructed only by the canonical resolver"
+            "BetfairStandardLayLimitPriceBoundEvidence is constructed only by "
+            "the canonical resolver"
         )
 
     def _validate(self) -> None:

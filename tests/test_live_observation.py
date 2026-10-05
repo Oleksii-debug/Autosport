@@ -638,6 +638,43 @@ class LiveObservationTests(unittest.TestCase):
                 },
             )
 
+    def test_long_lived_reconciliation_promotes_same_sequence_positive_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self._observe(tmp)
+            self.assertEqual(first.stats.accepted, 2)
+            promoted = first.current_quotes[0]
+
+            mirror = MarketMirror()
+            mirror._apply_with_causal_authority(
+                promoted,
+                decision_causal=False,
+            )
+            self.assertEqual(mirror.causal_view().events, ())
+            updates = BoundedMirrorInvalidationBuffer(mirror)
+
+            repeated = observe_workspace_once(
+                tmp,
+                self._provider(),
+                max_items=10,
+                clock=lambda: _RECEIVE_TIME,
+                mirror_updates=updates,
+            )
+
+            causal = mirror.causal_view(
+                source_ids=promoted.source_id,
+                selection_ids=promoted.selection_id,
+            )
+            self.assertEqual(
+                tuple(event.dedupe_key for event in causal.events),
+                (promoted.dedupe_key,),
+            )
+            invalidations = updates.drain(max_items=10)
+            self.assertIn(
+                (promoted.source_id, promoted.quote_key),
+                invalidations.changed_keys,
+            )
+            self.assertEqual(repeated.stats.accepted, 0)
+
     def test_long_lived_reconciliation_preserves_generation_zero_as_noncausal(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -717,6 +754,14 @@ class LiveObservationTests(unittest.TestCase):
                 raw.close()
 
             mirror = MarketMirror()
+            # Seed an intentionally wrong in-memory provenance claim for the exact
+            # generation-zero value. Canonical reconciliation must revoke causal
+            # authority even though provider sequence/payload are unchanged.
+            mirror.apply(legacy)
+            self.assertEqual(
+                tuple(event.dedupe_key for event in mirror.causal_view().events),
+                (legacy.dedupe_key,),
+            )
             updates = BoundedMirrorInvalidationBuffer(mirror)
             result = observe_workspace_once(
                 root,

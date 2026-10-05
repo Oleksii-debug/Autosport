@@ -485,6 +485,75 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(state.last_failure_kind, "provider_or_validation")
             store.close()
 
+    def test_provider_failure_survives_hostile_note_when_health_persistence_also_fails(self):
+        class HostileProviderError(RuntimeError):
+            def add_note(self, note: str) -> None:
+                raise RuntimeError("note-rejected")
+
+        class Provider:
+            source_id = "source"
+
+            def read_batch(self, max_items: int = 1000):
+                raise HostileProviderError("provider-primary")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            health_failure = OSError("health-write-failed")
+            try:
+                with patch.object(
+                    SourceHealthStore,
+                    "record_failure",
+                    side_effect=health_failure,
+                ):
+                    with self.assertRaisesRegex(
+                        HostileProviderError,
+                        "provider-primary",
+                    ) as raised:
+                        engine.poll_once(Provider(), max_items=1)
+
+                self.assertIs(raised.exception.__cause__, health_failure)
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
+    def test_provider_failure_note_survives_unprintable_health_persistence_error(self):
+        class UnprintableHealthError(OSError):
+            def __str__(self) -> str:
+                raise RuntimeError("health-stringification-failed")
+
+        class Provider:
+            source_id = "source"
+
+            def read_batch(self, max_items: int = 1000):
+                raise RuntimeError("provider-primary")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            health_failure = UnprintableHealthError()
+            try:
+                with patch.object(
+                    SourceHealthStore,
+                    "record_failure",
+                    side_effect=health_failure,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "provider-primary",
+                    ) as raised:
+                        engine.poll_once(Provider(), max_items=1)
+
+                self.assertIs(raised.exception.__cause__, health_failure)
+                self.assertTrue(
+                    any(
+                        "source health failure persistence also failed: "
+                        "UnprintableHealthError: <unprintable exception>" in note
+                        for note in getattr(raised.exception, "__notes__", ())
+                    )
+                )
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
     def test_provider_cannot_return_more_than_requested_batch_bound(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, store, health = self._engine(tmp)

@@ -12,6 +12,24 @@ from autosport.paper import PaperBook
 _TS = "2026-10-05T00:00:00+00:00"
 
 
+def _hostile_function_with_freevars(count: int):
+    names = [f"captured_{index}" for index in range(count)]
+    args = ", ".join(names)
+    references = "\n".join(f"        _ = {name}" for name in names)
+    if references:
+        references += "\n"
+    source = (
+        f"def factory({args}):\n"
+        "    def hostile(_value):\n"
+        f"{references}"
+        "        raise AssertionError('mutated authority code executed')\n"
+        "    return hostile\n"
+    )
+    namespace: dict[str, object] = {}
+    exec(source, namespace)
+    return namespace["factory"](*([None] * count))
+
+
 def _leg(*, odds: str = "2.00", sport: str = "soccer") -> TicketLeg:
     return TicketLeg(
         "event-1",
@@ -268,26 +286,16 @@ def test_opening_registry_rejects_in_place_commitment_code_mutation_before_execu
     book.open_ticket([_leg()], "10", placed_at=_TS)
     commitment = paper_module._ticket_opening_commitment
     original_code = commitment.__code__
-    attacker_called = False
-
-    def hostile_commitment(_ticket):
-        nonlocal attacker_called
-        attacker_called = True
-        return ()
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
 
     try:
-        commitment.__code__ = hostile_commitment.__code__
-        with pytest.raises(
-            ValueError,
-            match="opening commitment authority changed",
-        ):
+        commitment.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="opening commitment authority changed"):
             _ = book.committed_stake
     finally:
         commitment.__code__ = original_code
 
-    assert attacker_called is False
     assert book.balance == Decimal("90")
-
 
 @pytest.mark.parametrize("method_name", ["__hash__", "__eq__"])
 def test_hidden_registries_reject_rebound_paperbook_key_methods_before_execution(
@@ -342,26 +350,16 @@ def test_hidden_registries_reject_in_place_registry_key_validator_code_mutation(
     book.open_ticket([_leg()], "10", placed_at=_TS)
     validator = paper_module._require_registry_book_key_authority
     original_code = validator.__code__
-    attacker_calls = 0
-
-    def hostile_validator(_book):
-        nonlocal attacker_calls
-        attacker_calls += 1
-        return None
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
 
     try:
-        validator.__code__ = hostile_validator.__code__
-        with pytest.raises(
-            ValueError,
-            match="registry key validator authority changed",
-        ):
+        validator.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="registry key validator authority changed"):
             _ = book.committed_stake
     finally:
         validator.__code__ = original_code
 
-    assert attacker_calls == 0
     assert book.balance == Decimal("90")
-
 
 def test_settlement_resolution_keys_reject_str_subclass_before_internal_hashing() -> None:
     class HostileResolutionKey(str):
@@ -426,26 +424,16 @@ def test_public_operation_rejects_in_place_opening_authority_code_mutation_befor
     book.open_ticket([_leg()], "10", placed_at=_TS)
     authority = paper_module._require_ticket_opening_authority
     original_code = authority.__code__
-    attacker_calls = 0
-
-    def hostile_authority(_book):
-        nonlocal attacker_calls
-        attacker_calls += 1
-        return None
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
 
     try:
-        authority.__code__ = hostile_authority.__code__
-        with pytest.raises(
-            ValueError,
-            match="opening authority dispatch changed",
-        ):
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="opening authority dispatch changed"):
             _ = book.committed_stake
     finally:
         authority.__code__ = original_code
 
-    assert attacker_calls == 0
     assert book.balance == Decimal("90")
-
 
 def test_public_operation_ignores_rebound_causal_history_authority_dispatch(
     monkeypatch,
@@ -495,27 +483,16 @@ def test_public_operation_rejects_in_place_causal_authority_code_mutation_before
     book.open_ticket([_leg()], "10", placed_at=_TS)
     authority = paper_module._require_paperbook_causal_history_authority
     original_code = authority.__code__
-    attacker_calls = 0
-
-    def hostile_authority(_book):
-        nonlocal attacker_calls
-        attacker_calls += 1
-        return None
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
 
     try:
-        authority.__code__ = hostile_authority.__code__
-        with pytest.raises(
-            ValueError,
-            match="causal-history authority dispatch changed",
-        ):
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="causal-history authority dispatch changed"):
             _ = book.committed_stake
     finally:
         authority.__code__ = original_code
 
-    assert attacker_calls == 0
     assert book.balance == Decimal("90")
-
-
 
 def test_causal_registry_ignores_rebound_snapshot_module_dispatch(monkeypatch) -> None:
     book = PaperBook("100")
@@ -542,26 +519,16 @@ def test_causal_registry_rejects_in_place_snapshot_code_mutation_before_executio
     book.open_ticket([_leg()], "10", placed_at=_TS)
     snapshot = paper_module._paperbook_causal_history_snapshot
     original_code = snapshot.__code__
-    attacker_calls = 0
-
-    def hostile_snapshot(_book):
-        nonlocal attacker_calls
-        attacker_calls += 1
-        return ((), ())
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
 
     try:
-        snapshot.__code__ = hostile_snapshot.__code__
-        with pytest.raises(
-            ValueError,
-            match="causal-history snapshot authority changed",
-        ):
+        snapshot.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="causal-history snapshot authority changed"):
             _ = book.committed_stake
     finally:
         snapshot.__code__ = original_code
 
-    assert attacker_calls == 0
     assert book.balance == Decimal("90")
-
 
 class _HostileSnapshotText(str):
     comparisons = 0
@@ -835,18 +802,75 @@ def test_operation_lock_dispatch_rejects_in_place_code_mutation() -> None:
     book = PaperBook("100")
     authority = paper_module._require_paperbook_operation_lock
     original_code = authority.__code__
-    attacker_calls = 0
-
-    def hostile_lock(_book):
-        nonlocal attacker_calls
-        attacker_calls += 1
-        return threading.RLock()
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
 
     try:
-        authority.__code__ = hostile_lock.__code__
+        authority.__code__ = hostile.__code__
         with pytest.raises(ValueError, match="operation lock authority changed"):
             _ = book.committed_stake
     finally:
         authority.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ("committed_stake", "open_ticket", "settle", "save"),
+)
+def test_public_operations_never_execute_rebound_opening_authority(
+    monkeypatch, operation: str, tmp_path
+) -> None:
+    book = PaperBook("100")
+    leg = _leg()
+    ticket = book.open_ticket([leg], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(_book):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound opening authority executed")
+
+    monkeypatch.setattr(paper_module, "_require_ticket_opening_authority", hostile)
+
+    if operation == "committed_stake":
+        assert book.committed_stake == Decimal("10")
+    elif operation == "open_ticket":
+        book.open_ticket([_leg(odds="2.50")], "1", placed_at=_TS)
+    elif operation == "settle":
+        book.settle(ticket.ticket_id, {leg.quote_key}, settled_at=_TS)
+    else:
+        book.save(tmp_path / "rebound-opening-never-runs.json")
+
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ("committed_stake", "open_ticket", "settle", "save"),
+)
+def test_public_operations_never_execute_rebound_causal_authority(
+    monkeypatch, operation: str, tmp_path
+) -> None:
+    book = PaperBook("100")
+    leg = _leg()
+    ticket = book.open_ticket([leg], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(_book):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound causal authority executed")
+
+    monkeypatch.setattr(
+        paper_module, "_require_paperbook_causal_history_authority", hostile
+    )
+
+    if operation == "committed_stake":
+        assert book.committed_stake == Decimal("10")
+    elif operation == "open_ticket":
+        book.open_ticket([_leg(odds="2.50")], "1", placed_at=_TS)
+    elif operation == "settle":
+        book.settle(ticket.ticket_id, {leg.quote_key}, settled_at=_TS)
+    else:
+        book.save(tmp_path / "rebound-causal-never-runs.json")
 
     assert attacker_calls == 0

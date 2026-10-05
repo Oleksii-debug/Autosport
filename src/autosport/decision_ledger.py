@@ -316,11 +316,18 @@ class JsonlDecisionLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._path_authority = self.path
         self._absolute_path_authority = self.path.absolute()
+        self._writer_lock_path_authority = self._absolute_path_authority.with_name(
+            self._absolute_path_authority.name + ".writer.lock"
+        )
 
     def _assert_persistence_authority(self) -> None:
         if (
             self.path != self._path_authority
             or self.path.absolute() != self._absolute_path_authority
+            or self._writer_lock_path_authority
+            != self._absolute_path_authority.with_name(
+                self._absolute_path_authority.name + ".writer.lock"
+            )
         ):
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger persistence authority changed after construction"
@@ -460,16 +467,54 @@ class JsonlDecisionLedger:
             sort_keys=True,
             allow_nan=False,
         )
-        with self._absolute_path_authority.open(
-            "a",
-            encoding="utf-8",
-            newline="\n",
-        ) as handle:
-            handle.write(envelope + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        self._assert_persistence_authority()
-        return digest
+
+        try:
+            lock_fd = os.open(
+                self._writer_lock_path_authority,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer lock exists; fail closed until writer/crash "
+                "ownership is resolved"
+            ) from exc
+
+        try:
+            self._assert_persistence_authority()
+            try:
+                existing = self._absolute_path_authority.read_bytes()
+            except FileNotFoundError:
+                existing = b""
+            except OSError as exc:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger file is unreadable before append"
+                ) from exc
+
+            self._verify_bytes(existing)
+            for line in existing.decode("utf-8").splitlines():
+                prior = json.loads(line)
+                if prior["record"]["decision_id"] == payload["decision_id"]:
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger decision_id already exists"
+                    )
+
+            with self._absolute_path_authority.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
+                handle.write(envelope + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._assert_persistence_authority()
+            return digest
+        finally:
+            os.close(lock_fd)
+            try:
+                self._writer_lock_path_authority.unlink()
+            except FileNotFoundError:
+                pass
 
     def append(self, record: DecisionRecord) -> str:
         """Persist a non-economic decision only."""

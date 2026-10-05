@@ -490,6 +490,40 @@ def verify_product_issued_paper_equity_path(
     return resolved
 
 
+def _require_minimum_equity_prerequisites(
+    path: ProductIssuedPaperEquityPath,
+) -> None:
+    """Fail on the most specific unavailable authority needed by minimum equity."""
+
+    if not path.settled_history_complete:
+        raise ValueError(
+            "minimum equity requires all economically material PAPER tickets settled"
+        )
+    if any(
+        point.action == "settle" and point.available_at is None
+        for point in path.points
+    ):
+        raise ValueError(
+            "minimum equity requires complete durable availability chronology"
+        )
+    if not path.money_scope_complete:
+        raise ValueError(
+            "minimum equity requires exact bankroll and currency provenance"
+        )
+    if not path.opening_capital_authority_complete:
+        raise ValueError(
+            "minimum equity requires product-issued opening-capital authority"
+        )
+    if not path.availability_complete:
+        raise ValueError(
+            "minimum equity requires complete durable availability chronology"
+        )
+    if not path.applicable_costs_complete or not path.net_equity_authoritative:
+        raise ValueError(
+            "minimum equity requires complete authoritative net monetary costs"
+        )
+
+
 def verified_settled_minimum_equity(
     book: PaperBook,
     goal: EconomicGoalContract,
@@ -502,26 +536,7 @@ def verified_settled_minimum_equity(
     """
 
     resolved = verify_product_issued_paper_equity_path(book, goal, evidence)
-    if not resolved.availability_complete:
-        raise ValueError(
-            "minimum equity requires complete durable availability chronology"
-        )
-    if not resolved.settled_history_complete:
-        raise ValueError(
-            "minimum equity requires all economically material PAPER tickets settled"
-        )
-    if not resolved.money_scope_complete:
-        raise ValueError(
-            "minimum equity requires exact bankroll and currency provenance"
-        )
-    if not resolved.opening_capital_authority_complete:
-        raise ValueError(
-            "minimum equity requires product-issued opening-capital authority"
-        )
-    if not resolved.applicable_costs_complete or not resolved.net_equity_authoritative:
-        raise ValueError(
-            "minimum equity requires complete authoritative net monetary costs"
-        )
+    _require_minimum_equity_prerequisites(resolved)
     return resolved.minimum_equity, resolved.minimum_equity_point_id
 
 
@@ -789,26 +804,7 @@ def resolve_durable_verified_settled_minimum_equity(
         paper_book_path=paper_book_path,
         workspace=workspace,
     )
-    if not resolved.availability_complete:
-        raise ValueError(
-            "minimum equity requires complete durable availability chronology"
-        )
-    if not resolved.settled_history_complete:
-        raise ValueError(
-            "minimum equity requires all economically material PAPER tickets settled"
-        )
-    if not resolved.money_scope_complete:
-        raise ValueError(
-            "minimum equity requires exact bankroll and currency provenance"
-        )
-    if not resolved.opening_capital_authority_complete:
-        raise ValueError(
-            "minimum equity requires product-issued opening-capital authority"
-        )
-    if not resolved.applicable_costs_complete or not resolved.net_equity_authoritative:
-        raise ValueError(
-            "minimum equity requires complete authoritative net monetary costs"
-        )
+    _require_minimum_equity_prerequisites(resolved)
     return (
         resolved.minimum_equity,
         resolved.minimum_equity_point_id,

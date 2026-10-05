@@ -713,5 +713,51 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
 
+    def test_live_apply_rejects_ingest_before_local_observation(self) -> None:
+        mirror = MarketMirror()
+        inverted = self.event(
+            observed_ts="2026-09-16T19:00:01+00:00",
+            ingest_ts="2026-09-16T19:00:00+00:00",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts must not precede observed_ts",
+        ):
+            mirror.apply(inverted)
+
+        self.assertEqual(mirror.snapshot(), ())
+
+    def test_store_rejects_ingest_before_local_observation_without_durable_side_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                inverted = self.event(
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                    ingest_ts="2026-09-16T19:00:00+00:00",
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ingest_ts must not precede observed_ts",
+                ):
+                    store.append_many([inverted])
+
+                self.assertEqual(store.events(), [])
+            finally:
+                store.close()
+
+    def test_equal_observed_and_ingest_instants_remain_valid(self) -> None:
+        event = self.event(
+            observed_ts="2026-09-16T19:00:00+00:00",
+            ingest_ts="2026-09-16T20:00:00+01:00",
+        )
+        mirror = MarketMirror()
+
+        result = mirror.apply(event)
+
+        self.assertEqual(result.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.snapshot(), (event,))
+
+
 if __name__ == "__main__":
     unittest.main()

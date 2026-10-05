@@ -129,6 +129,8 @@ def _identity_from_metadata(metadata: object) -> BetfairQuoteIdentity:
     handicap_raw = metadata.get("handicap")
     side_raw = metadata.get("side")
     price_raw = metadata.get("identity_price")
+    if type(metadata.get("schema")) is not str:
+        raise ValueError("durable Betfair bridge schema metadata is invalid")
     if type(market_id) is not str or not market_id:
         raise ValueError("durable Betfair bridge market_id is invalid")
     if type(selection_id) is not int or selection_id <= 0:
@@ -137,6 +139,8 @@ def _identity_from_metadata(metadata: object) -> BetfairQuoteIdentity:
         raise ValueError("durable Betfair bridge handicap is invalid")
     if type(side_raw) is not str:
         raise ValueError("durable Betfair bridge side is invalid")
+    if price_raw is not None and type(price_raw) is not str:
+        raise ValueError("durable Betfair bridge identity price is invalid")
     try:
         handicap = Decimal(handicap_raw)
         side = BetfairQuoteSide(side_raw)
@@ -215,6 +219,8 @@ class BetfairAuthenticatedMarketProvider:
                 raise ValueError("durable current key must be (source_id, quote_key)")
             if type(event) is not MarketEvent:
                 raise TypeError("durable current values must be exact MarketEvent")
+            if key != (event.source_id, event.quote_key):
+                raise ValueError("durable current key does not match canonical MarketEvent key")
             if event.source_id != BETFAIR_STREAM_SOURCE_ID:
                 continue
             if type(event.sequence) is not int or event.sequence < 1:
@@ -238,6 +244,19 @@ class BetfairAuthenticatedMarketProvider:
                 if disposition != "closed":
                     raise ValueError(
                         "durable Betfair bridge closed disposition metadata mismatch"
+                    )
+                expected_exchange_side = (
+                    identity.side.value
+                    if identity.side in {BetfairQuoteSide.BACK, BetfairQuoteSide.LAY}
+                    else None
+                )
+                if event.exchange_side != expected_exchange_side:
+                    raise ValueError(
+                        "durable Betfair bridge closed exchange-side identity mismatch"
+                    )
+                if identity.price is None or event.decimal_odds != identity.price:
+                    raise ValueError(
+                        "durable Betfair bridge closed odds do not match quote identity"
                     )
                 continue
             else:
@@ -297,6 +316,19 @@ class BetfairAuthenticatedMarketProvider:
                 if disposition != "closed":
                     raise ValueError(
                         "durable Betfair bridge closed disposition metadata mismatch"
+                    )
+                expected_exchange_side = (
+                    identity.side.value
+                    if identity.side in {BetfairQuoteSide.BACK, BetfairQuoteSide.LAY}
+                    else None
+                )
+                if event.exchange_side != expected_exchange_side:
+                    raise ValueError(
+                        "durable Betfair bridge closed exchange-side identity mismatch"
+                    )
+                if identity.price is None or event.decimal_odds != identity.price:
+                    raise ValueError(
+                        "durable Betfair bridge closed odds do not match quote identity"
                     )
             else:
                 raise ValueError("durable Betfair bridge status is not canonical")

@@ -431,6 +431,9 @@ def _build_canonical_authority():
     datetime_cls = datetime
     timezone_utc = timezone.utc
     sha_pattern = re.compile(r"^[0-9a-f]{64}$")
+    json_dumps = json.dumps
+    json_dumps_code = json_dumps.__code__
+    sha256_constructor = hashlib.sha256
     model_source_family = "autosport.prospective_model_compute_money"
     slippage_source_family = "autosport.betfair_standard_limit_price_bound"
     required_classes = tuple(sorted(REQUIRED_COST_CLASSES, key=lambda value: value.value))
@@ -538,14 +541,18 @@ def _build_canonical_authority():
         return value.astimezone(timezone_utc).isoformat().replace("+00:00", "Z")
 
     def digest(payload: object) -> str:
-        encoded = json.dumps(
+        if json_dumps.__code__ is not json_dumps_code:
+            raise error_cls("canonical JSON proof serializer authority changed")
+        encoded = json_dumps(
             payload,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        if json_dumps.__code__ is not json_dumps_code:
+            raise error_cls("canonical JSON proof serializer authority changed")
+        return sha256_constructor(encoded).hexdigest()
 
     def expected_axes(status: ProspectiveCostResolutionStatus):
         for candidate, axes in status_axes:

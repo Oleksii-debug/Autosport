@@ -3348,12 +3348,12 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(loop._progress.phase, "append_pending")
             with self.assertRaisesRegex(
                 LiveDecisionProgressError,
-                "cannot unregister live input while economic progress is unfinished",
+                "cannot mutate live dependency registry while a decision is unfinished",
             ):
                 loop.unregister_input("input-a")
             with self.assertRaisesRegex(
                 LiveDecisionProgressError,
-                "cannot register live input while economic progress is unfinished",
+                "cannot mutate live dependency registry while a decision is unfinished",
             ):
                 loop.register_input("input-b", selection_ids="selection-b")
             self.assertEqual(loop.dependencies.input_ids, ("input-a",))
@@ -5777,12 +5777,12 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(loop._progress.phase, "pending")
             with self.assertRaisesRegex(
                 LiveDecisionProgressError,
-                "cannot unregister live input while economic progress is unfinished",
+                "cannot mutate live dependency registry while a decision is unfinished",
             ):
                 loop.unregister_input("input-a")
             with self.assertRaisesRegex(
                 LiveDecisionProgressError,
-                "cannot register live input while economic progress is unfinished",
+                "cannot mutate live dependency registry while a decision is unfinished",
             ):
                 loop.register_input("input-b", selection_ids="selection-b")
             self.assertEqual(loop.dependencies.input_ids, ("input-a",))

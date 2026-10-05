@@ -415,3 +415,34 @@ def test_betfair_cost_resolver_rejects_in_place_base_resolver_code_mutation():
             )
     finally:
         resolver.__code__ = original_code
+
+
+def test_applicable_cost_resolver_rejects_in_place_model_resolver_code_mutation():
+    resolver = subject.resolve_prospective_model_compute_money
+    original_code = resolver.__code__
+
+    def attacker_resolver(**_kwargs):
+        raise AssertionError("mutated model resolver body must never execute")
+
+    try:
+        resolver.__code__ = attacker_resolver.__code__
+        with canonical_applicable_cost_case() as (
+            intent,
+            plan,
+            router_store,
+            request,
+            decision_at,
+        ):
+            with pytest.raises(
+                subject.ProspectiveApplicableCostError,
+                match="model-compute resolver authority changed",
+            ):
+                subject.resolve_prospective_applicable_costs(
+                    intent=intent,
+                    plan=plan,
+                    router_store=router_store,
+                    model_request_id=request.request_id,
+                    decision_at=decision_at,
+                )
+    finally:
+        resolver.__code__ = original_code

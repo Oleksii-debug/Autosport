@@ -1244,6 +1244,13 @@ class PersistentLiveDecisionLoop:
         market_ids: str | tuple[str, ...] | None = None,
         selection_ids: str | tuple[str, ...] | None = None,
     ) -> None:
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+        ):
+            raise LiveDecisionProgressError(
+                "cannot register live input while economic progress is unfinished"
+            )
         normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
         candidate = _InputSpec(
             input_id=normalized_id,
@@ -1283,6 +1290,13 @@ class PersistentLiveDecisionLoop:
         self._needs_cache_rebuild = True
 
     def unregister_input(self, input_id: str) -> bool:
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+        ):
+            raise LiveDecisionProgressError(
+                "cannot unregister live input while economic progress is unfinished"
+            )
         normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
         existing = self._input_specs.get(normalized_id)
         if existing is None:
@@ -1542,6 +1556,11 @@ class PersistentLiveDecisionLoop:
         )
 
         registered_input_ids = self.dependencies.input_ids
+        expected_input_specs = tuple(self._input_specs.values())
+        if tuple(spec.input_id for spec in expected_input_specs) != registered_input_ids:
+            raise LiveDecisionProgressError(
+                "live dependency registry diverged before snapshot capture"
+            )
         if self._needs_cache_rebuild:
             for input_id in registered_input_ids:
                 self._pending_affected[input_id] = None
@@ -1587,6 +1606,7 @@ class PersistentLiveDecisionLoop:
             market_state_sha256=current_market_sha,
             affected_input_ids=affected,
             gate=_GATE_NORMAL,
+            expected_input_specs=expected_input_specs,
         )
         self._refresh_intents_from_snapshots(snapshots)
 
@@ -2640,6 +2660,7 @@ class PersistentLiveDecisionLoop:
         market_state_sha256: str,
         affected_input_ids: tuple[str, ...],
         gate: str,
+        expected_input_specs: tuple[_InputSpec, ...] | None = None,
     ) -> None:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
@@ -2671,8 +2692,28 @@ class PersistentLiveDecisionLoop:
                     raise LiveDecisionProgressError(
                         "live decision progress changed concurrently before pending publication"
                     )
+                current_input_specs = tuple(self._input_specs.values())
+                bound_input_specs = (
+                    current_input_specs
+                    if expected_input_specs is None
+                    else expected_input_specs
+                )
+                if (
+                    expected_input_specs is not None
+                    and current_input_specs != expected_input_specs
+                ):
+                    raise LiveDecisionProgressError(
+                        "live dependency registry changed after snapshot capture"
+                    )
+                expected_input_ids = tuple(
+                    spec.input_id for spec in bound_input_specs
+                )
+                if self.dependencies.input_ids != expected_input_ids:
+                    raise LiveDecisionProgressError(
+                        "focused dependency registry changed after snapshot capture"
+                    )
                 durable_input_specs = self._load_input_registry() or ()
-                if durable_input_specs != tuple(self._input_specs.values()):
+                if durable_input_specs != bound_input_specs:
                     raise LiveDecisionProgressError(
                         "live dependency registry changed concurrently before pending publication"
                     )
@@ -2739,7 +2780,7 @@ class PersistentLiveDecisionLoop:
                     market_append_generation=market_append_generation,
                     decision_context_sha256=durable_context_sha256,
                     affected_input_ids=affected_input_ids,
-                    registered_input_ids=self.dependencies.input_ids,
+                    registered_input_ids=expected_input_ids,
                     decision_id=None,
                     plan_sha256=None,
                     ledger_offset=self._ledger_end_offset(),

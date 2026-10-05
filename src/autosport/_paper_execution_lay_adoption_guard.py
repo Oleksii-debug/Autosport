@@ -482,17 +482,133 @@ def _execute_unlocked(
         evidence_registry=evidence_registry,
         suspended_action_ids=suspended_action_ids,
     )
-    return _ORIGINAL_EXECUTE_UNLOCKED(
-        self,
+    expected_run_id = self.expected_run_id(prepared, trigger_id)
+    self._publish_exposure_scope(
         prepared=prepared,
+        run_id=expected_run_id,
+    )
+    run = _adoption.execute_paper_plan(
+        plan=prepared.execution_plan,
         trigger_id=trigger_id,
+        config=self.config,
+        ledger=self.ledger,
         started_at=started_at,
-        materialize_exposure=materialize_exposure,
         observations=observation_snapshot,
         evidence_registry=evidence_registry,
         suspended_action_ids=suspended_action_ids,
     )
 
+    # Canonical execution is a callback boundary: ledger/evidence implementations
+    # perform durable I/O while the caller-owned frozen prepared value remains
+    # reachable. Re-prove runtime + minted authority before hashing action/binding
+    # ids or comparing any prepared field after that boundary.
+    _require_runtime_authority(self)
+    self._require_minted(prepared)
+    _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
+    _reality._require_canonical_execution_config_surface(self.config)
+
+    if run.run_id != expected_run_id:
+        raise PaperExecutionAdoptionError(
+            "canonical execution returned unexpected run identity"
+        )
+    if not materialize_exposure:
+        return _adoption.PaperExecutionAdoptionResult(run=run, ticket_ids=())
+
+    action_by_id = {
+        action.action_id: action for action in prepared.execution_plan.actions
+    }
+    binding_by_id = {
+        binding.action_id: binding for binding in prepared.exposure_bindings
+    }
+    ticket_ids: list[str] = []
+    accepted_attempts = []
+    for attempt in run.attempts:
+        if attempt.outcome not in {
+            _adoption.PaperAttemptOutcome.ACCEPTED,
+            _adoption.PaperAttemptOutcome.PARTIAL,
+        }:
+            continue
+        action = action_by_id.get(attempt.action_id)
+        binding = binding_by_id.get(attempt.action_id)
+        if action is None or binding is None:
+            raise PaperExecutionAdoptionError(
+                "canonical execution attempt is not bound to prepared authority"
+            )
+        ticket = self._materialize_attempt(
+            attempt=attempt,
+            action=action,
+            binding=binding,
+            decision_id=prepared.execution_plan.decision_id,
+        )
+        ticket_ids.append(ticket.ticket_id)
+        accepted_attempts.append((attempt, action, binding))
+
+    if accepted_attempts:
+        # Materialization/domain code is another mutation boundary. Validate the
+        # complete economic snapshot and prepared/runtime authority immediately
+        # before durable publication.
+        _require_runtime_authority(self)
+        self._require_minted(prepared)
+        try:
+            type(self.book)._validate_loaded_state(self.book)
+        except (TypeError, ValueError) as exc:
+            raise PaperExecutionAdoptionError(
+                "PaperBook state is invalid before durable publication"
+            ) from exc
+
+        self.book.save(self.paper_book_path)
+
+        # Filesystem publication may invoke path/filesystem machinery. Never use
+        # pre-save authority assumptions for the subsequent equality/idempotence
+        # decision.
+        _require_runtime_authority(self)
+        self._require_minted(prepared)
+        try:
+            type(self.book)._validate_loaded_state(self.book)
+        except (TypeError, ValueError) as exc:
+            raise PaperExecutionAdoptionError(
+                "PaperBook state changed or became invalid during durable publication"
+            ) from exc
+
+        durable_book = _adoption.PaperBook.load(self.paper_book_path)
+        if type(durable_book) is not _adoption.PaperBook:
+            raise PaperExecutionAdoptionError(
+                "durable PaperBook reload must retain exact PaperBook authority"
+            )
+        try:
+            type(durable_book)._validate_loaded_state(durable_book)
+        except (TypeError, ValueError) as exc:
+            raise PaperExecutionAdoptionError(
+                "durable PaperBook reload is not canonical"
+            ) from exc
+
+        self._assert_same_book_state(
+            durable_book,
+            self.book,
+            "PaperBook changed across atomic durable publication",
+        )
+        for attempt, action, binding in accepted_attempts:
+            _require_materialization_authority(action, binding)
+            marker = f"{self._TICKET_MARKER}{attempt.attempt_id}"
+            matches = [
+                ticket
+                for ticket in durable_book.tickets.values()
+                if marker in ticket.strategy_reason
+            ]
+            if len(matches) != 1 or not self._ticket_matches_attempt(
+                ticket=matches[0],
+                attempt=attempt,
+                action=action,
+                binding=binding,
+            ):
+                raise PaperExecutionAdoptionError(
+                    "durable PaperBook does not bind exact execution attempt"
+                )
+
+    return _adoption.PaperExecutionAdoptionResult(
+        run=run,
+        ticket_ids=tuple(ticket_ids),
+    )
 
 def _normalized_action_side(exchange_side: str | None) -> str:
     if exchange_side is None:

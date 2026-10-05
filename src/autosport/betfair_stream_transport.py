@@ -23,7 +23,7 @@ from queue import Empty, Queue
 from threading import Event, RLock, Thread
 from types import MappingProxyType
 from typing import Protocol
-from weakref import WeakKeyDictionary
+from weakref import ReferenceType, WeakKeyDictionary, ref
 
 from .betfair_account_readonly import BetfairSessionCredentials
 
@@ -410,6 +410,7 @@ class BetfairStreamTlsTransport:
         self._active_connect_cancel: Event | None = None
         self._lifecycle_lock = RLock()
         self._receive_lock = RLock()
+        self._authenticated_reader_ref: ReferenceType[object] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -686,13 +687,22 @@ class BetfairStreamTlsTransport:
             )
         return last_received_monotonic_ns, last_clock_witness
 
-    def read_authenticated_frame(self) -> BetfairStreamAuthenticatedFrame:
+    def read_authenticated_frame(self, *, reader: object | None = None) -> BetfairStreamAuthenticatedFrame:
         """Return one exact frame with process-local authenticated transport-origin proof."""
 
         with self._receive_lock:
-            stream = self._socket
-            connection_id = self._connection_id
-            connection_generation = self._connection_generation
+            with self._lifecycle_lock:
+                owner_ref = self._authenticated_reader_ref
+                owner = None if owner_ref is None else owner_ref()
+                if owner_ref is not None and owner is None:
+                    self._authenticated_reader_ref = None
+                elif owner is not None and owner is not reader:
+                    raise BetfairStreamTransportError(
+                        "Betfair authenticated frame reader is owned by another runtime"
+                    )
+                stream = self._socket
+                connection_id = self._connection_id
+                connection_generation = self._connection_generation
             if stream is None or connection_id is None or connection_generation <= 0:
                 raise BetfairStreamTransportError(
                     "Betfair stream transport is not authenticated"
@@ -789,6 +799,26 @@ class BetfairStreamTlsTransport:
             "Betfair stream transport does not issue durable persistence authority"
         )
 
+    def _claim_authenticated_reader(self, reader: object) -> None:
+        if reader is None:
+            raise TypeError("authenticated frame reader owner must be an object")
+        try:
+            reader_ref = ref(reader)
+        except TypeError as exc:
+            raise TypeError("authenticated frame reader owner must support weak references") from exc
+        with self._lifecycle_lock:
+            if not self.is_authenticated:
+                raise BetfairStreamTransportError(
+                    "Betfair stream transport is not authenticated"
+                )
+            current_ref = self._authenticated_reader_ref
+            current = None if current_ref is None else current_ref()
+            if current is not None and current is not reader:
+                raise BetfairStreamTransportError(
+                    "Betfair authenticated frame reader is already owned"
+                )
+            self._authenticated_reader_ref = reader_ref
+
     def _finish_connect_attempt(self, cancellation: Event) -> None:
         with self._lifecycle_lock:
             if self._active_connect_cancel is cancellation:
@@ -824,6 +854,7 @@ class BetfairStreamTlsTransport:
             stream = self._socket
             self._socket = None
             self._connection_id = None
+            self._authenticated_reader_ref = None
             self._clear_receive_buffer()
         if stream is not None:
             _close_socket_quietly(stream)

@@ -938,6 +938,7 @@ def _market_betting_type_updates(
         "ASIAN_HANDICAP_SINGLE_LINE",
         "ASIAN_HANDICAP_DOUBLE_LINE",
         "LINE",
+        "RANGE",
     }
     for change in market_changes:
         if type(change) is not dict:

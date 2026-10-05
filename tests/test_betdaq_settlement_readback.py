@@ -13,6 +13,7 @@ from autosport.betdaq_account_readonly import (
     BetdaqCredentials,
 )
 from autosport.betdaq_settlement_readback import (
+    BetdaqEconomicEvidence,
     BetdaqEconomicReadbackClient,
     BetdaqEconomicReadbackError,
     coalesce_posting_replays,
@@ -1399,6 +1400,11 @@ def test_order_result_accepts_all_documented_unprojected_attributes(monkeypatch)
 
 
 
+class _AdversarialMethod(str):
+    def __eq__(self, _other):
+        raise AssertionError("method subclass equality must not execute")
+
+
 class _AdversarialDecimal(Decimal):
     def is_finite(self):
         raise AssertionError("Decimal subclass hook must not execute")
@@ -1414,6 +1420,20 @@ class _AdversarialDatetime(datetime):
 
 class _ForgedEconomicEvidence:
     evidence_id = "betdaq-economic:" + ("0" * 64)
+
+
+def test_economic_evidence_rejects_method_subclass_before_equality():
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="economic evidence method must be exact text",
+    ):
+        BetdaqEconomicEvidence(
+            method=_AdversarialMethod("GetOrderDetails"),
+            request_identity_sha256="1" * 64,
+            source_payload_sha256="2" * 64,
+            observed_at="2026-10-01T00:00:00Z",
+            account_context_id="betdaq-auth-context:" + ("3" * 64),
+        )
 
 
 def test_order_observation_rejects_forged_evidence_object(monkeypatch):

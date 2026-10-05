@@ -1036,7 +1036,7 @@ def _place_action_with_final_durable_authority(
                 attempt_id,
                 {
                     "submitted_at": send_at,
-                    "submitted_request_sha256": request_sha256,
+                    "request_sha256": request_sha256,
                 },
             )
             submitted_request_sha256 = request_sha256

@@ -149,3 +149,21 @@ def test_acquisition_sequence_must_match_market_event_sequence() -> None:
         match="acquisition sequence is inconsistent",
     ):
         semantic_market_state_identity(forged)
+
+def test_excluded_request_fingerprint_still_requires_canonical_shape() -> None:
+    payload = _event(sequence=1).to_dict()
+    payload["metadata"]["request_fingerprint_sha256"] = "not-a-digest"
+    malformed = MarketEvent.from_dict(payload)
+
+    with pytest.raises(MarketStateIdentityError, match="request fingerprint"):
+        semantic_market_state_identity(malformed)
+
+
+def test_excluded_sequence_authority_still_requires_canonical_text() -> None:
+    payload = _event(sequence=1).to_dict()
+    payload["metadata"]["sequence_authority_id"] = " authority-with-whitespace "
+    malformed = MarketEvent.from_dict(payload)
+
+    with pytest.raises(MarketStateIdentityError, match="sequence authority identity"):
+        semantic_market_state_identity(malformed)
+

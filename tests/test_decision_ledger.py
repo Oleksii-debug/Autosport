@@ -389,6 +389,82 @@ class DecisionLedgerTests(unittest.TestCase):
 
             self.assertEqual(restarted.verify_integrity(), 2)
 
+    def test_writer_lock_replacement_after_open_fails_before_append(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            ledger.append(self._record(decision_id="first"))
+            lock_path = ledger._writer_lock_path_authority
+            replacement = root / "replacement-lock"
+            replacement.write_bytes(b"replacement")
+            real_open = os.open
+            injected = False
+
+            def racing_open(target, flags, mode=0o777):
+                nonlocal injected
+                fd = real_open(target, flags, mode)
+                if Path(target) == lock_path and not injected:
+                    injected = True
+                    lock_path.unlink()
+                    replacement.replace(lock_path)
+                return fd
+
+            with patch("autosport.decision_ledger.os.open", side_effect=racing_open):
+                with self.assertRaisesRegex(
+                    DecisionLedgerIntegrityError,
+                    "writer-lock path changed during acquisition",
+                ):
+                    ledger.append(self._record(decision_id="blocked"))
+
+            self.assertTrue(injected)
+            self.assertEqual(lock_path.read_bytes(), b"replacement")
+            self.assertEqual(
+                [item.decision_id for item in JsonlDecisionLedger(path).verified_records()],
+                ["first"],
+            )
+
+    def test_writer_lock_replacement_after_os_lock_fails_final_identity_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            ledger.append(self._record(decision_id="first"))
+            lock_path = ledger._writer_lock_path_authority
+            replacement = root / "replacement-lock"
+            replacement.write_bytes(b"replacement")
+            from autosport import decision_ledger as decision_ledger_module
+
+            original = decision_ledger_module._DecisionLedgerPathLock._assert_open_path_identity
+            calls = 0
+
+            def racing_identity(lock, handle):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    lock_path.unlink()
+                    replacement.replace(lock_path)
+                return original(lock, handle)
+
+            with patch.object(
+                decision_ledger_module._DecisionLedgerPathLock,
+                "_assert_open_path_identity",
+                autospec=True,
+                side_effect=racing_identity,
+            ):
+                with self.assertRaisesRegex(
+                    DecisionLedgerIntegrityError,
+                    "writer-lock path changed during acquisition",
+                ):
+                    ledger.append(self._record(decision_id="blocked"))
+
+            self.assertGreaterEqual(calls, 2)
+            self.assertEqual(lock_path.read_bytes(), b"replacement")
+            self.assertEqual(
+                [item.decision_id for item in JsonlDecisionLedger(path).verified_records()],
+                ["first"],
+            )
+
     def test_two_ledger_instances_cannot_append_same_decision_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"

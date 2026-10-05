@@ -1047,6 +1047,7 @@ for _method_name in (
     "state_snapshot_sha256",
     "require_current",
     "require_current_under_lock",
+    "require_committed_window",
     "_current_under_lock",
     "_publish_day",
     "_evidence",

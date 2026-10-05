@@ -45,7 +45,14 @@ def _start_surface(tmp_path: Path) -> SimpleNamespace:
     surface._product_operation_blocked = lambda: False
     surface._workspace_requires_recovery = lambda _workspace: False
     surface.workspace = tmp_path / "workspace"
-    surface.product_source = _Value("parlayapi-table-tennis")
+    display = "Parlay API — настільний теніс"
+    surface.product_source = _Value(display)
+    surface._product_source_display_to_id = {
+        display: "parlayapi-table-tennis"
+    }
+    surface._product_source_id_to_display = {
+        "parlayapi-table-tennis": display
+    }
     surface.product_status = _Value()
     surface.status = _Value()
     surface.product_worker = _Worker()
@@ -134,7 +141,13 @@ def test_source_configuration_change_is_blocked_while_runtime_busy(
         _product_busy=True,
         product_status=_Value(),
         status=_Value(),
-        product_source=_Value("parlayapi-table-tennis"),
+        product_source=_Value("Parlay API — настільний теніс"),
+        _product_source_display_to_id={
+            "Parlay API — настільний теніс": "parlayapi-table-tennis"
+        },
+        _product_source_id_to_display={
+            "parlayapi-table-tennis": "Parlay API — настільний теніс"
+        },
         workspace=tmp_path / "workspace",
         bell=lambda: None,
         _append_log=lambda _message: None,
@@ -172,5 +185,5 @@ def test_valid_source_save_uses_stable_registry_identity(tmp_path: Path) -> None
         surface.workspace,
         "parlayapi-table-tennis",
     )
-    assert surface.product_source.value == "parlayapi-table-tennis"
+    assert surface.product_source.value == "Parlay API — настільний теніс"
     assert "збережено" in surface.product_status.value

@@ -2108,5 +2108,58 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(durable.tickets, book.tickets)
 
 
+    def test_instance_open_ticket_override_cannot_replace_money_moving_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("instance-open-ticket-override", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            hostile_calls = 0
+
+            def hostile_open_ticket(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("instance open_ticket override must not run")
+
+            book.open_ticket = hostile_open_ticket
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="instance-open-ticket-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertEqual(len(book.tickets), 1)
+
+    def test_instance_materialize_override_cannot_replace_adoption_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("instance-materialize-override", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            hostile_calls = 0
+
+            def hostile_materialize(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("instance materialization override must not run")
+
+            runtime._materialize_attempt = hostile_materialize
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="instance-materialize-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertEqual(len(book.tickets), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -492,11 +492,30 @@ class JsonlDecisionLedger:
                 ) from exc
 
             self._verify_bytes(existing)
+            material_action_id = payload["payload"].get(
+                MATERIAL_ACTION_ID_PAYLOAD_KEY
+            )
+            if material_action_id is not None and (
+                not isinstance(material_action_id, str)
+                or not material_action_id.strip()
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger material_action_id is invalid"
+                )
             for line in existing.decode("utf-8").splitlines():
                 prior = json.loads(line)
-                if prior["record"]["decision_id"] == payload["decision_id"]:
+                prior_record = prior["record"]
+                if prior_record["decision_id"] == payload["decision_id"]:
                     raise DecisionLedgerIntegrityError(
                         "Decision Ledger decision_id already exists"
+                    )
+                if (
+                    material_action_id is not None
+                    and prior_record["payload"].get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+                    == material_action_id
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger material_action_id already exists"
                     )
 
             with self._absolute_path_authority.open(

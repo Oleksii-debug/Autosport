@@ -14,6 +14,7 @@ from .ingestion_health import (
 )
 from .market_bus import MarketEventBus, MarketEventDeliveryError
 from .providers import CanonicalNormalizer, MarketProvider, ProviderUnavailableError
+from .storage import _timezone_aware_instant
 
 
 Clock = Callable[[], str]
@@ -303,7 +304,10 @@ class IngestionEngine:
         now_point = parse_source_timestamp(now)
         for quote in batch.quotes:
             try:
-                observed_point = parse_source_timestamp(quote.observed_ts)
+                observed_point = _timezone_aware_instant(
+                    quote.observed_ts,
+                    "observed_ts",
+                ).astimezone(timezone.utc)
             except (AttributeError, TypeError, ValueError):
                 flags.add("INVALID_QUOTE")
                 rejected += 1

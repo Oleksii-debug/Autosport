@@ -965,6 +965,7 @@ def test_aggregate_rereads_durable_router_request_after_child_method_substitutio
                 decision_at=decision_at,
             )
 
+        assert attacker_calls == 0
 
 
 def test_aggregate_rereads_durable_router_decision_after_child_method_substitution(
@@ -1012,3 +1013,91 @@ def test_aggregate_rereads_durable_router_decision_after_child_method_substituti
 
 
         assert attacker_calls == 0
+
+
+
+@pytest.mark.parametrize(
+    ("target_name", "expected_message"),
+    [
+        ("get_request", "router request reader authority changed"),
+        ("get_decision", "router decision reader authority changed"),
+    ],
+)
+def test_aggregate_rejects_in_place_router_reader_code_mutation_before_execution(
+    target_name,
+    expected_message,
+) -> None:
+    target = getattr(subject.ModelComputeRouterStore, target_name)
+    original_code = target.__code__
+
+    def hostile(_self, _request_id):
+        raise AssertionError("mutated router reader executed")
+
+    try:
+        target.__code__ = hostile.__code__
+        with canonical_applicable_cost_case() as (
+            intent,
+            plan,
+            router_store,
+            request,
+            decision_at,
+        ):
+            with pytest.raises(
+                subject.ProspectiveApplicableCostError,
+                match=expected_message,
+            ):
+                subject.resolve_prospective_applicable_costs(
+                    intent=intent,
+                    plan=plan,
+                    router_store=router_store,
+                    model_request_id=request.request_id,
+                    decision_at=decision_at,
+                )
+    finally:
+        target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_message"),
+    [
+        (
+            subject.ComputeRouteRequest.payload,
+            "router request payload authority changed",
+        ),
+        (
+            subject.ComputeRouteDecision.payload,
+            "router decision payload authority changed",
+        ),
+    ],
+)
+def test_aggregate_rejects_in_place_router_payload_code_mutation_before_execution(
+    target,
+    expected_message,
+) -> None:
+    original_code = target.__code__
+
+    def hostile(_self):
+        raise AssertionError("mutated router payload method executed")
+
+    try:
+        target.__code__ = hostile.__code__
+        with canonical_applicable_cost_case() as (
+            intent,
+            plan,
+            router_store,
+            request,
+            decision_at,
+        ):
+            with pytest.raises(
+                subject.ProspectiveApplicableCostError,
+                match=expected_message,
+            ):
+                subject.resolve_prospective_applicable_costs(
+                    intent=intent,
+                    plan=plan,
+                    router_store=router_store,
+                    model_request_id=request.request_id,
+                    decision_at=decision_at,
+                )
+    finally:
+        target.__code__ = original_code

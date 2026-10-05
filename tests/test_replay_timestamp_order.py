@@ -4,7 +4,14 @@ import unittest
 from decimal import Decimal
 
 from autosport.domain import MarketEvent
-from autosport.replay import ReplayEngine
+from autosport.replay import (
+    ReplayEngine,
+    ReplayExecutionReceipt,
+    market_event_payload_multiset_sha256,
+    market_event_payload_sequence_sha256,
+    market_event_payload_sha256,
+    verify_replay_execution_receipt,
+)
 
 
 class ReplayTimestampOrderTests(unittest.TestCase):
@@ -202,6 +209,216 @@ class ReplayTimestampOrderTests(unittest.TestCase):
         self.assertEqual([event.event_id for event in engine.events], ["new", "old"])
         self.assertEqual(engine.dataset_hash, historical_hash)
         self.assertNotEqual(engine.dataset_hash, delivery_order_hash)
+
+    def test_replay_binds_exact_constructor_payload_sequence(self):
+        later = self._event(
+            "later",
+            "2026-01-01T00:10:00+00:00",
+            2,
+            ingest_ts="2026-01-01T00:10:00+00:00",
+        )
+        earlier = self._event(
+            "earlier",
+            "2026-01-01T00:00:00+00:00",
+            1,
+            ingest_ts="2026-01-01T00:00:00+00:00",
+        )
+        expected_input = market_event_payload_sequence_sha256(
+            (
+                market_event_payload_sha256(later),
+                market_event_payload_sha256(earlier),
+            )
+        )
+        expected_consumed = market_event_payload_sequence_sha256(
+            (
+                market_event_payload_sha256(earlier),
+                market_event_payload_sha256(later),
+            )
+        )
+
+        run = ReplayEngine([later, earlier]).run(
+            lambda _event: None,
+            run_id="payload-sequence",
+        )
+
+        self.assertEqual(
+            run.input_event_payload_sequence_sha256,
+            expected_input,
+        )
+        self.assertEqual(
+            run.consumed_event_payload_sequence_sha256,
+            expected_consumed,
+        )
+        self.assertNotEqual(
+            run.input_event_payload_sequence_sha256,
+            run.consumed_event_payload_sequence_sha256,
+        )
+
+    def test_applied_payload_sequence_excludes_suppressed_stale_event(self):
+        newer = self._event(
+            "same-event",
+            "2026-01-01T00:05:00+00:00",
+            2,
+            ingest_ts="2026-01-01T00:05:00+00:00",
+        )
+        late_stale = self._event(
+            "same-event",
+            "2026-01-01T00:00:00+00:00",
+            1,
+            ingest_ts="2026-01-01T00:10:00+00:00",
+        )
+        run = ReplayEngine([late_stale, newer]).run(
+            lambda _event: None,
+            run_id="applied-payload-sequence",
+        )
+
+        self.assertEqual(
+            run.applied_event_payload_sequence_sha256,
+            market_event_payload_sequence_sha256(
+                (market_event_payload_sha256(newer),)
+            ),
+        )
+        self.assertNotEqual(
+            run.applied_event_payload_sequence_sha256,
+            run.consumed_event_payload_sequence_sha256,
+        )
+
+    def test_event_payload_digest_ignores_subclass_serializer_override(self):
+        base = self._event(
+            "base-event",
+            "2026-01-01T00:00:00+00:00",
+            1,
+        )
+
+        class ForgedEvent(MarketEvent):
+            def to_dict(self):
+                return {"forged": True}
+
+        forged = ForgedEvent(**{
+            field: getattr(base, field)
+            for field in MarketEvent.__dataclass_fields__
+        })
+
+        self.assertEqual(
+            market_event_payload_sha256(forged),
+            market_event_payload_sha256(base),
+        )
+
+    def test_consumed_payload_multiset_preserves_duplicate_multiplicity(self):
+        first = self._event(
+            "event-a",
+            "2026-01-01T00:00:00+00:00",
+            1,
+        )
+        second = self._event(
+            "event-b",
+            "2026-01-01T00:01:00+00:00",
+            2,
+        )
+        first_sha = market_event_payload_sha256(first)
+        second_sha = market_event_payload_sha256(second)
+
+        run = ReplayEngine([second, first, second]).run(
+            lambda _event: None,
+            run_id="multiset-multiplicity",
+        )
+
+        self.assertEqual(
+            run.consumed_event_payload_multiset_sha256,
+            market_event_payload_multiset_sha256(
+                (second_sha, first_sha, second_sha)
+            ),
+        )
+        self.assertNotEqual(
+            run.consumed_event_payload_multiset_sha256,
+            market_event_payload_multiset_sha256((second_sha, first_sha)),
+        )
+
+    def test_event_payload_multiset_is_order_independent(self):
+        left = ("a" * 64, "b" * 64, "a" * 64)
+        right = ("a" * 64, "a" * 64, "b" * 64)
+        self.assertEqual(
+            market_event_payload_multiset_sha256(left),
+            market_event_payload_multiset_sha256(right),
+        )
+
+    def test_replay_execution_receipt_is_product_issued_and_verifiable(self):
+        event = self._event(
+            "receipt-event",
+            "2026-01-01T00:00:00+00:00",
+            1,
+        )
+        run = ReplayEngine([event]).run(
+            lambda _event: None,
+            run_id="receipt-run",
+        )
+
+        receipt = run.execution_receipt
+        self.assertIs(type(receipt), ReplayExecutionReceipt)
+        self.assertIs(verify_replay_execution_receipt(receipt), receipt)
+        self.assertEqual(receipt.run_id, run.run_id)
+        self.assertEqual(receipt.dataset_hash, run.dataset_hash)
+        self.assertEqual(receipt.event_count, run.event_count)
+        self.assertEqual(
+            receipt.consumed_event_payload_multiset_sha256,
+            run.consumed_event_payload_multiset_sha256,
+        )
+
+        with self.assertRaisesRegex(TypeError, "product-issued"):
+            ReplayExecutionReceipt(
+                run_id=run.run_id,
+                dataset_hash=run.dataset_hash,
+                event_count=run.event_count,
+                input_event_payload_sequence_sha256=(
+                    run.input_event_payload_sequence_sha256
+                ),
+                consumed_event_payload_sequence_sha256=(
+                    run.consumed_event_payload_sequence_sha256
+                ),
+                applied_event_payload_sequence_sha256=(
+                    run.applied_event_payload_sequence_sha256
+                ),
+                consumed_event_payload_multiset_sha256=(
+                    run.consumed_event_payload_multiset_sha256
+                ),
+                receipt_sha256="0" * 64,
+            )
+
+    def test_replay_execution_receipt_rejects_field_forgery(self):
+        event = self._event(
+            "receipt-forgery",
+            "2026-01-01T00:00:00+00:00",
+            1,
+        )
+        receipt = ReplayEngine([event]).run(
+            lambda _event: None,
+            run_id="receipt-forgery-run",
+        ).execution_receipt
+        self.assertIs(type(receipt), ReplayExecutionReceipt)
+
+        forged = object.__new__(ReplayExecutionReceipt)
+        for field_name in ReplayExecutionReceipt.__dataclass_fields__:
+            object.__setattr__(forged, field_name, getattr(receipt, field_name))
+        object.__setattr__(
+            forged,
+            "consumed_event_payload_multiset_sha256",
+            "0" * 64,
+        )
+
+        with self.assertRaisesRegex(ValueError, "authenticator mismatch"):
+            verify_replay_execution_receipt(forged)
+
+    def test_replay_execution_receipt_cannot_be_subclassed(self):
+        with self.assertRaisesRegex(TypeError, "must not be subclassed"):
+            class ForgedReceipt(ReplayExecutionReceipt):
+                pass
+
+    def test_event_payload_sequence_rejects_noncanonical_digest(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "lowercase SHA-256",
+        ):
+            market_event_payload_sequence_sha256(("A" * 64,))
 
     def test_replay_rejects_naive_ingest_timestamp_fail_closed(self):
         event = self._event(

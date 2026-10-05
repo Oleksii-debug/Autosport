@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .integrity import atomic_write_json, sha256_file
@@ -18,9 +19,13 @@ from .workspace_lock import (
 from .outcome_trust import (
     OutcomeLineageBinding,
     OutcomeLineageTrustError,
+    TrustedOutcomeRevision,
     assert_compatible_outcome_lineages,
+    assert_outcome_availability_not_downgraded,
+    bind_outcome_lineage_availability,
     outcome_lineage_binding_from_payload,
     outcome_lineage_payload,
+    resolve_outcome_revision_as_of,
 )
 
 
@@ -46,6 +51,7 @@ _OPTIONAL_ENTRY_FIELDS = frozenset(
         "abort_reason",
         "reconciled_from_summary",
         "outcome_lineage",
+        "sampling_draw_admission_receipt_sha256",
     }
 )
 _HASH_EVIDENCE_FIELDS = (
@@ -68,6 +74,14 @@ _FIRST_OPEN_MAX_WAIT_SECONDS = 5.0
 _LEGACY_SCHEMA_VERSION = 1
 _LINEAGE_TRUST_SCHEMA_VERSION = 2
 _LINEAGE_TRUST_FIELD = "outcome_lineage_trust"
+
+
+def _utc_now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _is_canonical_sha256(value: object) -> bool:
@@ -944,6 +958,32 @@ class RunRegistry:
             raise ValueError("outcome lineage binding must be an OutcomeLineageBinding")
         self._assert_outcome_lineage_compatible_state(self._read(), binding)
 
+    def outcome_revision_as_of(
+        self,
+        *,
+        source_identity: str,
+        record_id: str,
+        cutoff: str,
+    ) -> TrustedOutcomeRevision | None:
+        """Resolve only revision truth that this product had accepted by cutoff."""
+
+        for field, value in (
+            ("source_identity", source_identity),
+            ("record_id", record_id),
+            ("cutoff", cutoff),
+        ):
+            if type(value) is not str or not value or value.strip() != value:
+                raise ValueError(
+                    f"{field} must be an exact non-empty canonical string"
+                )
+        state = self._read()
+        trusted = self._outcome_lineage_trust_bindings(state).get(
+            (source_identity, record_id)
+        )
+        if trusted is None:
+            return None
+        return resolve_outcome_revision_as_of(trusted, cutoff)
+
     def begin(
         self,
         market_sha256: str,
@@ -955,6 +995,7 @@ class RunRegistry:
         base_paper_book_sha256: str | None = None,
         base_decision_ledger_sha256: str | None = None,
         outcome_lineage: OutcomeLineageBinding | None = None,
+        sampling_draw_admission_receipt_sha256: str | None = None,
     ) -> str:
         _require_canonical_sha256("market_sha256", market_sha256)
         _require_canonical_sha256("results_sha256", results_sha256)
@@ -969,6 +1010,11 @@ class RunRegistry:
             _require_canonical_sha256("base_decision_ledger_sha256", base_decision_ledger_sha256)
         if outcome_lineage is not None and not isinstance(outcome_lineage, OutcomeLineageBinding):
             raise ValueError("outcome_lineage must be an OutcomeLineageBinding or null")
+        if sampling_draw_admission_receipt_sha256 is not None:
+            _require_canonical_sha256(
+                "sampling_draw_admission_receipt_sha256",
+                sampling_draw_admission_receipt_sha256,
+            )
 
         state = self._read()
         if outcome_lineage is not None:
@@ -1023,8 +1069,18 @@ class RunRegistry:
             entry["base_paper_book_sha256"] = base_paper_book_sha256
             entry["base_decision_ledger_sha256"] = base_decision_ledger_sha256
         if outcome_lineage is not None:
-            self._record_outcome_lineage_trust_state(state, outcome_lineage)
-            entry["outcome_lineage"] = outcome_lineage_payload(outcome_lineage)
+            product_bound_lineage = self._record_outcome_lineage_trust_state(
+                state,
+                outcome_lineage,
+                accepted_at=_utc_now(),
+            )
+            entry["outcome_lineage"] = outcome_lineage_payload(
+                product_bound_lineage
+            )
+        if sampling_draw_admission_receipt_sha256 is not None:
+            entry["sampling_draw_admission_receipt_sha256"] = (
+                sampling_draw_admission_receipt_sha256
+            )
         state["runs"][key] = entry
         self._validate_entry(key, entry)
         self._write(state)
@@ -1185,6 +1241,14 @@ class RunRegistry:
             "sealed_results_sha256": item.get("results_sha256"),
             "strategy_id": item.get("strategy_id"),
         }
+        if "sampling_draw_admission_receipt_sha256" in item:
+            expected_identity["sampling_draw_admission_receipt_sha256"] = item.get(
+                "sampling_draw_admission_receipt_sha256"
+            )
+        if "replay_execution_receipt_sha256" in manifest:
+            expected_identity["replay_execution_receipt_sha256"] = manifest.get(
+                "replay_execution_receipt_sha256"
+            )
         for field, expected_value in expected_identity.items():
             if summary.get(field) != expected_value or manifest.get(field) != expected_value:
                 raise ReconciliationError(
@@ -1196,6 +1260,40 @@ class RunRegistry:
             raise ReconciliationError("completed run transaction_run_id mismatch")
         if summary.get("transaction_schema_version") != manifest.get("schema_version"):
             raise ReconciliationError("completed run transaction schema mismatch")
+
+        replay_evidence_fields = (
+            "replay_input_event_payload_sequence_sha256",
+            "replay_consumed_event_payload_sequence_sha256",
+            "replay_applied_event_payload_sequence_sha256",
+            "replay_consumed_event_payload_multiset_sha256",
+            "replay_execution_receipt_sha256",
+        )
+        present_replay_evidence = tuple(
+            field_name
+            for field_name in replay_evidence_fields
+            if field_name in summary
+        )
+        if present_replay_evidence:
+            if len(present_replay_evidence) != len(replay_evidence_fields):
+                raise ReconciliationError(
+                    "completed run replay payload evidence is incomplete"
+                )
+            if any(
+                not _is_canonical_sha256(summary.get(field_name))
+                for field_name in replay_evidence_fields
+            ):
+                raise ReconciliationError(
+                    "completed run replay payload evidence is invalid"
+                )
+            event_count = summary.get("event_count")
+            if type(event_count) is not int or event_count < 0:
+                raise ReconciliationError(
+                    "completed run replay event_count is invalid"
+                )
+            if not _is_canonical_sha256(summary.get("replay_dataset_hash")):
+                raise ReconciliationError(
+                    "completed run replay dataset identity is invalid"
+                )
 
         targets = manifest.get("targets")
         new_state = manifest.get("new")
@@ -1493,7 +1591,9 @@ class RunRegistry:
         cls,
         state: dict,
         incoming: OutcomeLineageBinding,
-    ) -> None:
+        *,
+        accepted_at: str,
+    ) -> OutcomeLineageBinding:
         if state.get("schema_version") == _LEGACY_SCHEMA_VERSION:
             if any("outcome_lineage" in item for item in state["runs"].values()):
                 raise ValueError(
@@ -1509,10 +1609,13 @@ class RunRegistry:
         trusted = bindings.get(identity)
         if trusted is not None:
             assert_compatible_outcome_lineages(trusted, incoming)
-            if len(incoming.revisions) <= len(trusted.revisions):
-                return
 
-        payload = outcome_lineage_payload(incoming)
+        product_bound = bind_outcome_lineage_availability(
+            incoming,
+            accepted_at=accepted_at,
+            trusted=trusted,
+        )
+        payload = outcome_lineage_payload(product_bound)
         raw_trust = state[_LINEAGE_TRUST_FIELD]
         if trusted is None:
             raw_trust.append(payload)
@@ -1528,6 +1631,7 @@ class RunRegistry:
             else:
                 raise ValueError("run registry lost an accepted outcome lineage trust binding")
         raw_trust.sort(key=lambda value: (value["source_identity"], value["record_id"]))
+        return product_bound
 
     @classmethod
     def _assert_outcome_lineage_compatible_state(
@@ -1601,6 +1705,13 @@ class RunRegistry:
         for field_name in _HASH_EVIDENCE_FIELDS:
             if field_name in item and not _is_canonical_sha256(item[field_name]):
                 raise ValueError(f"run registry contains invalid {field_name}")
+        if (
+            "sampling_draw_admission_receipt_sha256" in item
+            and not _is_canonical_sha256(item["sampling_draw_admission_receipt_sha256"])
+        ):
+            raise ValueError(
+                "run registry contains invalid sampling_draw_admission_receipt_sha256"
+            )
 
         if "outcome_lineage" in item:
             try:
@@ -1741,6 +1852,10 @@ class RunRegistry:
                     )
                 try:
                     assert_compatible_outcome_lineages(trusted, durable)
+                    assert_outcome_availability_not_downgraded(
+                        trusted,
+                        durable,
+                    )
                 except OutcomeLineageTrustError as exc:
                     raise ValueError(
                         "run registry conflicts with lineage trust preserved by durable run summary"
@@ -1775,6 +1890,10 @@ class RunRegistry:
                         "run registry outcome lineage lacks registry-level trust binding"
                     )
                 assert_compatible_outcome_lineages(durable_trust, lineage)
+                assert_outcome_availability_not_downgraded(
+                    durable_trust,
+                    lineage,
+                )
                 if len(lineage.revisions) > len(durable_trust.revisions):
                     raise ValueError(
                         "run registry outcome lineage exceeds registry-level trust history"

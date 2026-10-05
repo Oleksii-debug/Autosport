@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -10460,6 +10461,45 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             self.assertEqual(provider.calls, 1)
             self.assertFalse((workspace / "foreign-health.json").exists())
+            loop.close()
+
+
+    def test_cycle_entry_rejects_retained_source_health_hardlink_alias_before_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            provider = _EmptyProvider()
+            strategy = self._strategy_version()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=self._scientific_registry(workspace, strategy),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.run_cycle()
+            self.assertEqual(provider.calls, 1)
+            health_store = loop._default_health_store
+            self.assertIsNotNone(health_store)
+            alias = workspace / "source_health_alias.json"
+            try:
+                os.link(health_store.path, alias)
+            except OSError:
+                loop.close()
+                self.skipTest("hardlinks are unavailable")
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "source-health persistence authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(provider.calls, 1)
             loop.close()
 
 

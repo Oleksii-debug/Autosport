@@ -409,13 +409,10 @@ def test_recovered_boundary_has_no_reusable_live_origin_capability(
 
     # The public compatibility assertion remains permanently fail-closed even for
     # the exact object returned by a canonical provider read.
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="lacks live canonical provider-origin authority",
-    ):
-        acquisition_module.assert_account_snapshot_acquisition_authoritative(
-            acquired
-        )
+    assert not hasattr(
+        acquisition_module,
+        "assert_account_snapshot_acquisition_authoritative",
+    )
 
 
 def test_v4_closure_cell_replacement_cannot_create_live_origin_authority(
@@ -456,13 +453,7 @@ def test_v4_closure_cell_replacement_cannot_create_live_origin_authority(
     assert acquired.source_authority_proven is False
     assert durable.source_authority_proven is False
     for candidate in (acquired, durable):
-        with pytest.raises(
-            AccountSnapshotAcquisitionError,
-            match="lacks live canonical provider-origin authority",
-        ):
-            acquisition_module.assert_account_snapshot_acquisition_authoritative(
-                candidate
-            )
+        assert candidate.source_authority_proven is False
 
 
 def test_mappingproxy_module_rebind_cannot_restore_positive_origin_authority(
@@ -489,10 +480,7 @@ def test_mappingproxy_module_rebind_cannot_restore_positive_origin_authority(
 
     assert len(calls) == 3
     assert acquired.source_authority_proven is False
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="lacks live canonical provider-origin authority",
-    ):
-        acquisition_module.assert_account_snapshot_acquisition_authoritative(
-            acquired
-        )
+    assert not hasattr(
+        acquisition_module,
+        "assert_account_snapshot_acquisition_authoritative",
+    )

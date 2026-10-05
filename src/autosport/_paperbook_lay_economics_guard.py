@@ -40,7 +40,9 @@ _ORIGINAL_VALIDATE_TICKET_PROVENANCE = _paper.PaperBook._validate_ticket_provena
 _ORIGINAL_VALIDATE_LIFECYCLE_ENTRY = _paper.PaperBook._validate_lifecycle_entry.__func__
 _ORIGINAL_VALIDATE_SETTLED_AT = _paper.PaperBook._validate_settled_at.__func__
 _ORIGINAL_PARSE_ISO_TIMESTAMP = _paper.parse_iso_timestamp
+_ORIGINAL_PARSE_ISO_TIMESTAMP_CODE = _ORIGINAL_PARSE_ISO_TIMESTAMP.__code__
 _ORIGINAL_UTC_NOW_ISO = _paper.utc_now_iso
+_ORIGINAL_UTC_NOW_ISO_CODE = _ORIGINAL_UTC_NOW_ISO.__code__
 _ORIGINAL_UUID4 = _paper.uuid.uuid4
 _CANONICAL_UUID4 = _ORIGINAL_UUID4
 _ORIGINAL_UUID4_CODE = _ORIGINAL_UUID4.__code__
@@ -122,8 +124,18 @@ def _require_exact_text(
     return value
 
 
+def _require_time_authority() -> None:
+    if (
+        _ORIGINAL_PARSE_ISO_TIMESTAMP.__code__
+        is not _ORIGINAL_PARSE_ISO_TIMESTAMP_CODE
+        or _ORIGINAL_UTC_NOW_ISO.__code__ is not _ORIGINAL_UTC_NOW_ISO_CODE
+    ):
+        raise ValueError("PaperBook canonical time authority changed")
+
+
 def _validate_exact_timestamp(value: object, label: str) -> str:
     text = _require_exact_text(value, label)
+    _require_time_authority()
     try:
         _ORIGINAL_PARSE_ISO_TIMESTAMP(text)
     except ValueError as exc:
@@ -441,8 +453,14 @@ def _open_ticket_unlocked(
     if _ORIGINAL_DEBIT_BALANCE.__code__ is not _ORIGINAL_DEBIT_BALANCE_CODE:
         raise ValueError("PaperBook canonical debit authority changed")
 
+    if placed_at is None:
+        _require_time_authority()
+        ticket_placed_value = _ORIGINAL_UTC_NOW_ISO()
+        _require_time_authority()
+    else:
+        ticket_placed_value = placed_at
     ticket_placed_at = _validate_exact_timestamp(
-        placed_at if placed_at is not None else _ORIGINAL_UTC_NOW_ISO(),
+        ticket_placed_value,
         "placed_at",
     )
     _require_exact_text(reason, "strategy_reason", allow_empty=True)

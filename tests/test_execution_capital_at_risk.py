@@ -596,8 +596,10 @@ def test_multi_action_plan_aggregates_confirmed_and_unknown_gross_commitment(
     evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
 
     assert evidence.plan_stale is True
-    assert evidence.confirmed_open_capital == Decimal("4")
-    assert evidence.contingent_unknown_capital == Decimal("26")
+    # action-a has only acknowledgement economics, not canonical verified provider
+    # effect, so its full requested stake remains contingent alongside action-b.
+    assert evidence.confirmed_open_capital == Decimal("0")
+    assert evidence.contingent_unknown_capital == Decimal("30")
     assert evidence.max_plausible_capital_at_risk == Decimal("30")
     assert {item.action_id for item in evidence.attempts} == {
         "action-a",

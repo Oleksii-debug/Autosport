@@ -68,13 +68,16 @@ class ResearchDecisionAlreadyCommitted(RuntimeError):
 
 
 def _validate_sha256(value: str, label: str) -> str:
-    if not isinstance(value, str) or len(value) != 64:
-        raise ValueError(f"{label} must be a 64-character SHA-256 hex string")
-    try:
-        int(value, 16)
-    except ValueError as exc:
-        raise ValueError(f"{label} must be hexadecimal") from exc
-    return value.lower()
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or value != value.lower()
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
+        raise ValueError(
+            f"{label} must be a lowercase 64-character SHA-256 hex string"
+        )
+    return value
 
 
 def _validate_canonical_string(

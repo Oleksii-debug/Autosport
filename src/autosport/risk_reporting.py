@@ -656,6 +656,10 @@ def _require_minimum_equity_prerequisites(
         raise ValueError(
             "minimum equity requires authoritative correction/restatement lineage"
         )
+    if not path.frozen_scope_complete or not path.historical_reresolution_complete:
+        raise ValueError(
+            "minimum equity requires durable frozen-scope historical re-resolution"
+        )
 
 
 def verified_settled_minimum_equity(

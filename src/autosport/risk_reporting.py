@@ -30,6 +30,7 @@ from .risk import PaperRiskPolicy
 RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v5"
 EQUITY_PATH_SCHEMA = "autosport.paper-equity-path.v1"
 DRAWDOWN_EVIDENCE_SCHEMA = "autosport.paper-realized-settled-drawdown.v1"
+HISTORY_VIEW_RESTATED_CURRENT = "RESTATED_CURRENT_HISTORY"
 RISK_REPORT_SCOPE_PAPER_ONLY = "PAPER_ONLY"
 DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY = "REALIZED_SETTLED_EQUITY_DRAWDOWN"
 RISK_OF_RUIN_STATUS_UNKNOWN = "UNKNOWN_REQUIRES_PROVENANCE_BOUND_EVIDENCE"
@@ -68,6 +69,8 @@ class ProductIssuedPaperEquityPath:
     currency: str
     goal_contract_sha256: str
     portfolio_risk_state_sha256: str
+    history_view: str
+    historical_as_known_supported: bool
     initial_equity: Decimal
     points: tuple[PaperEquityPathPoint, ...]
     point_count: int
@@ -90,6 +93,8 @@ class ProductIssuedPaperDrawdownEvidence:
     goal_revision: int
     bankroll_id: str
     currency: str
+    history_view: str
+    historical_as_known_supported: bool
     initial_equity: Decimal
     current_equity: Decimal
     peak_equity: Decimal
@@ -128,6 +133,8 @@ class PaperRiskReport:
     equity_path_point_count: int
     equity_path_availability_complete: bool
     settled_history_complete: bool
+    history_view: str
+    historical_as_known_supported: bool
     goal_id: str
     goal_revision: int
     bankroll_id: str
@@ -181,6 +188,8 @@ def _equity_path_payload(
         "currency": goal_snapshot.currency,
         "goal_contract_sha256": goal_contract_sha256,
         "portfolio_risk_state_sha256": portfolio_risk_state_sha256,
+        "history_view": HISTORY_VIEW_RESTATED_CURRENT,
+        "historical_as_known_supported": False,
         "initial_equity": _decimal_text(initial_equity, "initial_equity"),
         "availability_complete": availability_complete,
         "settled_history_complete": settled_history_complete,
@@ -324,6 +333,8 @@ def build_product_issued_paper_equity_path(
         goal_snapshot=goal_snapshot,
         goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
         portfolio_risk_state_sha256=after_sha256,
+        history_view=HISTORY_VIEW_RESTATED_CURRENT,
+        historical_as_known_supported=False,
         initial_equity=book.initial_bankroll,
         points=point_tuple,
         availability_complete=availability_complete,
@@ -451,6 +462,8 @@ def _drawdown_evidence_payload(
         "goal_revision": path.goal_revision,
         "bankroll_id": path.bankroll_id,
         "currency": path.currency,
+        "history_view": path.history_view,
+        "historical_as_known_supported": path.historical_as_known_supported,
         "initial_equity": _decimal_text(path.initial_equity, "initial_equity"),
         "current_equity": _decimal_text(path.current_equity, "current_equity"),
         "peak_equity": _decimal_text(maximum.peak_equity, "peak_equity"),
@@ -493,6 +506,8 @@ def build_product_issued_paper_drawdown_evidence(
         goal_revision=path.goal_revision,
         bankroll_id=path.bankroll_id,
         currency=path.currency,
+        history_view=path.history_view,
+        historical_as_known_supported=path.historical_as_known_supported,
         initial_equity=path.initial_equity,
         current_equity=path.current_equity,
         peak_equity=maximum.peak_equity,
@@ -810,6 +825,8 @@ def build_paper_risk_report(
         equity_path_point_count=equity_path.point_count,
         equity_path_availability_complete=equity_path.availability_complete,
         settled_history_complete=equity_path.settled_history_complete,
+        history_view=equity_path.history_view,
+        historical_as_known_supported=equity_path.historical_as_known_supported,
         goal_id=goal_snapshot.goal_id,
         goal_revision=goal_snapshot.revision,
         bankroll_id=goal_snapshot.bankroll_id,

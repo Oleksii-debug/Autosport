@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import autosport.keyboard_audit as keyboard_audit
 from autosport.keyboard_audit import summarize_keyboard_contract
+from autosport.product_windows_gui import PRODUCT_RUNTIME_AUTOMATION_IDS
 from autosport.windows_entry import (
     _STARTUP_FOCUS_CONTROL,
     _install_deterministic_startup_focus,
@@ -63,6 +64,10 @@ class KeyboardAuditTests(unittest.TestCase):
             "replay_speed",
             "live_mode",
             "live_refresh",
+            "product_runtime_start",
+            "product_runtime_source",
+            "product_runtime_source_save",
+            "product_runtime_status",
             "live_quotes",
             "tickets",
             "evaluation",
@@ -111,6 +116,22 @@ class KeyboardAuditTests(unittest.TestCase):
         self.assertEqual(
             report["expected_automation_ids"]["manual_calculation_result"],
             WORKBENCH_AUTOMATION_IDS["result"],
+        )
+        self.assertEqual(
+            report["expected_automation_ids"]["product_runtime_start"],
+            PRODUCT_RUNTIME_AUTOMATION_IDS["start"],
+        )
+        self.assertEqual(
+            report["expected_automation_ids"]["product_runtime_source"],
+            PRODUCT_RUNTIME_AUTOMATION_IDS["source"],
+        )
+        self.assertEqual(
+            report["expected_automation_ids"]["product_runtime_source_save"],
+            PRODUCT_RUNTIME_AUTOMATION_IDS["source_save"],
+        )
+        self.assertEqual(
+            report["expected_automation_ids"]["product_runtime_status"],
+            PRODUCT_RUNTIME_AUTOMATION_IDS["status"],
         )
         self.assertFalse(report["human_tested"])
         self.assertFalse(report["nvda_verified"])
@@ -244,7 +265,7 @@ class KeyboardAuditTests(unittest.TestCase):
 
             audit_dialog = SimpleNamespace(destroy=lambda: None)
             with (
-                patch.object(keyboard_audit, "WindowsAutosportApp", return_value=_AuditApp()),
+                patch.object(keyboard_audit, "ProductWindowsAutosportApp", return_value=_AuditApp()),
                 patch.object(keyboard_audit, "_focused_control_name", return_value=_STARTUP_FOCUS_CONTROL),
                 patch.object(
                     keyboard_audit,
@@ -269,3 +290,38 @@ class KeyboardAuditTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PackagedRuntimeKeyboardAuditTests(unittest.TestCase):
+    def test_packaged_runtime_start_must_be_tab_reachable(self):
+        bindings, focus, reachable, reverse_reachable = KeyboardAuditTests()._passing()
+        reachable.remove("product_runtime_start")
+        report = summarize_keyboard_contract(
+            bindings,
+            focus,
+            reachable,
+            reverse_reachable,
+            startup_focus_control=_STARTUP_FOCUS_CONTROL,
+        )
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any("product_runtime_start" in item for item in report["failures"])
+        )
+
+    def test_packaged_runtime_source_must_be_reverse_tab_reachable(self):
+        bindings, focus, reachable, reverse_reachable = KeyboardAuditTests()._passing()
+        reverse_reachable.remove("product_runtime_source")
+        report = summarize_keyboard_contract(
+            bindings,
+            focus,
+            reachable,
+            reverse_reachable,
+            startup_focus_control=_STARTUP_FOCUS_CONTROL,
+        )
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any(
+                "Shift+Tab" in item and "product_runtime_source" in item
+                for item in report["failures"]
+            )
+        )

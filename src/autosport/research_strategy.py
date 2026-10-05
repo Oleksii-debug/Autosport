@@ -493,6 +493,12 @@ def _validate_market_binding(
             raise ValueError(f"research evidence source does not match replay state: {leg.quote_key}")
         if latest_evidence.observed_at != event.observed_ts:
             raise ValueError(f"research evidence timestamp does not match replay state: {leg.quote_key}")
+        if parse_iso_timestamp(latest_evidence.available_at) < _event_causal_availability_time(
+            event
+        ):
+            raise ValueError(
+                f"research evidence became available before market receipt: {leg.quote_key}"
+            )
         if latest_evidence.decimal_odds != event.decimal_odds:
             raise ValueError(f"research evidence odds do not match replay state: {leg.quote_key}")
         if latest_evidence.content_sha256 != market_event_evidence_hash(event):

@@ -86,8 +86,58 @@ class NvdaHumanAcceptanceError(ValueError):
     """Raised when a human NVDA transcript fails the structural evidence gate."""
 
 
+_NVDA_STRUCTURAL_RESULT_FIELD_NAMES = (
+    "transcript_sha256",
+    "artifact_sha256",
+    "source_sha",
+    "windows_version",
+    "nvda_version",
+    "webview2_runtime_browser_version",
+    "webview2_runtime_witness_sha256",
+    "evidence_origin",
+    "human_tester_attestation_sha256",
+    "journey_content_sha256",
+    "status",
+    "human_tested",
+    "nvda_verified",
+    "manual_truth_promotion_required",
+    "real_money_execution",
+    "whole_product_complete",
+)
+
+
+def _build_nvda_structural_result_meta():
+    sealed: set[type] = set()
+    protected = frozenset(_NVDA_STRUCTURAL_RESULT_FIELD_NAMES)
+
+    class _NvdaStructuralResultMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "NVDA structural result authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "NVDA structural result authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed.add(cls)
+
+    return _NvdaStructuralResultMeta
+
+
+_NvdaStructuralResultMeta = _build_nvda_structural_result_meta()
+del _build_nvda_structural_result_meta
+
+
 @dataclass(frozen=True, slots=True, init=False)
-class NvdaHumanAcceptanceStructuralResult:
+class NvdaHumanAcceptanceStructuralResult(metaclass=_NvdaStructuralResultMeta):
     """Validator-issued, non-promoting structural transcript result."""
 
     transcript_sha256: str
@@ -115,6 +165,10 @@ class NvdaHumanAcceptanceStructuralResult:
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         raise TypeError("NvdaHumanAcceptanceStructuralResult may not be subclassed")
+
+
+_NvdaStructuralResultMeta.seal(NvdaHumanAcceptanceStructuralResult)
+del _NvdaStructuralResultMeta
 
 
 def _require_exact_dict(name: str, value: object) -> dict[str, Any]:

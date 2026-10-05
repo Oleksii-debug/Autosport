@@ -281,10 +281,12 @@ class BetfairStandardLayLimitPriceBoundEvidence:
 
     @property
     def evidence_id(self) -> str:
-        return _digest(self.to_dict(include_evidence_id=False))
+        return _digest(
+            _CANONICAL_EVIDENCE_TO_DICT(self, include_evidence_id=False)
+        )
 
     def to_dict(self, *, include_evidence_id: bool = True) -> dict[str, Any]:
-        self._validate()
+        _CANONICAL_EVIDENCE_VALIDATE(self)
         payload: dict[str, Any] = {
             "schema": "autosport.betfair_standard_lay_limit_price_bound",
             "schema_version": _SCHEMA_VERSION,
@@ -315,6 +317,11 @@ class BetfairStandardLayLimitPriceBoundEvidence:
         if include_evidence_id:
             payload["evidence_id"] = _digest(payload)
         return payload
+
+
+_CANONICAL_EVIDENCE_TYPE = BetfairStandardLayLimitPriceBoundEvidence
+_CANONICAL_EVIDENCE_VALIDATE = BetfairStandardLayLimitPriceBoundEvidence._validate
+_CANONICAL_EVIDENCE_TO_DICT = BetfairStandardLayLimitPriceBoundEvidence.to_dict
 
 
 def _issue_evidence(
@@ -357,7 +364,7 @@ def _issue_evidence(
     }
     for field, value in values.items():
         object.__setattr__(item, field, value)
-    item._validate()
+    _CANONICAL_EVIDENCE_VALIDATE(item)
     return item
 
 
@@ -487,9 +494,14 @@ def resolve_betfair_standard_lay_limit_price_bound(
         persistence_type=persistence_type,
     )
 
+_CANONICAL_LAY_LIMIT_RESOLVER = resolve_betfair_standard_lay_limit_price_bound
+
 def require_betfair_standard_lay_limit_price_bound(
     request_body: bytes,
     evidence: object,
+    _evidence_type=_CANONICAL_EVIDENCE_TYPE,
+    _to_dict=_CANONICAL_EVIDENCE_TO_DICT,
+    _resolve=_CANONICAL_LAY_LIMIT_RESOLVER,
 ) -> BetfairStandardLayLimitPriceBoundEvidence:
     """Return fresh canonical authority only after exact request re-resolution.
 
@@ -499,14 +511,14 @@ def require_betfair_standard_lay_limit_price_bound(
     canonical evidence equivalence before returning the freshly resolved object.
     """
 
-    if type(evidence) is not BetfairStandardLayLimitPriceBoundEvidence:
+    if type(evidence) is not _evidence_type:
         raise BetfairStandardLayLimitPriceBoundError(
             "LAY price-bound assertion must use the exact canonical evidence type"
         )
-    canonical = resolve_betfair_standard_lay_limit_price_bound(request_body)
+    canonical = _resolve(request_body)
     try:
-        asserted = evidence.to_dict()
-        resolved = canonical.to_dict()
+        asserted = _to_dict(evidence)
+        resolved = _to_dict(canonical)
     except (AttributeError, TypeError, ValueError) as exc:
         raise BetfairStandardLayLimitPriceBoundError(
             "LAY price-bound assertion is invalid"

@@ -55,6 +55,44 @@ class ObservationFlowTests(unittest.TestCase):
             self.assertEqual(len(reopened.book.tickets), 0)
             reopened.close()
 
+    def test_session_observation_uses_full_canonical_quote_order(self):
+        provider = InMemoryProvider(
+            "fixture:identity-order",
+            [
+                ProviderQuote(
+                    provider_event_id="match-1",
+                    provider_market_id="winner",
+                    provider_selection_id="player-a",
+                    decimal_odds=Decimal("1.80"),
+                    observed_ts="2026-09-12T20:00:00+00:00",
+                    sequence=1,
+                    sport="tennis",
+                    exchange_side="lay",
+                ),
+                ProviderQuote(
+                    provider_event_id="match-1",
+                    provider_market_id="winner",
+                    provider_selection_id="player-a",
+                    decimal_odds=Decimal("1.81"),
+                    observed_ts="2026-09-12T20:00:01+00:00",
+                    sequence=2,
+                    sport="basketball",
+                    exchange_side="back",
+                ),
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = AutosportSession(tmp, "10000")
+            try:
+                result = session.observe_provider_once(provider, max_items=10)
+                quote_keys = tuple(event.quote_key for event in result.current_quotes)
+
+                self.assertEqual(quote_keys, tuple(sorted(quote_keys)))
+                self.assertEqual(len(set(quote_keys)), 2)
+            finally:
+                session.close()
+
     def test_session_observation_rejects_nonfinite_provider_odds_before_persistence(self):
         provider = InMemoryProvider(
             "fixture:finite-boundary",

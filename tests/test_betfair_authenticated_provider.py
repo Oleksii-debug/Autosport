@@ -379,3 +379,45 @@ def test_durable_assertion_rejects_same_sequence_open_metadata_rewrite() -> None
         provider.assert_durable_current(
             {(forged.source_id, forged.quote_key): forged}
         )
+
+
+def test_restart_binding_preserves_last_traded_identity_without_embedded_price() -> None:
+    identity = BetfairQuoteIdentity(
+        BETFAIR_STREAM_SOURCE_ID,
+        "1.23456789",
+        101,
+        Decimal("0"),
+        BetfairQuoteSide.LAST_TRADED,
+        None,
+    )
+    metadata = _metadata(_identity())
+    metadata.update(
+        {
+            "side": identity.side.value,
+            "identity_price": None,
+            "quote_size": None,
+        }
+    )
+    quote = ProviderQuote(
+        provider_event_id=_event_token(identity.market_id),
+        provider_market_id=identity.market_id,
+        provider_selection_id=_identity_token(identity),
+        decimal_odds=Decimal("2.5"),
+        observed_ts="2026-10-05T12:00:00+00:00",
+        sequence=9,
+        status="open",
+        source_ts="2026-10-05T11:59:59+00:00",
+        metadata=metadata,
+        exchange_side=None,
+    )
+    event = CanonicalNormalizer().normalize(BETFAIR_STREAM_SOURCE_ID, quote)
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+
+    current = {(event.source_id, event.quote_key): event}
+    provider.bind_durable_current(current)
+    provider.assert_durable_current(current)
+
+    assert provider._open_by_identity[identity].decimal_odds == Decimal("2.5")

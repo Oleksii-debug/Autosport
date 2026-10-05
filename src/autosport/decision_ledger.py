@@ -314,6 +314,17 @@ class JsonlDecisionLedger:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._path_authority = self.path
+        self._absolute_path_authority = self.path.absolute()
+
+    def _assert_persistence_authority(self) -> None:
+        if (
+            self.path != self._path_authority
+            or self.path.absolute() != self._absolute_path_authority
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger persistence authority changed after construction"
+            )
 
     @staticmethod
     def _require_utf8_text(value: str, *, path: str) -> None:
@@ -439,6 +450,7 @@ class JsonlDecisionLedger:
         )
 
     def _append_validated(self, record: DecisionRecord) -> str:
+        self._assert_persistence_authority()
         payload = self._validate_record(record.to_dict())
         canonical = self._canonical_record(payload)
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -448,10 +460,15 @@ class JsonlDecisionLedger:
             sort_keys=True,
             allow_nan=False,
         )
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+        with self._absolute_path_authority.open(
+            "a",
+            encoding="utf-8",
+            newline="\n",
+        ) as handle:
             handle.write(envelope + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        self._assert_persistence_authority()
         return digest
 
     def append(self, record: DecisionRecord) -> str:
@@ -574,12 +591,14 @@ class JsonlDecisionLedger:
         return line_count
 
     def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
+        self._assert_persistence_authority()
         try:
-            raw = self.path.read_bytes()
+            raw = self._absolute_path_authority.read_bytes()
         except OSError as exc:
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger file is missing or unreadable"
             ) from exc
+        self._assert_persistence_authority()
         record_count = self._verify_bytes(raw)
         return VerifiedDecisionLedgerSnapshot(
             payload=raw,

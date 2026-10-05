@@ -824,6 +824,67 @@ class LayExecutionLiabilityTests(unittest.TestCase):
             self.assertEqual(result.worst_case_exposure, Decimal("10.00"))
 
 
+class _MutatingEmptyObservationMapping(Mapping):
+    def __init__(self, plan, action, config) -> None:
+        self._plan = plan
+        self._action = action
+        self._config = config
+        self.mutations = 0
+
+    def __iter__(self):
+        if self.mutations == 0:
+            self.mutations += 1
+            object.__setattr__(self._plan, "plan_id", "mutated-caller-plan")
+            object.__setattr__(self._action, "action_id", "mutated-caller-action")
+            object.__setattr__(self._config, "model_id", "mutated-caller-config")
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+    def __getitem__(self, key):
+        raise KeyError(key)
+
+
+class ExecutionInputSnapshotTests(unittest.TestCase):
+    def test_observation_mapping_cannot_mutate_execution_authorities_after_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            action = _action("snapshot-action", side="BACK")
+            plan = _plan(action)
+            config = _config()
+            expected_plan_id = plan.plan_id
+            expected_action_id = action.action_id
+            expected_model_fingerprint = config.fingerprint
+            observations = _MutatingEmptyObservationMapping(plan, action, config)
+
+            result = execute_paper_plan(
+                plan=plan,
+                trigger_id="snapshot-execution-trigger",
+                config=config,
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations=observations,
+            )
+
+            self.assertEqual(observations.mutations, 1)
+            self.assertTrue(result.completed)
+            self.assertEqual(result.plan_id, expected_plan_id)
+            self.assertEqual(result.model_fingerprint, expected_model_fingerprint)
+            self.assertEqual(result.attempts[0].action_id, expected_action_id)
+            reservations = [
+                event
+                for event in ledger.events(result.run_id)
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(reservations[0]["payload"]["plan_id"], expected_plan_id)
+            self.assertEqual(
+                reservations[0]["payload"]["model_fingerprint"],
+                expected_model_fingerprint,
+            )
+
+
 class ReservationIdentitySnapshotTests(unittest.TestCase):
     def test_reserve_run_does_not_reread_plan_or_config_after_identity_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:

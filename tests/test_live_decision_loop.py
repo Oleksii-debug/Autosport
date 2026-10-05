@@ -8060,5 +8060,95 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
 
 
+    def test_same_id_selector_replacement_after_pending_blocks_ledger_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            refresh = loop._refresh_intents_from_snapshots
+
+            def refresh_then_replace(snapshots):
+                refresh(snapshots)
+                self.assertTrue(loop.dependencies.unregister("input-a"))
+                loop.dependencies.register(
+                    "input-a",
+                    selection_ids="selection-b",
+                )
+
+            with patch.object(
+                loop,
+                "_refresh_intents_from_snapshots",
+                side_effect=refresh_then_replace,
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "changed before durable ledger publication",
+                ):
+                    loop.run_cycle()
+
+            pending = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["phase"], "pending")
+            self.assertEqual(pending["registered_input_ids"], ["input-a"])
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            loop.close()
+
+    def test_pending_recovery_rejects_same_id_selector_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id, snapshot
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                loop.run_cycle()
+
+            self.assertTrue(loop.dependencies.unregister("input-a"))
+            loop.dependencies.register(
+                "input-a",
+                selection_ids="selection-b",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "requires exact durable dependency registry",
+            ):
+                loop.run_cycle()
+
+            pending = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["phase"], "pending")
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1219,6 +1219,115 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(len(snapshot.events), 1)
         self.assertEqual(snapshot.events[0].source_id, "provider-b")
 
+    def test_incremental_view_retries_if_fallback_dependency_changes_again(self) -> None:
+        mirror = MarketMirror()
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        provider_c = self.event(source_id="provider-c", selection="selection-c", sequence=1)
+        mirror.apply(provider_a)
+        mirror.apply(provider_b)
+        mirror.apply(provider_c)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_bounded = mirror.active_view_for_keys
+        original_full = mirror.active_view
+        fallback_reads = [0]
+
+        def replace_before_fallback(*args, **kwargs):
+            snapshot = original_bounded(*args, **kwargs)
+            self.assertTrue(dependencies.unregister("decision"))
+            dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        def replace_during_first_fallback(*args, **kwargs):
+            snapshot = original_full(*args, **kwargs)
+            fallback_reads[0] += 1
+            if fallback_reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-c")
+            return snapshot
+
+        with (
+            patch.object(
+                mirror,
+                "active_view_for_keys",
+                side_effect=replace_before_fallback,
+            ),
+            patch.object(
+                mirror,
+                "active_view",
+                side_effect=replace_during_first_fallback,
+            ),
+        ):
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(fallback_reads[0], 2)
+        self.assertEqual(len(snapshot.events), 1)
+        self.assertEqual(snapshot.events[0].source_id, "provider-c")
+
+    def test_decision_view_retries_dependency_replacement_during_read(self) -> None:
+        mirror = MarketMirror()
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        mirror.apply(provider_a)
+        mirror.apply(provider_b)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_full = mirror.active_view
+        reads = [0]
+
+        def replace_dependency(*args, **kwargs):
+            snapshot = original_full(*args, **kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "active_view",
+            side_effect=replace_dependency,
+        ):
+            snapshot = dependencies.decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(len(snapshot.events), 1)
+        self.assertEqual(snapshot.events[0].source_id, "provider-b")
+
+    def test_decision_view_fails_closed_if_dependency_removed_during_read(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(sequence=1)
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_full = mirror.active_view
+
+        def remove_dependency(*args, **kwargs):
+            snapshot = original_full(*args, **kwargs)
+            dependencies.unregister("decision")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "active_view",
+            side_effect=remove_dependency,
+        ):
+            with self.assertRaisesRegex(KeyError, "unknown focused mirror input"):
+                dependencies.decision_view(
+                    "decision",
+                    as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                    max_age=timedelta(minutes=5),
+                )
+
     def test_incremental_view_fails_closed_if_dependency_is_removed_mid_read(self) -> None:
         mirror = MarketMirror()
         event = self.event(sequence=1)

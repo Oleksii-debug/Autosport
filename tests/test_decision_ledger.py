@@ -297,6 +297,65 @@ class DecisionLedgerTests(unittest.TestCase):
 
             self.assertEqual(first.verify_integrity(), 1)
 
+    def test_verified_snapshot_fails_closed_while_writer_lock_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            ledger.append(self._record(decision_id="stable"))
+            lock_path = path.absolute().with_name(path.name + ".writer.lock")
+            lock_path.write_text("owned", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "verified snapshot is unavailable",
+            ):
+                ledger.verified_snapshot()
+
+    def test_integrity_rejects_malformed_material_action_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            record = self._record(decision_id="malformed-material")
+            persisted = record.to_dict()
+            persisted["payload"][MATERIAL_ACTION_ID_PAYLOAD_KEY] = "  bad  "
+            canonical = json.dumps(
+                persisted,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            envelope = json.dumps(
+                {
+                    "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    "record": persisted,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            path.write_text(envelope + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "material_action_id is invalid",
+            ):
+                JsonlDecisionLedger(path).verify_integrity()
+
+    def test_duplicate_rejection_releases_writer_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            record = self._record(decision_id="duplicate-release")
+            ledger.append(record)
+
+            with self.assertRaises(DecisionLedgerIntegrityError):
+                ledger.append(record)
+
+            lock_path = path.absolute().with_name(path.name + ".writer.lock")
+            self.assertFalse(lock_path.exists())
+            ledger.append(self._record(decision_id="next"))
+            self.assertEqual(ledger.verify_integrity(), 2)
+
     def test_verify_integrity_rejects_unterminated_tail(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"

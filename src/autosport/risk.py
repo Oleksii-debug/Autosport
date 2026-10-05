@@ -20,6 +20,8 @@ from pathlib import Path
 from .domain import MarketEvent, MarketType, PaperTicket, TicketLeg, TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
+_CANONICAL_ECONOMIC_GOAL_TYPE = EconomicGoalContract
+_CANONICAL_ECONOMIC_GOAL_VALIDATOR = EconomicGoalContract.__post_init__
 from .paper import PaperBook
 
 # Capture the source-defined MarketEvent serialization entrypoints once. Risk
@@ -538,11 +540,16 @@ class ProposedTicketRiskContext:
                     "risk_of_ruin_upper_bound must be an exact Decimal between 0 and 1"
                 )
         if self.risk_of_ruin_evidence is not None:
-            if type(self.risk_of_ruin_evidence) is not RiskOfRuinEvidence:
+            if (
+                type(self.risk_of_ruin_evidence)
+                is not _CANONICAL_RISK_OF_RUIN_EVIDENCE_TYPE
+            ):
                 raise ValueError(
                     "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"
                 )
-            RiskOfRuinEvidence.__post_init__(self.risk_of_ruin_evidence)
+            _CANONICAL_RISK_OF_RUIN_EVIDENCE_VALIDATOR(
+                self.risk_of_ruin_evidence
+            )
 
     @property
     def parlay_leg_count(self) -> int:
@@ -745,10 +752,10 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             return False
         goal = self.economic_goal
         if goal is not None:
-            if type(goal) is not EconomicGoalContract:
+            if type(goal) is not _CANONICAL_ECONOMIC_GOAL_TYPE:
                 return False
             try:
-                EconomicGoalContract.__post_init__(goal)
+                _CANONICAL_ECONOMIC_GOAL_VALIDATOR(goal)
             except (TypeError, ValueError):
                 return False
         path = self.risk_of_ruin_registry_path
@@ -1003,13 +1010,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 False,
                 "portfolio risk-of-ruin provenance-bound evidence is required by economic goal",
             )
-        if type(evidence) is not RiskOfRuinEvidence:
+        if type(evidence) is not _CANONICAL_RISK_OF_RUIN_EVIDENCE_TYPE:
             return RiskDecision(
                 False,
                 "portfolio risk-of-ruin evidence is invalid",
             )
         try:
-            RiskOfRuinEvidence.__post_init__(evidence)
+            _CANONICAL_RISK_OF_RUIN_EVIDENCE_VALIDATOR(evidence)
         except (AttributeError, TypeError, ValueError):
             return RiskDecision(
                 False,
@@ -1114,13 +1121,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 False,
                 "multi-candidate portfolio risk-of-ruin requires vector-bound evidence",
             )
-        if type(evidence) is not RiskOfRuinVectorEvidence:
+        if type(evidence) is not _CANONICAL_RISK_OF_RUIN_VECTOR_EVIDENCE_TYPE:
             return RiskDecision(
                 False,
                 "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
             )
         try:
-            RiskOfRuinVectorEvidence.__post_init__(evidence)
+            _CANONICAL_RISK_OF_RUIN_VECTOR_EVIDENCE_VALIDATOR(evidence)
         except (AttributeError, TypeError, ValueError):
             return RiskDecision(
                 False,

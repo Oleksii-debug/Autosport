@@ -334,3 +334,51 @@ def test_guard_rejects_in_place_betfair_cost_resolver_code_mutation():
                 )
         finally:
             resolver.__code__ = original_code
+
+
+def test_guard_rejects_in_place_resolution_validator_code_mutation():
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+        validator = cost._SEALED_RESOLUTION_VALIDATOR
+        original_code = validator.__code__
+
+        def attacker_validator(_value):
+            return None
+
+        try:
+            validator.__code__ = attacker_validator.__code__
+            with pytest.raises(
+                cost.ProspectiveApplicableCostError,
+                match="resolution validator authority changed",
+            ):
+                _require(asserted, case)
+        finally:
+            validator.__code__ = original_code
+
+
+def test_guard_rejects_in_place_component_validator_code_mutation():
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+        validator = cost._SEALED_COMPONENT_VALIDATOR
+        original_code = validator.__code__
+
+        def attacker_validator(_value):
+            return None
+
+        try:
+            validator.__code__ = attacker_validator.__code__
+            with pytest.raises(
+                cost.ProspectiveApplicableCostError,
+                match="component validator authority changed",
+            ):
+                _require(asserted, case)
+        finally:
+            validator.__code__ = original_code

@@ -91,14 +91,15 @@ def _attempt_locked_capital(attempt: PaperLegAttempt) -> Decimal:
 
 
 def _unknown_exposure_increment(attempt: PaperLegAttempt) -> Decimal:
-    side = attempt.side.strip().upper()
-    if side == "BACK":
+    if attempt.side == "BACK":
         return attempt.requested_stake
-    if side == "LAY":
+    if attempt.side == "LAY":
         raise PaperExecutionStateError(
             "UNKNOWN LAY exposure has no canonical upper-odds liability bound"
         )
-    raise PaperExecutionIntegrityError("durable attempt has unsupported exchange side")
+    raise PaperExecutionIntegrityError(
+        "durable attempt has noncanonical exchange side"
+    )
 
 
 @dataclass(frozen=True, slots=True)

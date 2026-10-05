@@ -82,6 +82,35 @@ def test_lay_liability_rejects_output_resource_amplification() -> None:
         )
 
 
+def test_lay_liability_accepts_large_exact_fraction_inside_resource_policy() -> None:
+    odds = Decimal("1." + ("1" * 5000))
+    expected = Decimal("0." + ("1" * 5000))
+
+    actual = locked_capital_for_exchange_side(
+        stake=Decimal("1"),
+        odds=odds,
+        exchange_side="LAY",
+    )
+
+    assert actual == expected
+    assert actual.as_tuple() == expected.as_tuple()
+
+
+def test_lay_liability_multiplies_large_coefficients_without_int_string_conversion() -> None:
+    stake_digits = "9" * 2500
+    liability_digits = Decimal(int(stake_digits) * int(stake_digits)).as_tuple().digits
+    expected = Decimal((0, liability_digits, -5000))
+
+    actual = locked_capital_for_exchange_side(
+        stake=Decimal("0." + stake_digits),
+        odds=Decimal("1." + stake_digits),
+        exchange_side="LAY",
+    )
+
+    assert actual == expected
+    assert actual.as_tuple() == expected.as_tuple()
+
+
 def test_back_exposure_uses_the_same_decimal_resource_policy() -> None:
     with pytest.raises(ValueError, match="resource limit"):
         locked_capital_for_exchange_side(

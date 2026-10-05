@@ -2078,5 +2078,35 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(len(durable.tickets), 2)
 
 
+    def test_instance_save_override_cannot_replace_persistence_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("instance-save-override", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            book_path = Path(tmp) / "paper-book.json"
+            hostile_calls = 0
+
+            def hostile_save(_path):
+                nonlocal hostile_calls
+                hostile_calls += 1
+
+            book.save = hostile_save
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="instance-save-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertTrue(book_path.exists())
+            durable = PaperBook.load(book_path)
+            self.assertEqual(durable.balance, Decimal("90.00"))
+            self.assertEqual(durable.tickets, book.tickets)
+
+
 if __name__ == "__main__":
     unittest.main()

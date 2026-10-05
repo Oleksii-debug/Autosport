@@ -612,12 +612,12 @@ class PaperBook:
 
     @staticmethod
     def _require_finite(value: object, label: str) -> None:
-        if not isinstance(value, Decimal) or not value.is_finite():
+        if type(value) is not Decimal or not value.is_finite():
             raise ValueError(f"PaperBook snapshot contains non-finite {label}")
 
     @staticmethod
     def _require_utf8_string(value: object, label: str) -> str:
-        if not isinstance(value, str):
+        if type(value) is not str:
             raise ValueError(f"PaperBook {label} must be a string")
         try:
             value.encode("utf-8", errors="strict")
@@ -808,8 +808,10 @@ class PaperBook:
         if type(entry) is not tuple or len(entry) != 4:
             raise ValueError("PaperBook lifecycle entries must be canonical tuples")
         action, ticket_id, winners, voids = entry
-        if action not in {"open", "settle"}:
-            raise ValueError("PaperBook lifecycle action must be open or settle")
+        if type(action) is not str or action not in {"open", "settle"}:
+            raise ValueError(
+                "PaperBook lifecycle action must be canonical open or settle text"
+            )
         cls._require_canonical_text(ticket_id, "lifecycle ticket_id")
         if type(winners) is not tuple or type(voids) is not tuple:
             raise ValueError("PaperBook lifecycle settlement keys must be canonical tuples")
@@ -828,6 +830,10 @@ class PaperBook:
             raise ValueError("PaperBook lifecycle must be a canonical list")
         if type(book._settlement_times) is not dict:
             raise ValueError("PaperBook settlement-time witness must be a canonical mapping")
+        if any(type(ticket_id) is not str for ticket_id in book._settlement_times):
+            raise ValueError(
+                "PaperBook settlement-time witness keys must be canonical strings"
+            )
 
         replay_balance = book.initial_bankroll
         opened: set[str] = set()

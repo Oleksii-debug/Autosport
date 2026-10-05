@@ -1233,12 +1233,6 @@ def _seal_paperbook_snapshot_install_authority(method):
     canonical_load_bytes_code = canonical_load_bytes.__code__
     canonical_snapshot_path = _canonical_paperbook_snapshot_path
     canonical_snapshot_path_code = canonical_snapshot_path.__code__
-    lifecycle_json = _canonical_paperbook_lifecycle_json
-    lifecycle_json_code = lifecycle_json.__code__
-    ensure_parent = _ensure_canonical_paperbook_snapshot_parent
-    ensure_parent_code = ensure_parent.__code__
-    fsync_directory = _fsync_canonical_paperbook_snapshot_directory
-    fsync_directory_code = fsync_directory.__code__
 
     def require_type(target: object) -> None:
         if type_authority.__code__ is not type_authority_code:
@@ -1272,12 +1266,6 @@ def _seal_paperbook_snapshot_install_authority(method):
             raise ValueError("PaperBook byte loader dispatch authority changed")
         if canonical_snapshot_path.__code__ is not canonical_snapshot_path_code:
             raise ValueError("PaperBook snapshot path dispatch authority changed")
-        if lifecycle_json.__code__ is not lifecycle_json_code:
-            raise ValueError("PaperBook lifecycle serializer dispatch authority changed")
-        if ensure_parent.__code__ is not ensure_parent_code:
-            raise ValueError("PaperBook parent durability dispatch authority changed")
-        if fsync_directory.__code__ is not fsync_directory_code:
-            raise ValueError("PaperBook directory fsync dispatch authority changed")
         result = method(
             cls,
             *args,
@@ -1305,6 +1293,12 @@ def _seal_paperbook_save_candidate_authority(method):
     canonical_raw_snapshot_code = canonical_raw_snapshot.__code__
     canonical_snapshot_path = _canonical_paperbook_snapshot_path
     canonical_snapshot_path_code = canonical_snapshot_path.__code__
+    lifecycle_json = _canonical_paperbook_lifecycle_json
+    lifecycle_json_code = lifecycle_json.__code__
+    ensure_parent = _ensure_canonical_paperbook_snapshot_parent
+    ensure_parent_code = ensure_parent.__code__
+    fsync_directory = _fsync_canonical_paperbook_snapshot_directory
+    fsync_directory_code = fsync_directory.__code__
 
     def require_opening(source_book: object, candidate_book: object) -> None:
         if opening_candidate.__code__ is not opening_candidate_code:
@@ -1332,6 +1326,12 @@ def _seal_paperbook_save_candidate_authority(method):
             raise ValueError("PaperBook raw snapshot dispatch authority changed")
         if canonical_snapshot_path.__code__ is not canonical_snapshot_path_code:
             raise ValueError("PaperBook snapshot path dispatch authority changed")
+        if lifecycle_json.__code__ is not lifecycle_json_code:
+            raise ValueError("PaperBook lifecycle serializer dispatch authority changed")
+        if ensure_parent.__code__ is not ensure_parent_code:
+            raise ValueError("PaperBook parent durability dispatch authority changed")
+        if fsync_directory.__code__ is not fsync_directory_code:
+            raise ValueError("PaperBook directory fsync dispatch authority changed")
         result = method(
             self,
             *args,

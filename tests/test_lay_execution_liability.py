@@ -2979,5 +2979,41 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(ticket.payout, Decimal("0"))
 
 
+    def test_lay_open_rejects_rebound_transition_authorities_before_economic_mutation(self):
+        guarded_names = (
+            "_ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY",
+            "_ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY",
+            "_ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY",
+            "_ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN",
+            "_ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE",
+        )
+
+        for name in guarded_names:
+            with self.subTest(authority=name):
+                book = PaperBook(Decimal("100"))
+                attacker_calls = 0
+
+                def hostile(*_args, **_kwargs):
+                    nonlocal attacker_calls
+                    attacker_calls += 1
+                    raise AssertionError("rebound transition authority executed")
+
+                with patch.object(lay_guard, name, hostile):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "canonical transition authority changed",
+                    ):
+                        book.open_ticket(
+                            [self._lay_leg()],
+                            Decimal("10"),
+                            placed_at=QUOTE_AT,
+                        )
+
+                self.assertEqual(attacker_calls, 0)
+                self.assertEqual(book.balance, Decimal("100"))
+                self.assertEqual(book.tickets, {})
+                self.assertEqual(book._lifecycle, [])
+
+
 if __name__ == "__main__":
     unittest.main()

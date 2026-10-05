@@ -469,6 +469,28 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.balance, Decimal("100.00"))
             self.assertEqual(replacement.balance, Decimal("100.00"))
 
+    def test_atomic_save_failure_restores_live_paperbook_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("save-failure-rollback", stake="10.00")
+            current_prepared = prepared(runtime, current)
+
+            def fail_before_replace(_book, _path):
+                raise OSError("simulated atomic snapshot failure")
+
+            with patch.object(PaperBook, "save", fail_before_replace):
+                with self.assertRaisesRegex(OSError, "simulated atomic snapshot failure"):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="save-failure-rollback",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(book.committed_capital, Decimal("0"))
+
     def test_save_callback_cannot_redirect_durable_verification_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)

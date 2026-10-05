@@ -299,7 +299,7 @@ def test_qualification_constructor_code_mutation_is_rejected() -> None:
         target.__code__ = forged_code
         with pytest.raises(
             CancellationError,
-            match="pull request qualification authority changed",
+            match="pull request qualification snapshot authority changed",
         ):
             admit_current_head(
                 api=QualificationApi(),
@@ -380,16 +380,24 @@ def test_coordinated_qualification_root_rebind_cannot_forge_trusted_head(
     )
 
     assert api.live_pr_qualification(2008) == (HEAD_B, True)
-    assert admit_current_head(
-        api=api,
-        pr_number=2008,
-        event_head_sha=HEAD_A,
-    ) == CancellationResult(current_head=False, cancelled_run_ids=())
-    assert admit_current_head(
-        api=api,
-        pr_number=2008,
-        event_head_sha=HEAD_B,
-    ) == CancellationResult(current_head=True, cancelled_run_ids=())
+    with pytest.raises(
+        CancellationError,
+        match="pull request qualification snapshot authority changed",
+    ):
+        admit_current_head(
+            api=api,
+            pr_number=2008,
+            event_head_sha=HEAD_A,
+        )
+    with pytest.raises(
+        CancellationError,
+        match="pull request qualification snapshot authority changed",
+    ):
+        admit_current_head(
+            api=api,
+            pr_number=2008,
+            event_head_sha=HEAD_B,
+        )
 
 
 def test_pull_request_target_does_not_trust_rebound_positive_int_helper(

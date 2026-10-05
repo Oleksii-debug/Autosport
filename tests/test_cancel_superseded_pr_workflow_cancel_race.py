@@ -55,6 +55,20 @@ class _FakeSuccessResponse:
         return self._body
 
 
+def _unbound_run_body(
+    run_id: int,
+    head_sha: str,
+    *,
+    head_branch: str = "stale-branch",
+) -> bytes:
+    return (
+        f'{{"id":{run_id},"workflow_id":1,"event":"pull_request",'
+        f'"head_sha":"{head_sha}","status":"queued","name":"CI",'
+        f'"pull_requests":[],"head_branch":"{head_branch}",'
+        '"head_repository":{"full_name":"owner/repo"}}'
+    ).encode()
+
+
 def test_cancel_accepts_nonempty_202_success_response_body(monkeypatch) -> None:
     api = GitHubApi(repository="owner/repo", token="token")
     calls: list[tuple[str, str, int]] = []
@@ -571,7 +585,7 @@ def test_scoped_cancel_helper_dispatch_metadata_is_immutable_and_complete() -> N
     helper_dispatch = closure["helper_dispatch"]
 
     assert type(helper_dispatch) is tuple
-    assert tuple(name for name, _, _ in helper_dispatch) == (
+    assert tuple(name for name, _, _, _ in helper_dispatch) == (
         "_request",
         "_historical_associated_pr_number",
         "_historical_head_has_no_associated_prs",
@@ -581,8 +595,10 @@ def test_scoped_cancel_helper_dispatch_metadata_is_immutable_and_complete() -> N
     )
     assert all(
         type(entry) is tuple
-        and len(entry) == 3
+        and len(entry) == 4
         and entry[2] is not None
+        and type(entry[3]) is tuple
+        and len(entry[3]) == 3
         for entry in helper_dispatch
     )
 
@@ -611,6 +627,11 @@ def test_scoped_cancel_rechecks_branch_helper_after_zero_association_roundtrip(
     def fake_urlopen(request, *, timeout: int):
         del timeout
         url = request.full_url
+        if url.endswith("/actions/runs/123"):
+            return _FakeSuccessResponse(
+                200,
+                _unbound_run_body(123, candidate_head),
+            )
         if "/commits/" in url and "/pulls?" in url:
             helper.__code__ = forged_code
             return _FakeSuccessResponse(200, b"[]")
@@ -654,6 +675,11 @@ def test_scoped_cancel_rechecks_live_qualification_after_association_roundtrip(
     def fake_urlopen(request, *, timeout: int):
         del timeout
         url = request.full_url
+        if url.endswith("/actions/runs/123"):
+            return _FakeSuccessResponse(
+                200,
+                _unbound_run_body(123, candidate_head),
+            )
         if "/commits/" in url and "/pulls?" in url:
             helper.__code__ = forged_code
             body = (
@@ -687,15 +713,36 @@ def test_scoped_cancel_rechecks_qualification_reader_after_live_roundtrip(
     reader = _pull_request_qualification_state
     original_code = reader.__code__
 
-    def forged_reader(_qualification):
-        return candidate_head, False
+    def make_forged_reader():
+        field_class_witnesses = ()
+        qualification_dict_descriptor = object()
+        qualification_init = object()
+        qualification_init_code = object()
+        qualification_type = object()
 
-    forged_code = forged_reader.__code__
+        def forged_reader(_qualification):
+            _ = (
+                field_class_witnesses,
+                qualification_dict_descriptor,
+                qualification_init,
+                qualification_init_code,
+                qualification_type,
+            )
+            return "a" * 40, False
+
+        return forged_reader
+
+    forged_code = make_forged_reader().__code__
     assert len(forged_code.co_freevars) == len(original_code.co_freevars)
 
     def fake_urlopen(request, *, timeout: int):
         del timeout
         url = request.full_url
+        if url.endswith("/actions/runs/123"):
+            return _FakeSuccessResponse(
+                200,
+                _unbound_run_body(123, candidate_head),
+            )
         if "/commits/" in url and "/pulls?" in url:
             body = (
                 '[{"number":7,"head":{"sha":"' + candidate_head + '"}}]'
@@ -759,6 +806,11 @@ def test_scoped_cancel_rechecks_base_cancel_code_after_external_revalidation(
     def fake_urlopen(request, *, timeout: int):
         del timeout
         url = request.full_url
+        if url.endswith("/actions/runs/123"):
+            return _FakeSuccessResponse(
+                200,
+                _unbound_run_body(123, candidate_head),
+            )
         if "/commits/" in url and "/pulls?" in url:
             GitHubApi.cancel.__code__ = forged_code
             body = (

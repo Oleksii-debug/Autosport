@@ -81,6 +81,7 @@ def _sealed_api(
         workflow_name="CI",
     )
     queue = list(responses)
+    observed_runs: dict[int, dict[str, object]] = {}
     api.paths = []
     api.cancelled = []
     prefix = "https://api.github.com/repos/Oleksii-debug/Autosport"
@@ -99,9 +100,29 @@ def _sealed_api(
             return _FakeSuccessResponse(202, b'{"message":"accepted"}')
         assert method == "GET"
         api.paths.append(path)
+        if path.startswith("/actions/runs/"):
+            run_id = int(path.split("/")[3])
+            observed = observed_runs.get(run_id)
+            if observed is None:
+                raise AssertionError("exact-run reread has no scan observation")
+            payload = dict(observed)
+            payload["workflow_id"] = 356678400
+            payload["event"] = "pull_request"
+            return _FakeSuccessResponse(
+                200,
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            )
         if not queue:
             raise AssertionError("unexpected API request")
         response = queue.pop(0)
+        if (
+            path.startswith("/actions/workflows/")
+            and isinstance(response, dict)
+            and isinstance(response.get("workflow_runs"), list)
+        ):
+            for observed in response["workflow_runs"]:
+                if isinstance(observed, dict) and type(observed.get("id")) is int:
+                    observed_runs[observed["id"]] = dict(observed)
         if isinstance(response, _AllowedHttpError):
             raise HTTPError(
                 url,
@@ -172,6 +193,7 @@ def test_unbound_stale_run_is_cancelled_only_after_unique_association_and_bounda
         "/actions/workflows/356678400/runs?event=pull_request&status=queued&per_page=100&page=1",
         f"/commits/{STALE_HEAD}/pulls?per_page=100&page=1",
         "/pulls/77",
+        "/actions/runs/91",
         f"/commits/{STALE_HEAD}/pulls?per_page=100&page=1",
         "/pulls/77",
     ]

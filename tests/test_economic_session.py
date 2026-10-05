@@ -403,15 +403,12 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         existing = self._store()
         first = existing.current()
 
-        dependency_cases = (
+        safe_dependency_cases = (
             ("strict_json_loads", economic_session, "strict_json_loads"),
             ("open_read_only_descriptor", economic_session, "_open_read_only_descriptor"),
             ("json_dumps", json, "dumps"),
-            ("sha256", hashlib, "sha256"),
-            ("lexists", economic_session.os.path, "lexists"),
-            ("provenance_for", economic_session, "provenance_for"),
         )
-        for name, owner, attribute in dependency_cases:
+        for name, owner, attribute in safe_dependency_cases:
             original = getattr(owner, attribute)
             calls = 0
 
@@ -424,6 +421,32 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             try:
                 with self.subTest(name=name):
                     self.assertEqual(existing.current(), first)
+            finally:
+                setattr(owner, attribute, original)
+            self.assertEqual(calls, 0)
+
+        fail_closed_dependency_cases = (
+            ("sha256", hashlib, "sha256"),
+            ("lexists", economic_session.os.path, "lexists"),
+            ("provenance_for", economic_session, "provenance_for"),
+        )
+        for name, owner, attribute in fail_closed_dependency_cases:
+            original = getattr(owner, attribute)
+            calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal calls
+                calls += 1
+                raise AssertionError(f"hostile {name} executed")
+
+            setattr(owner, attribute, forbidden)
+            try:
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        existing.current()
             finally:
                 setattr(owner, attribute, original)
             self.assertEqual(calls, 0)
@@ -457,7 +480,11 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         economic_session.atomic_write_json = forbidden_atomic
         try:
-            fresh_atomic.current()
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                fresh_atomic.current()
         finally:
             economic_session.atomic_write_json = original_atomic
 

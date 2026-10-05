@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -77,6 +78,90 @@ class IngestionHealthTests(unittest.TestCase):
             sequence=sequence,
             source_ts=source_ts,
         )
+
+    def test_source_health_rejects_path_rebinding_before_read_or_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            canonical = store.path
+            store.path = root / "foreign-health.json"
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "persistence authority changed",
+            ):
+                store.get("source-a")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "persistence authority changed",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
+            self.assertTrue(canonical.exists())
+            self.assertFalse((root / "foreign-health.json").exists())
+
+    def test_source_health_rejects_lock_namespace_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            store._lock_path = root / "foreign.lock"
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "persistence authority changed",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
+            self.assertFalse((root / "foreign.lock").exists())
+
+    def test_source_health_relative_path_survives_cwd_change(self):
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            try:
+                os.chdir(first)
+                store = SourceHealthStore("source-health.json")
+                canonical = store.path
+                os.chdir(second)
+                state = store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+                self.assertEqual(state.status, "failed")
+                self.assertEqual(store.path, canonical)
+                self.assertTrue(canonical.exists())
+                self.assertFalse((second / "source-health.json").exists())
+            finally:
+                os.chdir(original_cwd)
+
+    def test_source_health_symlinked_parent_aliases_share_lock_namespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = root / "real"
+            alias = root / "alias"
+            real.mkdir()
+            try:
+                alias.symlink_to(real, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks are unavailable")
+
+            first = SourceHealthStore(real / "source-health.json")
+            second = SourceHealthStore(alias / "source-health.json")
+            self.assertEqual(first.path, second.path)
+            self.assertEqual(first._lock_path, second._lock_path)
 
     def test_stats_throughput_uses_finite_positive_elapsed(self):
         stats = IngestionStats(

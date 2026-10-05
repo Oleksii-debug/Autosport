@@ -165,6 +165,16 @@ def _observed_instant(value: str) -> datetime:
     return _timezone_aware_instant(value, "observed_ts")
 
 
+def _validate_local_receipt_order(event: MarketEvent) -> tuple[datetime, datetime]:
+    """Return local observation/ingest instants iff their causal order is valid."""
+
+    observed = _observed_instant(event.observed_ts)
+    ingest = _timezone_aware_instant(event.ingest_ts, "ingest_ts")
+    if ingest < observed:
+        raise ValueError("ingest_ts must not precede observed_ts")
+    return observed, ingest
+
+
 def _canonical_replay_cutoff(value: str) -> str:
     return _timezone_aware_instant(value, "as_of").astimezone(timezone.utc).isoformat()
 
@@ -387,8 +397,7 @@ def _validate_persistable_sequence(value: object) -> int:
 def _validate_incoming_event(event: MarketEvent) -> str:
     """Prove an event survives the exact durable JSON/SQLite representation without type drift."""
     _validate_persistable_sequence(event.sequence)
-    _observed_instant(event.observed_ts)
-    _timezone_aware_instant(event.ingest_ts, "ingest_ts")
+    _validate_local_receipt_order(event)
     try:
         raw = event.to_dict()
         payload = _canonical_json(raw)
@@ -431,8 +440,7 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
     event = MarketEvent.from_dict(raw)
     if canonical_raw != _canonical_payload(event):
         raise ValueError("stored market event payload is not canonical")
-    _observed_instant(event.observed_ts)
-    _timezone_aware_instant(event.ingest_ts, "ingest_ts")
+    _validate_local_receipt_order(event)
 
     expected = (
         ("dedupe_key", dedupe_key, event.dedupe_key),

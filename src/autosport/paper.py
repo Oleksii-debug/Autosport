@@ -18,7 +18,7 @@ from decimal import (
 )
 from functools import wraps
 from pathlib import Path
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, ref
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
 from .forecasting import parse_iso_timestamp
@@ -27,6 +27,7 @@ from .forecasting import parse_iso_timestamp
 _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
+_MAX_PAPER_DECIMAL_TEXT_CHARS = 512
 _PAPER_SNAPSHOT_SCHEMA_VERSION = 7
 _SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
 _SCHEMA_MISSING = object()
@@ -342,6 +343,52 @@ def _make_paperbook_causal_history_authority_registry():
 ) = _make_paperbook_causal_history_authority_registry()
 
 
+
+
+def _make_paperbook_operation_lock_registry():
+    # Economic transitions/readouts must be linearizable per book. Key by object
+    # identity so caller-defined __hash__/__eq__ can never run at the lock boundary.
+    entries: dict[int, tuple[object, threading.RLock]] = {}
+    guard = threading.RLock()
+
+    def register_book(book: object) -> None:
+        identity = id(book)
+
+        def cleanup(dead_ref: object, *, _identity: int = identity) -> None:
+            with guard:
+                current = entries.get(_identity)
+                if current is not None and current[0] is dead_ref:
+                    entries.pop(_identity, None)
+
+        weak_book = ref(book, cleanup)
+        with guard:
+            entries[identity] = (weak_book, threading.RLock())
+
+    def require_lock(book: object) -> threading.RLock:
+        with guard:
+            current = entries.get(id(book))
+            if current is None or current[0]() is not book:
+                raise RuntimeError("PaperBook operation lock registry is unavailable")
+            return current[1]
+
+    return register_book, require_lock
+
+
+(
+    _register_paperbook_operation_lock,
+    _require_paperbook_operation_lock,
+) = _make_paperbook_operation_lock_registry()
+
+
+def _serialized_paperbook_operation(method):
+    @wraps(method)
+    def serialized(self, *args, **kwargs):
+        with _require_paperbook_operation_lock(self):
+            return method(self, *args, **kwargs)
+
+    return serialized
+
+
 def _guard_paperbook_runtime_authority(method):
     """Seal public PaperBook authority checks against module-level rebinding."""
     opening_authority = _require_ticket_opening_authority
@@ -402,10 +449,10 @@ class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
+        _register_paperbook_operation_lock(self)
         _register_ticket_opening_authority_book(self)
         _register_paperbook_causal_history_authority_book(self)
-        initial = Decimal(str(initial_bankroll))
-        self._require_finite(initial, "initial_bankroll")
+        initial = self._canonical_decimal_input(initial_bankroll, "initial_bankroll")
         if initial <= 0:
             raise ValueError("initial virtual bankroll must be positive")
         self.initial_bankroll = initial
@@ -421,12 +468,33 @@ class PaperBook:
         self._settlement_times: dict[str, str | None] = {}
 
     @property
+    @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
     def committed_stake(self) -> Decimal:
         self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
         return sum((t.stake for t in self.tickets.values() if t.status is TicketStatus.OPEN), Decimal("0"))
+
+    @classmethod
+    def _canonical_decimal_input(cls, value: object, label: str) -> Decimal:
+        if type(value) not in {Decimal, str, int, float}:
+            raise ValueError(
+                f"PaperBook {label} must be an exact built-in Decimal, string, integer or float"
+            )
+        if type(value) is Decimal:
+            parsed = value
+        else:
+            if type(value) is str and len(value) > _MAX_PAPER_DECIMAL_TEXT_CHARS:
+                raise ValueError(
+                    f"PaperBook {label} decimal text exceeds the canonical size limit"
+                )
+            try:
+                parsed = Decimal(str(value))
+            except (DecimalException, ValueError) as exc:
+                raise ValueError(f"PaperBook {label} is not a valid Decimal value") from exc
+        cls._require_finite(parsed, label)
+        return parsed
 
     @classmethod
     def _debit_balance(cls, balance: Decimal, amount: Decimal) -> Decimal:
@@ -445,6 +513,7 @@ class PaperBook:
             raise ValueError("PaperBook stake debit arithmetic is not representable") from exc
         return new_balance
 
+    @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
     def open_ticket(
         self,
@@ -461,7 +530,7 @@ class PaperBook:
         self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
-        amount = Decimal(str(stake))
+        amount = self._canonical_decimal_input(stake, "stake")
         new_balance = self._debit_balance(self.balance, amount)
 
         ticket_placed_at = self._validate_placed_at(
@@ -479,6 +548,8 @@ class PaperBook:
             bankroll_id,
             currency,
         )
+        if type(legs) not in {list, tuple}:
+            raise ValueError("ticket legs must be an exact list or tuple")
         ticket_legs = tuple(legs)
         if not ticket_legs:
             raise ValueError("ticket requires at least one leg")
@@ -564,6 +635,7 @@ class PaperBook:
             raise ValueError("PaperBook settlement arithmetic is not representable") from exc
         return status, payout, new_balance
 
+    @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
     def settle(
         self,
@@ -638,6 +710,7 @@ class PaperBook:
                 )
         return payload
 
+    @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
     def save(self, path: str | Path) -> None:
         # PaperBook and PaperTicket are intentionally mutable during a paper run.

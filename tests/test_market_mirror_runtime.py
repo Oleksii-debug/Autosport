@@ -1009,6 +1009,35 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             {legacy.dedupe_key, positive.dedupe_key},
         )
 
+    def test_focused_causal_view_retries_dependency_replacement_during_read(self) -> None:
+        mirror = MarketMirror()
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        mirror._apply_with_causal_authority(provider_a, decision_causal=True)
+        mirror._apply_with_causal_authority(provider_b, decision_causal=True)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_causal = mirror.causal_view
+        reads = [0]
+
+        def replace_dependency(*args, **kwargs):
+            snapshot = original_causal(*args, **kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "causal_view",
+            side_effect=replace_dependency,
+        ):
+            snapshot = dependencies.causal_view("decision")
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(snapshot.events, (provider_b,))
+
     def test_focused_dependencies_route_only_affected_provider_and_selection(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)
@@ -1616,6 +1645,39 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 )
             finally:
                 store.close()
+
+    def test_proven_history_decision_state_retries_dependency_replacement(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        history = ((provider_a, 1), (provider_b, 2))
+        original_resolve = dependencies._decision_state_for_dependency
+        reads = [0]
+
+        def replace_dependency(*args, **kwargs):
+            result = original_resolve(*args, **kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return result
+
+        with patch.object(
+            dependencies,
+            "_decision_state_for_dependency",
+            side_effect=replace_dependency,
+        ):
+            snapshot, _deadline = dependencies.decision_state_from_proven_history(
+                "decision",
+                history,
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(snapshot.events, (provider_b,))
 
     def test_focused_replay_uses_same_selectors_without_future_leakage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -352,6 +352,20 @@ def run_continuous_observation(
     started_at = read_wall_clock()
     started_monotonic = read_monotonic()
 
+    root = config.workspace
+    status_path = config.resolved_status_path
+
+    def canonical_path_key(path: Path) -> str:
+        return os.path.normcase(os.path.realpath(os.path.abspath(os.fspath(path))))
+
+    status_key = canonical_path_key(status_path)
+    protected_paths = (
+        root / "market.db",
+        root / "source_health.json",
+    )
+    if any(status_key == canonical_path_key(path) for path in protected_paths):
+        raise ValueError("status_path must not collide with authoritative storage")
+
     state = _LoopState(current_run_id, provider_source_id, started_at)
     stopper = stop_event if stop_event is not None else threading.Event()
     wait = waiter if waiter is not None else stopper.wait
@@ -368,9 +382,7 @@ def run_continuous_observation(
             raise TypeError("waiter must return bool")
         return value
 
-    root = config.workspace
     root.mkdir(parents=True, exist_ok=True)
-    status_path = config.resolved_status_path
     previous = _read_previous_status(status_path)
     previous_run_id = previous.get("run_id") if previous else None
     previous_state = previous.get("state") if previous else None

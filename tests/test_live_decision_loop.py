@@ -9831,5 +9831,65 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+
+    def test_cycle_entry_rejects_recovery_path_redirection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.progress_path = workspace / "foreign-progress.json"
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "progress path authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertFalse((workspace / "foreign-progress.json").exists())
+            loop.close()
+
+
+    def test_cycle_entry_rejects_same_semantic_intent_provenance_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            replacement = copy.deepcopy(loop.intent_provenance)
+            self.assertEqual(
+                replacement.provenance_sha256,
+                loop.intent_provenance.provenance_sha256,
+            )
+            self.assertIsNot(replacement, loop.intent_provenance)
+            loop.intent_provenance = replacement
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "intent provenance authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertFalse(loop.progress_path.exists())
+            loop.close()
+
 if __name__ == "__main__":
     unittest.main()

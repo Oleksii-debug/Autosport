@@ -381,3 +381,40 @@ def test_worker_rejects_noncanonical_stop_reason_before_state_change(
         worker.request_stop(reason)
 
     assert worker.busy is False
+
+
+def test_profiled_worker_rejects_relative_workspace_before_thread_start() -> None:
+    worker = ProductGuiWorker()
+
+    with pytest.raises(ValueError):
+        worker.start(
+            workspace="relative-workspace",
+            source_factory="autosport.product_source:create_parlay_product_source",
+            expected_source_id="parlayapi:table_tennis",
+            poll_seconds=60,
+        )
+
+    assert worker.busy is False
+
+
+def test_worker_rejects_workspace_path_subclass_before_fspath_dispatch(
+    tmp_path: Path,
+) -> None:
+    concrete_path_type = type(tmp_path)
+
+    class HostilePath(concrete_path_type):
+        def __str__(self) -> str:
+            raise AssertionError("workspace subtype conversion must not execute")
+
+    hostile = HostilePath(tmp_path)
+    worker = ProductGuiWorker()
+
+    with pytest.raises(ValueError):
+        worker.start(
+            workspace=hostile,
+            source_factory="autosport.product_source:create_parlay_product_source",
+            expected_source_id="parlayapi:table_tennis",
+            poll_seconds=60,
+        )
+
+    assert worker.busy is False

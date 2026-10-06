@@ -3776,6 +3776,33 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _dependency_input_ids_getter_code: object = (
             FocusedMirrorDependencyIndex.input_ids.fget.__code__
         ),
+        _invalidation_buffer_type: type[BoundedMirrorInvalidationBuffer] = (
+            BoundedMirrorInvalidationBuffer
+        ),
+        _invalidation_drain_method: Callable[..., MirrorInvalidationBatch] = (
+            BoundedMirrorInvalidationBuffer.drain
+        ),
+        _invalidation_drain_method_code: object = (
+            BoundedMirrorInvalidationBuffer.drain.__code__
+        ),
+        _invalidation_pending_descriptor: object = (
+            BoundedMirrorInvalidationBuffer.__dict__["pending_count"]
+        ),
+        _invalidation_pending_getter: Callable[
+            [BoundedMirrorInvalidationBuffer], int
+        ] = BoundedMirrorInvalidationBuffer.pending_count.fget,
+        _invalidation_pending_getter_code: object = (
+            BoundedMirrorInvalidationBuffer.pending_count.fget.__code__
+        ),
+        _invalidation_full_refresh_descriptor: object = (
+            BoundedMirrorInvalidationBuffer.__dict__["full_refresh_required"]
+        ),
+        _invalidation_full_refresh_getter: Callable[
+            [BoundedMirrorInvalidationBuffer], bool
+        ] = BoundedMirrorInvalidationBuffer.full_refresh_required.fget,
+        _invalidation_full_refresh_getter_code: object = (
+            BoundedMirrorInvalidationBuffer.full_refresh_required.fget.__code__
+        ),
         _lifecycle_type: type[ContinuousEventLifecycle] = ContinuousEventLifecycle,
         _lifecycle_register_eligible_method: Callable[..., tuple[str, ...]] = (
             ContinuousEventLifecycle.register_eligible
@@ -4011,6 +4038,39 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "continuous-session dependency index authority changed during tick"
                 )
 
+        def require_invalidation_buffer_dispatch_authority() -> None:
+            if type(invalidation_buffer) is not _invalidation_buffer_type:
+                return
+            pending_descriptor = _invalidation_buffer_type.__dict__.get(
+                "pending_count"
+            )
+            full_refresh_descriptor = _invalidation_buffer_type.__dict__.get(
+                "full_refresh_required"
+            )
+            if (
+                BoundedMirrorInvalidationBuffer is not _invalidation_buffer_type
+                or getattr(invalidation_drain, "__self__", None)
+                is not invalidation_buffer
+                or getattr(invalidation_drain, "__func__", None)
+                is not _invalidation_drain_method
+                or getattr(_invalidation_drain_method, "__code__", None)
+                is not _invalidation_drain_method_code
+                or pending_descriptor is not _invalidation_pending_descriptor
+                or getattr(pending_descriptor, "fget", None)
+                is not _invalidation_pending_getter
+                or getattr(_invalidation_pending_getter, "__code__", None)
+                is not _invalidation_pending_getter_code
+                or full_refresh_descriptor
+                is not _invalidation_full_refresh_descriptor
+                or getattr(full_refresh_descriptor, "fget", None)
+                is not _invalidation_full_refresh_getter
+                or getattr(_invalidation_full_refresh_getter, "__code__", None)
+                is not _invalidation_full_refresh_getter_code
+            ):
+                raise ContinuousSessionError(
+                    "canonical invalidation buffer dispatch authority changed"
+                )
+
         def require_lifecycle_dispatch_authority() -> None:
             if type(dependency_index) is _dependency_index_type:
                 descriptor = _dependency_index_type.__dict__.get("input_ids")
@@ -4074,6 +4134,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         "canonical event lifecycle dispatch authority changed"
                     )
 
+        require_invalidation_buffer_dispatch_authority()
         require_lifecycle_dispatch_authority()
 
         def dependency_fingerprint(
@@ -4320,6 +4381,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
             require_state_identity()
             require_dependency_index_identity()
+            require_invalidation_buffer_dispatch_authority()
             require_lifecycle_dispatch_authority()
             require_tick_dependency_routing_authority(
                 "dependency routing authority changed during collector observation"
@@ -4379,8 +4441,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # continuous-session snapshot path here: retained settlement history
                 # must not amplify an operational provider failure into O(history).
                 try:
-                    pending_count = invalidation_buffer.pending_count
-                    pending_full_refresh = invalidation_buffer.full_refresh_required
+                    require_invalidation_buffer_dispatch_authority()
+                    if type(invalidation_buffer) is _invalidation_buffer_type:
+                        pending_count = _invalidation_pending_getter(
+                            invalidation_buffer
+                        )
+                        pending_full_refresh = _invalidation_full_refresh_getter(
+                            invalidation_buffer
+                        )
+                    else:
+                        pending_count = invalidation_buffer.pending_count
+                        pending_full_refresh = invalidation_buffer.full_refresh_required
                     if (
                         type(pending_count) is not int
                         or pending_count < 0

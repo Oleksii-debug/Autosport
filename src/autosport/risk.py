@@ -748,6 +748,9 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                                 "market_id": leg.market_id,
                                 "selection_id": leg.selection_id,
                                 "locked_odds": str(leg.locked_odds),
+                                "exchange_side": leg.exchange_side,
+                                "market_semantics_id": leg.market_semantics_id,
+                                "settlement_key": leg.settlement_key,
                             }
                             for leg in ticket.legs
                         ],
@@ -802,6 +805,9 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     "market_id": leg.market_id,
                     "selection_id": leg.selection_id,
                     "locked_odds": str(leg.locked_odds),
+                    "exchange_side": leg.exchange_side,
+                    "market_semantics_id": leg.market_semantics_id,
+                    "settlement_key": leg.settlement_key,
                 }
                 for leg in sorted(context.legs, key=lambda item: item.quote_key)
             ]

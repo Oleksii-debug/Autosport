@@ -545,7 +545,7 @@ class StakeVectorDecision:
             raise ValueError("stake vector stakes must be a tuple")
         for stake in self.stakes:
             if (
-                type(stake) is not Decimal
+                not isinstance(stake, Decimal)
                 or not stake.is_finite()
                 or stake < Decimal("0")
             ):

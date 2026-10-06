@@ -2509,3 +2509,74 @@ def test_source_projection_allows_equal_position_explicit_revision() -> None:
 
         snapshot = state.snapshot()
         assert snapshot.source_state_delta_id == "revision-delta"
+
+def test_record_failure_does_not_enter_full_history_reader() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _LARGE_HISTORY)
+        before = state.path.read_bytes()
+
+        def forbidden_reader():
+            raise AssertionError("bounded operational failure must not read full settlement history")
+
+        with patch.object(state, "_read", forbidden_reader):
+            state.record_failure(code="BOUNDED_FAILURE")
+
+        assert state.path.read_bytes() == before
+        error_path = root / "continuous_session.json.operational_error.json"
+        payload = json.loads(error_path.read_text(encoding="utf-8"))
+        assert payload["last_error_code"] == "BOUNDED_FAILURE"
+
+
+def test_stale_instance_failure_overlay_is_ignored_after_newer_generation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        first = _state_with_history(root, _SMALL_HISTORY)
+        second = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        second.record_success(
+            at="2026-09-22T06:21:00+00:00",
+            full_refresh=False,
+            settlement_evidence=(),
+        )
+        assert second.snapshot().cycles_completed == _SMALL_HISTORY + 1
+
+        first.record_failure(code="STALE_INSTANCE_FAILURE")
+
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        assert reopened.snapshot().last_error_code is None
+        assert reopened.snapshot().cycles_completed == _SMALL_HISTORY + 1
+
+
+def test_fresh_failure_checkpoint_remains_visible_when_generation_is_unchanged() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        first = _state_with_history(root, _SMALL_HISTORY)
+        second = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        first.record_failure(code="FIRST_FAILURE")
+        second.record_failure(code="SECOND_FAILURE")
+
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        assert reopened.snapshot().last_error_code == "SECOND_FAILURE"
+

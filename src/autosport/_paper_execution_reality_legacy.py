@@ -262,6 +262,10 @@ def _parse_json_object(raw: str, *, what: str) -> dict[str, Any]:
     return value
 
 
+_CANONICAL_JSON_OBJECT_PARSER = _parse_json_object
+_CANONICAL_JSON_OBJECT_PARSER_CODE = _parse_json_object.__code__
+
+
 def _milliseconds(delta: timedelta, name: str) -> int:
     microseconds = (
         delta.days * 86_400_000_000
@@ -278,6 +282,10 @@ def _deterministic_int(seed_material: str, label: str, modulus: int) -> int:
         raise ValueError("modulus must be positive")
     payload = f"{seed_material}\x1f{label}".encode("utf-8")
     return int.from_bytes(_CANONICAL_SHA256(payload).digest()[:8], "big") % modulus
+
+
+_CANONICAL_DETERMINISTIC_INT = _deterministic_int
+_CANONICAL_DETERMINISTIC_INT_CODE = _deterministic_int.__code__
 
 
 @dataclass(frozen=True, slots=True)
@@ -902,7 +910,7 @@ class PaperExecutionLedger:
             raw = self._anchor_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise PaperExecutionIntegrityError("cannot read PAPER execution anchor") from exc
-        anchor = _parse_json_object(raw, what="ledger anchor")
+        anchor = _CANONICAL_JSON_OBJECT_PARSER(raw, what="ledger anchor")
         expected = {
             "anchor_schema_version", "ledger_schema_version", "event_count",
             "ledger_root_sha256", "anchor_sha256",
@@ -964,7 +972,7 @@ class PaperExecutionLedger:
         for sequence, raw in enumerate(lines):
             if not raw:
                 raise PaperExecutionIntegrityError("ledger contains blank event line")
-            event = _parse_json_object(raw, what="ledger event")
+            event = _CANONICAL_JSON_OBJECT_PARSER(raw, what="ledger event")
             if set(event) != expected_keys or event["schema_version"] != _SCHEMA_VERSION:
                 raise PaperExecutionIntegrityError("ledger event schema is invalid")
             if event["sequence"] != sequence:
@@ -1318,7 +1326,7 @@ def _synthetic_attempt(
     delay_span = config.max_delay_ms - config.min_delay_ms
     delay_ms = config.min_delay_ms
     if delay_span:
-        delay_ms += _deterministic_int(
+        delay_ms += _CANONICAL_DETERMINISTIC_INT(
             f"{config.seed}:{run_id}:{action.action_id}",
             "delay",
             delay_span + 1,
@@ -1342,7 +1350,7 @@ def _synthetic_attempt(
         outcome = _OUTCOME_REJECTED
         reason = "decision quote exceeded configured PAPER freshness bound"
     else:
-        bucket = _deterministic_int(
+        bucket = _CANONICAL_DETERMINISTIC_INT(
             f"{config.seed}:{run_id}:{action.action_id}",
             "outcome",
             10_000,
@@ -1364,7 +1372,7 @@ def _synthetic_attempt(
             slippage_bps = (
                 0
                 if config.max_slippage_bps == 0
-                else _deterministic_int(
+                else _CANONICAL_DETERMINISTIC_INT(
                     f"{config.seed}:{run_id}:{action.action_id}",
                     "slippage",
                     config.max_slippage_bps + 1,

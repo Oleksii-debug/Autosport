@@ -4385,3 +4385,119 @@ def test_stale_failure_writer_rejects_main_commit_without_tombstone() -> None:
         snapshot = reopened.snapshot()
         assert snapshot.cycles_completed == _SMALL_HISTORY + 1
         assert snapshot.last_error_code is None
+
+def test_record_success_rejects_paused_state_without_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.set_state(
+            continuous_session.SessionState.PAUSED,
+            reason="OPERATOR_PAUSE",
+        )
+        path = root / "continuous_session.json"
+        error_path = root / "continuous_session.json.operational_error.json"
+        before_main = path.read_bytes()
+        before_error = error_path.read_bytes()
+
+        try:
+            state.record_success(
+                at="2026-10-06T05:17:00+00:00",
+                full_refresh=False,
+                settlement_evidence=(),
+            )
+        except continuous_session.SessionPausedError:
+            pass
+        else:
+            raise AssertionError("record_success advanced a PAUSED session")
+
+        assert path.read_bytes() == before_main
+        assert error_path.read_bytes() == before_error
+        snapshot = state.snapshot()
+        assert snapshot.state is continuous_session.SessionState.PAUSED
+        assert snapshot.last_error_code == "OPERATOR_PAUSE"
+
+
+def test_record_success_rejects_stopped_state_without_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.set_state(
+            continuous_session.SessionState.STOPPED,
+            reason="OPERATOR_STOP",
+        )
+        path = root / "continuous_session.json"
+        error_path = root / "continuous_session.json.operational_error.json"
+        before_main = path.read_bytes()
+        before_error = error_path.read_bytes()
+
+        try:
+            state.record_success(
+                at="2026-10-06T05:17:00+00:00",
+                full_refresh=False,
+                settlement_evidence=(),
+            )
+        except continuous_session.SessionStoppedError:
+            pass
+        else:
+            raise AssertionError("record_success advanced a STOPPED session")
+
+        assert path.read_bytes() == before_main
+        assert error_path.read_bytes() == before_error
+        snapshot = state.snapshot()
+        assert snapshot.state is continuous_session.SessionState.STOPPED
+        assert snapshot.last_error_code == "OPERATOR_STOP"
+
+
+def test_record_source_projection_rejects_paused_state_without_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.set_state(
+            continuous_session.SessionState.PAUSED,
+            reason="OPERATOR_PAUSE",
+        )
+        path = root / "continuous_session.json"
+        error_path = root / "continuous_session.json.operational_error.json"
+        before_main = path.read_bytes()
+        before_error = error_path.read_bytes()
+
+        try:
+            state.record_source_projection(
+                deltas=(_projection_delta(1),),
+                backlog=False,
+            )
+        except continuous_session.SessionPausedError:
+            pass
+        else:
+            raise AssertionError("source projection advanced a PAUSED session")
+
+        assert path.read_bytes() == before_main
+        assert error_path.read_bytes() == before_error
+
+
+def test_record_source_projection_rejects_stopped_state_without_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.set_state(
+            continuous_session.SessionState.STOPPED,
+            reason="OPERATOR_STOP",
+        )
+        path = root / "continuous_session.json"
+        error_path = root / "continuous_session.json.operational_error.json"
+        before_main = path.read_bytes()
+        before_error = error_path.read_bytes()
+
+        try:
+            state.record_source_projection(
+                deltas=(_projection_delta(1),),
+                backlog=False,
+            )
+        except continuous_session.SessionStoppedError:
+            pass
+        else:
+            raise AssertionError("source projection advanced a STOPPED session")
+
+        assert path.read_bytes() == before_main
+        assert error_path.read_bytes() == before_error
+

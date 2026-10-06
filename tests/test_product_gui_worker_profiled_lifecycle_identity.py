@@ -224,7 +224,7 @@ def test_profiled_builder_closes_runtime_on_manifest_source_subclass(
             _ProfiledSourceBinding(
                 factory_spec="provider.module:factory",
                 provider_source_id="source-1",
-                factory=lambda: source,
+                factory=lambda *, workspace: source,
             ),
         ),
         runtime_factory=lambda **_kwargs: runtime,

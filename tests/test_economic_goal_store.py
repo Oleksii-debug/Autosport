@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import os
 from dataclasses import fields, replace
 from decimal import Decimal
 
@@ -818,3 +819,51 @@ def test_store_binding_resolver_ignores_rebound_object_getattribute(monkeypatch,
     )
 
     assert store.load() == _goal()
+
+
+def test_store_load_rejects_symlinked_authority_file(tmp_path) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"schema":"attacker"}', encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EconomicGoalStore(workspace)
+    try:
+        store.path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(EconomicGoalContractError):
+        store.load()
+
+
+def test_store_load_rejects_hardlinked_authority_file(tmp_path) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"schema":"attacker"}', encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = EconomicGoalStore(workspace)
+    try:
+        os.link(outside, store.path)
+    except OSError as exc:
+        pytest.skip(f"hard-link creation unavailable: {exc}")
+
+    with pytest.raises(EconomicGoalContractError, match="hard-link aliases"):
+        store.load()
+
+
+def test_store_load_rejects_oversize_bytes_without_unbounded_read(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.path.write_bytes(
+        b" " * (economic_goal_store_module._MAX_ECONOMIC_GOAL_JSON_BYTES + 1)
+    )
+
+    with pytest.raises(EconomicGoalContractError, match="byte-size limit"):
+        store.load()
+
+
+def test_store_load_normalizes_invalid_utf8_to_contract_error(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.path.write_bytes(b"\xff")
+
+    with pytest.raises(EconomicGoalContractError, match="valid UTF-8"):
+        store.load()

@@ -6190,3 +6190,151 @@ def test_desktop_failure_restores_lifecycle_class_mutation() -> None:
 
         assert type(lifecycle) is continuous_session.ContinuousEventLifecycle
         assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+def test_collector_cannot_consume_pending_invalidations() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        buffer._dirty[("provider-a", "quote-1")] = None
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop ran after collector stole invalidation")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after collector stole invalidation")
+
+        coordinator.collector = _Collector(
+            callback=lambda: buffer.drain(max_items=250)
+        )
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="collector observation consumed pending invalidations",
+        ):
+            coordinator.tick()
+
+        assert buffer.pending_count == 0
+        assert buffer.full_refresh_required is True
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_collector_failure_after_consuming_invalidation_preserves_error_and_recovers() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        buffer._dirty[("provider-a", "quote-1")] = None
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class FailingCollector(_Collector):
+            def run_cycle(self):
+                buffer.drain(max_items=250)
+                raise RuntimeError("collector failed after consuming invalidation")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = FailingCollector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            RuntimeError,
+            match="collector failed after consuming invalidation",
+        ):
+            coordinator.tick()
+
+        assert buffer.pending_count == 0
+        assert buffer.full_refresh_required is True
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+
+def test_desktop_cannot_consume_pending_invalidations() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        buffer._dirty[("provider-a", "quote-1")] = None
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                buffer.drain(max_items=250)
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after desktop stole invalidation")
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="desktop delivery consumed pending invalidations",
+        ):
+            coordinator.tick()
+
+        assert buffer.pending_count == 0
+        assert buffer.full_refresh_required is True
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_desktop_failure_after_consuming_invalidation_preserves_error_and_recovers() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        buffer._dirty[("provider-a", "quote-1")] = None
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                buffer.drain(max_items=250)
+                raise RuntimeError("desktop failed after consuming invalidation")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            RuntimeError,
+            match="desktop failed after consuming invalidation",
+        ):
+            coordinator.tick()
+
+        assert buffer.pending_count == 0
+        assert buffer.full_refresh_required is True
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"

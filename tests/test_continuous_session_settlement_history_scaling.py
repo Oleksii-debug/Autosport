@@ -1279,6 +1279,59 @@ def test_operational_checkpoint_presence_probe_code_identity_is_immutable() -> N
             original_lstat.__code__ = original_code
 
 
+def test_snapshot_ignores_rebound_sidecar_dispatch_helpers(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_error_checkpoint_present",
+            lambda _self: False,
+        )
+
+        def attacker_read(_self: object) -> dict[str, object]:
+            raise AssertionError("runtime-rebound sidecar reader executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_read_error_checkpoint",
+            attacker_read,
+        )
+
+        assert state.snapshot().last_error_code == "CANONICAL_FAILURE"
+
+
+def test_snapshot_sidecar_dispatch_code_identity_is_immutable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        descriptor = continuous_session._ContinuousSessionState.__dict__[
+            "_error_checkpoint_present"
+        ]
+        original_probe = descriptor
+        original_code = original_probe.__code__
+
+        def attacker_probe(_self: object) -> bool:
+            return False
+
+        try:
+            original_probe.__code__ = attacker_probe.__code__
+            try:
+                state.snapshot()
+            except continuous_session.ContinuousSessionError as exc:
+                assert "snapshot authority" in str(exc)
+            else:
+                raise AssertionError(
+                    "mutated sidecar presence helper bypassed snapshot authority"
+                )
+        finally:
+            original_probe.__code__ = original_code
+
+
 def test_operational_checkpoint_helper_rebinding_cannot_redirect_verified_read(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

@@ -853,10 +853,30 @@ class _ContinuousSessionState:
         raw["settlement_evidence"] = [dict(item) for item in evidence]
         return raw
 
-    def snapshot(self) -> ContinuousSessionStatus:
+    def snapshot(
+        self,
+        *,
+        _error_checkpoint_present: Callable[["_ContinuousSessionState"], bool] = (
+            _error_checkpoint_present
+        ),
+        _error_checkpoint_present_code: object = _error_checkpoint_present.__code__,
+        _read_error_checkpoint: Callable[
+            ["_ContinuousSessionState"], dict[str, Any]
+        ] = _read_error_checkpoint,
+        _read_error_checkpoint_code: object = _read_error_checkpoint.__code__,
+    ) -> ContinuousSessionStatus:
+        if (
+            getattr(_error_checkpoint_present, "__code__", None)
+            is not _error_checkpoint_present_code
+            or getattr(_read_error_checkpoint, "__code__", None)
+            is not _read_error_checkpoint_code
+        ):
+            raise ContinuousSessionError(
+                "canonical operational-checkpoint snapshot authority changed"
+            )
         raw = self._read()
-        if self._error_checkpoint_present():
-            error_checkpoint = self._read_error_checkpoint()
+        if _error_checkpoint_present(self):
+            error_checkpoint = _read_error_checkpoint(self)
             marker_matches = (
                 error_checkpoint["observed_cycles_completed"] == raw["cycles_completed"]
                 and error_checkpoint["observed_last_success_at"] == raw["last_success_at"]

@@ -780,11 +780,15 @@ class ProductEconomicSessionStore:
             except AttributeError:
                 descriptor = cls.__dict__[name]
             else:
-                descriptor = next(
-                    candidate
-                    for protected_name, candidate in witnesses
+                descriptor, code = next(
+                    (candidate, candidate_code)
+                    for protected_name, candidate, candidate_code in witnesses
                     if protected_name == name
                 )
+                if code is not None and getattr(descriptor, "__code__", None) is not code:
+                    raise EconomicSessionIntegrityError(
+                        "economic-session authority method code changed"
+                    )
             return descriptor.__get__(self, cls)
         return object.__getattribute__(self, name)
 
@@ -820,8 +824,14 @@ class ProductEconomicSessionStore:
                 "economic-session store method authority is not initialized"
             )
         cls = object.__getattribute__(self, "__class__")
-        for method_name, descriptor in canonical_methods:
-            if cls.__dict__.get(method_name) is not descriptor:
+        for method_name, descriptor, code in canonical_methods:
+            if (
+                cls.__dict__.get(method_name) is not descriptor
+                or (
+                    code is not None
+                    and getattr(descriptor, "__code__", None) is not code
+                )
+            ):
                 raise EconomicSessionIntegrityError(
                     "economic-session store method authority changed"
                 )
@@ -1119,7 +1129,11 @@ class ProductEconomicSessionStore:
             is not _PRODUCT_ECONOMIC_SESSION_STORE_METHODS
             or _any(
                 _type(self).__dict__.get(name) is not descriptor
-                for name, descriptor in self._protected_method_witnesses
+                or (
+                    code is not None
+                    and _getattr(descriptor, "__code__", None) is not code
+                )
+                for name, descriptor, code in self._protected_method_witnesses
             )
             or _type(self).__dict__.get("current") is not self._current_method_witness
             or (
@@ -1476,8 +1490,14 @@ class ProductEconomicSessionStore:
         )
 
 
-_PRODUCT_ECONOMIC_SESSION_STORE_METHODS: tuple[tuple[str, object], ...] | None = tuple(
-    (name, ProductEconomicSessionStore.__dict__[name])
+_PRODUCT_ECONOMIC_SESSION_STORE_METHODS: (
+    tuple[tuple[str, object, object | None], ...] | None
+) = tuple(
+    (
+        name,
+        ProductEconomicSessionStore.__dict__[name],
+        getattr(ProductEconomicSessionStore.__dict__[name], "__code__", None),
+    )
     for name in (
         "current",
         "require_current",

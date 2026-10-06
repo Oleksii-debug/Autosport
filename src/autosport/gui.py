@@ -128,6 +128,9 @@ class AutosportApp(tk.Tk):
         self._active_strategy_id = "baseline-v1"
         self._active_research_plan: ResearchStrategyPlan | None = None
         self._closing = False
+        self._close_teardown_unresolved = False
+        self._close_teardown_workspace: Path | None = None
+        self._last_teardown_failure_workspace: Path | None = None
         startup_status = (
             text("ui.status.startup.ready")
             if self._startup_economic_error is None
@@ -447,10 +450,23 @@ class AutosportApp(tk.Tk):
         return None
 
     def _evidence_export_workspace(self) -> Path | None:
-        value = self.__dict__.get("_active_workspace")
-        if value is None:
-            value = self.__dict__.get("workspace")
-        return None if value is None else Path(value)
+        base_workspace = self.__dict__.get("workspace")
+        if base_workspace is None:
+            return None
+        try:
+            strategy_id, research_plan = self._selected_replay_configuration()
+            return Path(
+                workspace_for_strategy(
+                    Path(base_workspace),
+                    strategy_id,
+                    research_plan,
+                )
+            )
+        except Exception:
+            # Evidence export is identity-sensitive. If the currently selected
+            # strategy/research-plan configuration cannot be resolved, never
+            # fall back to a stale workspace from an earlier replay/recovery.
+            return None
 
     def _dataset_selection_blocker(self) -> str | None:
         if self._dataset_busy:
@@ -467,6 +483,7 @@ class AutosportApp(tk.Tk):
         return None
 
     def _hide_uncertain_economic_state(self, ticket_message: str) -> bool:
+        self._last_teardown_failure_workspace = None
         session = self.session
         self.session = None
         self.bank.set(
@@ -476,22 +493,65 @@ class AutosportApp(tk.Tk):
         self.tickets.insert("end", ticket_message)
         if session is None:
             return True
+
+        # Resolve the exact detached session workspace without invoking a property
+        # after teardown has already failed. Hostile/corrupt metadata must not
+        # replace the primary close failure or prevent fail-closed quarantine.
+        session_workspace: Path | None = None
+        try:
+            session_state = object.__getattribute__(session, "__dict__")
+        except BaseException:
+            session_state = None
+        if isinstance(session_state, dict) and session_state.get("workspace") is not None:
+            try:
+                session_workspace = Path(session_state["workspace"])
+            except (TypeError, ValueError):
+                session_workspace = None
+        if session_workspace is None:
+            active_workspace = self.__dict__.get("_active_workspace")
+            if active_workspace is not None:
+                try:
+                    session_workspace = Path(active_workspace)
+                except (TypeError, ValueError):
+                    session_workspace = None
+
         try:
             session.close()
         except BaseException as exc:
-            session_workspace = Path(session.workspace)
-            self._block_workspace_for_recovery(session_workspace)
+            self._last_teardown_failure_workspace = session_workspace
+            if session_workspace is not None:
+                self._block_workspace_for_recovery(session_workspace)
             if not isinstance(exc, Exception):
                 raise
             self._append_log(
                 text(
                     "ui.log.session.teardown_secondary",
-                    workspace=session_workspace,
+                    workspace=session_workspace if session_workspace is not None else "?",
                     detail=_safe_exception_text(exc),
                 )
             )
             return False
         return True
+
+    def _remember_close_teardown_failure(self) -> None:
+        self._close_teardown_unresolved = True
+        failed_workspace = self.__dict__.get("_last_teardown_failure_workspace")
+        self._close_teardown_workspace = (
+            Path(failed_workspace) if failed_workspace is not None else None
+        )
+
+    def _clear_close_teardown_after_recovery(self, workspace: Path) -> None:
+        if not self.__dict__.get("_close_teardown_unresolved", False):
+            return
+        target = self.__dict__.get("_close_teardown_workspace")
+        # Workspace-scoped recovery can only prove teardown reconciliation when
+        # the failed detached session was bound to that exact workspace. If the
+        # teardown identity was unavailable, recovering an arbitrary known
+        # workspace must never launder the unknown economic state into "safe".
+        if target is None or Path(target) != Path(workspace):
+            return
+        self._close_teardown_unresolved = False
+        self._close_teardown_workspace = None
 
     def choose_dataset(self) -> None:
         if self._closing:
@@ -808,10 +868,12 @@ class AutosportApp(tk.Tk):
             return
 
         replay_workspace = Path(replay_workspace)
-        self._active_workspace = replay_workspace
-        self._active_strategy_id = strategy_id
-        self._active_research_plan = research_plan
-        self._recovery_required_workspaces.add(replay_workspace)
+
+        # Teardown still belongs to the currently attached economic workspace.
+        # Do not adopt the newly selected recovery target until that teardown is
+        # proven successful: if session workspace metadata is unavailable, the
+        # quarantine fallback must remain the prior _active_workspace rather than
+        # misattributing uncertain old state to an untouched new target.
         teardown_succeeded = self._hide_uncertain_economic_state(
             text("ui.status.recovery.in_progress_ticket")
         )
@@ -821,6 +883,11 @@ class AutosportApp(tk.Tk):
             self._append_log(detail)
             messagebox.showerror(text("ui.dialog.title"), detail)
             return
+
+        self._active_workspace = replay_workspace
+        self._active_strategy_id = strategy_id
+        self._active_research_plan = research_plan
+        self._recovery_required_workspaces.add(replay_workspace)
 
         try:
             report = reconcile_late_crashes(replay_workspace)
@@ -869,6 +936,7 @@ class AutosportApp(tk.Tk):
         self.bank.set(self._bank_text())
         self._refresh_tickets()
         self._recovery_required_workspaces.discard(replay_workspace)
+        self._clear_close_teardown_after_recovery(replay_workspace)
         self.status.set(summary + text("ui.status.recovery.ready_suffix"))
         messagebox.showinfo(text("ui.dialog.title"), text("ui.info.recovery.complete"))
 
@@ -932,7 +1000,29 @@ class AutosportApp(tk.Tk):
             )
 
         if not self.replay_worker.start(task):
-            self.session = self._open_session(strategy_id, research_plan)
+            try:
+                self.session = self._open_session(strategy_id, research_plan)
+            except Exception as exc:
+                self._recovery_required_workspaces.add(replay_workspace)
+                self._hide_uncertain_economic_state(
+                    text("ui.status.replay.reopen_ticket")
+                )
+                self._set_evaluation_lines(
+                    [text("ui.evaluation.reopen_failed")]
+                )
+                detail = text(
+                    "ui.error.replay.reopen",
+                    detail=_safe_exception_text(exc),
+                )
+                self.status.set(text("ui.status.replay.reopen_blocked"))
+                self._append_log(detail)
+                messagebox.showerror(text("ui.dialog.title"), detail)
+                return
+            self._active_strategy_id = strategy_id
+            self._active_research_plan = research_plan
+            self._startup_economic_error = None
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
             self.status.set(text("ui.status.replay.start_failed"))
             return
 
@@ -1046,19 +1136,56 @@ class AutosportApp(tk.Tk):
             self._append_log(close_message)
             self.bell()
             return
+        recovery_worker = self.__dict__.get("recovery_worker")
+        if recovery_worker is not None and recovery_worker.busy:
+            close_message = text("ui.status.close.recovery_busy")
+            self.status.set(close_message)
+            self._append_log(close_message)
+            self.bell()
+            return
         if self._evidence_export_busy:
             close_message = text("ui.status.close.evidence_export_busy")
             self.status.set(close_message)
             self._append_log(close_message)
             self.bell()
             return
+        if self.__dict__.get("_close_teardown_unresolved", False):
+            close_message = text("ui.status.close.teardown_blocked")
+            self.status.set(close_message)
+            self._append_log(close_message)
+            self.bell()
+            messagebox.showerror(
+                text("ui.dialog.title"),
+                text("ui.error.close.teardown"),
+            )
+            return
         self._closing = True
         try:
-            if self.session is not None:
-                self.session.close()
-                self.session = None
-        finally:
-            self.destroy()
+            teardown_succeeded = self._hide_uncertain_economic_state(
+                text("ui.status.close.teardown_ticket")
+            )
+        except BaseException:
+            # Process-control exceptions still leave economic truth quarantined by
+            # _hide_uncertain_economic_state. Persist the close latch too so a
+            # later close gesture cannot reinterpret the detached session as safe.
+            self._remember_close_teardown_failure()
+            self._closing = False
+            raise
+        if not teardown_succeeded:
+            self._remember_close_teardown_failure()
+            self._closing = False
+            close_message = text("ui.status.close.teardown_blocked")
+            self.status.set(close_message)
+            self._append_log(close_message)
+            self.bell()
+            messagebox.showerror(
+                text("ui.dialog.title"),
+                text("ui.error.close.teardown"),
+            )
+            return
+        self._close_teardown_unresolved = False
+        self._close_teardown_workspace = None
+        self.destroy()
 
 
 def main() -> int:

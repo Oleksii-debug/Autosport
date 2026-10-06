@@ -939,6 +939,27 @@ def test_operation_lock_dispatch_ignores_module_rebinding(monkeypatch) -> None:
     assert attacker_calls == 0
 
 
+def test_operation_lock_dispatch_rejects_outer_closure_retarget() -> None:
+    authority = paper_module._require_paperbook_operation_lock
+    target_cell = next(
+        cell
+        for cell in authority.__closure__ or ()
+        if type(cell.cell_contents) is dict
+    )
+    original_value = target_cell.cell_contents
+
+    try:
+        target_cell.cell_contents = {}
+        book = PaperBook("100")
+        with pytest.raises(
+            ValueError,
+            match=r"operation lock authority closure changed",
+        ):
+            _ = book.committed_stake
+    finally:
+        target_cell.cell_contents = original_value
+
+
 def test_operation_lock_dispatch_rejects_in_place_code_mutation() -> None:
     book = PaperBook("100")
     authority = paper_module._require_paperbook_operation_lock

@@ -708,3 +708,64 @@ def test_retire_rejects_canonical_but_collateral_identity_transition(
             dependency_index=index,
             unregister_input=index.unregister,
         )
+
+
+
+def test_register_accepts_exact_append_only_identity_transition() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    class Index:
+        def __init__(self) -> None:
+            self.input_ids = ("existing-a", "existing-b")
+
+        def register(self, input_id: str, **_selectors: object) -> None:
+            self.input_ids = (*self.input_ids, input_id)
+
+    index = Index()
+    assert coordinator._register_input(
+        "input-new",
+        dependency_index=index,
+        register_input=index.register,
+    )
+    assert index.input_ids == ("existing-a", "existing-b", "input-new")
+
+
+def test_retire_accepts_exact_target_only_identity_transition() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    class Index:
+        def __init__(self) -> None:
+            self.input_ids = ("keep-a", "input-1", "keep-b")
+
+        def unregister(self, input_id: str) -> bool:
+            self.input_ids = tuple(
+                value for value in self.input_ids if value != input_id
+            )
+            return True
+
+    index = Index()
+    assert coordinator._retire_input(
+        "input-1",
+        dependency_index=index,
+        unregister_input=index.unregister,
+    )
+    assert index.input_ids == ("keep-a", "keep-b")
+
+
+def test_retire_accepts_exact_noop_when_target_is_absent() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    class Index:
+        def __init__(self) -> None:
+            self.input_ids = ("keep-a", "keep-b")
+
+        def unregister(self, _input_id: str) -> bool:
+            return False
+
+    index = Index()
+    assert not coordinator._retire_input(
+        "input-1",
+        dependency_index=index,
+        unregister_input=index.unregister,
+    )
+    assert index.input_ids == ("keep-a", "keep-b")

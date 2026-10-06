@@ -2387,6 +2387,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         collector: HeadlessCollectorService | None = None,
         source_id: str | None = None,
         delta_store: Any | None = None,
+        read_deltas: Callable[..., tuple[CollectorDelta, ...]] | None = None,
         max_items: int | None = None,
         _snapshot_method: Callable[
             ["_ContinuousSessionState"], ContinuousSessionStatus
@@ -2414,6 +2415,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         collector = self.collector if collector is None else collector
         source_id = collector.source_id if source_id is None else source_id
         delta_store = collector.delta_store if delta_store is None else delta_store
+        read_deltas = (
+            getattr(delta_store, "deltas_after_commit", None)
+            if read_deltas is None
+            else read_deltas
+        )
         max_items = collector.config.max_items if max_items is None else max_items
         if (
             type(source_id) is not str
@@ -2421,16 +2427,24 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             or source_id.strip() != source_id
             or type(max_items) is not int
             or max_items <= 0
+            or not callable(read_deltas)
         ):
             raise ContinuousSessionError(
                 "collector projection configuration is invalid"
             )
         snapshot = _snapshot_method(self._state)
-        deltas = delta_store.deltas_after_commit(
+        deltas = read_deltas(
             source_id=source_id,
             after_delta_id=snapshot.source_state_delta_id,
             max_items=max_items + 1,
         )
+        if (
+            type(deltas) is not tuple
+            or any(type(delta) is not CollectorDelta for delta in deltas)
+        ):
+            raise ContinuousSessionError(
+                "collector projection returned invalid deltas"
+            )
         backlog = len(deltas) > max_items
         selected = deltas[:max_items]
         _record_source_projection_method(
@@ -2929,6 +2943,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         collector_run_cycle = collector.run_cycle
         collector_source_id = collector.source_id
         collector_delta_store = collector.delta_store
+        collector_delta_reader = collector_delta_store.deltas_after_commit
         collector_max_items = collector.config.max_items
         lifecycle = self.lifecycle
         lifecycle_register_eligible = lifecycle.register_eligible
@@ -3102,6 +3117,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     collector=collector,
                     source_id=collector_source_id,
                     delta_store=collector_delta_store,
+                    read_deltas=collector_delta_reader,
                     max_items=collector_max_items,
                 )
                 source_gap_states = (

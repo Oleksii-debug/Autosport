@@ -3016,7 +3016,9 @@ class PersistentLiveDecisionLoop:
                         "actionability provider-health evidence lacks input horizons"
                     )
                 component_source_ids = {
-                    component.source_id for component in diagnostic.components
+                    component.source_id
+                    for component in diagnostic.components
+                    if not component.wait_reasons
                 }
                 if set(source_ids) != component_source_ids:
                     raise LiveDecisionProgressError(
@@ -5889,10 +5891,10 @@ class PersistentLiveDecisionLoop:
                 raise DecisionLedgerIntegrityError(
                     "committed actionability WAIT evidence is invalid"
                 ) from exc
-            registered = frozenset(progress.registered_input_ids)
-            if any(item["input_id"] not in registered for item in wait_evidence):
+            affected = frozenset(progress.affected_input_ids)
+            if any(item["input_id"] not in affected for item in wait_evidence):
                 raise DecisionLedgerIntegrityError(
-                    "actionability WAIT evidence references an unregistered input"
+                    "actionability WAIT evidence references an unaffected input"
                 )
             if payload_version == 5:
                 context_payload["actionability_wait_evidence_sha256"] = (

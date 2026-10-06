@@ -26,6 +26,9 @@ from .workspace_lock import WorkspaceEconomicLock
 
 ECONOMIC_GOAL_SCHEMA: Final = "autosport.economic_goal_contract"
 ECONOMIC_GOAL_SCHEMA_VERSION: Final = 1
+_MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS: Final = 512
+_MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS: Final = 1024
+_MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS: Final = 512
 
 _CONTRACT_KEYS: Final = frozenset(
     {
@@ -99,6 +102,10 @@ def _decimal_text(name: str, value: object) -> Decimal:
         raise EconomicGoalContractError(f"{name} must be a Decimal string")
     if not value or value != value.strip():
         raise EconomicGoalContractError(f"{name} must be a canonical Decimal string")
+    if len(value) > _MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS:
+        raise EconomicGoalContractError(
+            f"{name} Decimal text exceeds the canonical size limit"
+        )
     try:
         parsed = Decimal(value)
     except InvalidOperation as exc:
@@ -113,8 +120,22 @@ def _decimal_text(name: str, value: object) -> Decimal:
 def _restriction_set(name: str, value: object) -> frozenset[str]:
     if type(value) is not list:
         raise EconomicGoalContractError(f"{name} must be a sorted JSON array")
-    if any(type(item) is not str for item in value):
-        raise EconomicGoalContractError(f"{name} must contain only strings")
+    if len(value) > _MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS:
+        raise EconomicGoalContractError(
+            f"{name} exceeds the canonical restriction-count limit"
+        )
+    for item in value:
+        if type(item) is not str:
+            raise EconomicGoalContractError(f"{name} must contain only strings")
+        if (
+            not item
+            or item != item.strip()
+            or len(item) > _MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS
+            or "\x00" in item
+        ):
+            raise EconomicGoalContractError(
+                f"{name} contains non-canonical restriction text"
+            )
     if value != sorted(value) or len(value) != len(set(value)):
         raise EconomicGoalContractError(
             f"{name} must be sorted and contain unique strings"

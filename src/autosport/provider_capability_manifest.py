@@ -178,18 +178,24 @@ def _validate_exact_profile(
 def _profile_state(
     profile: BookmakerCapabilityProfile,
     capability: BookmakerCapability,
+    _unknown=BookmakerCapabilityState.UNKNOWN,
+    _supported=BookmakerCapabilityState.SUPPORTED,
+    _unsupported=BookmakerCapabilityState.UNSUPPORTED,
+    _proven=ProviderManifestState.PROVEN,
+    _not_proven=ProviderManifestState.NOT_PROVEN,
+    _manifest_unsupported=ProviderManifestState.UNSUPPORTED,
 ) -> ProviderManifestState:
-    state = BookmakerCapabilityState.UNKNOWN
+    state = _unknown
     for fact in profile.facts:
         if fact.capability is capability:
             state = fact.state
             break
-    if state is BookmakerCapabilityState.SUPPORTED:
-        return ProviderManifestState.PROVEN
-    if state is BookmakerCapabilityState.UNSUPPORTED:
-        return ProviderManifestState.UNSUPPORTED
-    if state is BookmakerCapabilityState.UNKNOWN:
-        return ProviderManifestState.NOT_PROVEN
+    if state is _supported:
+        return _proven
+    if state is _unsupported:
+        return _manifest_unsupported
+    if state is _unknown:
+        return _not_proven
     raise ProviderCapabilityManifestError("canonical profile returned an unknown state")
 
 
@@ -352,9 +358,21 @@ class ProviderCapabilityEvidenceRef(metaclass=_SealedProviderManifestAuthorityTy
         _sha256(self.integration_evidence_id, "integration_evidence_id")
 
     @property
-    def evidence_id(self) -> str:
-        encoded = _canonical_json(self.to_canonical_dict()).encode("utf-8")
-        return sha256(encoded).hexdigest()
+    def evidence_id(
+        self,
+        _canonical_json_fn=_canonical_json,
+        _canonical_json_code: object = _canonical_json.__code__,
+        _sha256=sha256,
+    ) -> str:
+        if (
+            getattr(_canonical_json_fn, "__code__", None)
+            is not _canonical_json_code
+        ):
+            raise ProviderCapabilityManifestError(
+                "canonical digest serializer changed"
+            )
+        encoded = _canonical_json_fn(self.to_canonical_dict()).encode("utf-8")
+        return _sha256(encoded).hexdigest()
 
     def to_canonical_dict(self) -> dict[str, object]:
         return {
@@ -712,8 +730,22 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         return self.integration.integration_kind
 
     @property
-    def manifest_sha256(self) -> str:
-        return sha256(_canonical_json(self.to_canonical_dict()).encode("utf-8")).hexdigest()
+    def manifest_sha256(
+        self,
+        _canonical_json_fn=_canonical_json,
+        _canonical_json_code: object = _canonical_json.__code__,
+        _sha256=sha256,
+    ) -> str:
+        if (
+            getattr(_canonical_json_fn, "__code__", None)
+            is not _canonical_json_code
+        ):
+            raise ProviderCapabilityManifestError(
+                "canonical digest serializer changed"
+            )
+        return _sha256(
+            _canonical_json_fn(self.to_canonical_dict()).encode("utf-8")
+        ).hexdigest()
 
     @property
     def manifest_id(self) -> str:

@@ -523,6 +523,7 @@ def test_state_rejects_generation_rewind_or_duplicate_active_generation() -> Non
             2,
         )
 
+
 def test_projection_gate_rejects_subclassed_authority_inputs_before_mutation() -> None:
     class RequestId(str):
         pass
@@ -571,6 +572,7 @@ def test_projection_gate_rejects_subclassed_authority_inputs_before_mutation() -
             (),
             1,
         )
+
 
 def test_restart_revalidates_tampered_frozen_projection_state() -> None:
     value = gate()

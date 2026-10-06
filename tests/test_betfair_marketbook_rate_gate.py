@@ -460,6 +460,7 @@ def test_rate_decision_rejects_inconsistent_or_widened_authority() -> None:
             provider_dispatch_authorized=True,
         )
 
+
 def test_rate_gate_rejects_subclassed_authority_inputs_before_mutation() -> None:
     class MarketId(str):
         pass
@@ -494,6 +495,7 @@ def test_rate_gate_rejects_subclassed_authority_inputs_before_mutation() -> None
             None,
             (),
         )
+
 
 def test_rate_inputs_are_normalized_before_gate_lock() -> None:
     gate = BetfairMarketBookPerMarketRateGate()
@@ -543,6 +545,7 @@ def test_rate_inputs_are_normalized_before_gate_lock() -> None:
     assert decision.market_ids == ("1.1",)
     assert probe.entries == 1
     assert probe.depth == 0
+
 
 def test_restart_revalidates_tampered_frozen_rate_state() -> None:
     gate = BetfairMarketBookPerMarketRateGate()

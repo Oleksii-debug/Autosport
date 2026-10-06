@@ -391,6 +391,7 @@ class _ContinuousSessionState:
             type(raw) is not dict
             or set(raw) != self._ERROR_FIELDS
             or raw["schema"] != self._ERROR_SCHEMA
+            or type(raw["schema_version"]) is not int
             or raw["schema_version"] != self._ERROR_VERSION
             or raw["session_id"] != self._session_id
             or raw["source_id"] != self.source_id

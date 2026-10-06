@@ -304,8 +304,5 @@ def test_provenance_for_revalidates_when_class_post_init_is_rebound(monkeypatch)
 
     monkeypatch.setattr(EconomicGoalProvenance, "__post_init__", lambda self: None)
 
-    evidence = provenance_for(goal)
-    object.__setattr__(evidence, "goal_id", "")
-
-    with pytest.raises(EconomicGoalProvenanceError):
-        verify_provenance(goal, evidence)
+    with pytest.raises(EconomicGoalProvenanceError, match="SHA-256 hex"):
+        provenance_for(goal, _contract_sha256=lambda contract: "not-a-digest")

@@ -825,3 +825,57 @@ def test_invalid_sidecar_error_code_is_normalized_to_domain_error() -> None:
             assert "invalid field" in str(exc)
         else:
             raise AssertionError("invalid last_error_code escaped validation")
+
+
+def test_durable_session_writer_ignores_runtime_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        def attacker_write(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("runtime-rebound atomic_write_json gained session authority")
+
+        monkeypatch.setattr(continuous_session, "atomic_write_json", attacker_write)
+
+        state.record_success(
+            at=_AT,
+            full_refresh=False,
+            settlement_evidence=(),
+        )
+
+        snapshot = state.snapshot()
+        assert snapshot.cycles_completed == 1
+        assert snapshot.last_success_at == _AT
+
+
+def test_durable_session_parser_ignores_runtime_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        def attacker_parser(_text: object) -> object:
+            raise AssertionError("runtime-rebound strict_json_loads gained session authority")
+
+        monkeypatch.setattr(continuous_session, "strict_json_loads", attacker_parser)
+
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        assert reopened.snapshot().session_id == "session-history-scaling"
+
+
+def test_durable_session_path_reader_ignores_runtime_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        def attacker_read_text(*_args: object, **_kwargs: object) -> str:
+            raise AssertionError("runtime-rebound Path.read_text gained session authority")
+
+        monkeypatch.setattr(Path, "read_text", attacker_read_text)
+
+        assert state.snapshot().cycles_completed == 0

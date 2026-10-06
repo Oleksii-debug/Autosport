@@ -866,3 +866,68 @@ def test_bound_identity_fields_cannot_be_rewritten_with_coordinated_truth_mutati
     ):
         manifest.state_of(ProviderManifestCapability.PREMATCH_QUOTES)
 
+def test_builder_uses_original_manifest_constructor_after_module_rebinding(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    original_manifest_type = ProviderCapabilityManifest
+    monkeypatch.setattr(
+        provider_manifest_module,
+        "ProviderCapabilityManifest",
+        lambda **kwargs: object(),
+    )
+
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=26,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+
+    assert type(manifest) is original_manifest_type
+    assert manifest.state_of(ProviderManifestCapability.STREAM) is (
+        ProviderManifestState.NOT_PROVEN
+    )
+
+
+def test_builder_and_manifest_validation_use_original_fact_type_after_module_rebinding(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    monkeypatch.setattr(
+        provider_manifest_module,
+        "ProviderCapabilityManifestFact",
+        object,
+    )
+
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=27,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+
+    assert type(manifest.facts[0]) is ProviderCapabilityManifestFact
+    assert manifest.supports(ProviderManifestCapability.LIVE_QUOTES) is True
+    assert manifest.supports(ProviderManifestCapability.STREAM) is False
+

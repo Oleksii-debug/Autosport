@@ -1225,3 +1225,86 @@ def test_operational_checkpoint_path_lstat_rebinding_fails_closed(monkeypatch) -
             raise AssertionError("runtime-rebound Path.lstat was accepted")
 
         monkeypatch.setattr(Path, "lstat", original_lstat)
+
+
+def test_operational_checkpoint_helper_rebinding_cannot_redirect_verified_read(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        def attacker_read(*_args: object, **_kwargs: object) -> bytes:
+            raise AssertionError("runtime-rebound bounded reader executed")
+
+        def attacker_identity(_info: object) -> tuple[int, int]:
+            raise AssertionError("runtime-rebound file identity helper executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_bounded_descriptor_read",
+            staticmethod(attacker_read),
+        )
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_file_identity",
+            staticmethod(attacker_identity),
+        )
+
+        checkpoint = state._read_error_checkpoint()
+        assert checkpoint["last_error_code"] == "CANONICAL_FAILURE"
+
+
+def test_operational_checkpoint_helper_code_identity_is_immutable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        descriptor = continuous_session._ContinuousSessionState.__dict__[
+            "_bounded_descriptor_read"
+        ]
+        original_reader = descriptor.__func__
+        original_code = original_reader.__code__
+
+        def attacker_reader(*_args: object, **_kwargs: object) -> bytes:
+            raise AssertionError("mutated bounded reader executed")
+
+        try:
+            original_reader.__code__ = attacker_reader.__code__
+            try:
+                state._read_error_checkpoint()
+            except continuous_session.ContinuousSessionError as exc:
+                assert "filesystem authority" in str(exc)
+            else:
+                raise AssertionError("mutated bounded reader was accepted")
+        finally:
+            original_reader.__code__ = original_code
+
+
+def test_operational_checkpoint_stat_and_seek_authority_rebinding_fails_closed(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        original_isreg = continuous_session.stat.S_ISREG
+        monkeypatch.setattr(continuous_session.stat, "S_ISREG", lambda _mode: True)
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "filesystem authority" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound stat.S_ISREG was accepted")
+        finally:
+            monkeypatch.setattr(continuous_session.stat, "S_ISREG", original_isreg)
+
+        original_seek_set = continuous_session.os.SEEK_SET
+        monkeypatch.setattr(continuous_session.os, "SEEK_SET", original_seek_set + 1)
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "filesystem authority" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound os.SEEK_SET was accepted")

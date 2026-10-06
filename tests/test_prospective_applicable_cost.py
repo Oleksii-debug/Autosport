@@ -190,6 +190,61 @@ def test_module_type_model_resolver_and_semantic_rebinding_cannot_redirect_seale
     assert len(result.components) == 5
 
 
+def test_sealed_resolver_ignores_rebound_builtin_and_object_dispatch(
+    monkeypatch,
+):
+    sealed_resolver = subject.resolve_prospective_applicable_costs
+    attacker_called = False
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound builtin dispatch must never execute")
+
+    class HostileObject:
+        @staticmethod
+        def __getattribute__(*_args, **_kwargs):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("rebound object.__getattribute__ must never execute")
+
+        @staticmethod
+        def __new__(*_args, **_kwargs):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("rebound object.__new__ must never execute")
+
+        @staticmethod
+        def __setattr__(*_args, **_kwargs):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("rebound object.__setattr__ must never execute")
+
+    monkeypatch.setattr(subject, "type", hostile, raising=False)
+    monkeypatch.setattr(subject, "object", HostileObject)
+    monkeypatch.setattr(subject, "str", hostile, raising=False)
+    monkeypatch.setattr(subject, "tuple", hostile, raising=False)
+    monkeypatch.setattr(subject, "any", hostile, raising=False)
+    monkeypatch.setattr(subject, "len", hostile, raising=False)
+    monkeypatch.setattr(subject, "enumerate", hostile, raising=False)
+    monkeypatch.setattr(subject, "bool", hostile, raising=False)
+    monkeypatch.setattr(subject, "UnicodeEncodeError", RuntimeError, raising=False)
+    monkeypatch.setattr(subject, "ValueError", RuntimeError, raising=False)
+
+    with canonical_applicable_cost_case() as (intent, plan, store, request, decision_at):
+        result = sealed_resolver(
+            intent=intent,
+            plan=plan,
+            router_store=store,
+            model_request_id=request.request_id,
+            decision_at=decision_at,
+        )
+
+    assert attacker_called is False
+    subject._SEALED_RESOLUTION_VALIDATOR(result)
+    assert type(result) is subject._SEALED_CANONICAL_TYPES[2]
+
+
 def test_public_resolver_name_rebinding_does_not_mutate_preinstalled_sealed_capability(
     monkeypatch,
 ):

@@ -540,3 +540,35 @@ def test_settlement_evidence_normalizer_rejects_runtime_timestamp_rebinding(
             evidence
         )
 
+@pytest.mark.parametrize("authority", ("text", "delta"))
+def test_source_projection_rejects_runtime_validation_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+    authority: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        before = path.read_bytes()
+
+        if authority == "text":
+            def attacker_text(_value: object, _field: str) -> str:
+                raise AssertionError("runtime-rebound projection text validator executed")
+
+            monkeypatch.setattr(continuous_session, "_text", attacker_text)
+        else:
+            def attacker_delta_validate(_self: object) -> None:
+                raise AssertionError("runtime-rebound CollectorDelta validator executed")
+
+            monkeypatch.setattr(
+                continuous_session.CollectorDelta,
+                "validate",
+                attacker_delta_validate,
+            )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical source-projection validation authority changed",
+        ):
+            state.record_source_projection(deltas=(), backlog=False)
+
+        assert path.read_bytes() == before
+

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
 import stat
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from itertools import islice
 from pathlib import Path
 from typing import Callable
@@ -17,7 +20,7 @@ from .causal_collector import (
     canonical_event_digest,
     digest_source_payload,
 )
-from .domain import MarketEvent, utc_now_iso
+from .domain import MarketEvent, MarketType, utc_now_iso
 from .event_lifecycle import (
     CatalogCheckpoint,
     CatalogEvent,
@@ -322,6 +325,13 @@ class ParlayApiProductSource:
             raise ProductSourcePayloadError(f"{field} must be valid ISO-8601") from exc
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise ProductSourcePayloadError(f"{field} must be timezone-aware ISO-8601")
+        fractional = re.search(r"\d{2}:?\d{2}:?\d{2}[.,](\d+)", raw)
+        if fractional is not None:
+            digits = fractional.group(1)
+            if len(digits) > 6 and any(digit != "0" for digit in digits[6:]):
+                raise ProductSourcePayloadError(
+                    f"{field} has non-zero precision finer than microseconds"
+                )
         return parsed.astimezone(timezone.utc)
 
     @staticmethod
@@ -1119,6 +1129,174 @@ class ParlayApiProductSource:
             elif item["delta"] is not None:
                 raise ProductSourceStateError("unassigned pending item cannot contain a delta")
 
+    @classmethod
+    def _snapshot_provider_metadata(
+        cls,
+        value: object,
+        *,
+        path: str = "metadata",
+        depth: int = 0,
+        active: set[int] | None = None,
+    ) -> object:
+        """Copy only exact canonical JSON value types without coercion."""
+
+        if depth > 64:
+            raise ProductSourcePayloadError(
+                "provider metadata exceeds acquisition snapshot depth"
+            )
+        if value is None or type(value) in (str, bool, int):
+            return value
+        if type(value) is float:
+            if not math.isfinite(value):
+                raise ProductSourcePayloadError(
+                    f"{path} contains non-finite JSON number"
+                )
+            return value
+        if type(value) not in (list, dict):
+            raise ProductSourcePayloadError(
+                f"{path} contains non-canonical JSON value type"
+            )
+
+        if active is None:
+            active = set()
+        marker = id(value)
+        if marker in active:
+            raise ProductSourcePayloadError(
+                f"{path} contains cyclic JSON container"
+            )
+        active.add(marker)
+        try:
+            if type(value) is list:
+                return [
+                    cls._snapshot_provider_metadata(
+                        item,
+                        path=f"{path}[{index}]",
+                        depth=depth + 1,
+                        active=active,
+                    )
+                    for index, item in enumerate(value)
+                ]
+
+            result: dict[str, object] = {}
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise ProductSourcePayloadError(
+                        f"{path} contains non-canonical JSON object key"
+                    )
+                result[key] = cls._snapshot_provider_metadata(
+                    item,
+                    path=f"{path}.{key}",
+                    depth=depth + 1,
+                    active=active,
+                )
+            return result
+        finally:
+            active.remove(marker)
+
+    @classmethod
+    def _snapshot_provider_quote(cls, quote: object) -> ProviderQuote:
+        """Revalidate one provider DTO at the product-source acquisition boundary.
+
+        ProviderQuote is frozen for ordinary callers, but frozen dataclasses can still
+        be mutated through low-level object.__setattr__ and subclasses can replace
+        descriptors. Constructor-time provider validation therefore is not sufficient
+        authority for bytes received later from an external provider adapter.
+        """
+
+        if type(quote) is not ProviderQuote:
+            raise ProductSourcePayloadError(
+                "provider batch requires exact ProviderQuote evidence"
+            )
+        required_text = (
+            quote.provider_event_id,
+            quote.provider_market_id,
+            quote.provider_selection_id,
+            quote.observed_ts,
+            quote.status,
+        )
+        optional_text = (
+            quote.source_ts,
+            quote.score_state,
+            quote.sport,
+            quote.exchange_side,
+        )
+        if (
+            any(type(value) is not str for value in required_text)
+            or any(value is not None and type(value) is not str for value in optional_text)
+            or type(quote.decimal_odds) is not Decimal
+            or type(quote.sequence) is not int
+            or type(quote.market_type) is not MarketType
+            or type(quote.metadata) is not dict
+        ):
+            raise ProductSourcePayloadError(
+                "provider quote uses non-canonical acquisition value types"
+            )
+        cls._instant(quote.observed_ts, "provider quote observed_ts")
+        if quote.source_ts is not None:
+            cls._instant(quote.source_ts, "provider quote source_ts")
+        try:
+            metadata = cls._snapshot_provider_metadata(quote.metadata)
+            if type(metadata) is not dict:
+                raise TypeError("provider quote metadata must be an object")
+            # Canonical JSON encode/decode is now only a determinism check/copy
+            # witness; the exact-type traversal above has already rejected values
+            # that JSON would otherwise coerce (for example tuple -> array).
+            metadata = strict_json_loads(cls._canonical_json(metadata))
+            if type(metadata) is not dict:
+                raise TypeError("provider quote metadata must be an object")
+            return ProviderQuote(
+                provider_event_id=quote.provider_event_id,
+                provider_market_id=quote.provider_market_id,
+                provider_selection_id=quote.provider_selection_id,
+                decimal_odds=quote.decimal_odds,
+                observed_ts=quote.observed_ts,
+                sequence=quote.sequence,
+                market_type=quote.market_type,
+                status=quote.status,
+                source_ts=quote.source_ts,
+                score_state=quote.score_state,
+                metadata=metadata,
+                sport=quote.sport,
+                exchange_side=quote.exchange_side,
+            )
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ProductSourcePayloadError(
+                "provider quote failed acquisition-boundary validation"
+            ) from exc
+
+    @classmethod
+    def _snapshot_provider_batch(cls, batch: object) -> ProviderBatch:
+        """Copy provider output into exact canonical DTOs before product use."""
+
+        if type(batch) is not ProviderBatch:
+            raise ProductSourcePayloadError(
+                "provider.read_batch must return exact ProviderBatch"
+            )
+        if (
+            type(batch.source_id) is not str
+            or type(batch.quotes) is not tuple
+            or (batch.cursor is not None and type(batch.cursor) is not str)
+            or type(batch.quality_flags) is not tuple
+            or any(type(flag) is not str for flag in batch.quality_flags)
+        ):
+            raise ProductSourcePayloadError(
+                "provider batch uses non-canonical acquisition value types"
+            )
+        try:
+            quotes = tuple(cls._snapshot_provider_quote(quote) for quote in batch.quotes)
+            return ProviderBatch(
+                source_id=batch.source_id,
+                quotes=quotes,
+                cursor=batch.cursor,
+                quality_flags=batch.quality_flags,
+            )
+        except ProductSourcePayloadError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise ProductSourcePayloadError(
+                "provider batch failed acquisition-boundary validation"
+            ) from exc
+
     @staticmethod
     def _quote_payload_bytes(quote: ProviderQuote) -> bytes:
         payload = {
@@ -1134,6 +1312,7 @@ class ParlayApiProductSource:
             "score_state": quote.score_state,
             "metadata": quote.metadata,
             "sport": quote.sport,
+            "exchange_side": quote.exchange_side,
         }
         try:
             return json.dumps(
@@ -1166,8 +1345,7 @@ class ParlayApiProductSource:
                 raise ProductSourcePayloadError(
                     "product source provider changed during acquisition"
                 )
-            if not isinstance(batch, ProviderBatch):
-                raise ProductSourcePayloadError("provider.read_batch must return ProviderBatch")
+            batch = self._snapshot_provider_batch(batch)
             if getattr(provider, "source_id", None) != source_id:
                 raise ProductSourcePayloadError(
                     "provider source_id changed during acquisition"
@@ -1186,14 +1364,21 @@ class ParlayApiProductSource:
                 raise ProductSourcePayloadError(
                     "provider snapshot cursor changed while draining one snapshot"
                 )
+            truncated = "TRUNCATED_BATCH" in batch.quality_flags
+            if truncated and len(batch.quotes) != self._READ_BATCH_ITEMS:
+                raise ProductSourcePayloadError(
+                    "truncated provider batch must fill requested acquisition page"
+                )
             quotes.extend(batch.quotes)
-            if len(quotes) > self._MAX_SNAPSHOT_ITEMS:
-                raise ProductSourcePayloadError("provider snapshot exceeds bounded source capacity")
+            if len(quotes) > self._MAX_SNAPSHOT_ITEMS or (
+                truncated and len(quotes) == self._MAX_SNAPSHOT_ITEMS
+            ):
+                raise ProductSourcePayloadError(
+                    "provider snapshot exceeds bounded source capacity"
+                )
             flags.update(flag for flag in batch.quality_flags if flag != "TRUNCATED_BATCH")
-            if "TRUNCATED_BATCH" not in batch.quality_flags:
+            if not truncated:
                 break
-            if not batch.quotes:
-                raise ProductSourcePayloadError("provider returned empty truncated snapshot page")
         assert cursor is not None
         return cursor, tuple(quotes), tuple(sorted(flags))
 
@@ -1318,10 +1503,135 @@ class ParlayApiProductSource:
             raise ProductSourceStateError(
                 "product source provider read authority is unavailable"
             )
+        read_batch_func = getattr(read_batch, "__func__", read_batch)
+        read_batch_self = getattr(read_batch, "__self__", None)
+        read_batch_code = getattr(read_batch_func, "__code__", None)
+        read_batch_defaults = getattr(read_batch_func, "__defaults__", None)
+        read_batch_kwdefaults = getattr(read_batch_func, "__kwdefaults__", None)
+        read_batch_kwitems = (
+            tuple(read_batch_kwdefaults.items())
+            if read_batch_kwdefaults is not None
+            else ()
+        )
         normalize = normalizer.normalize
+        normalize_func = getattr(normalize, "__func__", normalize)
+        normalize_self = getattr(normalize, "__self__", None)
+        normalize_code = getattr(normalize_func, "__code__", None)
+        normalize_defaults = getattr(normalize_func, "__defaults__", None)
+        normalize_kwdefaults = getattr(normalize_func, "__kwdefaults__", None)
+        normalize_kwitems = (
+            tuple(normalize_kwdefaults.items())
+            if normalize_kwdefaults is not None
+            else ()
+        )
+        if read_batch_code is None or normalize_code is None:
+            raise ProductSourceStateError(
+                "product source acquisition executable authority is unavailable"
+            )
+
+        def callable_metadata_current(
+            *,
+            owner: object,
+            name: str,
+            expected_self: object,
+            expected_func: object,
+            expected_code: object,
+            expected_defaults: object,
+            expected_kwdefaults: object,
+            expected_kwitems: tuple[tuple[str, object], ...],
+        ) -> bool:
+            rebound = getattr(owner, name, None)
+            rebound_func = getattr(rebound, "__func__", rebound)
+            current_kwdefaults = getattr(expected_func, "__kwdefaults__", None)
+            return (
+                callable(rebound)
+                and getattr(rebound, "__self__", None) is expected_self
+                and rebound_func is expected_func
+                and getattr(expected_func, "__code__", None) is expected_code
+                and getattr(expected_func, "__defaults__", None) is expected_defaults
+                and current_kwdefaults is expected_kwdefaults
+                and (
+                    expected_kwdefaults is None
+                    or (
+                        len(current_kwdefaults) == len(expected_kwitems)
+                        and all(
+                            key in current_kwdefaults
+                            and current_kwdefaults[key] is value
+                            for key, value in expected_kwitems
+                        )
+                    )
+                )
+            )
+
+        def provider_read(max_items: int) -> ProviderBatch:
+            if not callable_metadata_current(
+                owner=provider,
+                name="read_batch",
+                expected_self=read_batch_self,
+                expected_func=read_batch_func,
+                expected_code=read_batch_code,
+                expected_defaults=read_batch_defaults,
+                expected_kwdefaults=read_batch_kwdefaults,
+                expected_kwitems=read_batch_kwitems,
+            ):
+                raise ProductSourcePayloadError(
+                    "product source provider read executable changed during acquisition"
+                )
+            result = read_batch(max_items)
+            if not callable_metadata_current(
+                owner=provider,
+                name="read_batch",
+                expected_self=read_batch_self,
+                expected_func=read_batch_func,
+                expected_code=read_batch_code,
+                expected_defaults=read_batch_defaults,
+                expected_kwdefaults=read_batch_kwdefaults,
+                expected_kwitems=read_batch_kwitems,
+            ):
+                raise ProductSourcePayloadError(
+                    "product source provider read executable changed during acquisition"
+                )
+            return result
+
+        def canonical_normalize(current_source_id: str, quote: ProviderQuote) -> MarketEvent:
+            if (
+                self.normalizer is not normalizer
+                or not callable_metadata_current(
+                    owner=normalizer,
+                    name="normalize",
+                    expected_self=normalize_self,
+                    expected_func=normalize_func,
+                    expected_code=normalize_code,
+                    expected_defaults=normalize_defaults,
+                    expected_kwdefaults=normalize_kwdefaults,
+                    expected_kwitems=normalize_kwitems,
+                )
+            ):
+                raise ProductSourceStateError(
+                    "product source normalizer executable changed during acquisition"
+                )
+            event = normalize(current_source_id, quote)
+            if (
+                self.normalizer is not normalizer
+                or not callable_metadata_current(
+                    owner=normalizer,
+                    name="normalize",
+                    expected_self=normalize_self,
+                    expected_func=normalize_func,
+                    expected_code=normalize_code,
+                    expected_defaults=normalize_defaults,
+                    expected_kwdefaults=normalize_kwdefaults,
+                    expected_kwitems=normalize_kwitems,
+                )
+            ):
+                raise ProductSourceStateError(
+                    "product source normalizer executable changed during acquisition"
+                )
+            return event
+
         cursor, quotes, quality_flags = self._read_provider_snapshot(
             provider=provider,
-            read_batch=read_batch,
+            read_batch=provider_read,
             source_id=source_id,
         )
         if (
@@ -1339,14 +1649,14 @@ class ParlayApiProductSource:
         catalog_events = self._catalog_events(
             quotes,
             source_id=source_id,
-            normalize=normalize,
+            normalize=canonical_normalize,
         )
 
         normalized: list[tuple[ProviderQuote, MarketEvent, str]] = []
         seen_quotes: dict[str, str] = {}
         seen_dedupes: dict[str, str] = {}
         for quote in quotes:
-            event = normalize(source_id, quote)
+            event = canonical_normalize(source_id, quote)
             digest = canonical_event_digest(event)
             previous_quote = seen_quotes.get(event.quote_key)
             if previous_quote is not None:

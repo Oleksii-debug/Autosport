@@ -6,7 +6,9 @@ from autosport._paper_execution_decision_origin import (
     PaperExecutionDecisionOriginError,
 )
 from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
+from autosport.campaign_inception import CampaignInceptionReceipt
 from autosport.campaign_provider_cycle_capture import CampaignCompleteBoardCycleReceipt
+from autosport.forward_evidence_completeness import ForwardEvidenceProtocolEnvelope
 
 
 _ISSUER_METHOD = "_autosport_issue_predecision_learning_observation"
@@ -152,5 +154,75 @@ def test_predecision_cycle_receipt_descriptor_rebind_fails_closed_before_getter(
             )
     finally:
         setattr(CampaignCompleteBoardCycleReceipt, "receipt_sha256", original)
+
+    assert hostile_called is False
+
+
+@pytest.mark.parametrize(
+    ("authority_type", "values", "field_name", "label"),
+    (
+        (
+            CampaignInceptionReceipt,
+            {
+                "receipt_sha256": "c" * 64,
+                "campaign_id": "campaign-a",
+                "source_id": "source-a",
+                "evaluation_universe_sha256": "d" * 64,
+                "observation_not_before": "2026-10-06T00:00:00+00:00",
+                "observation_not_after": "2026-10-06T01:00:00+00:00",
+            },
+            "receipt_sha256",
+            "campaign inception receipt",
+        ),
+        (
+            ForwardEvidenceProtocolEnvelope,
+            {
+                "campaign_id": "campaign-a",
+                "protocol_sha256": "e" * 64,
+            },
+            "campaign_id",
+            "forward protocol",
+        ),
+    ),
+)
+def test_predecision_authority_descriptor_rebind_fails_closed_before_getter(
+    authority_type,
+    values,
+    field_name,
+    label,
+):
+    descriptor = PaperExecutionAdoptionRuntime.__dict__[_ISSUER_METHOD]
+    issuer = object.__getattribute__(descriptor, "_issuer")
+    reader = _closure_function(issuer, "read_authority_fields")
+    instance = object.__new__(authority_type)
+    for name, value in values.items():
+        object.__setattr__(instance, name, value)
+
+    captured = tuple(
+        (name, authority_type.__dict__[name])
+        for name in values
+    )
+    original = authority_type.__dict__[field_name]
+    hostile_called = False
+
+    def hostile_getter(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile authority getter executed")
+
+    setattr(authority_type, field_name, property(hostile_getter))
+    try:
+        with pytest.raises(
+            PaperExecutionDecisionOriginError,
+            match=f"{label} descriptor authority changed",
+        ):
+            reader(
+                instance,
+                expected_type=authority_type,
+                descriptors=captured,
+                label=label,
+            )
+    finally:
+        setattr(authority_type, field_name, original)
 
     assert hostile_called is False

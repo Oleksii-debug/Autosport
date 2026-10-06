@@ -775,15 +775,7 @@ def test_instance_rebound_transport_cannot_execute_after_reservation() -> None:
 
         assert forged_calls == []
         assert transport.calls == []
-        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
-        attempt = next(
-            item
-            for item in view.attempts
-            if item.attempt.attempt_id == "attempt-shadowed-transport"
-        )
-        assert attempt.state is AttemptState.RESERVED
-        assert attempt.submitted_at is None
-        assert attempt.provider_evidence is None
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
 def test_in_place_gate_state_mutation_fails_closed_before_attempt() -> None:

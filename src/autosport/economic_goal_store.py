@@ -8,6 +8,8 @@ non-expanding successor of the already persisted owner contract.
 
 from __future__ import annotations
 
+import os
+import stat
 import weakref
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
@@ -24,7 +26,7 @@ from .economic_goal import (
 )
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
-from .workspace_lock import WorkspaceEconomicLock
+from .workspace_lock import WorkspaceEconomicLock, _open_read_only_descriptor
 
 
 ECONOMIC_GOAL_SCHEMA: Final = "autosport.economic_goal_contract"
@@ -33,6 +35,7 @@ _MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS: Final = 512
 _MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS: Final = 1024
 _MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS: Final = 512
 _MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS: Final = 2 * 1024 * 1024
+_MAX_ECONOMIC_GOAL_JSON_BYTES: Final = 4 * _MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS
 
 _CONTRACT_KEYS: Final = frozenset(
     {
@@ -177,6 +180,13 @@ _CANONICAL_WORKSPACE_LOCK_ACQUIRE: Final = WorkspaceEconomicLock.acquire
 _CANONICAL_WORKSPACE_LOCK_RELEASE: Final = WorkspaceEconomicLock.release
 _CANONICAL_PATH_TYPE: Final = Path
 _CANONICAL_STORE_FILE_NAME: Final = "economic_goal_contract.json"
+_CANONICAL_OPEN_READ_ONLY_DESCRIPTOR: Final = _open_read_only_descriptor
+_CANONICAL_OS_FSTAT: Final = os.fstat
+_CANONICAL_OS_STAT: Final = os.stat
+_CANONICAL_OS_FDOPEN: Final = os.fdopen
+_CANONICAL_OS_SAMEOPENFILE: Final = os.path.sameopenfile
+_CANONICAL_OS_CLOSE: Final = os.close
+_CANONICAL_STAT_ISREG: Final = stat.S_ISREG
 
 _STORE_BINDINGS_BY_ID: Final = {}
 _CANONICAL_OBJECT_GETATTRIBUTE: Final = object.__getattribute__
@@ -393,6 +403,127 @@ def economic_goal_from_json(
     return _payload_decoder(payload)
 
 
+
+def _require_canonical_goal_file(
+    stat_result: os.stat_result,
+    _is_regular=_CANONICAL_STAT_ISREG,
+    _error_type=EconomicGoalContractError,
+) -> None:
+    if not _is_regular(stat_result.st_mode):
+        raise _error_type(
+            "persisted economic goal must be a regular non-symlink file"
+        )
+    if stat_result.st_nlink != 1:
+        raise _error_type(
+            "persisted economic goal must not have hard-link aliases"
+        )
+
+
+def _read_economic_goal_text(
+    path: Path,
+    _open_descriptor=_CANONICAL_OPEN_READ_ONLY_DESCRIPTOR,
+    _fstat=_CANONICAL_OS_FSTAT,
+    _stat=_CANONICAL_OS_STAT,
+    _fdopen=_CANONICAL_OS_FDOPEN,
+    _sameopenfile=_CANONICAL_OS_SAMEOPENFILE,
+    _close=_CANONICAL_OS_CLOSE,
+    _validate_file=_require_canonical_goal_file,
+    _max_bytes=_MAX_ECONOMIC_GOAL_JSON_BYTES,
+    _max_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
+    _error_type=EconomicGoalContractError,
+) -> str:
+    descriptor = None
+    final_descriptor = None
+    verification_descriptor = None
+    post_read_descriptor = None
+    raw = b""
+    try:
+        descriptor = _open_descriptor(path)
+        opened_before = _fstat(descriptor)
+        path_before = _stat(path, follow_symlinks=False)
+        _validate_file(opened_before)
+        _validate_file(path_before)
+
+        with _fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(_max_bytes + 1)
+
+        final_descriptor = _open_descriptor(path)
+        opened_after = _fstat(descriptor)
+        final_stat = _fstat(final_descriptor)
+        path_after = _stat(path, follow_symlinks=False)
+        verification_descriptor = _open_descriptor(path)
+        verification_stat = _fstat(verification_descriptor)
+
+        for stat_result in (
+            opened_after,
+            final_stat,
+            path_after,
+            verification_stat,
+        ):
+            _validate_file(stat_result)
+
+        if (
+            not _sameopenfile(descriptor, final_descriptor)
+            or not _sameopenfile(descriptor, verification_descriptor)
+        ):
+            raise _error_type(
+                "persisted economic goal changed during verified read"
+            )
+
+        with _fdopen(final_descriptor, "rb", closefd=False) as final_handle:
+            final_raw = final_handle.read(_max_bytes + 1)
+        if raw != final_raw:
+            raise _error_type(
+                "persisted economic goal bytes changed during verified read"
+            )
+
+        post_read_descriptor = _open_descriptor(path)
+        post_read_stat = _fstat(post_read_descriptor)
+        _validate_file(post_read_stat)
+        if not _sameopenfile(descriptor, post_read_descriptor):
+            raise _error_type(
+                "persisted economic goal changed after verified read"
+            )
+    except _error_type:
+        raise
+    except OSError as exc:
+        raise _error_type(
+            f"cannot safely read persisted economic goal: {exc}"
+        ) from exc
+    finally:
+        for candidate in (
+            post_read_descriptor,
+            verification_descriptor,
+            final_descriptor,
+            descriptor,
+        ):
+            if candidate is None:
+                continue
+            try:
+                _close(candidate)
+            except OSError:
+                pass
+
+    if len(raw) > _max_bytes:
+        raise _error_type(
+            "economic goal JSON exceeds the canonical byte-size limit"
+        )
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise _error_type(
+            "persisted economic goal must be valid UTF-8"
+        ) from exc
+    if len(text) > _max_chars:
+        raise _error_type(
+            "economic goal JSON text exceeds the canonical size limit"
+        )
+    return text
+
+
+_CANONICAL_GOAL_TEXT_READER: Final = _read_economic_goal_text
+
+
 class EconomicGoalStore:
     """Workspace-local durable owner-contract store.
 
@@ -455,20 +586,10 @@ class EconomicGoalStore:
         self,
         _json_decoder=economic_goal_from_json,
         _binding_resolver=_resolve_store_binding,
-        _error_type=EconomicGoalContractError,
-        _max_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
+        _text_reader=_CANONICAL_GOAL_TEXT_READER,
     ) -> EconomicGoalContract:
-        _, _, _, path_open = _binding_resolver(self)
-        try:
-            with path_open("r", encoding="utf-8") as handle:
-                text = handle.read(_max_chars + 1)
-        except (OSError, UnicodeError) as exc:
-            raise _error_type(
-                f"cannot read persisted economic goal: {exc}"
-            ) from exc
-        if len(text) > _max_chars:
-            raise _error_type("economic goal JSON text exceeds the canonical size limit")
-        return _json_decoder(text)
+        _, path, _, _ = _binding_resolver(self)
+        return _json_decoder(_text_reader(path))
 
     def initialize_owner(
         self,
@@ -500,23 +621,13 @@ class EconomicGoalStore:
         _writer=_CANONICAL_ATOMIC_WRITE_JSON,
         _json_decoder=economic_goal_from_json,
         _binding_resolver=_resolve_store_binding,
-        _error_type=EconomicGoalContractError,
-        _max_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
+        _text_reader=_CANONICAL_GOAL_TEXT_READER,
         _lock_scope=_workspace_lock_scope,
     ) -> None:
         """Publish one machine revision only when durable authority cannot expand."""
 
-        workspace, path, _, path_open = _binding_resolver(self)
+        workspace, path, _, _ = _binding_resolver(self)
         with _lock_scope(workspace, _lock_type):
-            try:
-                with path_open("r", encoding="utf-8") as handle:
-                    previous_text = handle.read(_max_chars + 1)
-            except (OSError, UnicodeError) as exc:
-                raise _error_type(
-                    f"cannot read persisted economic goal: {exc}"
-                ) from exc
-            if len(previous_text) > _max_chars:
-                raise _error_type("economic goal JSON text exceeds the canonical size limit")
-            previous = _json_decoder(previous_text)
+            previous = _json_decoder(_text_reader(path))
             _transition_validator(previous, candidate)
             _writer(path, _payload_encoder(candidate))

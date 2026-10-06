@@ -12,6 +12,7 @@ The module never performs provider writes or stores credentials in evidence.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -76,6 +77,8 @@ def _authenticated_application_key_context(
     client: _base.BetfairReadOnlyClient,
     *,
     credentials: object,
+    transport: object,
+    transport_post: Callable[..., bytes],
 ) -> _AuthenticatedApplicationKeyContext:
     """Resolve the exact current App Key through authenticated provider metadata.
 
@@ -86,6 +89,10 @@ def _authenticated_application_key_context(
     if client._credentials is not credentials:
         raise BetfairMarketBookFreshnessError(
             "Betfair authenticated context changed before app-key verification"
+        )
+    if client._transport is not transport:
+        raise BetfairMarketBookFreshnessError(
+            "Betfair transport changed before app-key verification"
         )
     request_id = client._next_request_id()
     body = json.dumps(
@@ -99,16 +106,28 @@ def _authenticated_application_key_context(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    payload = client._transport.post(
+    if client._credentials is not credentials:
+        raise BetfairMarketBookFreshnessError(
+            "Betfair authenticated context changed before app-key transport"
+        )
+    if client._transport is not transport:
+        raise BetfairMarketBookFreshnessError(
+            "Betfair transport changed before app-key transport"
+        )
+    payload = transport_post(
         _base.ACCOUNT_JSON_RPC_ENDPOINT,
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "X-Authentication": client._credentials.session_token,
+            "X-Authentication": credentials.session_token,
         },
         body=body,
         timeout_seconds=client._timeout_seconds,
     )
+    if client._transport is not transport:
+        raise BetfairMarketBookFreshnessError(
+            "Betfair transport changed during app-key transport"
+        )
     if not isinstance(payload, bytes):
         raise BetfairMarketBookFreshnessError(
             "Betfair developer-app transport must return bytes"
@@ -141,7 +160,7 @@ def _authenticated_application_key_context(
         envelope["result"], "getDeveloperAppKeys result"
     )
     matches: list[tuple[int, int, bool, bool, bool]] = []
-    expected_key = client._credentials.application_key
+    expected_key = credentials.application_key
     for app_index, raw_app in enumerate(applications):
         app = _base._mapping(
             raw_app, f"getDeveloperAppKeys result[{app_index}]"
@@ -186,6 +205,10 @@ def _authenticated_application_key_context(
     if client._credentials is not credentials:
         raise BetfairMarketBookFreshnessError(
             "Betfair authenticated context changed during app-key verification"
+        )
+    if client._transport is not transport:
+        raise BetfairMarketBookFreshnessError(
+            "Betfair transport changed during app-key verification"
         )
 
     app_id, version_id, delay_data, active, owner_managed = matches[0]
@@ -562,6 +585,8 @@ def _post_market_book_readonly(
         _authenticated_application_key_context(
             client,
             credentials=credentials,
+            transport=transport,
+            transport_post=transport_post,
         )
         if network_origin and resolve_application_context
         else None

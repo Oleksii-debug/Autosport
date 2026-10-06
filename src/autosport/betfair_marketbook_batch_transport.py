@@ -32,9 +32,16 @@ from .betfair_marketbook_attempt_history import (
     MarketBookAttemptOutcome,
     MarketBookAttemptRecord,
 )
-from .betfair_marketbook_rate_gate import BetfairMarketBookPerMarketRateGate
+from . import betfair_marketbook_rate_gate as _rate_gate_module
+from . import betfair_marketbook_projection_concurrency as _projection_gate_module
+from .betfair_marketbook_rate_gate import (
+    BetfairMarketBookPerMarketRateGate,
+    MarketBookRateDecision,
+)
 from .betfair_marketbook_projection_concurrency import (
     BetfairMarketBookProjectionConcurrencyGate,
+    MarketBookProjectionConcurrencyDecision,
+    MarketBookProjectionLease,
 )
 
 
@@ -717,6 +724,210 @@ def _install_transport_result_authority() -> None:
     token = _token
     release_projection_lease = _release_projection_lease
     release_projection_lease_after_failure = _release_projection_lease_after_failure
+    rate_gate_module = _rate_gate_module
+    projection_gate_module = _projection_gate_module
+    rate_normalize_market_ids = rate_gate_module._normalize_market_ids
+    rate_utc_microseconds = rate_gate_module._utc_microseconds
+    rate_decision_global = rate_gate_module.MarketBookRateDecision
+    rate_decision_init = rate_decision_global.__init__
+    rate_decision_validate = rate_decision_global.__post_init__
+    rate_max_calls_per_window = rate_gate_module._MAX_CALLS_PER_WINDOW
+    rate_window_microseconds = rate_gate_module._WINDOW_MICROSECONDS
+    projection_validate_request_id = projection_gate_module._validate_request_id
+    projection_utc_microseconds = projection_gate_module._utc_microseconds
+    projection_decision_global = (
+        projection_gate_module.MarketBookProjectionConcurrencyDecision
+    )
+    projection_lease_global = projection_gate_module.MarketBookProjectionLease
+    projection_decision_init = projection_decision_global.__init__
+    projection_decision_validate = projection_decision_global.__post_init__
+    projection_lease_init = projection_lease_global.__init__
+    projection_lease_validate = projection_lease_global.__post_init__
+    projection_max_unresolved = (
+        projection_gate_module._MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
+    )
+    rate_decision_type = MarketBookRateDecision
+    projection_decision_type = MarketBookProjectionConcurrencyDecision
+    datetime_type = datetime
+    utc_timezone = timezone.utc
+    utc_epoch = datetime_type(1970, 1, 1, tzinfo=utc_timezone)
+
+    def canonical_instant_us(value: datetime) -> int:
+        if type(value) is not datetime_type:
+            raise batch_transport_error_type(
+                "MarketBook gate instant must be an exact datetime"
+            )
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise batch_transport_error_type(
+                "MarketBook gate instant must be timezone-aware"
+            )
+        delta = value.astimezone(utc_timezone) - utc_epoch
+        return (
+            (delta.days * 86_400 + delta.seconds) * 1_000_000
+            + delta.microseconds
+        )
+
+    def assert_projection_gate_primitives() -> None:
+        if (
+            projection_gate_module._validate_request_id
+            is not projection_validate_request_id
+            or projection_gate_module._utc_microseconds
+            is not projection_utc_microseconds
+            or projection_gate_module.MarketBookProjectionConcurrencyDecision
+            is not projection_decision_global
+            or projection_gate_module.MarketBookProjectionLease
+            is not projection_lease_global
+            or projection_decision_global.__init__ is not projection_decision_init
+            or projection_decision_global.__post_init__
+            is not projection_decision_validate
+            or projection_lease_global.__init__ is not projection_lease_init
+            or projection_lease_global.__post_init__ is not projection_lease_validate
+            or type(
+                projection_gate_module._MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
+            )
+            is not int
+            or projection_gate_module._MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
+            != projection_max_unresolved
+        ):
+            raise batch_transport_error_type(
+                "MarketBook projection gate authority changed after transport installation"
+            )
+
+    def validate_projection_decision(
+        decision: object,
+        *,
+        request_id: str,
+        observed_at_utc_us: int,
+        projection_bearing: bool,
+    ) -> tuple[bool, int | None]:
+        if type(decision) is not projection_decision_type:
+            raise batch_transport_error_type(
+                "MarketBook projection gate returned a noncanonical decision"
+            )
+        if decision.request_id != request_id:
+            raise batch_transport_error_type(
+                "MarketBook projection decision is bound to another request"
+            )
+        if decision.observed_at_utc_us != observed_at_utc_us:
+            raise batch_transport_error_type(
+                "MarketBook projection decision is bound to another causal instant"
+            )
+        if decision.projection_bearing is not projection_bearing:
+            raise batch_transport_error_type(
+                "MarketBook projection decision contradicts request projection shape"
+            )
+        if type(decision.allowed) is not bool:
+            raise batch_transport_error_type(
+                "MarketBook projection decision allowed must be exact bool"
+            )
+        if (
+            type(decision.active_projection_requests) is not int
+            or not 0
+            <= decision.active_projection_requests
+            <= projection_max_unresolved
+        ):
+            raise batch_transport_error_type(
+                "MarketBook projection decision carries invalid active-request count"
+            )
+        if (
+            decision.provider_limit_coverage_complete is not False
+            or decision.provider_dispatch_authorized is not False
+        ):
+            raise batch_transport_error_type(
+                "MarketBook projection decision overclaims provider authority"
+            )
+        if projection_bearing and decision.allowed:
+            if (
+                type(decision.lease_generation) is not int
+                or decision.lease_generation < 1
+            ):
+                raise batch_transport_error_type(
+                    "admitted projection decision lacks canonical lease generation"
+                )
+        elif decision.lease_generation is not None:
+            raise batch_transport_error_type(
+                "non-admitted projection decision cannot carry lease generation"
+            )
+        if not projection_bearing and decision.allowed is not True:
+            raise batch_transport_error_type(
+                "price-only MarketBook request cannot be denied by projection gate"
+            )
+        return decision.allowed, decision.lease_generation
+
+    def assert_rate_gate_primitives() -> None:
+        if (
+            rate_gate_module._normalize_market_ids is not rate_normalize_market_ids
+            or rate_gate_module._utc_microseconds is not rate_utc_microseconds
+            or rate_gate_module.MarketBookRateDecision is not rate_decision_global
+            or rate_decision_global.__init__ is not rate_decision_init
+            or rate_decision_global.__post_init__ is not rate_decision_validate
+            or type(rate_gate_module._MAX_CALLS_PER_WINDOW) is not int
+            or rate_gate_module._MAX_CALLS_PER_WINDOW != rate_max_calls_per_window
+            or type(rate_gate_module._WINDOW_MICROSECONDS) is not int
+            or rate_gate_module._WINDOW_MICROSECONDS != rate_window_microseconds
+        ):
+            raise batch_transport_error_type(
+                "MarketBook rate gate authority changed after transport installation"
+            )
+
+    def validate_rate_decision(
+        decision: object,
+        *,
+        market_ids: tuple[str, ...],
+        scheduled_at_utc_us: int,
+    ) -> bool:
+        if type(decision) is not rate_decision_type:
+            raise batch_transport_error_type(
+                "MarketBook rate gate returned a noncanonical decision"
+            )
+        if type(decision.market_ids) is not tuple or decision.market_ids != market_ids:
+            raise batch_transport_error_type(
+                "MarketBook rate decision is bound to another market set"
+            )
+        if decision.scheduled_at_utc_us != scheduled_at_utc_us:
+            raise batch_transport_error_type(
+                "MarketBook rate decision is bound to another causal instant"
+            )
+        if type(decision.allowed) is not bool:
+            raise batch_transport_error_type(
+                "MarketBook rate decision allowed must be exact bool"
+            )
+        if type(decision.blocked_market_ids) is not tuple:
+            raise batch_transport_error_type(
+                "MarketBook rate decision blocked markets must be exact tuple"
+            )
+        if any(
+            type(market_id) is not str or market_id not in market_ids
+            for market_id in decision.blocked_market_ids
+        ):
+            raise batch_transport_error_type(
+                "MarketBook rate decision blocked markets are not request-bound"
+            )
+        if (
+            decision.provider_limit_coverage_complete is not False
+            or decision.provider_dispatch_authorized is not False
+        ):
+            raise batch_transport_error_type(
+                "MarketBook rate decision overclaims provider authority"
+            )
+        if decision.allowed:
+            if (
+                decision.blocked_market_ids
+                or decision.next_eligible_at_utc_us is not None
+            ):
+                raise batch_transport_error_type(
+                    "allowed MarketBook rate decision carries denial state"
+                )
+        else:
+            if (
+                not decision.blocked_market_ids
+                or type(decision.next_eligible_at_utc_us) is not int
+                or decision.next_eligible_at_utc_us <= scheduled_at_utc_us
+            ):
+                raise batch_transport_error_type(
+                    "denied MarketBook rate decision lacks canonical denial state"
+                )
+        return decision.allowed
 
     def read_market_book_batch(
         client: _base.BetfairReadOnlyClient,
@@ -748,7 +959,14 @@ def _install_transport_result_authority() -> None:
             )
 
         contract = plan.request_contract_payload
+        projection_bearing = (
+            contract["order_projection"] is not None
+            or contract["match_projection"] is not None
+        )
+        expected_instant_us = canonical_instant_us(instant)
+        lease_generation: int | None = None
         try:
+            assert_projection_gate_primitives()
             concurrency_decision = concurrency_begin(
                 concurrency_gate,
                 request,
@@ -756,23 +974,52 @@ def _install_transport_result_authority() -> None:
                 has_order_projection=contract["order_projection"] is not None,
                 has_match_projection=contract["match_projection"] is not None,
             )
-        except Exception as exc:
+            if (
+                type(concurrency_decision) is projection_decision_type
+                and type(concurrency_decision.lease_generation) is int
+                and concurrency_decision.lease_generation > 0
+            ):
+                lease_generation = concurrency_decision.lease_generation
+            concurrency_allowed, validated_generation = validate_projection_decision(
+                concurrency_decision,
+                request_id=request,
+                observed_at_utc_us=expected_instant_us,
+                projection_bearing=projection_bearing,
+            )
+            lease_generation = validated_generation
+        except BaseException as exc:
+            if lease_generation is not None:
+                release_projection_lease_after_failure(
+                    client,
+                    concurrency_gate,
+                    request,
+                    lease_generation,
+                    exc,
+                    complete=concurrency_complete,
+                )
+            if not isinstance(exc, Exception):
+                raise
             raise admission_error_type(
                 not_dispatched_concurrency,
                 "MarketBook projection concurrency gate could not establish local admission",
             ) from exc
-        if concurrency_decision.allowed is not True:
+        if concurrency_allowed is not True:
             raise admission_error_type(
                 not_dispatched_concurrency,
                 "MarketBook projection concurrency gate denied local admission",
             )
 
-        lease_generation = concurrency_decision.lease_generation
         try:
+            assert_rate_gate_primitives()
             rate_decision = rate_reserve(
                 rate_gate,
                 batch.market_ids,
                 scheduled_at=instant,
+            )
+            rate_allowed = validate_rate_decision(
+                rate_decision,
+                market_ids=batch.market_ids,
+                scheduled_at_utc_us=expected_instant_us,
             )
         except BaseException as exc:
             if not isinstance(exc, Exception):
@@ -798,7 +1045,7 @@ def _install_transport_result_authority() -> None:
                 complete=concurrency_complete,
             )
             raise denial from exc
-        if rate_decision.allowed is not True:
+        if rate_allowed is not True:
             denial = admission_error_type(
                 not_dispatched_rate,
                 "MarketBook per-market rate gate denied local admission",

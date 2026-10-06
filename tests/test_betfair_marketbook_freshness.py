@@ -252,6 +252,80 @@ def test_physical_marketbook_boundary_rejects_transport_swap_before_dispatch():
     assert injected.calls == []
 
 
+def test_authenticated_app_context_rejects_transport_swap_before_metadata_dispatch(monkeypatch):
+    network_methods = []
+
+    def fake_urlopen(request, timeout):
+        body = json.loads(request.data.decode("utf-8"))
+        network_methods.append(body["method"])
+        if body["method"] != "SportsAPING/v1.0/listMarketBook":
+            raise AssertionError("app-key metadata request must not dispatch")
+        return FakeNetworkResponse(
+            _payload(request_id=body["id"], delayed=False)
+        )
+
+    monkeypatch.setattr(betfair_account_readonly, "urlopen", fake_urlopen)
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        venue_id="betfair-global",
+        account_id="configured-account",
+    )
+    canonical_transport = client._transport
+    metadata_payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "result": [
+                {
+                    "appName": "autosport-test",
+                    "appId": 101,
+                    "appVersions": [
+                        {
+                            "owner": "synthetic-owner",
+                            "versionId": 202,
+                            "version": "synthetic-1",
+                            "applicationKey": "app-secret",
+                            "delayData": False,
+                            "subscriptionRequired": False,
+                            "ownerManaged": False,
+                            "active": True,
+                        }
+                    ],
+                }
+            ],
+            "id": 2,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    injected = FakeTransport(metadata_payload)
+    injected_post = injected.post
+
+    def post_and_restore(*args, **kwargs):
+        payload = injected_post(*args, **kwargs)
+        client._transport = canonical_transport
+        return payload
+
+    injected.post = post_and_restore
+    request_counter = 0
+
+    def next_request_id_with_metadata_swap():
+        nonlocal request_counter
+        request_counter += 1
+        if request_counter == 2:
+            client._transport = injected
+        return request_counter
+
+    client._next_request_id = next_request_id_with_metadata_swap
+
+    with pytest.raises(
+        BetfairMarketBookFreshnessError,
+        match="transport changed before app-key transport",
+    ):
+        read_market_book_delay(client, "1.234")
+
+    assert network_methods == ["SportsAPING/v1.0/listMarketBook"]
+    assert injected.calls == []
+
+
 def test_unmodified_default_http_transport_is_the_only_positive_network_origin_shape():
     client = BetfairReadOnlyClient(
         BetfairSessionCredentials("app-secret", "session-secret")

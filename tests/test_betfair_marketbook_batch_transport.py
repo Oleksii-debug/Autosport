@@ -5,6 +5,8 @@ import json
 import pytest
 
 import autosport.betfair_marketbook_batch_transport as _batch_transport_module
+import autosport.betfair_marketbook_rate_gate as _rate_gate_module
+import autosport.betfair_marketbook_projection_concurrency as _projection_gate_module
 from autosport.betfair_account_readonly import (
     BETTING_JSON_RPC_ENDPOINT,
     BetfairReadOnlyClient,
@@ -3108,3 +3110,207 @@ def test_failure_cleanup_seals_nested_release_rebind(monkeypatch):
     assert concurrency_gate.snapshot().active == ()
     assert transport.calls == []
 
+
+
+
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    (
+        ("_normalize_market_ids", lambda *args, **kwargs: ("9.999",)),
+        ("_utc_microseconds", lambda *args, **kwargs: 0),
+        ("MarketBookRateDecision", object),
+        ("_MAX_CALLS_PER_WINDOW", 999),
+        ("_WINDOW_MICROSECONDS", 1),
+    ),
+)
+def test_transport_rejects_rebound_rate_gate_primitives_before_mutation(
+    monkeypatch,
+    attribute,
+    replacement,
+):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    rate_before = rate_gate.snapshot()
+
+    monkeypatch.setattr(_rate_gate_module, attribute, replacement)
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id=f"rebound-rate-{attribute}",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert rate_gate.snapshot() == rate_before
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    (
+        ("_validate_request_id", lambda *args, **kwargs: "forged-request"),
+        ("_utc_microseconds", lambda *args, **kwargs: 0),
+        ("MarketBookProjectionConcurrencyDecision", object),
+        ("MarketBookProjectionLease", object),
+        ("_MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED", 999),
+    ),
+)
+def test_transport_rejects_rebound_projection_gate_primitives_before_mutation(
+    monkeypatch,
+    attribute,
+    replacement,
+):
+    plan = _plan(market_ids=("1.001",), order_projection="EXECUTABLE")
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    concurrency_before = concurrency_gate.snapshot()
+    rate_before = rate_gate.snapshot()
+
+    monkeypatch.setattr(_projection_gate_module, attribute, replacement)
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id=f"rebound-projection-{attribute}",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY
+    assert concurrency_gate.snapshot() == concurrency_before
+    assert rate_gate.snapshot() == rate_before
+    assert transport.calls == []
+
+
+def test_transport_rejects_rate_decision_lifecycle_tamper_before_mutation(
+    monkeypatch,
+):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    rate_before = rate_gate.snapshot()
+    decision_type = _rate_gate_module.MarketBookRateDecision
+    original_init = decision_type.__init__
+
+    def forged_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        object.__setattr__(self, "market_ids", ("9.999",))
+
+    monkeypatch.setattr(decision_type, "__init__", forged_init)
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="forged-rate-decision-binding",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert rate_gate.snapshot() == rate_before
+    assert transport.calls == []
+
+
+def test_transport_rejects_projection_decision_lifecycle_tamper_before_lease(
+    monkeypatch,
+):
+    plan = _plan(market_ids=("1.001",), order_projection="EXECUTABLE")
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    concurrency_before = concurrency_gate.snapshot()
+    decision_type = _projection_gate_module.MarketBookProjectionConcurrencyDecision
+    original_init = decision_type.__init__
+
+    def forged_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        object.__setattr__(
+            self,
+            "observed_at_utc_us",
+            self.observed_at_utc_us + 1,
+        )
+
+    monkeypatch.setattr(decision_type, "__init__", forged_init)
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="forged-projection-decision-time",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert (
+        exc_info.value.outcome
+        is MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY
+    )
+    assert concurrency_gate.snapshot() == concurrency_before
+    assert rate_gate.snapshot().markets == ()
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize(
+    ("module", "class_name"),
+    (
+        (_rate_gate_module, "MarketBookRateDecision"),
+        (_projection_gate_module, "MarketBookProjectionConcurrencyDecision"),
+        (_projection_gate_module, "MarketBookProjectionLease"),
+    ),
+)
+def test_transport_rejects_gate_post_init_rebind_before_admission(
+    monkeypatch,
+    module,
+    class_name,
+):
+    plan = _plan(market_ids=("1.001",), order_projection="EXECUTABLE")
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    rate_before = rate_gate.snapshot()
+    concurrency_before = concurrency_gate.snapshot()
+    target = getattr(module, class_name)
+
+    monkeypatch.setattr(
+        target,
+        "__post_init__",
+        lambda self: None,
+    )
+
+    expected = (
+        MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+        if module is _rate_gate_module
+        else MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY
+    )
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id=f"rebound-post-init-{class_name}",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is expected
+    assert rate_gate.snapshot() == rate_before
+    assert concurrency_gate.snapshot() == concurrency_before
+    assert transport.calls == []

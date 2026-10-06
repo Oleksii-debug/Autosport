@@ -1128,6 +1128,76 @@ def test_handler_sender_close_failure_stops_child_and_becomes_terminal_truth(mon
     assert process.closed is True
 
 
+def test_handler_parent_keyboard_interrupt_reaps_child_and_reraises(monkeypatch):
+    class FakeEndpoint:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.join_calls = 0
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_calls += 1
+            if self.join_calls == 1:
+                raise KeyboardInterrupt()
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FakeEndpoint()
+    sender = FakeEndpoint()
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, sender
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert process.killed is True
+    assert process.closed is True
+    assert process.join_calls == 2
+    assert receiver.closed is True
+    assert sender.closed is True
+
+
 def test_handler_initial_join_failure_stops_child_and_becomes_terminal_truth(monkeypatch):
     class FakeEndpoint:
         def close(self):

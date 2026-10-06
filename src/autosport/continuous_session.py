@@ -288,6 +288,8 @@ class _ContinuousSessionFailurePublication:
     cycles_completed: int
     last_success_at: str | None
     last_error_code: str
+    source_gap_state: str | None
+    source_sync_state: str | None
 
 
 def _text(value: object, field: str) -> str:
@@ -461,6 +463,8 @@ class _ContinuousSessionState:
         self._cycles_completed = raw["cycles_completed"]
         self._last_success_at = raw["last_success_at"]
         self._state = raw["state"]
+        self._source_gap_state = raw["source_gap_state"]
+        self._source_sync_state = raw["source_sync_state"]
         self._error_path = self.path.with_name(
             f"{self.path.name}.operational_error.json"
         )
@@ -1175,6 +1179,8 @@ class _ContinuousSessionState:
             self._cycles_completed = updated["cycles_completed"]
             self._last_success_at = updated["last_success_at"]
             self._state = updated["state"]
+            self._source_gap_state = updated["source_gap_state"]
+            self._source_sync_state = updated["source_sync_state"]
         return updated
 
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:
@@ -1596,6 +1602,8 @@ class _ContinuousSessionState:
                 cycles_completed=self._cycles_completed,
                 last_success_at=self._last_success_at,
                 last_error_code=code,
+                source_gap_state=self._source_gap_state,
+                source_sync_state=self._source_sync_state,
             )
 
 
@@ -2127,8 +2135,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     cycle_index=failure.cycles_completed,
                     source_id=cycle.source_id,
                     source_provider_unavailable=True,
-                    source_gap_states=(),
-                    source_sync_states=(),
+                    source_gap_states=(
+                        ()
+                        if failure.source_gap_state is None
+                        else (failure.source_gap_state,)
+                    ),
+                    source_sync_states=(
+                        ()
+                        if failure.source_sync_state is None
+                        else (failure.source_sync_state,)
+                    ),
                     committed_delta_ids=cycle.committed_delta_ids,
                     delivered_delta_ids=(),
                     affected_input_ids=(),

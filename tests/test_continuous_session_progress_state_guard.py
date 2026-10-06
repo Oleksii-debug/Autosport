@@ -88,6 +88,32 @@ def test_record_source_projection_cannot_publish_non_running_session(
         assert durable["state"] == state_value.value
 
 @pytest.mark.parametrize(
+    ("state_value", "error_type"),
+    (
+        (continuous_session.SessionState.PAUSED, continuous_session.SessionPausedError),
+        (continuous_session.SessionState.STOPPED, continuous_session.SessionStoppedError),
+    ),
+)
+def test_record_failure_cannot_publish_non_running_session(
+    state_value: continuous_session.SessionState,
+    error_type: type[Exception],
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        state.set_state(state_value, reason="OPERATOR_CONTROL")
+        sidecar_path = path.with_name(f"{path.name}.operational_error.json")
+        canonical_before = path.read_bytes()
+        sidecar_before = sidecar_path.read_bytes()
+
+        with pytest.raises(error_type):
+            state.record_failure(code="ProviderUnavailableError")
+
+        assert path.read_bytes() == canonical_before
+        assert sidecar_path.read_bytes() == sidecar_before
+        assert state.snapshot().last_error_code == "OPERATOR_CONTROL"
+
+
+@pytest.mark.parametrize(
     "state_value",
     (
         continuous_session.SessionState.PAUSED,

@@ -1097,3 +1097,152 @@ def test_credentials_subclass_cannot_be_canonicalized_by_client_binding() -> Non
         match="credentials must be exact canonical credentials",
     ):
         betfair_execution.BetfairSupervisedPlaceOrdersClient(credentials)
+
+
+def test_client_getattribute_rebinding_fails_closed_before_attempt(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        original = type(client).__getattribute__
+        hostile_calls: list[str] = []
+
+        def rebound_getattribute(self, name):
+            if name == "_gate":
+                hostile_calls.append(name)
+            return original(self, name)
+
+        monkeypatch.setattr(type(client), "__getattribute__", rebound_getattribute)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-client-getattribute-rebinding",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert hostile_calls == []
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_gate_getattribute_rebinding_fails_closed_before_attempt(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        gate_type = type(client._gate)
+        original = gate_type.__getattribute__
+        hostile_calls: list[str] = []
+
+        def rebound_getattribute(self, name):
+            if name == "require":
+                hostile_calls.append(name)
+            return original(self, name)
+
+        monkeypatch.setattr(gate_type, "__getattribute__", rebound_getattribute)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="dependency dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-gate-getattribute-rebinding",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert hostile_calls == []
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_transport_getattribute_rebinding_fails_closed_before_attempt(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        transport_type = type(transport)
+        original = transport_type.__getattribute__
+        hostile_calls: list[str] = []
+
+        def rebound_getattribute(self, name):
+            if name == "post":
+                hostile_calls.append(name)
+            return original(self, name)
+
+        monkeypatch.setattr(transport_type, "__getattribute__", rebound_getattribute)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="dependency dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-transport-getattribute-rebinding",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert hostile_calls == []
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_gate_owner_authority_method_rebinding_fails_closed_before_attempt(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        gate_type = type(client._gate)
+        hostile_calls = 0
+
+        def rebound_owner_authority(self, **kwargs):
+            nonlocal hostile_calls
+            del self, kwargs
+            hostile_calls += 1
+            raise AssertionError("rebound owner authority must never execute")
+
+        monkeypatch.setattr(
+            gate_type,
+            "_require_current_owner_authority",
+            rebound_owner_authority,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="dependency dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-gate-owner-method-rebinding",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert hostile_calls == 0
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}

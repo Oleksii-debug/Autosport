@@ -575,6 +575,7 @@ def _leg_key(value: Mapping[str, object]) -> tuple[object, ...]:
         value.get("selection_id"),
         value.get("sport"),
         value.get("exchange_side"),
+        value.get("market_semantics_id"),
     )
 
 
@@ -650,10 +651,6 @@ def _material(
             if not isinstance(leg, Mapping):
                 raise ProductProposalTargetTerminalPopulationError(
                     "candidate leg is invalid"
-                )
-            if leg.get("exchange_side") is not None:
-                raise ProductProposalTargetTerminalPopulationError(
-                    "provider terminal population does not yet prove exchange-side semantics"
                 )
             sport = leg.get("sport")
             if type(sport) is not str or not sport:

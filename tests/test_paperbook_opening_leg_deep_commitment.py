@@ -358,6 +358,35 @@ def test_opening_registry_ignores_rebound_commitment_module_dispatch(monkeypatch
     assert attacker_called is False
 
 
+def test_opening_registry_rejects_commitment_default_mutation_before_execution() -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+
+    commitment = paper_module._ticket_opening_commitment
+    original_defaults = commitment.__defaults__
+    assert original_defaults is not None
+
+    class HostileDescriptor:
+        def __get__(self, _instance, _owner):
+            raise AssertionError("mutated opening commitment default executed")
+
+    hostile_fields = (HostileDescriptor(),) + tuple(original_defaults[1][1:])
+    commitment.__defaults__ = (
+        original_defaults[0],
+        hostile_fields,
+        original_defaults[2],
+        original_defaults[3],
+    )
+
+    try:
+        with pytest.raises(ValueError, match="opening commitment authority changed"):
+            _ = book.committed_stake
+    finally:
+        commitment.__defaults__ = original_defaults
+
+    assert book.balance == Decimal("90")
+
+
 def test_opening_registry_rejects_in_place_commitment_code_mutation_before_execution() -> None:
     book = PaperBook("100")
     book.open_ticket([_leg()], "10", placed_at=_TS)

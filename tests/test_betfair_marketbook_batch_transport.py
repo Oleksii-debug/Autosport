@@ -918,6 +918,45 @@ def test_direct_attempt_execution_cannot_claim_unrecorded_or_mismatched_outcome(
         )
 
 
+def test_attempt_execution_rejects_exact_result_for_incomplete_outcome():
+    plan = _plan()
+    batch = plan.batches[0]
+
+    incomplete_client, _ = _client(_payload(("1.001",)))
+    incomplete_result = _read(
+        incomplete_client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="incomplete-result",
+    )
+    recorded = append_market_book_transport_attempt(
+        MarketBookAttemptHistory(plan, ()),
+        incomplete_result,
+        attempt_id="attempt-incomplete",
+        required=True,
+    )
+    assert recorded.records[-1].outcome is MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
+
+    exact_client, _ = _client(_payload(batch.market_ids))
+    exact_result = _read(
+        exact_client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="exact-result",
+    )
+    assert exact_result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="receipt status contradicts outcome",
+    ):
+        MarketBookBatchAttemptExecution(
+            recorded,
+            MarketBookAttemptOutcome.INCOMPLETE_RESPONSE,
+            exact_result,
+        )
+
+
 def test_attempt_execution_revalidates_history_after_adversarial_plan_mutation():
     plan = _plan()
     history = MarketBookAttemptHistory(plan, ())

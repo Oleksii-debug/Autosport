@@ -525,6 +525,15 @@ class MarketBookBatchAttemptExecution:
                 raise MarketBookBatchTransportError(
                     "attempt execution result is bound to another history batch"
                 )
+            expected_receipt_status = (
+                BatchReceiptStatus.EXACT_RESPONSE
+                if self.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+                else BatchReceiptStatus.INCOMPLETE_RESPONSE
+            )
+            if self.result.receipt.status is not expected_receipt_status:
+                raise MarketBookBatchTransportError(
+                    "attempt execution result receipt status contradicts outcome"
+                )
             if (
                 self.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
                 and latest.exact_receipt != self.result.receipt

@@ -290,7 +290,7 @@ class PaperExecutionEvidenceRecord:
     suspended: bool = False
     reason: str = "observed execution evidence"
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _decimal_parser=_decimal) -> None:
         for name in (
             "action_id",
             "bookmaker_id",
@@ -314,8 +314,8 @@ class PaperExecutionEvidenceRecord:
         if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
             if self.accepted_odds is None or self.accepted_stake is None:
                 raise ValueError("accepted/partial evidence requires odds and stake")
-            odds = _decimal(self.accepted_odds, "accepted_odds")
-            stake = _decimal(self.accepted_stake, "accepted_stake")
+            odds = _decimal_parser(self.accepted_odds, "accepted_odds")
+            stake = _decimal_parser(self.accepted_stake, "accepted_stake")
             if odds <= 1:
                 raise ValueError("accepted_odds must be > 1")
             object.__setattr__(self, "accepted_odds", odds)
@@ -442,7 +442,7 @@ class ObservedPaperExecution:
     suspended: bool = False
     reason: str = "observed execution evidence"
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _decimal_parser=_decimal) -> None:
         _text(self.action_id, "action_id")
         _timestamp(self.observed_at, "observed_at")
         if not isinstance(self.outcome, PaperAttemptOutcome):
@@ -460,8 +460,8 @@ class ObservedPaperExecution:
         if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
             if self.accepted_odds is None or self.accepted_stake is None:
                 raise ValueError("accepted/partial observation requires odds and stake")
-            odds = _decimal(self.accepted_odds, "accepted_odds")
-            stake = _decimal(self.accepted_stake, "accepted_stake")
+            odds = _decimal_parser(self.accepted_odds, "accepted_odds")
+            stake = _decimal_parser(self.accepted_stake, "accepted_stake")
             if odds <= 1:
                 raise ValueError("accepted_odds must be > 1")
             object.__setattr__(self, "accepted_odds", odds)
@@ -501,7 +501,7 @@ class PaperLegAttempt:
     model_fingerprint: str
     reason: str
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _decimal_parser=_decimal) -> None:
         for name in (
             "attempt_id",
             "run_id",
@@ -521,14 +521,14 @@ class PaperLegAttempt:
             _text(getattr(self, name), name)
         if type(self.sequence) is not int or self.sequence < 0:
             raise ValueError("sequence must be a non-negative int")
-        decision_odds = _decimal(self.decision_odds, "decision_odds")
+        decision_odds = _decimal_parser(self.decision_odds, "decision_odds")
         if decision_odds <= 1:
             raise ValueError("decision_odds must be > 1")
         object.__setattr__(self, "decision_odds", decision_odds)
         object.__setattr__(
             self,
             "requested_stake",
-            _decimal(self.requested_stake, "requested_stake"),
+            _decimal_parser(self.requested_stake, "requested_stake"),
         )
         decision_time = _timestamp(self.decision_observed_at, "decision_observed_at")
         execution_time = _timestamp(self.execution_observed_at, "execution_observed_at")
@@ -555,10 +555,10 @@ class PaperLegAttempt:
         if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
             if self.execution_odds is None or self.execution_stake is None:
                 raise ValueError("accepted/partial attempt requires execution odds and stake")
-            execution_odds = _decimal(self.execution_odds, "execution_odds")
+            execution_odds = _decimal_parser(self.execution_odds, "execution_odds")
             if execution_odds <= 1:
                 raise ValueError("execution_odds must be > 1")
-            execution_stake = _decimal(self.execution_stake, "execution_stake")
+            execution_stake = _decimal_parser(self.execution_stake, "execution_stake")
             if execution_stake > self.requested_stake:
                 raise ValueError("execution_stake cannot exceed requested_stake")
             if self.outcome is PaperAttemptOutcome.ACCEPTED and execution_stake != self.requested_stake:
@@ -680,7 +680,7 @@ class PaperExecutionRun:
     worst_case_exposure: Decimal
     completed: bool
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _decimal_parser=_decimal) -> None:
         for name in ("run_id", "trigger_id", "plan_id", "plan_fingerprint", "model_fingerprint"):
             _text(getattr(self, name), name)
         _timestamp(self.started_at, "started_at")
@@ -695,7 +695,7 @@ class PaperExecutionRun:
         object.__setattr__(
             self,
             "worst_case_exposure",
-            _decimal(self.worst_case_exposure, "worst_case_exposure", allow_zero=True),
+            _decimal_parser(self.worst_case_exposure, "worst_case_exposure", allow_zero=True),
         )
         if type(self.completed) is not bool:
             raise ValueError("completed must be bool")

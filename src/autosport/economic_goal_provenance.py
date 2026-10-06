@@ -96,6 +96,17 @@ _CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
 _CANONICAL_PROVENANCE_TYPE: Final = EconomicGoalProvenance
 _CANONICAL_PROVENANCE_VALIDATOR: Final = EconomicGoalProvenance.__post_init__
 
+_PROVENANCE_CONTRACT_FIELD_NAMES: Final = (
+    "goal_id", "revision", "bankroll_id", "currency", "objective",
+    "max_stake_fraction", "max_stake_amount", "max_session_loss_fraction",
+    "max_day_loss_fraction", "max_drawdown_fraction", "max_capital_at_risk_fraction",
+    "max_event_concentration_fraction", "max_market_concentration_fraction",
+    "max_provider_concentration_fraction", "max_sport_concentration_fraction",
+    "max_turnover_fraction", "max_risk_of_ruin", "max_execution_slippage_fraction",
+    "max_quote_age_seconds", "minimum_data_quality", "max_concurrent_positions",
+    "max_parlay_legs", "automation_level", "emergency_stop",
+    "blocked_sports", "blocked_providers", "blocked_markets",
+)
 _PROVENANCE_FIELD_NAMES: Final = (
     "schema",
     "schema_version",

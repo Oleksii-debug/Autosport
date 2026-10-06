@@ -9,6 +9,7 @@ non-expanding successor of the already persisted owner contract.
 from __future__ import annotations
 
 import weakref
+from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final
@@ -169,11 +170,35 @@ _CANONICAL_TRANSITION_VALIDATOR: Final = validate_automatic_transition
 _CANONICAL_STRICT_JSON_LOADS: Final = strict_json_loads
 _CANONICAL_ATOMIC_WRITE_JSON: Final = atomic_write_json
 _CANONICAL_WORKSPACE_LOCK_TYPE: Final = WorkspaceEconomicLock
+_CANONICAL_WORKSPACE_LOCK_ENTER: Final = WorkspaceEconomicLock.__enter__
+_CANONICAL_WORKSPACE_LOCK_EXIT: Final = WorkspaceEconomicLock.__exit__
 _CANONICAL_PATH_TYPE: Final = Path
 _CANONICAL_STORE_FILE_NAME: Final = "economic_goal_contract.json"
 
 _STORE_BINDINGS_BY_ID: Final = {}
 _CANONICAL_OBJECT_GETATTRIBUTE: Final = object.__getattribute__
+
+_CANONICAL_WORKSPACE_CONTEXTMANAGER: Final = contextmanager
+
+
+@_CANONICAL_WORKSPACE_CONTEXTMANAGER
+def _workspace_lock_scope(
+    workspace: str | Path,
+    _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
+    _enter=_CANONICAL_WORKSPACE_LOCK_ENTER,
+    _exit=_CANONICAL_WORKSPACE_LOCK_EXIT,
+):
+    lock = _lock_type(workspace)
+    _enter(lock)
+    try:
+        yield lock
+    except BaseException as exc:
+        if _exit(lock, type(exc), exc, exc.__traceback__):
+            return
+        raise
+    else:
+        _exit(lock, None, None, None)
+
 
 
 def _resolve_store_binding(
@@ -438,11 +463,12 @@ class EconomicGoalStore:
         _writer=_CANONICAL_ATOMIC_WRITE_JSON,
         _binding_resolver=_resolve_store_binding,
         _error_type=EconomicGoalContractError,
+        _lock_scope=_workspace_lock_scope,
     ) -> None:
         """Create the first owner contract while holding the economic writer lock."""
 
         workspace, path, path_exists, _ = _binding_resolver(self)
-        with _lock_type(workspace):
+        with _lock_scope(workspace):
             if path_exists():
                 raise _error_type(
                     "persisted economic goal already exists; owner replacement requires "
@@ -461,11 +487,12 @@ class EconomicGoalStore:
         _binding_resolver=_resolve_store_binding,
         _error_type=EconomicGoalContractError,
         _max_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
+        _lock_scope=_workspace_lock_scope,
     ) -> None:
         """Publish one machine revision only when durable authority cannot expand."""
 
         workspace, path, _, path_open = _binding_resolver(self)
-        with _lock_type(workspace):
+        with _lock_scope(workspace):
             try:
                 with path_open("r", encoding="utf-8") as handle:
                     previous_text = handle.read(_max_chars + 1)

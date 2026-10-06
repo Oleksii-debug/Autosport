@@ -6,6 +6,7 @@ from decimal import Decimal, localcontext
 from pathlib import Path
 
 from autosport import _paper_execution_reality_legacy as legacy
+from autosport import paper_execution_reality as public_paper
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
@@ -78,6 +79,31 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
             "decimal input text exceeds resource limit",
         ):
             evidence(odds="1" * 8193)
+
+    def test_public_decimal_arithmetic_ignores_rebound_module_decimal(self) -> None:
+        previous = public_paper.Decimal
+
+        def forged_decimal(*args, **kwargs):
+            raise AssertionError("rebound public Decimal executed")
+
+        public_paper.Decimal = forged_decimal
+        try:
+            result = public_paper._decimal_add_exact(
+                Decimal("1.20"),
+                Decimal("2.30"),
+            )
+        finally:
+            public_paper.Decimal = previous
+
+        self.assertEqual(result, Decimal("3.50"))
+
+    def test_public_decimal_coefficient_boundary_avoids_int_string_limit(self) -> None:
+        coefficient = 10 ** 8191
+
+        result = public_paper._decimal_from_coefficient(coefficient, 0)
+
+        self.assertEqual(len(format(result, "f")), 8192)
+        self.assertEqual(result, Decimal(coefficient))
 
     def test_huge_integer_ingress_is_rejected_before_decimal_construction(self) -> None:
         huge = 1 << 1_000_000
@@ -275,6 +301,25 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(attempt.requested_stake, Decimal("10.00"))
         self.assertEqual(attempt.execution_odds, Decimal("2.40"))
         self.assertEqual(attempt.execution_stake, Decimal("10.00"))
+
+    def test_public_completion_writer_enforces_event_size_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(ledger_path)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger event exceeds resource limit",
+            ):
+                ledger._append_completion_unlocked(
+                    events=[],
+                    run_id="resource-run",
+                    payload={
+                        "oversized": "x" * legacy._MAX_DURABLE_EVENT_LINE_CHARS,
+                    },
+                )
+
+            self.assertFalse(ledger_path.exists())
 
     def test_oversized_event_is_rejected_before_durable_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

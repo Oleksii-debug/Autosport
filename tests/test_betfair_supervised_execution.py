@@ -1317,3 +1317,31 @@ def test_client_repr_never_exposes_session_credentials() -> None:
     assert "super-secret-app" not in rendered
     assert "super-secret-session" not in rendered
     assert "enabled=False" in rendered
+
+
+def test_structural_and_authoritative_reports_have_distinct_evidence_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, _approval, _ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        report = client.place_action(
+            action,
+            profile=profile,
+            bound=bound,
+            provider_order_ref="a" * 32,
+            execution_workspace=Path(tmp),
+        )
+
+        assert report.provider_origin_authoritative is False
+        authoritative_shape = replace(
+            report,
+            provider_origin_authoritative=True,
+        )
+        assert report.evidence_id != authoritative_shape.evidence_id

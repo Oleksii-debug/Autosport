@@ -9,6 +9,7 @@ from autosport.localization import text
 from autosport.operator_source_registry import list_product_source_entries
 from autosport.product_gui_worker import ProductGuiMessage
 from autosport.product_windows_gui import ProductWindowsAutosportApp
+from autosport.research_strategy import ResearchStrategyPlan
 
 
 class _Var:
@@ -211,6 +212,52 @@ def test_product_session_restore_uses_frozen_start_configuration(
     assert calls == [("captured-strategy", captured_plan)]
     assert app._product_runtime_workspace is None
     assert app._product_restore_strategy_id is None
+
+
+def test_product_restore_rejects_tampered_frozen_plan_before_opening_workspace(
+    tmp_path, monkeypatch
+) -> None:
+    app = _headless_app(tmp_path)
+    original_sha = "a" * 64
+    tampered_sha = "b" * 64
+    plan = ResearchStrategyPlan(
+        (
+            SimpleNamespace(
+                decision_id="decision-1",
+                decision_ts="2026-09-19T04:00:00Z",
+                trigger_quote_key="quote-1",
+            ),
+        ),
+        original_sha,
+    )
+    target = tmp_path / "autosport" / "strategies" / original_sha[:8]
+    app.session = None
+    app._active_workspace = target
+    app._product_runtime_workspace = target
+    app._product_restore_strategy_id = "captured-research-strategy"
+    app._product_restore_research_plan = plan
+    opened: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        "autosport.product_windows_gui.workspace_for_strategy",
+        lambda root, strategy_id, research_plan: Path(root)
+        / "strategies"
+        / research_plan.source_sha256[:8],
+    )
+
+    def open_session(self, strategy_id, research_plan):
+        opened.append((strategy_id, research_plan))
+        return SimpleNamespace(workspace=tmp_path / "unexpected")
+
+    monkeypatch.setattr(ProductWindowsAutosportApp, "_open_session", open_session)
+
+    # frozen=True is not an authority boundary against object.__setattr__.
+    object.__setattr__(plan, "source_sha256", tampered_sha)
+
+    assert app._restore_base_session_after_product() is False
+    assert opened == []
+    assert target in app._recovery_blocked_workspaces
+    assert app._active_workspace == target
 
 
 def test_start_failure_does_not_mask_reopen_failure(tmp_path, monkeypatch) -> None:

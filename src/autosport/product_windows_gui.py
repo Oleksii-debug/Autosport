@@ -381,6 +381,17 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
                 or strategy_id.strip() != strategy_id
             ):
                 raise RuntimeError("product restore strategy identity is unavailable")
+            # The saved ResearchStrategyPlan is a Python object reference, not an
+            # immutable trust boundary: object.__setattr__ can alter a frozen
+            # dataclass after START. Re-resolve the economic identity before
+            # _open_session can touch any workspace and fail closed on drift.
+            restore_workspace = Path(
+                workspace_for_strategy(self.workspace, strategy_id, research_plan)
+            )
+            if restore_workspace != target_workspace:
+                raise RuntimeError(
+                    "product restore configuration no longer resolves to runtime workspace"
+                )
             restored_session = self._open_session(strategy_id, research_plan)
             if (
                 Path(self._active_workspace) != target_workspace

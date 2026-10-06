@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from threading import Barrier, Thread
 
 import pytest
 
+import autosport.betfair_marketbook_projection_concurrency as _projection_gate_module
 from autosport.betfair_marketbook_projection_concurrency import (
     BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION,
     BetfairMarketBookProjectionConcurrencyGate,
@@ -522,3 +523,591 @@ def test_state_rejects_generation_rewind_or_duplicate_active_generation() -> Non
             (a, b),
             2,
         )
+
+
+def test_projection_gate_rejects_subclassed_authority_inputs_before_mutation() -> None:
+    class RequestId(str):
+        pass
+
+    class ObservedInstant(datetime):
+        def astimezone(self, tz=None):
+            raise AssertionError("subclass clock override must not execute")
+
+    value = gate()
+
+    with pytest.raises(TypeError, match="request_id must be exact str"):
+        value.begin(
+            RequestId("r-subclass"),
+            observed_at=T0,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+
+    state = value.snapshot()
+    assert state.active == ()
+    assert state.last_observed_at_utc_us is None
+
+    hostile_time = ObservedInstant(2026, 9, 22, tzinfo=timezone.utc)
+    with pytest.raises(TypeError, match="observed_at must be exact datetime"):
+        value.begin(
+            "r-time-subclass",
+            observed_at=hostile_time,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+
+    state = value.snapshot()
+    assert state.active == ()
+    assert state.last_observed_at_utc_us is None
+
+    class PolicyVersion(str):
+        pass
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported Betfair MarketBook projection concurrency policy",
+    ):
+        MarketBookProjectionConcurrencyState(
+            PolicyVersion(BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION),
+            None,
+            (),
+            1,
+        )
+
+
+def test_restart_revalidates_tampered_frozen_projection_state() -> None:
+    value = gate()
+    assert begin_projected(value, "r0").allowed
+    state = value.snapshot()
+    lease = state.active[0]
+
+    object.__setattr__(lease, "generation", 0)
+
+    with pytest.raises(ValueError, match="generation must be a positive"):
+        BetfairMarketBookProjectionConcurrencyGate(state=state)
+
+
+def test_restart_revalidates_tampered_projection_policy_identity() -> None:
+    state = gate().snapshot()
+    object.__setattr__(state, "policy_version", "forged-policy")
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported Betfair MarketBook projection concurrency policy",
+    ):
+        BetfairMarketBookProjectionConcurrencyGate(state=state)
+
+
+def test_instance_shadowed_clock_helper_cannot_bypass_monotonic_fence() -> None:
+    acquire_gate = gate()
+    assert begin_projected(
+        acquire_gate,
+        "first",
+        at=T0 + timedelta(seconds=1),
+    ).allowed
+
+    acquire_gate._require_not_backwards = lambda observed_us: None  # type: ignore[method-assign]
+
+    before_acquire = acquire_gate.snapshot()
+    with pytest.raises(ValueError, match="must not move backwards"):
+        begin_projected(acquire_gate, "backdated", at=T0)
+    assert acquire_gate.snapshot() == before_acquire
+
+    release_gate = gate()
+    first = begin_projected(
+        release_gate,
+        "active",
+        at=T0 + timedelta(seconds=1),
+    )
+    assert first.lease_generation is not None
+
+    release_gate._require_not_backwards = lambda observed_us: None  # type: ignore[method-assign]
+
+    before_release = release_gate.snapshot()
+    with pytest.raises(ValueError, match="must not move backwards"):
+        release_gate.complete(
+            "active",
+            lease_generation=first.lease_generation,
+            observed_at=T0,
+        )
+    assert release_gate.snapshot() == before_release
+
+
+def test_process_control_during_active_insert_burns_lease_generation() -> None:
+    value = gate()
+    interrupt = KeyboardInterrupt("active insert interrupted")
+
+    class InterruptingActive(dict[str, MarketBookProjectionLease]):
+        def __setitem__(self, key: str, lease: MarketBookProjectionLease) -> None:
+            super().__setitem__(key, lease)
+            raise interrupt
+
+    value._active = InterruptingActive()
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        begin_projected(value, "interrupted")
+
+    assert exc_info.value is interrupt
+    state = value.snapshot()
+    assert state.active == ()
+    assert state.next_lease_generation == 2
+    assert state.last_observed_at_utc_us is None
+
+    successor = begin_projected(value, "successor")
+    assert successor.allowed is True
+    assert successor.lease_generation == 2
+
+
+def test_process_control_during_complete_delete_preserves_causal_time() -> None:
+    value = gate()
+    first = begin_projected(value, "active")
+    assert first.lease_generation is not None
+    interrupt = KeyboardInterrupt("complete delete interrupted")
+
+    class InterruptingActive(dict[str, MarketBookProjectionLease]):
+        def __delitem__(self, key: str) -> None:
+            super().__delitem__(key)
+            raise interrupt
+
+    value._active = InterruptingActive(value._active)
+
+    completed_at = T0 + timedelta(seconds=1)
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        value.complete(
+            "active",
+            lease_generation=first.lease_generation,
+            observed_at=completed_at,
+        )
+
+    assert exc_info.value is interrupt
+    state = value.snapshot()
+    assert state.active == ()
+    assert state.last_observed_at_utc_us == int(completed_at.timestamp() * 1_000_000)
+    assert state.next_lease_generation == 2
+
+
+
+def test_projection_gate_runtime_authority_is_closure_bound(monkeypatch) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    state_type = MarketBookProjectionConcurrencyState
+    lease_type = MarketBookProjectionLease
+    decision_type = _projection_gate_module.MarketBookProjectionConcurrencyDecision
+    original_policy = BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION
+
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "_validate_request_id",
+        lambda value: "forged-request",
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "_utc_microseconds",
+        lambda *args, **kwargs: 0,
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "_MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED",
+        999,
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION",
+        "forged",
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "MarketBookProjectionConcurrencyDecision",
+        object,
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "MarketBookProjectionLease",
+        object,
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "MarketBookProjectionConcurrencyState",
+        object,
+    )
+    monkeypatch.setattr(
+        decision_type,
+        "__init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable decision constructor must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        decision_type,
+        "__post_init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable decision validator must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        lease_type,
+        "__init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable lease constructor must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        lease_type,
+        "__post_init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable lease validator must not run")
+        ),
+    )
+
+    value = gate_type()
+    first = value.begin(
+        "r0",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    second = value.begin(
+        "r1",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    third = value.begin(
+        "r2",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    denied = value.begin(
+        "r3",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    state = value.snapshot()
+
+    assert all(
+        type(decision) is decision_type and decision.allowed
+        for decision in (first, second, third)
+    )
+    assert type(denied) is decision_type
+    assert denied.allowed is False
+    assert denied.active_projection_requests == 3
+    assert type(state) is state_type
+    assert all(type(lease) is lease_type for lease in state.active)
+    assert [lease.request_id for lease in state.active] == ["r0", "r1", "r2"]
+    assert state.policy_version == original_policy
+    assert value.policy_version == original_policy
+
+    assert first.lease_generation is not None
+    value.complete(
+        "r0",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(seconds=1),
+    )
+    assert [lease.request_id for lease in value.snapshot().active] == ["r1", "r2"]
+
+
+def test_projection_restart_validation_ignores_rebound_dto_validators(monkeypatch) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    original = gate_type()
+    assert begin_projected(original, "r0").allowed
+    state = original.snapshot()
+    lease = state.active[0]
+
+    monkeypatch.setattr(
+        MarketBookProjectionConcurrencyState,
+        "__post_init__",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        MarketBookProjectionLease,
+        "__post_init__",
+        lambda self: None,
+    )
+    object.__setattr__(lease, "generation", 0)
+
+    with pytest.raises(ValueError, match="generation must be a positive"):
+        gate_type(state=state)
+
+
+def test_projection_snapshot_is_detached_from_live_lease_authority() -> None:
+    value = gate()
+    first = begin_projected(value, "r0")
+    assert first.lease_generation is not None
+
+    snapshot = value.snapshot()
+    exposed = snapshot.active[0]
+    object.__setattr__(exposed, "generation", exposed.generation + 100)
+
+    live = value.snapshot()
+    assert live.active[0].generation == first.lease_generation
+    value.complete(
+        "r0",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(seconds=1),
+    )
+    assert value.snapshot().active == ()
+
+
+def test_projection_restart_detaches_imported_lease_authority() -> None:
+    source = gate()
+    first = begin_projected(source, "r0")
+    assert first.lease_generation is not None
+    state = source.snapshot()
+
+    restored = BetfairMarketBookProjectionConcurrencyGate(state=state)
+    imported = state.active[0]
+    object.__setattr__(imported, "request_id", "forged-after-restart")
+    object.__setattr__(imported, "generation", imported.generation + 100)
+
+    live = restored.snapshot()
+    assert len(live.active) == 1
+    assert live.active[0].request_id == "r0"
+    assert live.active[0].generation == first.lease_generation
+    restored.complete(
+        "r0",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(seconds=1),
+    )
+    assert restored.snapshot().active == ()
+
+
+def test_projection_gate_instance_storage_authority_ignores_rebound_special_methods(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    value = gate_type()
+
+    def hostile_getattribute(self, name: str):
+        if name.startswith("_"):
+            raise AssertionError(f"rebound __getattribute__ reached authority field {name}")
+        return object.__getattribute__(self, name)
+
+    def hostile_setattr(self, name: str, new_value: object) -> None:
+        if name.startswith("_"):
+            raise AssertionError(f"rebound __setattr__ reached authority field {name}")
+        object.__setattr__(self, name, new_value)
+
+    monkeypatch.setattr(gate_type, "__getattribute__", hostile_getattribute)
+    monkeypatch.setattr(gate_type, "__setattr__", hostile_setattr)
+
+    first = value.begin(
+        "r0",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    assert first.allowed is True
+    assert first.lease_generation is not None
+    snapshot = value.snapshot()
+    assert [lease.request_id for lease in snapshot.active] == ["r0"]
+
+    restored = gate_type(state=snapshot)
+    restored.complete(
+        "r0",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(seconds=1),
+    )
+    assert restored.snapshot().active == ()
+
+
+def test_projection_restart_authority_ignores_rebound_state_slot_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    source = gate_type()
+    for index in range(3):
+        assert begin_projected(source, f"r{index}").allowed
+    state = source.snapshot()
+
+    monkeypatch.setattr(
+        MarketBookProjectionConcurrencyState,
+        "active",
+        property(lambda self: ()),
+    )
+
+    restored = gate_type(state=state)
+    denied = restored.begin(
+        "r3",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    assert denied.allowed is False
+
+
+def test_projection_live_release_ignores_rebound_lease_generation_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    value = gate_type()
+    first = begin_projected(value, "r0")
+    assert first.lease_generation is not None
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            MarketBookProjectionLease,
+            "generation",
+            property(lambda self: first.lease_generation + 100),
+        )
+        value.complete(
+            "r0",
+            lease_generation=first.lease_generation,
+            observed_at=T0 + timedelta(seconds=1),
+        )
+
+    assert value.snapshot().active == ()
+
+
+def test_projection_decision_construction_ignores_rebound_field_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    value = gate_type()
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            _projection_gate_module.MarketBookProjectionConcurrencyDecision,
+            "allowed",
+            property(lambda self: False),
+        )
+        decision = value.begin(
+            "r0",
+            observed_at=T0,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+
+    assert decision.allowed is True
+    assert decision.lease_generation == 1
+
+
+def test_projection_timezone_offset_is_observed_once_before_gate_lock() -> None:
+    class ChangingOffset(tzinfo):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def utcoffset(self, dt):
+            self.calls += 1
+            return timedelta(hours=self.calls)
+
+        def dst(self, dt):
+            return timedelta(0)
+
+    zone = ChangingOffset()
+    local = datetime(2026, 9, 22, 1, 0, 0, tzinfo=zone)
+    value = BetfairMarketBookProjectionConcurrencyGate()
+
+    decision = value.begin(
+        "r0",
+        observed_at=local,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+
+    assert zone.calls == 1
+    assert decision.observed_at_utc_us == int(T0.timestamp() * 1_000_000)
+
+
+def test_projection_gate_authority_ignores_late_builtin_shadowing(monkeypatch) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    shadowed = (
+        "object",
+        "type",
+        "isinstance",
+        "tuple",
+        "set",
+        "str",
+        "int",
+        "bool",
+        "len",
+        "sorted",
+        "TypeError",
+        "ValueError",
+    )
+    for name in shadowed:
+        monkeypatch.setattr(_projection_gate_module, name, None, raising=False)
+
+    value = gate_type()
+    with pytest.raises(TypeError, match="request_id must be exact str"):
+        value.begin(
+            object(),  # type: ignore[arg-type]
+            observed_at=T0,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+
+    first = value.begin(
+        "r0",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    with pytest.raises(ValueError, match="request_id is already active"):
+        value.begin(
+            "r0",
+            observed_at=T0,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+    state = value.snapshot()
+    restored = gate_type(state=state)
+
+    assert first.allowed is True
+    assert first.lease_generation == 1
+    assert restored.snapshot() == state
+    restored.complete(
+        "r0",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(microseconds=1),
+    )
+    assert restored.snapshot().active == ()
+
+
+def test_projection_cleanup_authority_ignores_late_exception_builtin_shadowing(
+    monkeypatch,
+) -> None:
+    value = BetfairMarketBookProjectionConcurrencyGate()
+    original_lock = value._lock
+    primary = KeyboardInterrupt("primary process-control failure")
+
+    class InterruptThenCleanupFailureLock:
+        def __init__(self) -> None:
+            self.cleanup = False
+
+        def __enter__(self):
+            if self.cleanup:
+                raise RuntimeError("cleanup lock failure")
+            return original_lock.__enter__()
+
+        def __exit__(self, exc_type, exc, tb):
+            result = original_lock.__exit__(exc_type, exc, tb)
+            if exc_type is None and not self.cleanup:
+                self.cleanup = True
+                raise primary
+            return result
+
+    value._lock = InterruptThenCleanupFailureLock()
+    for name in ("BaseException", "Exception", "getattr", "callable"):
+        monkeypatch.setattr(_projection_gate_module, name, None, raising=False)
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        value.begin(
+            "r0",
+            observed_at=T0,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+
+    assert exc_info.value is primary
+    assert any(
+        "projection-begin cleanup also failed: RuntimeError: cleanup lock failure"
+        in note
+        for note in getattr(primary, "__notes__", ())
+    )
+
+    value._lock = original_lock
+    state = value.snapshot()
+    assert [lease.request_id for lease in state.active] == ["r0"]
+    assert state.next_lease_generation == 2
+

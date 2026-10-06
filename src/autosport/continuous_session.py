@@ -2653,6 +2653,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
         ] = FocusedMirrorDependencyIndex._dependency,
         _dependency_reader_code: object = FocusedMirrorDependencyIndex._dependency.__code__,
+        _dependency_type: type[FocusedMirrorDependency] = FocusedMirrorDependency,
+        _dependency_matches: Callable[[FocusedMirrorDependency, object], bool] = (
+            FocusedMirrorDependency.matches
+        ),
+        _dependency_matches_code: object = FocusedMirrorDependency.matches.__code__,
+        _dependency_equals: Callable[[FocusedMirrorDependency, object], object] = (
+            FocusedMirrorDependency.__eq__
+        ),
+        _dependency_equals_code: object = FocusedMirrorDependency.__eq__.__code__,
     ) -> tuple[
         tuple[str, ...],
         bool,
@@ -2716,6 +2725,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index input identity state is invalid"
             )
+        def require_dependency_model_dispatch(message: str) -> None:
+            if (
+                FocusedMirrorDependency is not _dependency_type
+                or _dependency_type.matches is not _dependency_matches
+                or getattr(_dependency_matches, "__code__", None)
+                is not _dependency_matches_code
+                or _dependency_type.__eq__ is not _dependency_equals
+                or getattr(_dependency_equals, "__code__", None)
+                is not _dependency_equals_code
+            ):
+                raise ContinuousSessionError(message)
+
+        require_dependency_model_dispatch(
+            "canonical dependency routing model authority changed"
+        )
+
         dependency_authority: tuple[FocusedMirrorDependency, ...] | None = None
         dependency_mirror: object | None = None
         dependency_storage: object | None = None
@@ -2740,6 +2765,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             dependency_lock = dependency_index._lock
 
         def require_dependency_authority(message: str) -> None:
+            require_dependency_model_dispatch(message)
             if dependency_authority is None:
                 return
             if (

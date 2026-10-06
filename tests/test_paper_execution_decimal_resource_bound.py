@@ -316,5 +316,97 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
             )
 
 
+    def test_authority_dataclasses_ignore_rebound_decimal_ingress_parser(self) -> None:
+        sentinel = object()
+        previous = legacy.__dict__.get("_decimal", sentinel)
+
+        def forged_decimal(value, name, *, allow_zero=False):
+            return Decimal("2")
+
+        legacy._decimal = forged_decimal
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                evidence(odds="1E+8192")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                legacy.ObservedPaperExecution(
+                    action_id="resource-action",
+                    outcome=PaperAttemptOutcome.ACCEPTED,
+                    observed_at="2026-10-05T00:00:00.250000+00:00",
+                    evidence_grade=EvidenceGrade.EMPIRICAL,
+                    evidence_source="captured-paper-observation-v1",
+                    evidence_id="paper-evidence-ingress",
+                    evidence_sha256="a" * 64,
+                    accepted_odds=Decimal("1E+8192"),
+                    accepted_stake=Decimal("10.00"),
+                    suspended=False,
+                    reason="ingress parser rebound regression",
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                PaperLegAttempt(
+                    attempt_id="attempt-ingress",
+                    run_id="run-ingress",
+                    plan_id="plan-ingress",
+                    action_id="resource-action",
+                    sequence=0,
+                    bookmaker_id="paper-venue",
+                    account_id="paper-account",
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    side="BACK",
+                    decision_quote_id="quote-1",
+                    decision_odds=Decimal("1E+8192"),
+                    requested_stake=Decimal("10.00"),
+                    decision_observed_at="2026-10-05T00:00:00.100000+00:00",
+                    execution_observed_at="2026-10-05T00:00:00.200000+00:00",
+                    delay_ms=100,
+                    quote_age_ms=100,
+                    outcome=PaperAttemptOutcome.ACCEPTED,
+                    execution_odds=Decimal("2.40"),
+                    execution_stake=Decimal("10.00"),
+                    suspended=False,
+                    evidence_grade=EvidenceGrade.EMPIRICAL,
+                    evidence_source="captured-paper-observation-v1",
+                    evidence_id="paper-evidence-ingress",
+                    evidence_sha256="a" * 64,
+                    model_fingerprint="b" * 64,
+                    reason="ingress parser rebound regression",
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                PaperExecutionRun(
+                    run_id="run-ingress",
+                    trigger_id="trigger-ingress",
+                    plan_id="plan-ingress",
+                    plan_fingerprint="a" * 64,
+                    model_fingerprint="b" * 64,
+                    started_at="2026-10-05T00:00:00.100000+00:00",
+                    attempts=(),
+                    pending_action_ids=(),
+                    recovery_decision=RecoveryDecision.NONE,
+                    worst_case_exposure=Decimal("1E+8192"),
+                    completed=True,
+                )
+        finally:
+            if previous is sentinel:
+                del legacy._decimal
+            else:
+                legacy._decimal = previous
+
+
 if __name__ == "__main__":
     unittest.main()

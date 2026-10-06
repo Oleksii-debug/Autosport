@@ -81,7 +81,9 @@ class ProviderManifestFactAuthority(str, Enum):
     """Authority that owns a manifest fact."""
 
     CANONICAL_PROFILE = "canonical_profile"
-    # Compatibility vocabulary only: a public evidence ref is structural, not authority.\n    EXPLICIT_EVIDENCE = "explicit_evidence"\n    NOT_PROVEN = "not_proven"
+    # Compatibility vocabulary only: a public evidence ref is structural, not authority.
+    EXPLICIT_EVIDENCE = "explicit_evidence"
+    NOT_PROVEN = "not_proven"
 
 
 _CANONICAL_CAPABILITY_MAP: dict[ProviderManifestCapability, BookmakerCapability] = {

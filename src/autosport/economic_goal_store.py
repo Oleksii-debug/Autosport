@@ -369,7 +369,7 @@ def economic_goal_to_payload(
         "minimum_data_quality": str(minimum_data_quality),
         "max_concurrent_positions": max_concurrent_positions,
         "max_parlay_legs": max_parlay_legs,
-        "automation_level": _automation_value_getter(contract.automation_level),
+        "automation_level": _automation_value_getter(automation_level),
         "emergency_stop": emergency_stop,
         "blocked_sports": sorted(blocked_sports),
         "blocked_providers": sorted(blocked_providers),

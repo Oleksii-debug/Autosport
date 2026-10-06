@@ -546,6 +546,28 @@ def test_caller_modified_exact_type_cannot_pass_product_verifier() -> None:
         verify_provider_billing_row_attribution(source, modified, "billing-ref-1")
 
 
+def test_charge_identity_post_construction_tamper_cannot_pass_product_verifier() -> None:
+    source = _source()
+    evidence = resolve_provider_billing_row_attribution(source, "billing-ref-1")
+
+    object.__setattr__(
+        evidence,
+        "row_provider_charge_class",
+        "BETFAIR_TRANSACTION_CHARGE",
+    )
+    object.__setattr__(evidence, "row_provider_transaction_id", 123)
+
+    with pytest.raises(
+        ProviderBillingRowAuthorityError,
+        match="does not match canonical source re-resolution",
+    ):
+        verify_provider_billing_row_attribution(
+            source,
+            evidence,
+            "billing-ref-1",
+        )
+
+
 def test_rebound_evidence_equality_cannot_bypass_field_verification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

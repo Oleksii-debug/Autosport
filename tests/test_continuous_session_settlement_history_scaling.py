@@ -1743,3 +1743,70 @@ def test_stale_instance_failure_rebinds_to_current_canonical_generation() -> Non
         assert payload["observed_cycles_completed"] == canonical["cycles_completed"]
         assert payload["observed_last_success_at"] == canonical["last_success_at"]
         assert payload["observed_state"] == canonical["state"]
+
+
+def test_snapshot_serializes_with_concurrent_failure_publication() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        original_write = state._write_error_checkpoint
+        writer_entered = threading.Event()
+        release_writer = threading.Event()
+        snapshot_started = threading.Event()
+        snapshot_completed = threading.Event()
+        snapshot_result: list[continuous_session.ContinuousSessionStatus] = []
+
+        def gated_write(code: str | None) -> None:
+            if code == "CONCURRENT_FAILURE":
+                writer_entered.set()
+                assert release_writer.wait(2.0)
+            original_write(code)
+
+        state._write_error_checkpoint = gated_write  # type: ignore[method-assign]
+
+        publisher = threading.Thread(
+            target=lambda: state.record_failure(code="CONCURRENT_FAILURE"),
+            daemon=True,
+        )
+        publisher.start()
+        assert writer_entered.wait(1.0)
+
+        def take_snapshot() -> None:
+            snapshot_started.set()
+            snapshot_result.append(state.snapshot())
+            snapshot_completed.set()
+
+        reader = threading.Thread(target=take_snapshot, daemon=True)
+        reader.start()
+        assert snapshot_started.wait(1.0)
+        assert not snapshot_completed.wait(0.15)
+
+        release_writer.set()
+        publisher.join(timeout=2.0)
+        reader.join(timeout=2.0)
+        assert not publisher.is_alive()
+        assert not reader.is_alive()
+        assert snapshot_completed.is_set()
+        assert snapshot_result[0].last_error_code == "CONCURRENT_FAILURE"
+
+
+def test_snapshot_rejects_runtime_session_lock_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        def attacker_lock(_path: object):
+            raise AssertionError("runtime-rebound snapshot lock executed")
+
+        monkeypatch.setattr(
+            continuous_session,
+            "durable_path_lock",
+            attacker_lock,
+        )
+        try:
+            state.snapshot()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "snapshot authority changed" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound snapshot lock was accepted")

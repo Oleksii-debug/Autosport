@@ -1841,6 +1841,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _paper_book_type: type[PaperBook] = PaperBook,
         _paper_book_load: Callable[..., PaperBook] = PaperBook.load,
         _paper_book_load_descriptor: object = PaperBook.__dict__["load"],
+        _path_exists: Callable[[Path], bool] = Path.exists,
+        _path_exists_code: object = Path.exists.__code__,
     ) -> PaperBook:
         current_load = PaperBook.__dict__.get("load")
         if (
@@ -1852,11 +1854,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "__func__",
                 None,
             )
+            or Path.exists is not _path_exists
+            or getattr(_path_exists, "__code__", None) is not _path_exists_code
         ):
             raise ContinuousSessionError(
                 "settlement book loader authority changed"
             )
-        if self.paper_book_path.exists():
+        if _path_exists(self.paper_book_path):
             return _paper_book_load(self.paper_book_path)
         return _paper_book_type(self.initial_bankroll)
 

@@ -403,6 +403,7 @@ def _provenance_for_bound(
     _schema_version=PROVENANCE_SCHEMA_VERSION,
     _goal_error=EconomicGoalContractError,
     _contract_snapshot=_canonical_contract_snapshot,
+    _contract_field_names=_PROVENANCE_CONTRACT_FIELD_NAMES,
 ) -> EconomicGoalProvenance:
     """Derive immutable provenance identity without introducing another authority."""
 
@@ -414,7 +415,7 @@ def _provenance_for_bound(
     after = _contract_snapshot(contract)
     if before != after:
         raise _goal_error("economic goal changed during provenance derivation")
-    values = dict(zip(_PROVENANCE_CONTRACT_FIELD_NAMES, after))
+    values = dict(zip(_contract_field_names, after))
     contract_sha256 = _contract_sha256(contract)
     final_snapshot = _contract_snapshot(contract)
     if after != final_snapshot:

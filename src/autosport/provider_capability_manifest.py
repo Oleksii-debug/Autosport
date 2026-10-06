@@ -19,6 +19,7 @@ from datetime import datetime
 from enum import Enum
 from hashlib import sha256
 import json
+import weakref
 from types import MappingProxyType
 
 from .bookmaker_capability import (
@@ -186,6 +187,62 @@ def _profile_state(
     if state is BookmakerCapabilityState.UNKNOWN:
         return ProviderManifestState.NOT_PROVEN
     raise ProviderCapabilityManifestError("canonical profile returned an unknown state")
+
+
+def _make_manifest_identity_guard():
+    """Create a process-local original-identity registry outside manifest instances."""
+
+    bindings: dict[
+        int,
+        tuple[weakref.ReferenceType[object], str, str],
+    ] = {}
+
+    def guard(
+        manifest: object,
+        profile_id: str,
+        integration_evidence_id: str,
+    ) -> None:
+        if type(profile_id) is not str or type(integration_evidence_id) is not str:
+            raise ProviderCapabilityManifestError(
+                "bound provider identity must remain exact strings"
+            )
+
+        key = id(manifest)
+        current = bindings.get(key)
+        if current is None:
+            def cleanup(
+                ref: weakref.ReferenceType[object],
+                *,
+                key: int = key,
+                bindings=bindings,
+            ) -> None:
+                observed = bindings.get(key)
+                if observed is not None and observed[0] is ref:
+                    bindings.pop(key, None)
+
+            ref = weakref.ref(manifest, cleanup)
+            bindings[key] = (ref, profile_id, integration_evidence_id)
+            return
+
+        ref, bound_profile_id, bound_integration_evidence_id = current
+        if ref() is not manifest:
+            raise ProviderCapabilityManifestError(
+                "provider manifest identity registry collision"
+            )
+        if profile_id != bound_profile_id:
+            raise ProviderCapabilityManifestError(
+                "bound capability profile identity changed after validation"
+            )
+        if integration_evidence_id != bound_integration_evidence_id:
+            raise ProviderCapabilityManifestError(
+                "bound integration evidence identity changed after validation"
+            )
+
+    return guard
+
+
+_manifest_identity_guard = _make_manifest_identity_guard()
+del _make_manifest_identity_guard
 
 
 class _SealedProviderManifestAuthorityType(type):
@@ -374,7 +431,7 @@ class ProviderCapabilityManifestFact(metaclass=_SealedProviderManifestAuthorityT
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType):
     """Versioned complete capability projection for one exact provider profile."""
 
@@ -402,6 +459,8 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         _integration_contract_validator_code: object = BookmakerIntegrationEvidence.__post_init__.__code__,
         _verify_profile=BookmakerIntegrationEvidence.verify_profile,
         _verify_profile_code: object = BookmakerIntegrationEvidence.verify_profile.__code__,
+        _identity_guard=_manifest_identity_guard,
+        _identity_guard_code: object = _manifest_identity_guard.__code__,
     ) -> None:
         if (
             BookmakerCapabilityProfile.__post_init__ is not _profile_contract_validator
@@ -413,6 +472,7 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
             is not _integration_contract_validator_code
             or BookmakerIntegrationEvidence.verify_profile is not _verify_profile
             or getattr(_verify_profile, "__code__", None) is not _verify_profile_code
+            or getattr(_identity_guard, "__code__", None) is not _identity_guard_code
         ):
             raise ProviderCapabilityManifestError(
                 "canonical manifest dependency validator changed"
@@ -431,6 +491,11 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
 
         current_profile_id = self.profile.profile_id
         current_integration_evidence_id = self.integration.evidence_id
+        _identity_guard(
+            self,
+            current_profile_id,
+            current_integration_evidence_id,
+        )
         try:
             bound_profile_id = self._bound_profile_id
             bound_integration_evidence_id = self._bound_integration_evidence_id
@@ -606,6 +671,8 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         _profile_validator_code: object = _validate_exact_profile.__code__,
         _verify_profile=BookmakerIntegrationEvidence.verify_profile,
         _verify_profile_code: object = BookmakerIntegrationEvidence.verify_profile.__code__,
+        _identity_guard=_manifest_identity_guard,
+        _identity_guard_code: object = _manifest_identity_guard.__code__,
     ) -> ProviderManifestState:
         """Return revalidated capability truth, never a post-construction mutation."""
 
@@ -621,6 +688,7 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
             is not _profile_validator_code
             or BookmakerIntegrationEvidence.verify_profile is not _verify_profile
             or getattr(_verify_profile, "__code__", None) is not _verify_profile_code
+            or getattr(_identity_guard, "__code__", None) is not _identity_guard_code
         ):
             raise ProviderCapabilityManifestError(
                 "canonical manifest read authority changed"
@@ -634,6 +702,11 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         _verify_profile(self.integration, self.profile)
         current_profile_id = self.profile.profile_id
         current_integration_evidence_id = self.integration.evidence_id
+        _identity_guard(
+            self,
+            current_profile_id,
+            current_integration_evidence_id,
+        )
         if (
             type(self._bound_profile_id) is not str
             or current_profile_id != self._bound_profile_id

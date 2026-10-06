@@ -328,3 +328,25 @@ def test_contract_successor_ignores_rebound_public_transition_validator(monkeypa
     )
 
     previous.validate_automatic_successor(candidate)
+
+
+def test_contract_validation_ignores_rebound_public_helpers(monkeypatch) -> None:
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound validation helper executed")
+
+    for name in (
+        "_canonical_text",
+        "_positive_int",
+        "_fraction",
+        "_optional_nonnegative_decimal",
+        "_nonnegative_decimal",
+        "_nonnegative_int",
+        "_canonical_restrictions",
+    ):
+        monkeypatch.setattr(economic_goal_module, name, forged)
+
+    goal = _goal()
+    assert goal.goal_id == "owner-goal-v1"
+
+    candidate = replace(goal, revision=2, max_stake_fraction=Decimal("0.01"))
+    validate_automatic_transition(goal, candidate)

@@ -267,6 +267,22 @@ def test_settlement_witness_key_rejected_before_rehash() -> None:
     assert _HostileSettlementKey.hash_calls == 0
 
 
+def test_opening_registry_ignores_ticket_mapping_descriptor_rebinding(monkeypatch) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+
+    class HostileDescriptor:
+        def __get__(self, instance, owner):
+            raise AssertionError("rebound PaperBook.tickets descriptor executed")
+
+        def __set__(self, instance, value):
+            raise AssertionError("rebound PaperBook.tickets setter executed")
+
+    monkeypatch.setattr(PaperBook, "tickets", HostileDescriptor(), raising=False)
+
+    paper_module._require_ticket_opening_authority(book)
+
+
 def test_opening_registry_ignores_rebound_commitment_module_dispatch(monkeypatch) -> None:
     book = PaperBook("100")
     book.open_ticket([_leg()], "10", placed_at=_TS)

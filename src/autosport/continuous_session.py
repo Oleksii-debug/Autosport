@@ -2252,6 +2252,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
         ] = FocusedMirrorDependencyIndex._dependency,
         _dependency_reader_code: object = FocusedMirrorDependencyIndex._dependency.__code__,
+        _matching_keys_reader: Callable[..., tuple[object, ...]] = (
+            FocusedMirrorDependencyIndex.matching_keys
+        ),
+        _matching_keys_reader_code: object = FocusedMirrorDependencyIndex.matching_keys.__code__,
         **selectors: object,
     ) -> bool:
         def require_canonical_dependency_helpers() -> None:
@@ -2267,6 +2271,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 or _dependency_index_type._dependency is not _dependency_reader
                 or getattr(_dependency_reader, "__code__", None)
                 is not _dependency_reader_code
+                or _dependency_index_type.matching_keys is not _matching_keys_reader
+                or getattr(_matching_keys_reader, "__code__", None)
+                is not _matching_keys_reader_code
             ):
                 raise ContinuousSessionError(
                     "canonical dependency lifecycle verification authority changed"
@@ -2316,7 +2323,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         expected_dependency: FocusedMirrorDependency | None = None
         before_dependencies: tuple[FocusedMirrorDependency, ...] | None = None
+        before_matching_keys: tuple[tuple[str, tuple[object, ...]], ...] | None = None
         dependency_mirror: object | None = None
+        dependency_storage: object | None = None
+        matched_keys_storage: object | None = None
+        dependency_lock: object | None = None
         if isinstance(dependency_index, _dependency_index_type):
             try:
                 expected_dependency = _dependency_type(
@@ -2353,7 +2364,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
                 for existing_input_id in before_ids
             )
+            before_matching_keys = tuple(
+                (
+                    existing_input_id,
+                    _matching_keys_reader(dependency_index, existing_input_id),
+                )
+                for existing_input_id in before_ids
+            )
             dependency_mirror = dependency_index._mirror
+            dependency_storage = dependency_index._dependencies
+            matched_keys_storage = dependency_index._matched_keys
+            dependency_lock = dependency_index._lock
         if input_id in before_ids:
             if expected_dependency is not None:
                 existing_dependency = _dependency_reader(
@@ -2371,6 +2392,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         register_input(input_id, **selectors)
         require_canonical_dependency_helpers()
+        if before_dependencies is not None and (
+            dependency_index._dependencies is not dependency_storage
+            or dependency_index._matched_keys is not matched_keys_storage
+            or dependency_index._lock is not dependency_lock
+        ):
+            raise ContinuousSessionError(
+                "dependency index registration changed state authority"
+            )
         after_ids = dependency_index.input_ids
         if (
             type(after_ids) is not tuple
@@ -2409,6 +2438,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "dependency index registration changed unrelated dependency selectors"
                 )
+            current_matching_keys = tuple(
+                (
+                    existing_input_id,
+                    _matching_keys_reader(dependency_index, existing_input_id),
+                )
+                for existing_input_id in before_ids
+            )
+            if current_matching_keys != before_matching_keys:
+                raise ContinuousSessionError(
+                    "dependency index registration changed unrelated matched-key routing"
+                )
         if expected_dependency is not None:
             published_dependency = _dependency_reader(
                 dependency_index,
@@ -2435,6 +2475,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
         ] = FocusedMirrorDependencyIndex._dependency,
         _dependency_reader_code: object = FocusedMirrorDependencyIndex._dependency.__code__,
+        _matching_keys_reader: Callable[..., tuple[object, ...]] = (
+            FocusedMirrorDependencyIndex.matching_keys
+        ),
+        _matching_keys_reader_code: object = FocusedMirrorDependencyIndex.matching_keys.__code__,
     ) -> bool:
         def require_canonical_dependency_helpers() -> None:
             if (
@@ -2445,6 +2489,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 or _dependency_index_type._dependency is not _dependency_reader
                 or getattr(_dependency_reader, "__code__", None)
                 is not _dependency_reader_code
+                or _dependency_index_type.matching_keys is not _matching_keys_reader
+                or getattr(_matching_keys_reader, "__code__", None)
+                is not _matching_keys_reader_code
             ):
                 raise ContinuousSessionError(
                     "canonical dependency lifecycle verification authority changed"
@@ -2486,7 +2533,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "dependency index input identity state is invalid"
             )
         before_dependencies: tuple[FocusedMirrorDependency, ...] | None = None
+        before_matching_keys: tuple[tuple[str, tuple[object, ...]], ...] | None = None
         dependency_mirror: object | None = None
+        dependency_storage: object | None = None
+        matched_keys_storage: object | None = None
+        dependency_lock: object | None = None
         if isinstance(dependency_index, _dependency_index_type):
             before_dependencies = tuple(
                 _dependency_reader(
@@ -2495,9 +2546,27 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
                 for existing_input_id in before_ids
             )
+            before_matching_keys = tuple(
+                (
+                    existing_input_id,
+                    _matching_keys_reader(dependency_index, existing_input_id),
+                )
+                for existing_input_id in before_ids
+            )
             dependency_mirror = dependency_index._mirror
+            dependency_storage = dependency_index._dependencies
+            matched_keys_storage = dependency_index._matched_keys
+            dependency_lock = dependency_index._lock
         removed = unregister_input(input_id)
         require_canonical_dependency_helpers()
+        if before_dependencies is not None and (
+            dependency_index._dependencies is not dependency_storage
+            or dependency_index._matched_keys is not matched_keys_storage
+            or dependency_index._lock is not dependency_lock
+        ):
+            raise ContinuousSessionError(
+                "dependency index retirement changed state authority"
+            )
         if type(removed) is not bool:
             raise ContinuousSessionError(
                 "dependency index retirement receipt is invalid"
@@ -2552,6 +2621,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if current_remaining_dependencies != expected_remaining_dependencies:
                 raise ContinuousSessionError(
                     "dependency index retirement changed unrelated dependency selectors"
+                )
+            expected_remaining_matching_keys = tuple(
+                item
+                for item in before_matching_keys
+                if item[0] != input_id
+            )
+            current_remaining_matching_keys = tuple(
+                (
+                    remaining_input_id,
+                    _matching_keys_reader(dependency_index, remaining_input_id),
+                )
+                for remaining_input_id in after_ids
+            )
+            if current_remaining_matching_keys != expected_remaining_matching_keys:
+                raise ContinuousSessionError(
+                    "dependency index retirement changed unrelated matched-key routing"
                 )
         return removed
 

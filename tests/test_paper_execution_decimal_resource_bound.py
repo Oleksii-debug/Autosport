@@ -273,6 +273,43 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(attempt.execution_odds, Decimal("2.40"))
         self.assertEqual(attempt.execution_stake, Decimal("10.00"))
 
+    def test_ledger_durability_ignores_rebound_filesystem_module_globals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            names = ("os", "threading", "Path")
+            sentinel = object()
+            previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+
+            class ForbiddenRuntime:
+                def __getattr__(self, name: str):
+                    raise AssertionError(f"rebound filesystem global executed: {name}")
+
+                def __call__(self, *args, **kwargs):
+                    raise AssertionError("rebound Path global executed")
+
+            try:
+                forbidden = ForbiddenRuntime()
+                for name in names:
+                    legacy.__dict__[name] = forbidden
+
+                ledger = PaperExecutionLedger(str(ledger_path))
+                record = evidence()
+                ledger.register_observation_evidence(record)
+                events = ledger.events()
+            finally:
+                for name, value in previous.items():
+                    if value is sentinel:
+                        legacy.__dict__.pop(name, None)
+                    else:
+                        legacy.__dict__[name] = value
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["event_type"],
+                "OBSERVATION_EVIDENCE_REGISTERED",
+            )
+            self.assertTrue(ledger_path.exists())
+
     def test_identity_helpers_ignore_rebound_module_runtime_globals(self) -> None:
         expected_record = evidence()
         expected_digest = expected_record.evidence_sha256

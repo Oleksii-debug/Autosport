@@ -43,6 +43,9 @@ _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCK_LOCAL = threading.local()
 
 _SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN = "autosport.scientific-registry.v1"
+_CANONICAL_PATH_TYPE = Path
+_CANONICAL_PATH_RESOLVE = Path.resolve
+_CANONICAL_PATH_RESOLVE_CODE = Path.resolve.__code__
 _CANONICAL_MONOTONIC_AUTHORITY_TYPE = MonotonicWorkspaceAuthority
 _MISSING_MONOTONIC_CLASS_MEMBER = object()
 _CANONICAL_MONOTONIC_NEW = vars(MonotonicWorkspaceAuthority).get(
@@ -257,7 +260,13 @@ def _authority_recover(
 
 
 def _scientific_registry_authority(destination: Path) -> MonotonicWorkspaceAuthority:
-    workspace = destination.parent.resolve(strict=False)
+    if (
+        Path is not _CANONICAL_PATH_TYPE
+        or _CANONICAL_PATH_TYPE.resolve is not _CANONICAL_PATH_RESOLVE
+        or _CANONICAL_PATH_RESOLVE.__code__ is not _CANONICAL_PATH_RESOLVE_CODE
+    ):
+        raise RuntimeError("ScientificRegistry authority path resolver changed")
+    workspace = _CANONICAL_PATH_RESOLVE(destination.parent, strict=False)
     class_dict = vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE)
     current_new = class_dict.get("__new__", _MISSING_MONOTONIC_CLASS_MEMBER)
     if (

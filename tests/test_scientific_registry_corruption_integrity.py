@@ -4,6 +4,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -439,6 +440,42 @@ def test_transplant_rejects_monotonic_constructor_alias_replacement(
         match="ScientificRegistry monotonic authority constructor changed",
     ):
         ScientificRegistry(target_path)
+
+
+def test_transplant_rejects_one_shot_path_resolver_redirection(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source_path = tmp_path / "resolver-source" / "scientific_registry.json"
+    source = ScientificRegistry.initialize_pristine(source_path)
+    source.append(_question())
+    transplanted_bytes = source_path.read_bytes()
+
+    target_path = tmp_path / "resolver-target" / "scientific_registry.json"
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(transplanted_bytes)
+
+    canonical_resolve = Path.resolve
+    target_parent_text = str(target_path.parent)
+    source_parent = source_path.parent
+    hostile_calls: list[str] = []
+
+    def hostile_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        if str(self) == target_parent_text:
+            hostile_calls.append(str(self))
+            monkeypatch.setattr(Path, "resolve", canonical_resolve)
+            return canonical_resolve(source_parent, strict=False)
+        return canonical_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", hostile_resolve)
+    with pytest.raises(
+        RuntimeError,
+        match="ScientificRegistry authority path resolver changed",
+    ):
+        ScientificRegistry(target_path)
+
+    assert hostile_calls == []
+    assert target_path.read_bytes() == transplanted_bytes
 
 
 def test_valid_old_registry_restore_is_rejected_as_monotonic_rollback(tmp_path):

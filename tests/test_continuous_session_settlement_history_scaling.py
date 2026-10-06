@@ -4150,3 +4150,31 @@ def test_sidecar_writer_rejects_runtime_text_validator_rebinding_before_publicat
             raise AssertionError("runtime-rebound sidecar writer validator was accepted")
 
         assert not error_path.exists()
+
+
+def test_source_projection_write_preserves_active_failure_generation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="PROVIDER_FAILURE")
+
+        state.record_source_projection(
+            deltas=(_projection_delta(1),),
+            backlog=False,
+        )
+
+        snapshot = state.snapshot()
+        assert snapshot.last_error_code == "PROVIDER_FAILURE"
+        assert snapshot.source_gap_state == "NONE"
+        assert snapshot.source_sync_state == "READY"
+
+        canonical = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        sidecar = json.loads(
+            (
+                root / "continuous_session.json.operational_error.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert canonical["generation"] == 0
+        assert sidecar["observed_generation"] == 0

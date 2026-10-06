@@ -2463,7 +2463,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "collector projection configuration is invalid"
             )
-        snapshot = _snapshot_method(self._state)
+        snapshot = _snapshot_method(state)
         deltas = read_deltas(
             source_id=source_id,
             after_delta_id=snapshot.source_state_delta_id,

@@ -143,14 +143,19 @@ def _restriction_set(name: str, value: object) -> frozenset[str]:
     return frozenset(value)
 
 
-def economic_goal_to_payload(contract: EconomicGoalContract) -> dict[str, object]:
+def economic_goal_to_payload(
+    contract: EconomicGoalContract,
+    _goal_type=EconomicGoalContract,
+    _goal_validator=EconomicGoalContract.__post_init__,
+    _error_type=EconomicGoalContractError,
+) -> dict[str, object]:
     """Return the canonical schema-v1 JSON payload for ``contract``."""
 
-    if type(contract) is not EconomicGoalContract:
-        raise EconomicGoalContractError(
+    if type(contract) is not _goal_type:
+        raise _error_type(
             "economic goal persistence requires an EconomicGoalContract"
         )
-    EconomicGoalContract.__post_init__(contract)
+    _goal_validator(contract)
 
     body: dict[str, object] = {
         "goal_id": contract.goal_id,
@@ -200,76 +205,94 @@ def economic_goal_to_payload(contract: EconomicGoalContract) -> dict[str, object
     }
 
 
-def economic_goal_from_payload(payload: object) -> EconomicGoalContract:
+def economic_goal_from_payload(
+    payload: object,
+    _goal_type=EconomicGoalContract,
+    _goal_error=EconomicGoalContractError,
+    _objective_type=EconomicObjective,
+    _automation_type=AutomationLevel,
+    _exact_keys=_require_exact_keys,
+    _decimal_decoder=_decimal_text,
+    _restriction_decoder=_restriction_set,
+    _root_keys=_ROOT_KEYS,
+    _contract_keys=_CONTRACT_KEYS,
+    _decimal_fields=_DECIMAL_FIELDS,
+    _restriction_fields=_RESTRICTION_FIELDS,
+) -> EconomicGoalContract:
     """Decode schema-v1 persistence input and fail closed on any ambiguity."""
 
     if type(payload) is not dict or not all(
         type(key) is str for key in payload
     ):
-        raise EconomicGoalContractError("economic goal payload must be a JSON object")
+        raise _goal_error("economic goal payload must be a JSON object")
     root: dict[str, object] = payload
-    _require_exact_keys("economic goal payload", root, _ROOT_KEYS)
+    _exact_keys("economic goal payload", root, _root_keys)
 
     if type(root["schema"]) is not str or root["schema"] != ECONOMIC_GOAL_SCHEMA:
-        raise EconomicGoalContractError("unsupported economic goal schema")
+        raise _goal_error("unsupported economic goal schema")
     version = root["schema_version"]
     if type(version) is not int or version != ECONOMIC_GOAL_SCHEMA_VERSION:
-        raise EconomicGoalContractError("unsupported economic goal schema_version")
+        raise _goal_error("unsupported economic goal schema_version")
 
     raw_contract = root["contract"]
     if type(raw_contract) is not dict or not all(
         type(key) is str for key in raw_contract
     ):
-        raise EconomicGoalContractError("contract must be a JSON object")
+        raise _goal_error("contract must be a JSON object")
     body: dict[str, object] = raw_contract
-    _require_exact_keys("contract", body, _CONTRACT_KEYS)
+    _exact_keys("contract", body, _contract_keys)
 
     decoded = dict(body)
-    for field in _DECIMAL_FIELDS:
-        decoded[field] = _decimal_text(field, body[field])
+    for field in _decimal_fields:
+        decoded[field] = _decimal_decoder(field, body[field])
     if body["max_stake_amount"] is None:
         decoded["max_stake_amount"] = None
     else:
-        decoded["max_stake_amount"] = _decimal_text(
+        decoded["max_stake_amount"] = _decimal_decoder(
             "max_stake_amount", body["max_stake_amount"]
         )
 
     if type(body["objective"]) is not str:
-        raise EconomicGoalContractError("objective must be a string")
+        raise _goal_error("objective must be a string")
     try:
-        decoded["objective"] = EconomicObjective(body["objective"])
+        decoded["objective"] = _objective_type(body["objective"])
     except (TypeError, ValueError) as exc:
-        raise EconomicGoalContractError("unsupported economic objective") from exc
+        raise _goal_error("unsupported economic objective") from exc
 
     automation = body["automation_level"]
     if type(automation) is not int:
-        raise EconomicGoalContractError("automation_level must be an integer")
+        raise _goal_error("automation_level must be an integer")
     try:
-        decoded["automation_level"] = AutomationLevel(automation)
+        decoded["automation_level"] = _automation_type(automation)
     except ValueError as exc:
-        raise EconomicGoalContractError("unsupported automation_level") from exc
+        raise _goal_error("unsupported automation_level") from exc
 
-    for field in _RESTRICTION_FIELDS:
-        decoded[field] = _restriction_set(field, body[field])
+    for field in _restriction_fields:
+        decoded[field] = _restriction_decoder(field, body[field])
 
     try:
-        return EconomicGoalContract(**decoded)  # type: ignore[arg-type]
-    except EconomicGoalContractError:
+        return _goal_type(**decoded)  # type: ignore[arg-type]
+    except _goal_error:
         raise
     except (TypeError, ValueError) as exc:
-        raise EconomicGoalContractError("malformed economic goal contract") from exc
+        raise _goal_error("malformed economic goal contract") from exc
 
 
-def economic_goal_from_json(text: str) -> EconomicGoalContract:
+def economic_goal_from_json(
+    text: str,
+    _loads=strict_json_loads,
+    _payload_decoder=economic_goal_from_payload,
+    _error_type=EconomicGoalContractError,
+) -> EconomicGoalContract:
     """Decode one strict JSON document into a validated contract."""
 
     if type(text) is not str:
-        raise EconomicGoalContractError("economic goal JSON must be text")
+        raise _error_type("economic goal JSON must be text")
     try:
-        payload = strict_json_loads(text)
+        payload = _loads(text)
     except (TypeError, ValueError) as exc:
-        raise EconomicGoalContractError("invalid economic goal JSON") from exc
-    return economic_goal_from_payload(payload)
+        raise _error_type("invalid economic goal JSON") from exc
+    return _payload_decoder(payload)
 
 
 class EconomicGoalStore:

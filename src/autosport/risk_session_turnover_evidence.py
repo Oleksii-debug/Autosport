@@ -372,11 +372,22 @@ class PaperSessionTurnoverResolver:
             )
 
         started = _instant(current.started_at, "session.started_at")
+        chronology = getattr(book, "_product_day_admissions", None)
+        if type(chronology) is not dict or set(chronology) != set(book.tickets):
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "exact session turnover requires product-issued PAPER admission chronology"
+            )
         constituents: list[dict[str, str]] = []
         stakes: list[Decimal] = []
         for ticket in book.tickets.values():
-            placed = _instant(ticket.placed_at, "ticket.placed_at")
-            if placed < started:
+            witness = chronology.get(ticket.ticket_id)
+            if type(witness) is not tuple or len(witness) != 6:
+                raise PaperSessionTurnoverEvidenceIncompleteError(
+                    "PAPER admission chronology witness is not canonical"
+                )
+            admission_ts = witness[0]
+            admitted = _instant(admission_ts, "ticket.admission_ts")
+            if admitted < started:
                 continue
             if ticket.bankroll_id != current.bankroll_id:
                 raise PaperSessionTurnoverEvidenceIncompleteError(
@@ -395,6 +406,7 @@ class PaperSessionTurnoverResolver:
                 {
                     "ticket_id": ticket.ticket_id,
                     "stake": _decimal_text(ticket.stake),
+                    "admission_ts": admission_ts,
                     "placed_at": ticket.placed_at,
                     "bankroll_id": current.bankroll_id,
                     "currency": current.currency,

@@ -3099,3 +3099,113 @@ def test_workspace_lock_init_kwdefault_mutation_fails_closed_before_attempt(
 
         assert transport.calls == []
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_economic_goal_store_setattr_rebinding_fails_closed_before_attempt(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        def hostile_setattr(self, name, value):
+            object.__setattr__(self, name, value)
+
+        monkeypatch.setattr(
+            betfair_execution.EconomicGoalStore,
+            "__setattr__",
+            hostile_setattr,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-owner-store-setattr-rebind",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_workspace_lock_file_name_equality_spoof_fails_closed_before_attempt(
+    monkeypatch,
+) -> None:
+    class EqualitySpoof:
+        def __eq__(self, other):
+            return other == ".economic-run.lock"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        monkeypatch.setattr(
+            betfair_execution.WorkspaceEconomicLock,
+            "FILE_NAME",
+            EqualitySpoof(),
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-workspace-file-name-equality-spoof",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_economic_goal_store_file_name_equality_spoof_fails_closed_before_attempt(
+    monkeypatch,
+) -> None:
+    class EqualitySpoof:
+        def __eq__(self, other):
+            return other == "economic_goal_contract.json"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        monkeypatch.setattr(
+            betfair_execution.EconomicGoalStore,
+            "FILE_NAME",
+            EqualitySpoof(),
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-owner-store-file-name-equality-spoof",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}

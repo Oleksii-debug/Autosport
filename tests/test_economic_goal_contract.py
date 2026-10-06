@@ -415,6 +415,16 @@ def test_contract_successor_ignores_rebound_canonical_transition_alias(monkeypat
     previous.validate_automatic_successor(candidate)
 
 
+def test_contract_constructor_ignores_rebound_post_init(monkeypatch) -> None:
+    def forged_post_init(self) -> None:
+        raise AssertionError("rebound contract post-init executed")
+
+    monkeypatch.setattr(EconomicGoalContract, "__post_init__", forged_post_init)
+
+    with pytest.raises(EconomicGoalContractError, match="between 0 and 1"):
+        _goal(max_stake_fraction=Decimal("2"))
+
+
 def test_contract_validation_ignores_rebound_public_helpers(monkeypatch) -> None:
     def forged(*args, **kwargs):
         raise AssertionError("rebound validation helper executed")

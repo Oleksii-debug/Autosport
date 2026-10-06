@@ -915,6 +915,13 @@ def _execute_market_book_batch_attempt(
     read_batch: Callable[..., MarketBookBatchTransportResult],
     append_response: Callable[..., MarketBookAttemptHistory],
     append_nonresponse: Callable[..., MarketBookAttemptHistory],
+    freeze_plan: Callable[[MarketBookReadPlan], MarketBookReadPlan],
+    freeze_history: Callable[
+        [MarketBookReadPlan, MarketBookAttemptHistory],
+        MarketBookAttemptHistory,
+    ],
+    token: Callable[[object, str], str],
+    canonical_batch: Callable[[MarketBookReadPlan, str], MarketBookReadBatch],
     make_execution: Callable[
         [MarketBookAttemptHistory, MarketBookAttemptOutcome, MarketBookBatchTransportResult | None],
         MarketBookBatchAttemptExecution,
@@ -928,19 +935,16 @@ def _execute_market_book_batch_attempt(
     # dataclasses can still be adversarially mutated through object.__setattr__;
     # a detached round-trip snapshot preserves the exact pre-dispatch denominator
     # so post-I/O failures can always be recorded against what was actually sent.
-    frozen_plan = MarketBookReadPlan.from_json(history.plan.to_json())
-    frozen_history = MarketBookAttemptHistory.from_json(
-        frozen_plan,
-        history.to_json(),
-    )
-    attempt = _token(attempt_id, "attempt_id")
+    frozen_plan = freeze_plan(history.plan)
+    frozen_history = freeze_history(frozen_plan, history)
+    attempt = token(attempt_id, "attempt_id")
     if type(required) is not bool:
         raise TypeError("required must be exact bool")
     if any(record.attempt_id == attempt for record in frozen_history.records):
         raise MarketBookBatchTransportError(
             "attempt_id is already present in canonical MarketBook history"
         )
-    _canonical_batch(frozen_history.plan, batch_id)
+    canonical_batch(frozen_history.plan, batch_id)
 
     try:
         result = read_batch(
@@ -1014,6 +1018,21 @@ def _install_attempt_executor() -> None:
     canonical_append_nonresponse = _append_nonresponse_attempt
     canonical_execution_type = MarketBookBatchAttemptExecution
     canonical_execution_validate = MarketBookBatchAttemptExecution.__post_init__
+    canonical_plan_to_json = MarketBookReadPlan.to_json
+    canonical_plan_from_json = MarketBookReadPlan.from_json
+    canonical_history_to_json = MarketBookAttemptHistory.to_json
+    canonical_history_from_json = MarketBookAttemptHistory.from_json
+    canonical_token = _token
+    canonical_batch = _canonical_batch
+
+    def freeze_plan(plan: MarketBookReadPlan) -> MarketBookReadPlan:
+        return canonical_plan_from_json(canonical_plan_to_json(plan))
+
+    def freeze_history(
+        plan: MarketBookReadPlan,
+        history: MarketBookAttemptHistory,
+    ) -> MarketBookAttemptHistory:
+        return canonical_history_from_json(plan, canonical_history_to_json(history))
 
     def make_execution(
         history: MarketBookAttemptHistory,
@@ -1055,6 +1074,10 @@ def _install_attempt_executor() -> None:
             read_batch=canonical_read_batch,
             append_response=canonical_append_response,
             append_nonresponse=canonical_append_nonresponse,
+            freeze_plan=freeze_plan,
+            freeze_history=freeze_history,
+            token=canonical_token,
+            canonical_batch=canonical_batch,
             make_execution=make_execution,
         )
 

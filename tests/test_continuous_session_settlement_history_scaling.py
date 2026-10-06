@@ -3484,3 +3484,65 @@ def test_settlement_consumer_rejects_runtime_replace_rebinding(monkeypatch) -> N
         assert "copy authority changed" in str(exc)
     else:
         raise AssertionError("runtime-rebound settlement consumer copy was accepted")
+
+
+def test_settlement_consumer_ignores_instance_shadowed_book_and_scope_helpers() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+        coordinator.workspace = Path(directory)
+        coordinator.paper_book_path = Path(directory) / "paper_book.json"
+        coordinator.initial_bankroll = "10000"
+
+        def attacker_load_book() -> object:
+            raise AssertionError("instance-shadowed settlement book loader executed")
+
+        def attacker_scope(*_args: object, **_kwargs: object) -> set[str]:
+            raise AssertionError("instance-shadowed settlement quote scope executed")
+
+        coordinator._load_book = attacker_load_book
+        coordinator._open_quote_keys_for_book = attacker_scope
+
+        settled, evidence_ids = coordinator._settle(resolutions=(_resolution(),))
+
+        assert settled == ()
+        assert evidence_ids == ("evidence-1",)
+
+
+def test_settlement_consumer_helper_class_bindings_are_immutable() -> None:
+    original_load = continuous_session.ContinuousSessionCoordinator._load_book
+    original_scope = (
+        continuous_session.ContinuousSessionCoordinator._open_quote_keys_for_book
+    )
+
+    for name, replacement in (
+        ("_load_book", lambda _self: None),
+        ("_open_quote_keys_for_book", lambda _book, _identity: set()),
+    ):
+        try:
+            setattr(
+                continuous_session.ContinuousSessionCoordinator,
+                name,
+                replacement,
+            )
+        except TypeError as exc:
+            assert "consumer entry binding is immutable" in str(exc)
+        else:
+            raise AssertionError(f"{name} class binding was mutable")
+
+    assert continuous_session.ContinuousSessionCoordinator._load_book is original_load
+    assert (
+        continuous_session.ContinuousSessionCoordinator._open_quote_keys_for_book
+        is original_scope
+    )
+
+
+def test_settlement_consumer_subclass_cannot_override_helper_graph() -> None:
+    try:
+        class AttackerCoordinator(continuous_session.ContinuousSessionCoordinator):
+            def _load_book(self) -> object:
+                raise AssertionError("subclass book loader executed")
+
+    except TypeError as exc:
+        assert "consumer entry binding is immutable" in str(exc)
+    else:
+        raise AssertionError("settlement consumer helper override subclass was accepted")

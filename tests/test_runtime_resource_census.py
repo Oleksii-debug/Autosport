@@ -507,5 +507,19 @@ class RuntimeResourceCoverageTruthTests(unittest.TestCase):
             self.assertEqual(probe(missing), ())
 
 
+    def test_runner_subscription_lifecycle_probe_is_self_contained(self) -> None:
+        namespace = self._runner_namespace()
+        probe = namespace["_exercise_subscription_lifecycle"]
+        source_type = namespace["_IdleProductSource"]
+        clock_type = namespace["_DeterministicClock"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            probe(
+                Path(directory) / "subscription-runtime",
+                source=source_type(),
+                clock=clock_type(),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

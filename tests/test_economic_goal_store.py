@@ -1059,7 +1059,6 @@ def test_store_binding_registry_cannot_be_mutated_to_redirect_authority(tmp_path
         attacker_workspace,
         attacker_path,
         binding[3],
-        attacker_path.open,
     )
 
     with pytest.raises(TypeError):

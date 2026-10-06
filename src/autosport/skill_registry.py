@@ -293,8 +293,10 @@ def _stop_process_bounded(process: Any) -> str | None:
     # If the runtime cannot report process state after both stop attempts, a
     # successful close is sufficient proof that the child is no longer running.
     # Never use close() to override an explicit final is_alive() == True.
-    if last_alive is None and _close_process_handle(process):
-        return None
+    if last_alive is None:
+        if _close_process_handle(process):
+            return None
+        return "HANDLE_CLOSE_FAILED"
     return "STOP_FAILED"
 
 

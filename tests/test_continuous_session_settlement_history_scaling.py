@@ -2071,3 +2071,76 @@ def test_concurrent_successes_return_distinct_committed_cycle_indexes() -> None:
 
         assert sorted(results) == [5, 6]
         assert first.snapshot().cycles_completed == 6
+
+
+def test_success_timestamp_cannot_precede_session_start() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        before = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+
+        try:
+            state.record_success(
+                at="2026-09-22T06:19:59+00:00",
+                full_refresh=False,
+                settlement_evidence=(),
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "precedes session start" in str(exc)
+        else:
+            raise AssertionError("pre-start success timestamp was accepted")
+
+        after = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        assert after == before
+
+
+def test_success_timestamp_cannot_roll_back_last_success() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        committed = state.record_success(
+            at="2026-09-22T06:21:00+00:00",
+            full_refresh=False,
+            settlement_evidence=(),
+        )
+        assert committed == 5
+
+        before = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        try:
+            state.record_success(
+                at="2026-09-22T06:20:30+00:00",
+                full_refresh=False,
+                settlement_evidence=(),
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "roll back durable session time" in str(exc)
+        else:
+            raise AssertionError("success-time rollback was accepted")
+
+        after = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        assert after == before
+
+
+def test_record_success_requires_exact_boolean_full_refresh() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        try:
+            state.record_success(
+                at="2026-09-22T06:21:00+00:00",
+                full_refresh=1,  # type: ignore[arg-type]
+                settlement_evidence=(),
+            )
+        except TypeError as exc:
+            assert "full_refresh must be boolean" in str(exc)
+        else:
+            raise AssertionError("non-boolean full_refresh was accepted")

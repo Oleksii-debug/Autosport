@@ -1723,6 +1723,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "outcome authority must return exact SettlementResolution or None"
                 )
+            if (
+                type(resolution.event_identity) is not str
+                or type(resolution.settlement_ref) is not str
+                or type(resolution.evidence_id) is not str
+                or type(resolution.evidence_sha256) is not str
+                or type(resolution.available_at) is not str
+            ):
+                raise ContinuousSessionError(
+                    "outcome authority returned malformed settlement resolution fields"
+                )
             if resolution.event_identity != record_identity:
                 raise ContinuousSessionError(
                     "settlement evidence event identity does not match lifecycle identity"

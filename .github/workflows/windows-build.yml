@@ -361,6 +361,14 @@ jobs:
             throw 'External UIA evidence did not prove packaged durable emergency STOP activation'
           }
           if (
+            $external.live_region_event_status -ne 'PASS' -or
+            [int]$external.live_region_event_count -lt 1 -or
+            [string]$external.live_region_event_automation_id -ne 'emergency-stop-status' -or
+            [string]::IsNullOrWhiteSpace([string]$external.live_region_event_text)
+          ) {
+            throw 'External UIA evidence did not prove packaged LiveRegionChanged observation'
+          }
+          if (
             $external.keyboard_shortcuts_status -ne 'PASS' -or
             [string]$external.f2_focus_automation_id -ne '301' -or
             [string]$external.f8_focus_automation_id -ne '204'
@@ -390,6 +398,10 @@ jobs:
           $verification | Add-Member -NotePropertyName extracted_external_uia_normal_close_status -NotePropertyValue $external.normal_close_status -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_emergency_stop_activation_status -NotePropertyValue $external.emergency_stop_activation_status -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_emergency_stop_status_text -NotePropertyValue $external.emergency_stop_status_text -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_live_region_event_status -NotePropertyValue $external.live_region_event_status -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_live_region_event_count -NotePropertyValue $external.live_region_event_count -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_live_region_event_automation_id -NotePropertyValue $external.live_region_event_automation_id -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_live_region_event_text -NotePropertyValue $external.live_region_event_text -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_keyboard_shortcuts_status -NotePropertyValue $external.keyboard_shortcuts_status -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_f2_focus_automation_id -NotePropertyValue $external.f2_focus_automation_id -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_f8_focus_automation_id -NotePropertyValue $external.f8_focus_automation_id -Force

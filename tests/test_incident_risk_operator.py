@@ -154,6 +154,19 @@ class IncidentRiskOperatorViewTests(unittest.TestCase):
         self.assertEqual(view.state_key, "ui.risk_register.state.unavailable")
         self.assertEqual(view.rows, ())
 
+    def test_io_failure_is_unavailable_without_raw_diagnostic(self) -> None:
+        with mock.patch.object(
+            IncidentRiskStore,
+            "load",
+            side_effect=OSError("password=must-not-reach-operator"),
+        ):
+            view = load_incident_risk_operator_view(self.store)
+
+        self.assertFalse(view.evidence_available)
+        self.assertEqual(view.state_key, "ui.risk_register.state.unavailable")
+        self.assertEqual(view.rows, ())
+        self.assertNotIn("must-not-reach-operator", repr(view))
+
     def test_operator_view_has_no_financial_or_release_authority_fields(self) -> None:
         view = load_incident_risk_operator_view(self.store)
         rendered = repr(view)

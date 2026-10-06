@@ -388,6 +388,26 @@ def test_forged_transport_result_cannot_be_appended_to_attempt_history():
         )
 
 
+def test_invalid_client_fails_before_gate_mutation():
+    plan = _plan()
+    batch = plan.batches[0]
+    rate_gate, concurrency_gate = _gates()
+
+    with pytest.raises(TypeError, match="client must be an exact BetfairReadOnlyClient"):
+        read_market_book_batch(
+            object(),
+            plan,
+            batch_id=batch.batch_id,
+            request_id="invalid-client",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert rate_gate.snapshot().markets == ()
+    assert concurrency_gate.snapshot().active == ()
+
+
 def test_projection_concurrency_denial_precedes_rate_reservation_and_transport():
     plan = _plan(order_projection="EXECUTABLE")
     batch = plan.batches[0]
@@ -497,6 +517,71 @@ def test_successful_projection_read_releases_local_concurrency_lease():
     assert result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
     assert len(transport.calls) == 1
     assert concurrency_gate.snapshot().active == ()
+
+
+def test_attempt_executor_rejects_invalid_required_before_transport():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+
+    with pytest.raises(TypeError, match="required must be exact bool"):
+        execute_market_book_batch_attempt(
+            client,
+            MarketBookAttemptHistory(plan, ()),
+            batch_id=batch.batch_id,
+            attempt_id="attempt-invalid-required",
+            required=1,
+            request_id="invalid-required",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert transport.calls == []
+    assert rate_gate.snapshot().markets == ()
+    assert concurrency_gate.snapshot().active == ()
+
+
+def test_attempt_executor_rejects_duplicate_attempt_id_before_transport():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    first_client, _ = _client(_payload(batch.market_ids))
+    first_rate, first_concurrency = _gates()
+    first = execute_market_book_batch_attempt(
+        first_client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="attempt-stable",
+        required=True,
+        request_id="first-request",
+        scheduled_at=NOW,
+        rate_gate=first_rate,
+        concurrency_gate=first_concurrency,
+    )
+    assert first.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+
+    second_client, second_transport = _client(_payload(batch.market_ids))
+    second_rate, second_concurrency = _gates()
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="attempt_id is already present",
+    ):
+        execute_market_book_batch_attempt(
+            second_client,
+            first.history,
+            batch_id=batch.batch_id,
+            attempt_id="attempt-stable",
+            required=True,
+            request_id="duplicate-attempt",
+            scheduled_at=NOW,
+            rate_gate=second_rate,
+            concurrency_gate=second_concurrency,
+        )
+
+    assert second_transport.calls == []
+    assert second_rate.snapshot().markets == ()
+    assert second_concurrency.snapshot().active == ()
 
 
 def test_direct_attempt_execution_cannot_claim_unrecorded_or_mismatched_outcome():

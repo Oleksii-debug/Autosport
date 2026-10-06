@@ -1234,3 +1234,123 @@ class PaperSessionTurnoverResolver(metaclass=_PaperSessionTurnoverResolverMeta):
                 "session turnover evidence does not match current canonical PAPER state"
             )
         return current
+
+
+def _seal_session_turnover_resolver_method(
+    function: FunctionType,
+    frozen_globals: dict[str, object],
+) -> FunctionType:
+    if type(function) is not FunctionType:
+        raise TypeError(
+            "session turnover resolver authority method must be a Python function"
+        )
+    function_type = FunctionType
+    code = function.__code__
+    defaults = function.__defaults__
+    kwdefaults = (
+        None if function.__kwdefaults__ is None else dict(function.__kwdefaults__)
+    )
+    closure = function.__closure__
+    name = function.__name__
+    qualname = function.__qualname__
+    doc = function.__doc__
+    annotations = dict(function.__annotations__)
+
+    def sealed(*args, **kwargs):
+        if type(function) is not function_type or function.__code__ is not code:
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "canonical session turnover resolver executable authority changed"
+            )
+        delegate = function_type(
+            code,
+            frozen_globals,
+            name=name,
+            argdefs=defaults,
+            closure=closure,
+        )
+        if kwdefaults is not None:
+            delegate.__kwdefaults__ = dict(kwdefaults)
+        return delegate(*args, **kwargs)
+
+    sealed.__name__ = name
+    sealed.__qualname__ = qualname
+    sealed.__doc__ = doc
+    sealed.__annotations__ = annotations
+    return sealed
+
+
+_raw_session_resolve_descriptor = PaperSessionTurnoverResolver.__dict__["resolve"]
+if type(_raw_session_resolve_descriptor) is not classmethod:
+    raise RuntimeError("canonical session turnover resolve classmethod is unavailable")
+_session_resolve_globals = _freeze_turnover_module_globals()
+_session_resolve_globals["ProductEconomicSessionStore"] = ProductEconomicSessionStore
+_session_resolve_globals["ProductEconomicSession"] = ProductEconomicSession
+type.__setattr__(
+    PaperSessionTurnoverResolver,
+    "resolve",
+    classmethod(
+        _seal_session_turnover_resolver_method(
+            _raw_session_resolve_descriptor.__func__,
+            _session_resolve_globals,
+        )
+    ),
+)
+_SESSION_TURNOVER_RESOLVE_BOUND = PaperSessionTurnoverResolver.resolve
+
+_raw_session_require_descriptor = PaperSessionTurnoverResolver.__dict__["require_current"]
+if type(_raw_session_require_descriptor) is not classmethod:
+    raise RuntimeError("canonical session turnover require_current classmethod is unavailable")
+_session_require_globals = _freeze_turnover_module_globals()
+_session_require_globals["_SESSION_TURNOVER_RESOLVE_BOUND"] = (
+    _SESSION_TURNOVER_RESOLVE_BOUND
+)
+_raw_session_require = _raw_session_require_descriptor.__func__
+_raw_session_require_code = _raw_session_require.__code__
+
+
+def _session_require_current_sealed(
+    cls,
+    candidate: PaperSessionTurnoverEvidence,
+    *,
+    book: PaperBook,
+    goal_store: EconomicGoalStore,
+    session_store: ProductEconomicSessionStore,
+    session_evidence: ProductEconomicSession,
+) -> PaperSessionTurnoverEvidence:
+    if (
+        type(_raw_session_require) is not FunctionType
+        or _raw_session_require.__code__ is not _raw_session_require_code
+    ):
+        raise PaperSessionTurnoverEvidenceIncompleteError(
+            "canonical session turnover resolver executable authority changed"
+        )
+    if cls is not PaperSessionTurnoverResolver:
+        raise PaperSessionTurnoverEvidenceMismatchError(
+            "session turnover resolver must be canonical exact class"
+        )
+    if type(candidate) is not PaperSessionTurnoverEvidence:
+        raise PaperSessionTurnoverEvidenceMismatchError(
+            "candidate must be canonical PaperSessionTurnoverEvidence"
+        )
+    current = _SESSION_TURNOVER_RESOLVE_BOUND(
+        book=book,
+        goal_store=goal_store,
+        session_store=session_store,
+        session_evidence=session_evidence,
+    )
+    if candidate != current:
+        raise PaperSessionTurnoverEvidenceMismatchError(
+            "session turnover evidence does not match current canonical PAPER state"
+        )
+    return current
+
+
+type.__setattr__(
+    PaperSessionTurnoverResolver,
+    "require_current",
+    classmethod(_session_require_current_sealed),
+)
+
+del _raw_session_resolve_descriptor
+del _session_resolve_globals
+del _raw_session_require_descriptor

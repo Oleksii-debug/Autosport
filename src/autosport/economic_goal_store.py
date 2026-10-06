@@ -698,7 +698,81 @@ def _read_economic_goal_text(
 _CANONICAL_GOAL_TEXT_READER: Final = _read_economic_goal_text
 
 
-class EconomicGoalStore:
+_ECONOMIC_GOAL_STORE_AUTHORITY_NAMES: Final = frozenset(
+    {
+        "__init__",
+        "load",
+        "initialize_owner",
+        "persist_automatic_successor",
+        "_authority_operations_sealed",
+    }
+)
+
+
+class _EconomicGoalStoreMeta(type):
+    """Seal public store authority entrypoints against class-level rebinding."""
+
+    _AUTHORITY_NAMES: Final = _ECONOMIC_GOAL_STORE_AUTHORITY_NAMES
+
+    def __setattr__(
+        cls,
+        name: str,
+        value: object,
+        _authority_names=_ECONOMIC_GOAL_STORE_AUTHORITY_NAMES,
+    ) -> None:
+        if (
+            cls.__dict__.get("_authority_operations_sealed", False)
+            and name in _authority_names
+        ):
+            raise TypeError(
+                "economic goal store authority operation binding is immutable"
+            )
+        super().__setattr__(name, value)
+
+    def __delattr__(
+        cls,
+        name: str,
+        _authority_names=_ECONOMIC_GOAL_STORE_AUTHORITY_NAMES,
+    ) -> None:
+        if (
+            cls.__dict__.get("_authority_operations_sealed", False)
+            and name in _authority_names
+        ):
+            raise TypeError(
+                "economic goal store authority operation binding is immutable"
+            )
+        super().__delattr__(name)
+
+
+def _make_store_operation_descriptor(operation):
+    """Make a closure-owned public store operation non-shadowable on an instance."""
+
+    class _ImmutableStoreOperation:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return operation
+            if type(instance) is not owner:
+                raise TypeError(
+                    "economic goal store authority requires the exact store type"
+                )
+            return MethodType(operation, instance)
+
+        def __set__(self, _instance, _value) -> None:
+            raise TypeError(
+                "economic goal store authority operation binding is immutable"
+            )
+
+        def __delete__(self, _instance) -> None:
+            raise TypeError(
+                "economic goal store authority operation binding is immutable"
+            )
+
+    return _ImmutableStoreOperation()
+
+
+class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
     """Workspace-local durable owner-contract store.
 
     ``initialize_owner`` is creation-only. Automatic actors have only
@@ -986,10 +1060,13 @@ economic_goal_to_payload = _bind_goal_encoder(_BOUND_ECONOMIC_GOAL_TO_PAYLOAD)
 economic_goal_from_payload = _bind_goal_payload_decoder(_BOUND_ECONOMIC_GOAL_FROM_PAYLOAD)
 economic_goal_from_json = _bind_goal_json_decoder(_BOUND_ECONOMIC_GOAL_FROM_JSON)
 EconomicGoalStore.__init__ = _bind_store_init(_BOUND_STORE_INIT)
-EconomicGoalStore.load = _bind_store_load(_BOUND_STORE_LOAD)
-EconomicGoalStore.initialize_owner = _bind_store_contract_write(
-    _BOUND_STORE_INITIALIZE_OWNER
+EconomicGoalStore.load = _make_store_operation_descriptor(
+    _bind_store_load(_BOUND_STORE_LOAD)
 )
-EconomicGoalStore.persist_automatic_successor = _bind_store_contract_write(
-    _BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR
+EconomicGoalStore.initialize_owner = _make_store_operation_descriptor(
+    _bind_store_contract_write(_BOUND_STORE_INITIALIZE_OWNER)
 )
+EconomicGoalStore.persist_automatic_successor = _make_store_operation_descriptor(
+    _bind_store_contract_write(_BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR)
+)
+EconomicGoalStore._authority_operations_sealed = True

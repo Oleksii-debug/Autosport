@@ -4,6 +4,7 @@ from threading import Event, Thread
 
 import pytest
 
+import autosport.bookmaker_account_reconciliation as reconciliation_module
 from autosport.bookmaker_account_reconciliation import (
     AccountReconciliationIntegrityError,
     AccountSnapshotStaleError,
@@ -93,6 +94,7 @@ def _position(
     venue_id: str = "book-a",
     account_id: str = "acct-a",
     adapter_id: str = "adapter-a",
+    provider_status: str | None = None,
 ) -> BookmakerPositionObservation:
     return BookmakerPositionObservation(
         venue_id=venue_id,
@@ -107,6 +109,7 @@ def _position(
         provider_amount=Decimal("10"),
         provider_amount_semantics="backer_stake",
         decimal_odds=Decimal("2.0"),
+        provider_status=provider_status,
     )
 
 
@@ -709,24 +712,27 @@ def test_schema_version_bool_is_not_integer_schema_version(tmp_path) -> None:
         BookmakerAccountReconciliationStore(path).history()
 
 
-def test_crash_after_prepare_before_local_publish_aborts_safely(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def test_crash_after_prepare_before_local_publish_aborts_safely(tmp_path) -> None:
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(path)
     first = _snapshot(_T1)
 
-    class SimulatedCrash(RuntimeError):
-        pass
+    encoded = store._encode_history((first,))
+    snapshot_id = snapshot_fingerprint(first)
+    tx_id = store._next_authority_tx_id(snapshot_id)
+    binding = reconciliation_module._authority_transition_binding(
+        previous_state_sha256=None,
+        snapshot_id=snapshot_id,
+        tx_id=tx_id,
+    )
+    store._require_canonical_authority().prepare(
+        tx_id=tx_id,
+        observed_state_sha256=None,
+        intended_state_sha256=reconciliation_module.sha256(encoded).hexdigest(),
+        semantic_binding_sha256=binding,
+    )
 
-    def crash_before_publish(_encoded: bytes) -> None:
-        raise SimulatedCrash("crash before local publish")
-
-    monkeypatch.setattr(store, "_publish_history_bytes", crash_before_publish)
-    with pytest.raises(SimulatedCrash, match="before local publish"):
-        store.append_snapshot(first)
-
+    # Crash prefix: PREPARE is durable, but local state was never published.
     assert not path.exists()
     restarted = BookmakerAccountReconciliationStore(path)
     assert restarted.history() == ()
@@ -734,62 +740,68 @@ def test_crash_after_prepare_before_local_publish_aborts_safely(
     assert restarted.history() == (first,)
 
 
-def test_crash_after_local_publish_before_commit_recovers_exact_prepare(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def test_crash_after_local_publish_before_commit_recovers_exact_prepare(tmp_path) -> None:
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(path)
     first = _snapshot(_T1)
-    original_recover = store._recover_authority
 
-    class SimulatedCrash(RuntimeError):
-        pass
+    encoded = store._encode_history((first,))
+    snapshot_id = snapshot_fingerprint(first)
+    tx_id = store._next_authority_tx_id(snapshot_id)
+    binding = reconciliation_module._authority_transition_binding(
+        previous_state_sha256=None,
+        snapshot_id=snapshot_id,
+        tx_id=tx_id,
+    )
+    store._require_canonical_authority().prepare(
+        tx_id=tx_id,
+        observed_state_sha256=None,
+        intended_state_sha256=reconciliation_module.sha256(encoded).hexdigest(),
+        semantic_binding_sha256=binding,
+    )
+    store._publish_history_bytes(encoded)
 
-    def crash_before_commit(
-        observed_state_sha256: str | None,
-        *,
-        history: list[BookmakerAccountSnapshot] | None = None,
-    ) -> None:
-        if observed_state_sha256 is not None:
-            raise SimulatedCrash("crash after local publish")
-        original_recover(observed_state_sha256, history=history)
-
-    monkeypatch.setattr(store, "_recover_authority", crash_before_commit)
-    with pytest.raises(SimulatedCrash, match="after local publish"):
-        store.append_snapshot(first)
-
+    # Crash prefix: local publication exists while the matching PREPARE is pending.
     assert path.exists()
     restarted = BookmakerAccountReconciliationStore(path)
     assert restarted.history() == (first,)
     assert restarted.append_snapshot(first) is False
 
 
-def test_reader_cannot_abort_writer_pending_monotonic_transition(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def test_reader_cannot_abort_writer_pending_monotonic_transition(tmp_path) -> None:
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(path)
     first = _snapshot(_T1)
     writer_prepared = Event()
-    allow_publish = Event()
+    allow_recovery = Event()
     reader_started = Event()
     reader_done = Event()
     writer_errors: list[BaseException] = []
     reader_errors: list[BaseException] = []
     reader_history: list[BookmakerAccountSnapshot] = []
-    original_publish = store._publish_history_bytes
-
-    def held_publish(encoded: bytes) -> None:
-        writer_prepared.set()
-        if not allow_publish.wait(timeout=5):
-            raise RuntimeError("test timed out waiting to publish")
-        original_publish(encoded)
 
     def writer() -> None:
         try:
-            store.append_snapshot(first)
+            with reconciliation_module._write_lock(path):
+                encoded = store._encode_history((first,))
+                snapshot_id = snapshot_fingerprint(first)
+                tx_id = store._next_authority_tx_id(snapshot_id)
+                binding = reconciliation_module._authority_transition_binding(
+                    previous_state_sha256=None,
+                    snapshot_id=snapshot_id,
+                    tx_id=tx_id,
+                )
+                store._require_canonical_authority().prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=reconciliation_module.sha256(encoded).hexdigest(),
+                    semantic_binding_sha256=binding,
+                )
+                store._publish_history_bytes(encoded)
+                writer_prepared.set()
+                if not allow_recovery.wait(timeout=5):
+                    raise RuntimeError("test timed out waiting to recover publication")
+                assert store._load_history() == [first]
         except BaseException as exc:
             writer_errors.append(exc)
 
@@ -802,7 +814,6 @@ def test_reader_cannot_abort_writer_pending_monotonic_transition(
         finally:
             reader_done.set()
 
-    monkeypatch.setattr(store, "_publish_history_bytes", held_publish)
     writer_thread = Thread(target=writer)
     writer_thread.start()
     assert writer_prepared.wait(timeout=5)
@@ -811,12 +822,11 @@ def test_reader_cannot_abort_writer_pending_monotonic_transition(
     reader_thread.start()
     assert reader_started.wait(timeout=5)
 
-    # Recovery is mutating: a reader must wait behind the same store lock while the
-    # writer has an authority PREPARE, otherwise it could observe old local bytes and
-    # abort the writer's pending transaction.
+    # Recovery is mutating: the reader must wait behind the same store lock while
+    # the writer owns a published state plus pending authority PREPARE.
     assert not reader_done.wait(timeout=0.2)
 
-    allow_publish.set()
+    allow_recovery.set()
     writer_thread.join(timeout=5)
     reader_thread.join(timeout=5)
 
@@ -825,7 +835,6 @@ def test_reader_cannot_abort_writer_pending_monotonic_transition(
     assert writer_errors == []
     assert reader_errors == []
     assert tuple(reader_history) == (first,)
-
 
 
 @pytest.mark.parametrize(
@@ -946,3 +955,124 @@ def test_cross_currency_balance_reconciliation_fails_closed(tmp_path) -> None:
                 ),
             )
         )
+
+
+
+def test_provider_status_round_trips_through_schema_v2_and_restart(tmp_path) -> None:
+    path = tmp_path / "provider-status-account.json"
+    position = _position(
+        BookmakerPositionState.SETTLED,
+        _T1,
+        observation_id="native-status-1",
+        provider_status="PUSH_WIN",
+    )
+    snapshot = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.SETTLED_POSITIONS_READ,),
+        settled_positions=(position,),
+    )
+    store = BookmakerAccountReconciliationStore(path)
+    assert store.append_snapshot(snapshot) is True
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["schema_version"] == 2
+    persisted = document["snapshots"][0]["snapshot"]["settled_positions"][0]
+    assert persisted["provider_status"] == "PUSH_WIN"
+    restarted = BookmakerAccountReconciliationStore(path)
+    reopened = restarted.latest_snapshot()
+    assert reopened is not None
+    assert reopened.settled_positions[0].provider_status == "PUSH_WIN"
+    assert reopened.settled_positions[0].state is BookmakerPositionState.SETTLED
+
+
+def test_provider_status_changes_snapshot_fingerprint_and_conflicts_by_observation_id(
+    tmp_path,
+) -> None:
+    without_status = _position(
+        BookmakerPositionState.OPEN,
+        _T1,
+        observation_id="same-native-status-observation",
+    )
+    with_status = _position(
+        BookmakerPositionState.OPEN,
+        _T1,
+        observation_id="same-native-status-observation",
+        provider_status="PUSH",
+    )
+    first = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(without_status,),
+    )
+    same_time_with_status = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(with_status,),
+    )
+    changed = _snapshot(
+        _T2,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(with_status,),
+    )
+    assert snapshot_fingerprint(first) != snapshot_fingerprint(same_time_with_status)
+    store = BookmakerAccountReconciliationStore(tmp_path / "status-conflict.json")
+    assert store.append_snapshot(first) is True
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="position observation_id was reused",
+    ):
+        store.append_snapshot(changed)
+
+
+def test_schema_v1_snapshot_without_provider_status_keeps_legacy_identity() -> None:
+    snapshot = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(
+            _position(
+                BookmakerPositionState.OPEN,
+                _T1,
+                observation_id="legacy-position",
+            ),
+        ),
+    )
+    payload = reconciliation_module.snapshot_to_canonical_dict(snapshot)
+    assert "provider_status" not in payload["open_positions"][0]
+    decoded = reconciliation_module._decode_snapshot(payload, schema_version=1)
+    assert decoded.open_positions[0].provider_status is None
+    assert snapshot_fingerprint(decoded) == snapshot_fingerprint(snapshot)
+
+
+def test_schema_v1_rejects_provider_status_field() -> None:
+    snapshot = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.SETTLED_POSITIONS_READ,),
+        settled_positions=(
+            _position(
+                BookmakerPositionState.SETTLED,
+                _T1,
+                observation_id="v2-only-position",
+                provider_status="PUSH_LOSE",
+            ),
+        ),
+    )
+    payload = reconciliation_module.snapshot_to_canonical_dict(snapshot)
+    with pytest.raises(AccountReconciliationIntegrityError, match="position schema"):
+        reconciliation_module._decode_snapshot(payload, schema_version=1)
+
+
+def test_schema_v2_accepts_legacy_position_without_provider_status() -> None:
+    snapshot = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(
+            _position(
+                BookmakerPositionState.OPEN,
+                _T1,
+                observation_id="v2-legacy-compatible",
+            ),
+        ),
+    )
+    payload = reconciliation_module.snapshot_to_canonical_dict(snapshot)
+    decoded = reconciliation_module._decode_snapshot(payload, schema_version=2)
+    assert decoded == snapshot
+    assert decoded.open_positions[0].provider_status is None

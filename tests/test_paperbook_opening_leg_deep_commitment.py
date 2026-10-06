@@ -2809,3 +2809,41 @@ def test_market_semantics_mutation_after_admission_cannot_change_settlement() ->
     assert ticket.payout == Decimal("0")
     assert book.balance == Decimal("80")
     assert ticket.legs[0].quote_key == original_key
+
+
+def test_lay_capital_root_rejects_underlying_calculator_code_mutation() -> None:
+    calculator = paper_module.locked_capital_for_exchange_side
+    original_code = calculator.__code__
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("mutated exchange exposure calculator executed")
+
+    try:
+        calculator.__code__ = hostile.__code__
+        book = PaperBook("100")
+        with pytest.raises(
+            ValueError,
+            match="exchange exposure authority changed",
+        ):
+            book.open_ticket([_lay_leg()], "10", placed_at=_TS)
+    finally:
+        calculator.__code__ = original_code
+
+
+def test_market_semantics_root_rejects_underlying_validator_code_mutation() -> None:
+    validator = paper_module._canonical_semantic_identity
+    original_code = validator.__code__
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("mutated market semantics validator executed")
+
+    try:
+        validator.__code__ = hostile.__code__
+        book = PaperBook("100")
+        with pytest.raises(
+            ValueError,
+            match="market-semantics identity authority changed",
+        ):
+            book.open_ticket([_lay_leg()], "10", placed_at=_TS)
+    finally:
+        validator.__code__ = original_code

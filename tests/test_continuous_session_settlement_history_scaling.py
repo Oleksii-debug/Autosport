@@ -3042,6 +3042,12 @@ def test_provider_unavailable_tick_uses_bounded_failure_publication() -> None:
             (),
             {"run_cycle": lambda _self: ProviderUnavailableCycle()},
         )()
+        coordinator.invalidation_buffer = type(
+            "InvalidationBufferStub",
+            (),
+            {"pending_count": 0, "full_refresh_required": False},
+        )()
+
         def forbidden_reader():
             raise AssertionError(
                 "provider-unavailable tick must not read the full settlement history"

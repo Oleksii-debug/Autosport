@@ -28,6 +28,7 @@ from .domain import (
     _canonical_semantic_identity,
     utc_now_iso,
 )
+from .exchange_exposure import locked_capital_for_exchange_side
 from .forecasting import parse_iso_timestamp
 
 
@@ -78,6 +79,44 @@ _CANONICAL_OS_RDONLY = os.O_RDONLY
 _CANONICAL_OS_RDWR = os.O_RDWR
 _CANONICAL_OS_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _CANONICAL_OS_NAME = os.name
+_CANONICAL_EXCHANGE_LOCKED_CAPITAL = locked_capital_for_exchange_side
+_CANONICAL_EXCHANGE_LOCKED_CAPITAL_CODE = getattr(
+    _CANONICAL_EXCHANGE_LOCKED_CAPITAL,
+    "__code__",
+    None,
+)
+
+
+def _locked_capital_for_ticket_leg(
+    stake: Decimal,
+    leg: TicketLeg,
+) -> Decimal:
+    if (
+        locked_capital_for_exchange_side
+        is not _CANONICAL_EXCHANGE_LOCKED_CAPITAL
+        or getattr(_CANONICAL_EXCHANGE_LOCKED_CAPITAL, "__code__", None)
+        is not _CANONICAL_EXCHANGE_LOCKED_CAPITAL_CODE
+    ):
+        raise ValueError("PaperBook exchange exposure authority changed")
+    if type(stake) is not _CANONICAL_PAPER_DECIMAL_TYPE:
+        raise ValueError("PaperBook locked-capital stake must be canonical Decimal")
+    if type(leg) is not _CANONICAL_TICKET_LEG_TYPE:
+        raise ValueError("PaperBook locked-capital leg must be canonical TicketLeg")
+    if leg.exchange_side == "lay":
+        return _CANONICAL_EXCHANGE_LOCKED_CAPITAL(
+            stake=stake,
+            odds=leg.locked_odds,
+            exchange_side="LAY",
+        )
+    return stake
+
+
+_CANONICAL_LOCKED_CAPITAL_FOR_TICKET = _locked_capital_for_ticket_leg
+_CANONICAL_LOCKED_CAPITAL_FOR_TICKET_CODE = getattr(
+    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET,
+    "__code__",
+    None,
+)
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 

@@ -4596,6 +4596,49 @@ class PersistentLiveDecisionLoop:
         record = JsonlDecisionLedger._validate_record(envelope["record"])
         return DecisionRecord(**record)
 
+    def _require_committed_market_state_truth(
+        self,
+        *,
+        progress: _Progress,
+        decision_time: datetime,
+        committed_market_history: tuple[tuple[MarketEvent, int], ...] | None,
+    ) -> MirrorSnapshot | None:
+        if progress.market_append_generation is None:
+            return None
+        if committed_market_history is None:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision lacks proven market prefix"
+            )
+        boundary, age_limit = MarketMirror._decision_boundary(
+            as_of=decision_time,
+            max_age=self.max_quote_age,
+        )
+        try:
+            committed_snapshot = MarketMirror._decision_view_from_proven_history(
+                committed_market_history,
+                boundary=boundary,
+                max_age=age_limit,
+                source_ids=None,
+                sports=None,
+                event_ids=None,
+                market_ids=None,
+                selection_ids=None,
+            )
+            market_state_sha256 = self._market_state_sha256_for_events(
+                committed_snapshot.events,
+                as_of=decision_time,
+                health_boundaries=progress.health_boundaries,
+            )
+        except (LiveDecisionProgressError, TypeError, ValueError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision market prefix cannot be replayed"
+            ) from exc
+        if market_state_sha256 != progress.market_state_sha256:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision market state conflicts with proven append prefix"
+            )
+        return committed_snapshot
+
     def _verify_committed_execution_binding(
         self,
         *,
@@ -5713,6 +5756,15 @@ class PersistentLiveDecisionLoop:
             raise DecisionLedgerIntegrityError(
                 "committed live decision PortfolioPlan conflicts with progress"
             )
+        _, committed_market_time = _canonical_timestamp(
+            "committed market decision_ts",
+            progress.decision_ts,
+        )
+        self._require_committed_market_state_truth(
+            progress=progress,
+            decision_time=committed_market_time,
+            committed_market_history=committed_market_history,
+        )
         self._verify_committed_execution_binding(
             existing=existing,
             durable_plan=durable_plan,

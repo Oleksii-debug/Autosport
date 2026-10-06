@@ -889,6 +889,69 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
             loop.close()
 
+    def test_zero_stake_committed_market_state_replays_exact_append_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=_EmptyProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            result = loop.run_cycle()
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            progress = loop._progress
+            self.assertIsNotNone(progress)
+            assert progress is not None
+            self.assertEqual(progress.phase, "committed")
+            self.assertIsNotNone(progress.market_append_generation)
+            store = SQLiteMarketStore.open_frozen_prefix_reader(
+                workspace / "market.db"
+            )
+            try:
+                history = tuple(
+                    store.events_at_committed_append_boundary(
+                        progress.market_append_generation
+                    )
+                )
+            finally:
+                store.close()
+
+            snapshot = loop._require_committed_market_state_truth(
+                progress=progress,
+                decision_time=clock.value,
+                committed_market_history=history,
+            )
+            self.assertIsNotNone(snapshot)
+            forged = replace(progress, market_state_sha256="0" * 64)
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "market state conflicts with proven append prefix",
+            ):
+                loop._require_committed_market_state_truth(
+                    progress=forged,
+                    decision_time=clock.value,
+                    committed_market_history=history,
+                )
+            loop.close()
+
     def test_committed_health_horizon_tamper_conflicts_with_decision_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

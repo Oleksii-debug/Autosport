@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -377,3 +378,74 @@ def test_pathological_operational_checkpoint_nesting_is_normalized() -> None:
             assert "cannot verify" in str(exc)
         else:
             raise AssertionError("pathological nested sidecar was accepted")
+
+
+def test_operational_checkpoint_symlink_is_rejected_before_read() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
+        error_path = root / "continuous_session.json.operational_error.json"
+        target_path = root / "foreign-error-checkpoint.json"
+        target_path.write_bytes(error_path.read_bytes())
+        error_path.unlink()
+        try:
+            os.symlink(target_path, error_path)
+        except (OSError, NotImplementedError):
+            return
+
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "regular file" in str(exc) or "cannot verify" in str(exc)
+        else:
+            raise AssertionError("symlink operational checkpoint was accepted")
+
+
+def test_operational_checkpoint_hard_link_is_rejected_before_read() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
+        error_path = root / "continuous_session.json.operational_error.json"
+        alias_path = root / "operational-error-alias.json"
+        try:
+            os.link(error_path, alias_path)
+        except (OSError, NotImplementedError):
+            return
+
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "hard links" in str(exc) or "not trustworthy" in str(exc)
+        else:
+            raise AssertionError("multiply-linked operational checkpoint was accepted")
+
+
+def test_operational_checkpoint_path_replacement_during_open_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
+        error_path = root / "continuous_session.json.operational_error.json"
+        replacement = root / "replacement.json"
+        replacement.write_bytes(error_path.read_bytes())
+        original_open = continuous_session.os.open
+        replaced = False
+
+        def replacing_open(path: object, flags: int, *args: object) -> int:
+            nonlocal replaced
+            if not replaced and Path(path) == error_path:
+                replacement.replace(error_path)
+                replaced = True
+            return original_open(path, flags, *args)
+
+        with patch.object(continuous_session.os, "open", replacing_open):
+            try:
+                state._read_error_checkpoint()
+            except continuous_session.ContinuousSessionError as exc:
+                assert "replaced" in str(exc) or "changed" in str(exc)
+            else:
+                raise AssertionError(
+                    "path-replaced operational checkpoint was accepted"
+                )

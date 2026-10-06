@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -382,10 +384,70 @@ class _ContinuousSessionState:
         if self._error_path.exists():
             self._read_error_checkpoint()
 
+    @staticmethod
+    def _file_identity(info: os.stat_result) -> tuple[int, int]:
+        return (info.st_dev, info.st_ino)
+
+    def _read_error_checkpoint_bytes(self) -> bytes:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        try:
+            before = self._error_path.lstat()
+            if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+                raise ContinuousSessionError(
+                    "continuous session operational error checkpoint "
+                    "must be a regular file"
+                )
+            if before.st_nlink != 1:
+                raise ContinuousSessionError(
+                    "continuous session operational error checkpoint "
+                    "must not have multiple hard links"
+                )
+
+            descriptor = os.open(self._error_path, flags)
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise ContinuousSessionError(
+                    "continuous session operational error checkpoint "
+                    "file identity is not trustworthy"
+                )
+            if self._file_identity(opened) != self._file_identity(before):
+                raise ContinuousSessionError(
+                    "continuous session operational error checkpoint "
+                    "was replaced before verification"
+                )
+
+            with os.fdopen(os.dup(descriptor), "rb") as handle:
+                encoded = handle.read(self._MAX_ERROR_CHECKPOINT_BYTES + 1)
+
+            current = os.fstat(descriptor)
+            after = self._error_path.lstat()
+            if (
+                self._file_identity(current) != self._file_identity(opened)
+                or self._file_identity(after) != self._file_identity(opened)
+                or stat.S_ISLNK(after.st_mode)
+                or not stat.S_ISREG(after.st_mode)
+                or after.st_nlink != 1
+            ):
+                raise ContinuousSessionError(
+                    "continuous session operational error checkpoint "
+                    "changed during verification"
+                )
+            return encoded
+        except ContinuousSessionError:
+            raise
+        except OSError as exc:
+            raise ContinuousSessionError(
+                "cannot verify continuous session operational error checkpoint file"
+            ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
     def _read_error_checkpoint(self) -> dict[str, Any]:
         try:
-            with self._error_path.open("rb") as handle:
-                encoded = handle.read(self._MAX_ERROR_CHECKPOINT_BYTES + 1)
+            encoded = self._read_error_checkpoint_bytes()
             if len(encoded) > self._MAX_ERROR_CHECKPOINT_BYTES:
                 raise ContinuousSessionError(
                     "continuous session operational error checkpoint "

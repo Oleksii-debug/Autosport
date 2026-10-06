@@ -187,16 +187,18 @@ def _snapshot_provenance(
     _provenance_type=_CANONICAL_PROVENANCE_TYPE,
     _builder=_build_provenance,
     _error_type=EconomicGoalProvenanceError,
+    _snapshot=_canonical_provenance_snapshot,
 ) -> EconomicGoalProvenance:
     if type(provenance) is not _provenance_type:
         raise _error_type("provenance must be EconomicGoalProvenance")
+    values = _snapshot(provenance)
     return _builder(
-        schema=provenance.schema,
-        schema_version=provenance.schema_version,
-        goal_id=provenance.goal_id,
-        revision=provenance.revision,
-        bankroll_id=provenance.bankroll_id,
-        contract_sha256=provenance.contract_sha256,
+        schema=values[0],
+        schema_version=values[1],
+        goal_id=values[2],
+        revision=values[3],
+        bankroll_id=values[4],
+        contract_sha256=values[5],
     )
 
 def _canonical_json(

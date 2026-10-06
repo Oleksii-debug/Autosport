@@ -4966,3 +4966,114 @@ def test_settlement_prepare_selector_tamper_restores_latest_accepted_routing_bas
         assert index._dependency("input-a").source_ids == frozenset({"provider-a"})
         assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
 
+def test_invalidation_restores_selector_tamper_during_drain() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    dependency = index.register("input-a", source_ids="provider-a")
+
+    class Buffer:
+        pending_count = 0
+        full_refresh_required = False
+
+        def drain(self, *, max_items: int):
+            assert max_items == 250
+            object.__setattr__(
+                dependency,
+                "source_ids",
+                frozenset({"provider-b"}),
+            )
+            return continuous_session.MirrorInvalidationBatch(
+                changed_keys=(),
+                full_refresh_required=False,
+                has_more=False,
+            )
+
+    buffer = Buffer()
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="routing authority changed during invalidation drain",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=index.affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+
+    assert index._dependency("input-a").source_ids == frozenset({"provider-a"})
+
+
+def test_invalidation_restores_matched_keys_tamper_during_drain() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("input-a", source_ids="provider-a")
+
+    class Buffer:
+        pending_count = 0
+        full_refresh_required = False
+
+        def drain(self, *, max_items: int):
+            assert max_items == 250
+            index._matched_keys["input-a"].add(("provider-a", "forged-quote"))
+            return continuous_session.MirrorInvalidationBatch(
+                changed_keys=(),
+                full_refresh_required=False,
+                has_more=False,
+            )
+
+    buffer = Buffer()
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="matched-key routing changed during invalidation drain",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=index.affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+
+    assert index.matching_keys("input-a") == ()
+
+
+def test_invalidation_restores_matched_keys_tamper_during_backlog_inspection() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("input-a", source_ids="provider-a")
+
+    class Buffer:
+        full_refresh_required = False
+
+        @property
+        def pending_count(self):
+            index._matched_keys["input-a"].add(("provider-a", "forged-quote"))
+            return 0
+
+        def drain(self, *, max_items: int):
+            assert max_items == 250
+            return continuous_session.MirrorInvalidationBatch(
+                changed_keys=(),
+                full_refresh_required=False,
+                has_more=False,
+            )
+
+    buffer = Buffer()
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="matched-key routing changed during invalidation backlog inspection",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=index.affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+
+    assert index.matching_keys("input-a") == ()
+

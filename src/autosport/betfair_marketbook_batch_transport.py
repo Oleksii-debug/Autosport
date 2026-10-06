@@ -564,6 +564,7 @@ class MarketBookBatchAttemptExecution:
 def _install_transport_result_authority() -> None:
     issued: dict[int, tuple[object, str, bool]] = {}
     validate = MarketBookBatchTransportResult.__post_init__
+    validate_attempt_execution = MarketBookBatchAttemptExecution.__post_init__
     rate_reserve = BetfairMarketBookPerMarketRateGate.reserve
     concurrency_begin = BetfairMarketBookProjectionConcurrencyGate.begin
 
@@ -736,6 +737,19 @@ def _install_transport_result_authority() -> None:
                 "MarketBook batch transport result lacks canonical network origin"
             )
 
+    def validate_attempt_execution_bound(
+        self: MarketBookBatchAttemptExecution,
+    ) -> None:
+        # Response-bearing execution evidence must prove issuance through the
+        # closure-local registry too. Calling the mutable result class method
+        # alone would let a class rebound bless a copied/unissued result.
+        if self.outcome in {
+            MarketBookAttemptOutcome.EXACT_RESPONSE,
+            MarketBookAttemptOutcome.INCOMPLETE_RESPONSE,
+        } and type(self.result) is MarketBookBatchTransportResult:
+            _record(self.result)
+        validate_attempt_execution(self)
+
     append_attempt_unbound = append_market_book_transport_attempt
 
     def append_market_book_transport_attempt_bound(
@@ -766,6 +780,7 @@ def _install_transport_result_authority() -> None:
     MarketBookBatchTransportResult.assert_canonical_network_origin = (
         assert_canonical_network_origin
     )
+    MarketBookBatchAttemptExecution.__post_init__ = validate_attempt_execution_bound
 
 
 _install_transport_result_authority()

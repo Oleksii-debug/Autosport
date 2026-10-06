@@ -508,6 +508,36 @@ def test_class_rebound_assert_issued_cannot_append_forged_result(monkeypatch):
     assert history.records == ()
 
 
+
+def test_class_rebound_assert_issued_cannot_forge_attempt_execution(monkeypatch):
+    plan = _plan()
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    history = append_market_book_transport_attempt(
+        MarketBookAttemptHistory(plan, ()),
+        issued,
+        attempt_id="attempt-issued-execution",
+        required=True,
+    )
+    forged = replace(issued)
+
+    monkeypatch.setattr(
+        MarketBookBatchTransportResult,
+        "assert_issued",
+        lambda self: None,
+    )
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="not issued by canonical transport",
+    ):
+        MarketBookBatchAttemptExecution(
+            history,
+            MarketBookAttemptOutcome.EXACT_RESPONSE,
+            forged,
+        )
+
 def test_invalid_client_fails_before_gate_mutation():
     plan = _plan()
     batch = plan.batches[0]

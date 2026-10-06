@@ -1812,6 +1812,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "settlement consumer requires exact SettlementResolution values"
                 )
+            # Take ownership of the only mutable field before any economic I/O.
+            # A caller retaining the input resolution must not be able to alter
+            # outcomes after the consumer has accepted the batch.
+            resolution = replace(
+                resolution,
+                quote_outcomes=dict(resolution.quote_outcomes),
+            )
             settlement_key = (
                 resolution.event_identity,
                 resolution.settlement_ref,

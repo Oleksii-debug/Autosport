@@ -393,12 +393,13 @@ class EconomicGoalStore:
         self,
         _json_decoder=economic_goal_from_json,
         _binding_resolver=_resolve_store_binding,
+        _error_type=EconomicGoalContractError,
     ) -> EconomicGoalContract:
         _, _, _, path_read_text = _binding_resolver(self)
         try:
             text = path_read_text(encoding="utf-8")
         except OSError as exc:
-            raise EconomicGoalContractError(
+            raise _error_type(
                 f"cannot read persisted economic goal: {exc}"
             ) from exc
         return _json_decoder(text)
@@ -410,13 +411,14 @@ class EconomicGoalStore:
         _payload_encoder=economic_goal_to_payload,
         _writer=_CANONICAL_ATOMIC_WRITE_JSON,
         _binding_resolver=_resolve_store_binding,
+        _error_type=EconomicGoalContractError,
     ) -> None:
         """Create the first owner contract while holding the economic writer lock."""
 
         workspace, path, path_exists, _ = _binding_resolver(self)
         with _lock_type(workspace):
             if path_exists():
-                raise EconomicGoalContractError(
+                raise _error_type(
                     "persisted economic goal already exists; owner replacement requires "
                     "a separate authority boundary"
                 )
@@ -431,6 +433,7 @@ class EconomicGoalStore:
         _writer=_CANONICAL_ATOMIC_WRITE_JSON,
         _json_decoder=economic_goal_from_json,
         _binding_resolver=_resolve_store_binding,
+        _error_type=EconomicGoalContractError,
     ) -> None:
         """Publish one machine revision only when durable authority cannot expand."""
 
@@ -439,7 +442,7 @@ class EconomicGoalStore:
             try:
                 previous_text = path_read_text(encoding="utf-8")
             except OSError as exc:
-                raise EconomicGoalContractError(
+                raise _error_type(
                     f"cannot read persisted economic goal: {exc}"
                 ) from exc
             previous = _json_decoder(previous_text)

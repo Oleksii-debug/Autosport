@@ -388,12 +388,19 @@ class _ContinuousSessionState:
                 encoded = handle.read(self._MAX_ERROR_CHECKPOINT_BYTES + 1)
             if len(encoded) > self._MAX_ERROR_CHECKPOINT_BYTES:
                 raise ContinuousSessionError(
-                    "continuous session operational error checkpoint exceeds resource limit"
+                    "continuous session operational error checkpoint "
+                    "exceeds resource limit"
                 )
             raw = strict_json_loads(encoded.decode("utf-8"))
         except ContinuousSessionError:
             raise
-        except (OSError, UnicodeDecodeError, TypeError, ValueError) as exc:
+        except (
+            OSError,
+            UnicodeDecodeError,
+            TypeError,
+            ValueError,
+            RecursionError,
+        ) as exc:
             raise ContinuousSessionError(
                 "cannot verify continuous session operational error checkpoint"
             ) from exc

@@ -492,6 +492,30 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             MonotonicWorkspaceAuthority.__init__ = original_authority_init
 
 
+    def test_decoder_in_place_code_mutation_fails_before_execution(self) -> None:
+        store = self._store()
+        store.current()
+        authority = economic_session._decode_state
+        original_code = authority.__code__
+        calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("hostile economic-session decoder executed")
+
+        try:
+            authority.__code__ = hostile.__code__
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+        finally:
+            authority.__code__ = original_code
+
+        self.assertEqual(calls, 0)
+
     def test_instance_configuration_rebinding_fails_closed(self) -> None:
         store = self._store()
         store.current()

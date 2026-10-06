@@ -2602,7 +2602,7 @@ def _projection_delta(
     )
 
 
-def test_source_projection_change_advances_generation() -> None:
+def test_source_projection_change_is_session_generation_neutral() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         state = _state_with_history(root, _SMALL_HISTORY)
@@ -2618,7 +2618,7 @@ def test_source_projection_change_advances_generation() -> None:
         after = json.loads(
             (root / "continuous_session.json").read_text(encoding="utf-8")
         )
-        assert after["generation"] == before.get("generation", 0) + 1
+        assert after["generation"] == before.get("generation", 0)
         assert after["source_state_delta_id"] == "delta-1"
         assert after["source_projection_stream_epoch"] == "epoch-a"
 
@@ -2656,7 +2656,7 @@ def test_projection_change_preserves_active_failure_overlay() -> None:
         assert state.snapshot().last_error_code == "PRE_PROJECTION_FAILURE"
 
 
-def test_failure_after_projection_binds_to_new_generation() -> None:
+def test_failure_after_projection_binds_to_current_session_generation() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         state = _state_with_history(root, _SMALL_HISTORY)

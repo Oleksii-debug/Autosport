@@ -260,6 +260,10 @@ def _atomic_create_owner_json(
     _link=_CANONICAL_OS_LINK,
     _unlink=_CANONICAL_OS_UNLINK,
     _error_type=EconomicGoalContractError,
+    _file_exists_error=FileExistsError,
+    _file_not_found_error=FileNotFoundError,
+    _os_error=OSError,
+    _base_exception=BaseException,
 ) -> None:
     """Atomically publish the first owner contract without replacing an incumbent.
 
@@ -298,18 +302,18 @@ def _atomic_create_owner_json(
         try:
             _link(temporary_name, path)
             linked = True
-        except FileExistsError as exc:
+        except _file_exists_error as exc:
             primary_error = _error_type(
                 "persisted economic goal already exists; owner replacement requires "
                 "a separate authority boundary"
             )
             raise primary_error from exc
-        except OSError as exc:
+        except _os_error as exc:
             primary_error = _error_type(
                 f"cannot atomically create persisted economic goal: {exc}"
             )
             raise primary_error from exc
-    except BaseException as exc:
+    except _base_exception as exc:
         if primary_error is None:
             primary_error = exc
         raise
@@ -317,9 +321,9 @@ def _atomic_create_owner_json(
         if temporary_name is not None:
             try:
                 _unlink(temporary_name)
-            except FileNotFoundError:
+            except _file_not_found_error:
                 pass
-            except OSError as exc:
+            except _os_error as exc:
                 if primary_error is None:
                     if linked:
                         raise _error_type(

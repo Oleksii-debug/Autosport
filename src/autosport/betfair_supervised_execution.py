@@ -90,31 +90,29 @@ _CANONICAL_URLLIB_BETFAIR_HTTP_POST = UrllibBetfairHttpTransport.post
 _CANONICAL_URLLIB_BETFAIR_HTTP_POST_CODE = (
     _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__code__
 )
+_CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS = (
+    _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__
+)
 _CANONICAL_URLLIB_BETFAIR_REQUEST = (
-    _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__["Request"]
+    _CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS["Request"]
 )
-_CANONICAL_URLLIB_BETFAIR_URLOPEN = (
-    _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__["urlopen"]
-)
-# Keep the actual stdlib urlopen dependency graph distinct from the mutable
-# compatibility seam above. Tests may temporarily replace the account module's
-# urlopen binding; terminal production execution must never trust the process-
-# global urllib.request._opener behind the original urlopen function.
-_ORIGINAL_URLLIB_BETFAIR_URLOPEN = _CANONICAL_URLLIB_BETFAIR_URLOPEN
-_CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS = (
-    _ORIGINAL_URLLIB_BETFAIR_URLOPEN.__globals__
-)
+# The canonical account transport no longer uses urllib.request.urlopen().
+# It constructs an isolated opener per request. Seal exactly that current
+# dependency graph instead of assuming the obsolete process-global _opener seam.
 _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER = (
-    _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS["build_opener"]
+    _CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS["build_opener"]
 )
 _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_CODE = (
     _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER.__code__
 )
+_CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_GLOBALS = (
+    _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER.__globals__
+)
 _CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER = (
-    _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER.__globals__["HTTPRedirectHandler"]
+    _CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS["HTTPRedirectHandler"]
 )
 _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR = (
-    _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS["OpenerDirector"]
+    _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_GLOBALS["OpenerDirector"]
 )
 _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN = (
     _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.open
@@ -140,7 +138,6 @@ _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR = (
 _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR_CODE = (
     _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR.__code__
 )
-
 
 def _capture_private_opener_dispatch(
     opener: object,
@@ -2080,9 +2077,6 @@ def execute_betfair_supervised_action(
                 acknowledgement.external_receipt_id,
             )
 
-        ambient_urllib_opener = (
-            _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("_opener")
-        )
         client._gate.require(
             action=action,
             profile=profile,
@@ -2099,24 +2093,32 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST
             or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__code__
             is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST_CODE
-            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("Request")
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS.get("Request")
             is not _CANONICAL_URLLIB_BETFAIR_REQUEST
-            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("urlopen")
-            is not _CANONICAL_URLLIB_BETFAIR_URLOPEN
-            or _CANONICAL_URLLIB_BETFAIR_URLOPEN
-            is not _ORIGINAL_URLLIB_BETFAIR_URLOPEN
-            or _ORIGINAL_URLLIB_BETFAIR_URLOPEN.__globals__
-            is not _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS
-            or _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("build_opener")
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS.get("build_opener")
             is not _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS.get(
+                "HTTPRedirectHandler"
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER
             or getattr(
                 _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER,
                 "__code__",
                 None,
             )
             is not _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_CODE
-            or _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("OpenerDirector")
+            or _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER.__globals__
+            is not _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_GLOBALS
+            or _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_GLOBALS.get(
+                "OpenerDirector"
+            )
             is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
+            or _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_GLOBALS.get(
+                "HTTPRedirectHandler"
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER
             or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.open
             is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
             or getattr(
@@ -2225,21 +2227,6 @@ def execute_betfair_supervised_action(
                 for cell, expected in zip(
                     _CANONICAL_PROVIDER_HTTP_POST.__closure__,
                     _CANONICAL_PROVIDER_HTTP_POST_CLOSURE,
-                )
-            )
-            or (
-                ambient_urllib_opener is not None
-                and (
-                    type(ambient_urllib_opener)
-                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
-                    or type(ambient_urllib_opener).open
-                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
-                    or getattr(
-                        type(ambient_urllib_opener).open,
-                        "__code__",
-                        None,
-                    )
-                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN_CODE
                 )
             )
             or _parse_place_orders_response
@@ -2446,9 +2433,6 @@ def execute_betfair_supervised_action(
         except BetfairSupervisedExecutionError:
             canonical_place_action_after_provider = False
 
-        ambient_urllib_opener = (
-            _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("_opener")
-        )
         if (
             not canonical_place_action_after_provider
             or _CANONICAL_BETFAIR_PLACE_ACTION.__code__
@@ -2457,24 +2441,32 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST
             or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__code__
             is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST_CODE
-            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("Request")
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS.get("Request")
             is not _CANONICAL_URLLIB_BETFAIR_REQUEST
-            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("urlopen")
-            is not _CANONICAL_URLLIB_BETFAIR_URLOPEN
-            or _CANONICAL_URLLIB_BETFAIR_URLOPEN
-            is not _ORIGINAL_URLLIB_BETFAIR_URLOPEN
-            or _ORIGINAL_URLLIB_BETFAIR_URLOPEN.__globals__
-            is not _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS
-            or _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("build_opener")
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS.get("build_opener")
             is not _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS.get(
+                "HTTPRedirectHandler"
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER
             or getattr(
                 _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER,
                 "__code__",
                 None,
             )
             is not _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_CODE
-            or _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("OpenerDirector")
+            or _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER.__globals__
+            is not _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_GLOBALS
+            or _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_GLOBALS.get(
+                "OpenerDirector"
+            )
             is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
+            or _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_GLOBALS.get(
+                "HTTPRedirectHandler"
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER
             or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.open
             is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
             or getattr(
@@ -2583,21 +2575,6 @@ def execute_betfair_supervised_action(
                 for cell, expected in zip(
                     _CANONICAL_PROVIDER_HTTP_POST.__closure__,
                     _CANONICAL_PROVIDER_HTTP_POST_CLOSURE,
-                )
-            )
-            or (
-                ambient_urllib_opener is not None
-                and (
-                    type(ambient_urllib_opener)
-                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
-                    or type(ambient_urllib_opener).open
-                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
-                    or getattr(
-                        type(ambient_urllib_opener).open,
-                        "__code__",
-                        None,
-                    )
-                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN_CODE
                 )
             )
             or _parse_place_orders_response

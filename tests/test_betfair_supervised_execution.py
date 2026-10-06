@@ -998,6 +998,68 @@ def test_subclassed_write_client_cannot_mint_terminal_provider_truth() -> None:
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
+def test_supervised_transport_seal_tracks_isolated_opener_contract() -> None:
+    post = betfair_account_readonly.UrllibBetfairHttpTransport.post
+    post_globals = post.__globals__
+
+    assert "urlopen" not in post_globals
+    assert (
+        betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_HTTP_POST
+        is post
+    )
+    assert (
+        betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS
+        is post_globals
+    )
+    assert (
+        betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_BUILD_OPENER
+        is post_globals["build_opener"]
+    )
+    assert (
+        betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_GLOBALS
+        is post_globals["build_opener"].__globals__
+    )
+
+
+def test_replaced_isolated_opener_factory_cannot_mint_terminal_provider_truth(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_build_opener = betfair_account_readonly.build_opener
+        monkeypatch.setattr(
+            betfair_account_readonly,
+            "build_opener",
+            lambda *args, **kwargs: original_build_opener(*args, **kwargs),
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical client, transport, and parser authority",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-rebound-opener-factory",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
 def test_injected_write_transport_cannot_mint_terminal_provider_truth() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)

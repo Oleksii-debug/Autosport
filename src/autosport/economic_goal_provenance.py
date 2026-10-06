@@ -502,6 +502,7 @@ verify_provenance = _bind_provenance_verifier(_verify_provenance_bound)
 def _make_provenance_authority(operation, label: str):
     operation_code = operation.__code__
     operation_defaults = operation.__defaults__
+    operation_kwdefaults = operation.__kwdefaults__
     nested_callables = tuple(
         value
         for value in (operation_defaults or ())
@@ -525,6 +526,10 @@ def _make_provenance_authority(operation, label: str):
         if operation.__defaults__ is not operation_defaults:
             raise EconomicGoalProvenanceError(
                 f"{label} defaults authority changed"
+            )
+        if operation.__kwdefaults__ is not operation_kwdefaults:
+            raise EconomicGoalProvenanceError(
+                f"{label} keyword defaults authority changed"
             )
         for callable_object, expected_code, expected_defaults, expected_kwdefaults in nested_authority:
             if getattr(callable_object, "__code__", None) is not expected_code:

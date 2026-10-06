@@ -411,17 +411,24 @@ class IncidentRiskRegisterTests(unittest.TestCase):
                 ),
             )
 
+        opened_with_preexisting_resolution_ref = self._entry(
+            evidence_refs=(
+                "evidence://provider-gap/001",
+                "evidence://resolution/preexisting",
+            ),
+        )
         with self.assertRaisesRegex(
             IncidentRiskRegisterError,
             "new verified evidence",
         ):
             validate_successor(
-                opened,
+                opened_with_preexisting_resolution_ref,
                 self._entry(
                     revision=2,
                     updated_at="2026-09-21T07:06:00+00:00",
                     status=RiskStatus.RESOLVED,
                     evidence_state=RiskEvidenceState.VERIFIED,
+                    evidence_refs=opened_with_preexisting_resolution_ref.evidence_refs,
                     mitigation="Recovery was reported complete.",
                     requires_operator_action=False,
                 ),

@@ -263,3 +263,74 @@ def test_tick_keeps_outcome_and_learning_authorities() -> None:
         assert original_handoff.reconciled == 1
         assert replacement_handoff.prepared == 0
         assert replacement_handoff.reconciled == 0
+
+def test_tick_keeps_invalidation_routing_composition() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def __init__(self, *, forbidden: bool = False) -> None:
+                self.calls = 0
+                self.forbidden = forbidden
+
+            def drain(self, *, max_items: int):
+                if self.forbidden:
+                    raise AssertionError("rebound invalidation buffer executed")
+                assert max_items == 250
+                self.calls += 1
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class Index:
+            input_ids = ()
+
+            def __init__(self, *, forbidden: bool = False) -> None:
+                self.calls = 0
+                self.forbidden = forbidden
+
+            def affected_inputs(self, _batch):
+                if self.forbidden:
+                    raise AssertionError("rebound dependency index executed")
+                self.calls += 1
+                return ()
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        original_buffer = Buffer()
+        replacement_buffer = Buffer(forbidden=True)
+        original_index = Index()
+        replacement_index = Index(forbidden=True)
+        coordinator.invalidation_buffer = original_buffer
+        coordinator.dependency_index = original_index
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        def rebind() -> None:
+            coordinator.invalidation_buffer = replacement_buffer
+            coordinator.dependency_index = replacement_index
+            coordinator.max_invalidation_batches_per_tick = 1
+            coordinator.max_invalidation_items_per_batch = 1
+
+        coordinator.collector = _Collector(callback=rebind)
+
+        result = coordinator.tick()
+
+        assert result.cycle_index == 1
+        assert original_buffer.calls == 1
+        assert replacement_buffer.calls == 0
+        assert original_index.calls == 1
+        assert replacement_index.calls == 0
+

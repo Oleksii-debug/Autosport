@@ -331,5 +331,8 @@ class BetfairMarketBookProjectionConcurrencyGate:
                 )
             if lease.generation != lease_generation:
                 raise ValueError("lease_generation does not match active request")
-            del self._active[request_id]
+            # Publish causal completion time before the destructive release.
+            # If process control lands during deletion, restart must not forget
+            # that this completion instant was already admitted.
             self._last_observed_at_utc_us = observed_us
+            del self._active[request_id]

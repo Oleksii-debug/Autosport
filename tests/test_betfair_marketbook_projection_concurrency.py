@@ -656,3 +656,31 @@ def test_process_control_during_active_insert_burns_lease_generation() -> None:
     assert successor.allowed is True
     assert successor.lease_generation == 2
 
+
+def test_process_control_during_complete_delete_preserves_causal_time() -> None:
+    value = gate()
+    first = begin_projected(value, "active")
+    assert first.lease_generation is not None
+    interrupt = KeyboardInterrupt("complete delete interrupted")
+
+    class InterruptingActive(dict[str, MarketBookProjectionLease]):
+        def __delitem__(self, key: str) -> None:
+            super().__delitem__(key)
+            raise interrupt
+
+    value._active = InterruptingActive(value._active)
+
+    completed_at = T0 + timedelta(seconds=1)
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        value.complete(
+            "active",
+            lease_generation=first.lease_generation,
+            observed_at=completed_at,
+        )
+
+    assert exc_info.value is interrupt
+    state = value.snapshot()
+    assert state.active == ()
+    assert state.last_observed_at_utc_us == int(completed_at.timestamp() * 1_000_000)
+    assert state.next_lease_generation == 2
+

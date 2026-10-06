@@ -252,6 +252,42 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(legacy._decimal_text(Decimal("12.3400")), "12.3400")
 
 
+    def test_decimal_authorities_keep_noninjectable_call_shapes(self) -> None:
+        self.assertEqual(legacy._decimal.__kwdefaults__, {"allow_zero": False})
+        self.assertIsNone(legacy._decimal.__defaults__)
+        self.assertIsNone(legacy._decimal_text.__defaults__)
+        self.assertIsNone(legacy._decimal_text.__kwdefaults__)
+        self.assertIsNone(PaperExecutionEvidenceRecord.to_dict.__defaults__)
+        self.assertIsNone(PaperExecutionEvidenceRecord.to_dict.__kwdefaults__)
+
+        with self.assertRaises(TypeError):
+            legacy._decimal(
+                Decimal("2"),
+                "value",
+                _resource_validator=lambda _value: None,
+            )
+        with self.assertRaises(TypeError):
+            legacy._decimal_text(
+                Decimal("2"),
+                _preflight=lambda *_values: None,
+            )
+        with self.assertRaises(TypeError):
+            evidence().to_dict(lambda *_values: None)
+
+    def test_complete_run_rejects_formatter_injection_before_durable_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(ledger_path)
+            with self.assertRaises(TypeError):
+                ledger.complete_run(
+                    run_id="run-injection",
+                    pending_action_ids=(),
+                    recovery_decision=RecoveryDecision.NONE,
+                    worst_case_exposure=Decimal("1E+100000000"),
+                    _decimal_formatter=lambda _value: "0",
+                )
+            self.assertFalse(ledger_path.exists())
+
     def test_in_place_resource_validator_code_mutation_fails_closed(self) -> None:
         validator = legacy._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
         original_code = validator.__code__

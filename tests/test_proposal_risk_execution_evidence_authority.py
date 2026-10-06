@@ -1034,6 +1034,27 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
             last_record["payload"]["terminal_population_sha256"],
             self.terminal_population.population_sha256,
         )
+        records = [
+            json.loads(line)["record"]
+            for line in (self.workspace / "decisions.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line
+        ]
+        target_records = [
+            record
+            for record in records
+            if record["action"] == "PROPOSAL_RISK_TARGET_PRECOMMIT"
+        ]
+        self.assertEqual(len(target_records), 1)
+        self.assertEqual(
+            target_records[0]["payload"]["schema"],
+            "autosport.proposal-risk-target-precommit.v2",
+        )
+        self.assertEqual(
+            scenario_population_authority._TARGET_SCHEMA,
+            target_records[0]["payload"]["schema"],
+        )
         self.assertFalse(issued.product_scenario_source_provenance_proven)
         self.assertFalse(issued.terminal_mapping_proven)
         self.assertFalse(issued.scenario_execution_proven)

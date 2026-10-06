@@ -733,6 +733,28 @@ def _guard_paperbook_constructor_authority(method):
     type_authority_code = type_authority.__code__
     canonical_decimal = _canonicalize_paperbook_constructor_decimal
     canonical_decimal_code = canonical_decimal.__code__
+    runtime_helper_authority = _require_paperbook_runtime_helper_authority
+    runtime_helper_authority_code = runtime_helper_authority.__code__
+    runtime_module_globals = globals()
+    constructor_module_dependencies = {
+        "Decimal": Decimal,
+        "DecimalException": DecimalException,
+        "_MAX_PAPER_DECIMAL_TEXT_CHARS": _MAX_PAPER_DECIMAL_TEXT_CHARS,
+    }
+
+    def require_constructor_module_dependencies() -> None:
+        for name, dependency in constructor_module_dependencies.items():
+            if runtime_module_globals.get(name) is not dependency:
+                raise ValueError(
+                    f"PaperBook constructor module dependency changed: {name}"
+                )
+
+    def require_runtime_helpers(book: object) -> None:
+        if runtime_helper_authority.__code__ is not runtime_helper_authority_code:
+            raise ValueError("PaperBook runtime helper dispatch authority changed")
+        runtime_helper_authority(book)
+        if runtime_helper_authority.__code__ is not runtime_helper_authority_code:
+            raise ValueError("PaperBook runtime helper dispatch authority changed")
 
     def require_type(book: object) -> None:
         if type_authority.__code__ is not type_authority_code:
@@ -753,6 +775,9 @@ def _guard_paperbook_constructor_authority(method):
         if method.__code__ is not method_code:
             raise ValueError("PaperBook constructor callable authority changed")
         require_type(self)
+        require_constructor_module_dependencies()
+        require_runtime_helpers(self)
+        require_constructor_module_dependencies()
         invoke(
             operation_register,
             operation_register_code,
@@ -775,12 +800,16 @@ def _guard_paperbook_constructor_authority(method):
             raise ValueError("PaperBook constructor callable authority changed")
         if canonical_decimal.__code__ is not canonical_decimal_code:
             raise ValueError("PaperBook constructor decimal dispatch authority changed")
+        require_constructor_module_dependencies()
+        require_runtime_helpers(self)
         result = method(
             self,
             *args,
             _canonical_decimal=canonical_decimal,
             **kwargs,
         )
+        require_constructor_module_dependencies()
+        require_runtime_helpers(self)
         if method.__code__ is not method_code:
             raise ValueError("PaperBook constructor callable authority changed")
         return result

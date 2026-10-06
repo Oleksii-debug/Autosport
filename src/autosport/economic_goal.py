@@ -269,21 +269,21 @@ _CANONICAL_CONTRACT_TYPE: Final = EconomicGoalContract
 _CANONICAL_CONTRACT_VALIDATOR: Final = EconomicGoalContract.__post_init__
 
 
-def _same_guard(name: str, previous: object, candidate: object) -> None:
+def _require_same(name: str, previous: object, candidate: object) -> None:
     if candidate != previous:
         raise EconomicGoalContractError(
             f"automatic transition must preserve {name}"
         )
 
 
-def _cap_guard(name: str, previous: Decimal, candidate: Decimal) -> None:
+def _require_cap_not_increased(name: str, previous: Decimal, candidate: Decimal) -> None:
     if candidate > previous:
         raise EconomicGoalContractError(
             f"automatic transition must not increase {name}"
         )
 
 
-def _optional_cap_guard(
+def _require_optional_cap_not_increased(
     name: str, previous: Decimal | None, candidate: Decimal | None
 ) -> None:
     if previous is None:
@@ -295,7 +295,7 @@ def _optional_cap_guard(
         )
 
 
-def _floor_guard(
+def _require_floor_not_decreased(
     name: str, previous: Decimal, candidate: Decimal
 ) -> None:
     if candidate < previous:
@@ -304,14 +304,14 @@ def _floor_guard(
         )
 
 
-def _int_cap_guard(name: str, previous: int, candidate: int) -> None:
+def _require_int_cap_not_increased(name: str, previous: int, candidate: int) -> None:
     if candidate > previous:
         raise EconomicGoalContractError(
             f"automatic transition must not increase {name}"
         )
 
 
-def _restrictions_guard(
+def _require_restrictions_not_removed(
     name: str, previous: frozenset[str], candidate: frozenset[str]
 ) -> None:
     if not previous.issubset(candidate):

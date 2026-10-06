@@ -5077,3 +5077,82 @@ def test_invalidation_restores_matched_keys_tamper_during_backlog_inspection() -
 
     assert index.matching_keys("input-a") == ()
 
+def test_consumed_invalidation_routing_failure_promotes_next_drain_to_full_refresh() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+    buffer._dirty[("provider-a", "quote-a")] = None
+    index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+    index.register("input-a", source_ids="provider-a")
+
+    def fail_routing(_batch):
+        raise RuntimeError("routing failed after drain")
+
+    with pytest.raises(RuntimeError, match="routing failed after drain"):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=fail_routing,
+            max_batches=4,
+            max_items=250,
+        )
+
+    assert buffer.pending_count == 0
+    assert buffer.full_refresh_required is True
+    recovery = buffer.drain()
+    assert recovery.changed_keys == ()
+    assert recovery.full_refresh_required is True
+    assert recovery.has_more is False
+
+
+def test_consumed_invalidation_receipt_failure_promotes_next_drain_to_full_refresh() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+    buffer._dirty[("provider-a", "quote-a")] = None
+    index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+    index.register("input-a", source_ids="provider-a")
+
+    def invalid_routing(_batch):
+        return ("missing-input",)
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="routed an unregistered input",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=invalid_routing,
+            max_batches=4,
+            max_items=250,
+        )
+
+    assert buffer.full_refresh_required is True
+    assert buffer.drain().full_refresh_required is True
+
+
+def test_successful_invalidation_routing_does_not_force_recovery_refresh() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+    buffer._dirty[("provider-a", "quote-a")] = None
+    index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+    index.register("input-a", source_ids="provider-a")
+
+    affected, full_refresh, backlog = coordinator._drain_invalidations(
+        invalidation_buffer=buffer,
+        dependency_index=index,
+        drain_invalidation=buffer.drain,
+        affected_inputs=lambda _batch: (),
+        max_batches=4,
+        max_items=250,
+    )
+
+    assert affected == ()
+    assert full_refresh is False
+    assert backlog is False
+    assert buffer.full_refresh_required is False
+

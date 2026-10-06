@@ -23,6 +23,7 @@ from .economic_goal_store import economic_goal_from_payload, economic_goal_to_pa
 PROVENANCE_SCHEMA: Final = "autosport.economic_goal_provenance"
 PROVENANCE_SCHEMA_VERSION: Final = 1
 _MAX_PROVENANCE_IDENTITY_CHARS: Final = 512
+_PROVENANCE_OBJECT_SETATTR: Final = object.__setattr__
 
 
 class _EconomicGoalProvenanceMeta(type):

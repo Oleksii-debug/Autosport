@@ -32,8 +32,8 @@ from .proposal_risk_target_authority import (
 from .risk import PaperRiskPolicy
 
 
-_SCHEMA = "autosport.proposal-risk-counterfactual-cash-floor.v1"
-_PATH_PROTOCOL = "paperbook.cash-floor.open-all-before-settlement.v1"
+_SCHEMA = "autosport.proposal-risk-counterfactual-cash-floor.v2"
+_PATH_PROTOCOL = "paperbook.cash-floor.open-all-capital-before-settlement.v2"
 _SCHEMA_EXPECTED = _SCHEMA
 _PATH_PROTOCOL_EXPECTED = _PATH_PROTOCOL
 _HEX = frozenset("0123456789abcdef")
@@ -638,10 +638,11 @@ del _make_identity_capability
 class ProductProposalRiskCounterfactualCashFloor:
     """Deterministic conservative cash-floor arithmetic for one proposal target.
 
-    The protocol reserves every positive target stake before crediting any terminal
-    payout. Because the terminal payoff authority proves canonical BACK-only
-    PaperBook settlement arithmetic and every reconstructed payout is non-negative,
-    the post-open cash balance is the minimum cash balance under this conservative
+    The protocol reserves every positive target capital-at-risk amount before
+    crediting any terminal payout. BACK reserves stake; single-leg LAY reserves
+    exact liability. Because terminal payoff uses the same canonical PaperBook
+    settlement authority and every reconstructed payout is non-negative, the
+    post-open cash balance is the minimum cash balance under this conservative
     counterfactual ordering.
 
     This is not market-value equity, actual scenario execution, an IID/joint

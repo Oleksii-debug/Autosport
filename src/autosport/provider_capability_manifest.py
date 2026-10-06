@@ -19,6 +19,7 @@ from datetime import datetime
 from enum import Enum
 from hashlib import sha256
 import json
+from types import MappingProxyType
 
 from .bookmaker_capability import (
     BookmakerCapability,
@@ -86,7 +87,7 @@ class ProviderManifestFactAuthority(str, Enum):
     NOT_PROVEN = "not_proven"
 
 
-_CANONICAL_CAPABILITY_MAP: dict[ProviderManifestCapability, BookmakerCapability] = {
+_CANONICAL_CAPABILITY_MAP = MappingProxyType({
     ProviderManifestCapability.PREMATCH_QUOTES: BookmakerCapability.PREMATCH_QUOTES_READ,
     ProviderManifestCapability.LIVE_QUOTES: BookmakerCapability.LIVE_QUOTES_READ,
     ProviderManifestCapability.LIMITS: BookmakerCapability.LIMITS_READ,
@@ -99,7 +100,17 @@ _CANONICAL_CAPABILITY_MAP: dict[ProviderManifestCapability, BookmakerCapability]
     ProviderManifestCapability.READBACK: BookmakerCapability.BET_READBACK,
     ProviderManifestCapability.CASHOUT: BookmakerCapability.CASHOUT,
     ProviderManifestCapability.CANCEL_BET: BookmakerCapability.CANCEL_BET,
-}
+})
+
+
+def _canonical_capability_for(
+    capability: ProviderManifestCapability,
+    _get=_CANONICAL_CAPABILITY_MAP.get,
+) -> BookmakerCapability | None:
+    """Resolve canonical authority from the immutable import-time capability map."""
+
+    return _get(capability)
+
 
 _EXTENSION_CAPABILITIES = frozenset(ProviderManifestCapability) - frozenset(
     _CANONICAL_CAPABILITY_MAP
@@ -289,7 +300,7 @@ class ProviderCapabilityManifestFact:
             )
 
         if self.authority is ProviderManifestFactAuthority.CANONICAL_PROFILE:
-            if self.capability not in _CANONICAL_CAPABILITY_MAP:
+            if _canonical_capability_for(self.capability) is None:
                 raise ProviderCapabilityManifestError(
                     "canonical-profile authority is invalid for this extension capability"
                 )
@@ -372,7 +383,7 @@ class ProviderCapabilityManifest:
             )
 
         for fact in self.facts:
-            canonical = _CANONICAL_CAPABILITY_MAP.get(fact.capability)
+            canonical = _canonical_capability_for(fact.capability)
             if canonical is not None:
                 if fact.authority is not ProviderManifestFactAuthority.CANONICAL_PROFILE:
                     raise ProviderCapabilityManifestError(
@@ -540,7 +551,7 @@ def build_provider_capability_manifest(
 
     by_capability: dict[ProviderManifestCapability, ProviderCapabilityManifestFact] = {}
     for fact in extension_facts:
-        if fact.capability in _CANONICAL_CAPABILITY_MAP:
+        if _canonical_capability_for(fact.capability) is not None:
             raise ProviderCapabilityManifestError(
                 f"{fact.capability.value} is canonical and cannot be caller-overridden"
             )
@@ -552,7 +563,7 @@ def build_provider_capability_manifest(
 
     facts: list[ProviderCapabilityManifestFact] = []
     for capability in ProviderManifestCapability:
-        canonical = _CANONICAL_CAPABILITY_MAP.get(capability)
+        canonical = _canonical_capability_for(capability)
         if canonical is not None:
             facts.append(
                 ProviderCapabilityManifestFact(

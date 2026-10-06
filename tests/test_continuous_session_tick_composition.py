@@ -7254,3 +7254,50 @@ def test_tick_rechecks_invalidation_validator_authority_after_provider_io(
             == "ContinuousSessionError"
         )
 
+@pytest.mark.parametrize(
+    "corruption",
+    ("missing_full_refresh", "malformed_dirty", "conflicting_full_refresh", "overflow"),
+)
+def test_tick_recovers_malformed_canonical_invalidation_truth_as_full_refresh(
+    corruption: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(
+            mirror,
+            max_dirty_keys=1,
+        )
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        def corrupt() -> None:
+            if corruption == "missing_full_refresh":
+                del buffer._full_refresh_required
+            elif corruption == "malformed_dirty":
+                buffer._dirty[("provider-a", "")] = None
+            elif corruption == "conflicting_full_refresh":
+                buffer._dirty[("provider-a", "quote-a")] = None
+                buffer._full_refresh_required = True
+            else:
+                buffer._dirty[("provider-a", "quote-a")] = None
+                buffer._dirty[("provider-a", "quote-b")] = None
+
+        coordinator.collector = _Collector(callback=corrupt)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical invalidation buffer state is invalid",
+        ):
+            coordinator.tick()
+
+        assert buffer.pending_count == 0
+        assert buffer.full_refresh_required is True
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+

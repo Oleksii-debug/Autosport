@@ -667,19 +667,58 @@ class BetfairSupervisedPlaceOrdersClient:
             "X-Application": self._credentials.application_key,
             "X-Authentication": self._credentials.session_token,
         }
+        transport = self._transport
+        timeout_seconds = self._timeout_seconds
+        observed_clock = self._clock
         if _before_transport is not None:
             _before_transport(request_sha256)
+
+        canonical_transport = type(transport) is UrllibBetfairHttpTransport
+        canonical_transport_post = (
+            UrllibBetfairHttpTransport.__dict__.get("post")
+            if canonical_transport
+            else None
+        )
+        transport_namespace = (
+            object.__getattribute__(transport, "__dict__")
+            if canonical_transport
+            else None
+        )
         origin_candidate = (
-            type(self._transport) is UrllibBetfairHttpTransport
+            canonical_transport
+            and type(transport_namespace) is dict
+            and "post" not in transport_namespace
+            and callable(canonical_transport_post)
+            and getattr(canonical_transport_post, "__code__", None) is not None
             and _execution_provider_network_dispatch_is_current()
         )
         try:
-            payload = self._transport.post(
-                BETTING_JSON_RPC_ENDPOINT,
-                headers=headers,
-                body=body,
-                timeout_seconds=self._timeout_seconds,
-            )
+            if canonical_transport:
+                if not origin_candidate:
+                    raise BetfairPlaceOrdersAmbiguous(
+                        "canonical placeOrders transport dispatch changed; "
+                        "authoritative readback required"
+                    )
+                # Call the exact class dispatch captured after the durable SUBMITTED
+                # boundary.  Never re-enter instance attribute lookup here: a
+                # same-process interleaving must not install transport.post after
+                # preflight and fabricate provider-origin response authority.
+                payload = canonical_transport_post(
+                    transport,
+                    BETTING_JSON_RPC_ENDPOINT,
+                    headers=headers,
+                    body=body,
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                payload = transport.post(
+                    BETTING_JSON_RPC_ENDPOINT,
+                    headers=headers,
+                    body=body,
+                    timeout_seconds=timeout_seconds,
+                )
+        except BetfairPlaceOrdersAmbiguous:
+            raise
         except (BetfairReadOnlyError, TimeoutError, OSError) as exc:
             raise BetfairPlaceOrdersAmbiguous(
                 "placeOrders transport outcome is ambiguous; "
@@ -689,18 +728,25 @@ class BetfairSupervisedPlaceOrdersClient:
             raise BetfairPlaceOrdersAmbiguous(
                 "placeOrders transport returned non-bytes response"
             )
+        provider_origin_authoritative = (
+            origin_candidate
+            and type(self._transport) is UrllibBetfairHttpTransport
+            and self._transport is transport
+            and object.__getattribute__(transport, "__dict__")
+            is transport_namespace
+            and "post" not in transport_namespace
+            and UrllibBetfairHttpTransport.__dict__.get("post")
+            is canonical_transport_post
+            and _execution_provider_network_dispatch_is_current()
+        )
         return _parse_place_orders_response(
             payload,
             request_id=request_id,
             request_sha256=request_sha256,
             action=action,
             provider_order_ref=provider_ref,
-            observed_at=self._clock(),
-            provider_origin_authoritative=(
-                origin_candidate
-                and type(self._transport) is UrllibBetfairHttpTransport
-                and _execution_provider_network_dispatch_is_current()
-            ),
+            observed_at=observed_clock(),
+            provider_origin_authoritative=provider_origin_authoritative,
         )
 
 

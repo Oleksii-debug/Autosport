@@ -1,0 +1,308 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from threading import RLock
+
+
+BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION = (
+    "betfair.list-market-book.local-projection-pressure.v4-generation-safe"
+)
+_MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED = 3
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _validate_request_id(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("request_id must be str")
+    if not value or value != value.strip():
+        raise ValueError("request_id must be non-empty and trimmed")
+    return value
+
+
+def _utc_microseconds(value: object, *, name: str) -> int:
+    if not isinstance(value, datetime):
+        raise TypeError(f"{name} must be datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    utc_value = value.astimezone(timezone.utc)
+    delta = utc_value - _EPOCH
+    return (
+        delta.days * 86_400 * 1_000_000
+        + delta.seconds * 1_000_000
+        + delta.microseconds
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MarketBookProjectionLease:
+    request_id: str
+    acquired_at_utc_us: int
+    generation: int
+
+    def __post_init__(self) -> None:
+        _validate_request_id(self.request_id)
+        if type(self.acquired_at_utc_us) is not int:
+            raise TypeError("acquired_at_utc_us must be a non-boolean int")
+        if type(self.generation) is not int or self.generation < 1:
+            raise ValueError("generation must be a positive non-boolean int")
+
+
+@dataclass(frozen=True, slots=True)
+class MarketBookProjectionConcurrencyState:
+    policy_version: str
+    last_observed_at_utc_us: int | None
+    active: tuple[MarketBookProjectionLease, ...]
+    next_lease_generation: int
+
+    def __post_init__(self) -> None:
+        if self.policy_version != BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION:
+            raise ValueError("unsupported Betfair MarketBook projection concurrency policy")
+        if self.last_observed_at_utc_us is not None and type(
+            self.last_observed_at_utc_us
+        ) is not int:
+            raise TypeError("last_observed_at_utc_us must be a non-boolean int or None")
+        if type(self.active) is not tuple:
+            raise TypeError("active must be a tuple")
+        if type(self.next_lease_generation) is not int or self.next_lease_generation < 1:
+            raise ValueError("next_lease_generation must be a positive non-boolean int")
+        if len(self.active) > _MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED:
+            raise ValueError("projection concurrency state exceeds conservative local maximum")
+        if self.active and self.last_observed_at_utc_us is None:
+            raise ValueError("active leases require last observed time")
+        ids: list[str] = []
+        generations: list[int] = []
+        for lease in self.active:
+            if type(lease) is not MarketBookProjectionLease:
+                raise TypeError("active must contain MarketBookProjectionLease values")
+            ids.append(lease.request_id)
+            generations.append(lease.generation)
+            if lease.generation >= self.next_lease_generation:
+                raise ValueError("active lease generation must precede next generation")
+            if (
+                self.last_observed_at_utc_us is not None
+                and lease.acquired_at_utc_us > self.last_observed_at_utc_us
+            ):
+                raise ValueError("lease was acquired after last observed time")
+        if ids != sorted(ids):
+            raise ValueError("active leases must be sorted by request_id")
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate active request_id")
+        if len(set(generations)) != len(generations):
+            raise ValueError("duplicate active lease generation")
+
+
+@dataclass(frozen=True, slots=True)
+class MarketBookProjectionConcurrencyDecision:
+    request_id: str
+    observed_at_utc_us: int
+    projection_bearing: bool
+    allowed: bool
+    active_projection_requests: int
+    lease_generation: int | None = None
+    provider_limit_coverage_complete: bool = False
+    provider_dispatch_authorized: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_request_id(self.request_id)
+        if type(self.observed_at_utc_us) is not int:
+            raise TypeError("observed_at_utc_us must be a non-boolean int")
+        if type(self.projection_bearing) is not bool:
+            raise TypeError("projection_bearing must be bool")
+        if type(self.allowed) is not bool:
+            raise TypeError("allowed must be bool")
+        if (
+            type(self.active_projection_requests) is not int
+            or not 0 <= self.active_projection_requests <= _MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
+        ):
+            raise ValueError("active_projection_requests is outside local bounds")
+        if self.projection_bearing and self.allowed:
+            if type(self.lease_generation) is not int or self.lease_generation < 1:
+                raise ValueError("allowed projection decision requires lease_generation")
+        elif self.lease_generation is not None:
+            raise ValueError("non-admitted decision cannot carry lease_generation")
+        if not self.projection_bearing and not self.allowed:
+            raise ValueError("price-only local decision cannot be denied by projection gate")
+        if self.provider_limit_coverage_complete is not False:
+            raise ValueError("local projection decision cannot claim complete provider-limit coverage")
+        if self.provider_dispatch_authorized is not False:
+            raise ValueError("local projection decision cannot authorize provider dispatch")
+
+
+class BetfairMarketBookProjectionConcurrencyGate:
+    """Conservative local pressure gate for projection-bearing listMarketBook calls.
+
+    Betfair's current TOO_MANY_REQUESTS guidance is account-scoped rather than a
+    standalone exact listMarketBook in-flight counter: projection-bearing
+    listMarketBook calls contend with listCurrentOrders and listMarketProfitAndLoss,
+    and the provider describes a limit involving queued requests that are ready for
+    processing while already-processing requests do not count.
+
+    This kernel therefore does NOT claim to model the provider queue or complete
+    account-wide headroom. It deliberately applies a stricter local fail-safe cap of
+    three unresolved projection-bearing listMarketBook requests. Price-only reads
+    bypass this local bucket. Passing the gate proves only that this product-local
+    conservative cap has room; it never proves provider acceptance, complete
+    account-scoped limit coverage, or dispatch authorization.
+
+    Active local leases NEVER expire merely because caller time advanced. A
+    caller-chosen timeout cannot prove provider queue/processing state or establish
+    that another account-scoped operation stopped contending. Slots therefore release
+    only through complete for the exact active local request. On restart unresolved
+    leases remain blocking; a separate product recovery authority must establish when
+    they are safe to resolve. This kernel does no network I/O, scheduling, sleeping,
+    retry, cross-operation accounting, or recovery.
+    """
+
+    def __init__(
+        self,
+        *,
+        state: MarketBookProjectionConcurrencyState | None = None,
+    ) -> None:
+        self._lock = RLock()
+        self._active: dict[str, MarketBookProjectionLease] = {}
+        self._last_observed_at_utc_us: int | None = None
+        self._next_lease_generation = 1
+        if state is not None:
+            if type(state) is not MarketBookProjectionConcurrencyState:
+                raise TypeError(
+                    "state must be MarketBookProjectionConcurrencyState or None"
+                )
+            self._last_observed_at_utc_us = state.last_observed_at_utc_us
+            self._active = {lease.request_id: lease for lease in state.active}
+            self._next_lease_generation = state.next_lease_generation
+
+    @property
+    def policy_version(self) -> str:
+        return BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION
+
+    def _require_not_backwards(self, observed_us: int) -> None:
+        if (
+            self._last_observed_at_utc_us is not None
+            and observed_us < self._last_observed_at_utc_us
+        ):
+            raise ValueError("observed_at must not move backwards")
+
+    def snapshot(self) -> MarketBookProjectionConcurrencyState:
+        with self._lock:
+            return MarketBookProjectionConcurrencyState(
+                policy_version=BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION,
+                last_observed_at_utc_us=self._last_observed_at_utc_us,
+                active=tuple(
+                    self._active[request_id]
+                    for request_id in sorted(self._active)
+                ),
+                next_lease_generation=self._next_lease_generation,
+            )
+
+    def begin(
+        self,
+        request_id: str,
+        *,
+        observed_at: datetime,
+        has_order_projection: bool,
+        has_match_projection: bool,
+    ) -> MarketBookProjectionConcurrencyDecision:
+        request_id = _validate_request_id(request_id)
+        if type(has_order_projection) is not bool:
+            raise TypeError("has_order_projection must be bool")
+        if type(has_match_projection) is not bool:
+            raise TypeError("has_match_projection must be bool")
+        observed_us = _utc_microseconds(observed_at, name="observed_at")
+        projection_bearing = has_order_projection or has_match_projection
+
+        generation: int | None = None
+        try:
+            with self._lock:
+                self._require_not_backwards(observed_us)
+                if request_id in self._active:
+                    raise ValueError("request_id is already active")
+
+                if not projection_bearing:
+                    decision = MarketBookProjectionConcurrencyDecision(
+                        request_id=request_id,
+                        observed_at_utc_us=observed_us,
+                        projection_bearing=False,
+                        allowed=True,
+                        active_projection_requests=len(self._active),
+                    )
+                    self._last_observed_at_utc_us = observed_us
+                    return decision
+
+                if len(self._active) >= _MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED:
+                    decision = MarketBookProjectionConcurrencyDecision(
+                        request_id=request_id,
+                        observed_at_utc_us=observed_us,
+                        projection_bearing=True,
+                        allowed=False,
+                        active_projection_requests=len(self._active),
+                    )
+                    self._last_observed_at_utc_us = observed_us
+                    return decision
+
+                generation = self._next_lease_generation
+                lease = MarketBookProjectionLease(
+                    request_id=request_id,
+                    acquired_at_utc_us=observed_us,
+                    generation=generation,
+                )
+                decision = MarketBookProjectionConcurrencyDecision(
+                    request_id=request_id,
+                    observed_at_utc_us=observed_us,
+                    projection_bearing=True,
+                    allowed=True,
+                    active_projection_requests=len(self._active) + 1,
+                    lease_generation=generation,
+                )
+                self._active[request_id] = lease
+                self._next_lease_generation = generation + 1
+                self._last_observed_at_utc_us = observed_us
+                return decision
+        except BaseException as primary:
+            # A process-control interruption can land after lease mutation but
+            # before the decision reaches the caller. Remove only the exact
+            # request+generation introduced by this begin attempt. Never rewind
+            # causal time or generation counters and never touch a successor.
+            if generation is not None:
+                try:
+                    with self._lock:
+                        lease = self._active.get(request_id)
+                        if lease is not None and lease.generation == generation:
+                            del self._active[request_id]
+                except BaseException as cleanup_exc:
+                    if (
+                        not isinstance(cleanup_exc, Exception)
+                        and isinstance(primary, Exception)
+                    ):
+                        raise
+                    add_note = getattr(primary, "add_note", None)
+                    if callable(add_note):
+                        add_note(
+                            "projection-begin cleanup also failed: "
+                            f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                        )
+            raise
+
+    def complete(
+        self,
+        request_id: str,
+        *,
+        lease_generation: int,
+        observed_at: datetime,
+    ) -> None:
+        request_id = _validate_request_id(request_id)
+        if type(lease_generation) is not int or lease_generation < 1:
+            raise ValueError("lease_generation must be a positive non-boolean int")
+        observed_us = _utc_microseconds(observed_at, name="observed_at")
+
+        with self._lock:
+            self._require_not_backwards(observed_us)
+            lease = self._active.get(request_id)
+            if lease is None:
+                raise ValueError(
+                    "request_id is not an active projection-bearing request"
+                )
+            if lease.generation != lease_generation:
+                raise ValueError("lease_generation does not match active request")
+            del self._active[request_id]
+            self._last_observed_at_utc_us = observed_us

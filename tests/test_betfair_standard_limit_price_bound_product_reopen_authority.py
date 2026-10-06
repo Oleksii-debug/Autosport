@@ -6,6 +6,7 @@ import pytest
 
 import autosport.real_execution_ledger as ledger_module
 import autosport.supervised_plan_issuance as issuance_module
+import autosport.betfair_standard_limit_price_bound_product_verifier as product_verifier_module
 
 from autosport.betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
@@ -37,6 +38,56 @@ def _case(monkeypatch, tmp_path: Path):
         action_id=action.action_id,
     )
     return bound, action, store, ledger, evidence
+
+
+def test_product_verifier_ignores_rebound_builtin_and_error_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+):
+    bound, action, store, ledger, evidence = _case(monkeypatch, tmp_path)
+    attacker_called = False
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound product verifier builtin executed")
+
+    class HostileObject:
+        @staticmethod
+        def __getattribute__(*_args, **_kwargs):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("rebound object.__getattribute__ executed")
+
+    monkeypatch.setattr(product_verifier_module, "type", hostile, raising=False)
+    monkeypatch.setattr(product_verifier_module, "object", HostileObject)
+    monkeypatch.setattr(product_verifier_module, "all", hostile, raising=False)
+    monkeypatch.setattr(product_verifier_module, "getattr", hostile, raising=False)
+    monkeypatch.setattr(product_verifier_module, "dict", hostile, raising=False)
+    monkeypatch.setattr(product_verifier_module, "str", hostile, raising=False)
+    monkeypatch.setattr(
+        product_verifier_module,
+        "BetfairStandardLimitPriceBoundError",
+        hostile,
+    )
+    monkeypatch.setattr(product_verifier_module, "AttributeError", RuntimeError, raising=False)
+    monkeypatch.setattr(product_verifier_module, "OSError", RuntimeError, raising=False)
+    monkeypatch.setattr(product_verifier_module, "TypeError", RuntimeError, raising=False)
+    monkeypatch.setattr(product_verifier_module, "ValueError", RuntimeError, raising=False)
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        result = verify_product_betfair_standard_limit_price_bound(
+            evidence=evidence,
+            ledger=ledger,
+            issuance_store=store,
+            runtime_profile=runtime_profile,
+            execution_plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+    assert result.execution_plan_id == bound.execution_plan.plan_id
+    assert result.action_id == action.action_id
 
 
 def test_product_verifier_rejects_rebound_ledger_constructor_after_reopen(

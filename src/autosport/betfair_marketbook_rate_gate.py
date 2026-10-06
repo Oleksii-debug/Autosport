@@ -199,6 +199,11 @@ def _install_rate_gate_authority() -> None:
     window_us = _WINDOW_MICROSECONDS
     object_getattribute = object.__getattribute__
     object_setattr = object.__setattr__
+    window_market_id_member = window_type.__dict__["market_id"]
+    window_accepted_at_member = window_type.__dict__["accepted_at_utc_us"]
+    state_policy_version_member = state_type.__dict__["policy_version"]
+    state_last_scheduled_member = state_type.__dict__["last_scheduled_at_utc_us"]
+    state_markets_member = state_type.__dict__["markets"]
 
     def validate_market_id(value: object) -> str:
         if type(value) is not str:
@@ -238,15 +243,17 @@ def _install_rate_gate_authority() -> None:
     def validate_window(value: object) -> None:
         if type(value) is not window_type:
             raise TypeError("markets must contain MarketBookRateWindowState values")
-        validate_market_id(value.market_id)
-        if type(value.accepted_at_utc_us) is not tuple:
+        market_id = window_market_id_member.__get__(value, window_type)
+        accepted_at_utc_us = window_accepted_at_member.__get__(value, window_type)
+        validate_market_id(market_id)
+        if type(accepted_at_utc_us) is not tuple:
             raise TypeError("accepted_at_utc_us must be a tuple")
-        if not value.accepted_at_utc_us:
+        if not accepted_at_utc_us:
             raise ValueError("accepted_at_utc_us must not be empty")
-        if len(value.accepted_at_utc_us) > max_calls:
+        if len(accepted_at_utc_us) > max_calls:
             raise ValueError("rate state exceeds provider maximum calls per window")
         previous: int | None = None
-        for timestamp in value.accepted_at_utc_us:
+        for timestamp in accepted_at_utc_us:
             if type(timestamp) is not int:
                 raise TypeError("accepted rate timestamp must be a non-boolean int")
             if previous is not None and timestamp < previous:
@@ -256,30 +263,41 @@ def _install_rate_gate_authority() -> None:
     def validate_state(value: object) -> None:
         if type(value) is not state_type:
             raise TypeError("state must be MarketBookRateGateState or None")
-        if type(value.policy_version) is not str or value.policy_version != policy_version:
+        policy = state_policy_version_member.__get__(value, state_type)
+        last_scheduled_at_utc_us = state_last_scheduled_member.__get__(
+            value,
+            state_type,
+        )
+        markets = state_markets_member.__get__(value, state_type)
+        if type(policy) is not str or policy != policy_version:
             raise ValueError("unsupported Betfair MarketBook rate policy version")
         if (
-            value.last_scheduled_at_utc_us is not None
-            and type(value.last_scheduled_at_utc_us) is not int
+            last_scheduled_at_utc_us is not None
+            and type(last_scheduled_at_utc_us) is not int
         ):
             raise TypeError(
                 "last_scheduled_at_utc_us must be a non-boolean int or None"
             )
-        if type(value.markets) is not tuple:
+        if type(markets) is not tuple:
             raise TypeError("markets must be a tuple")
-        if value.markets and value.last_scheduled_at_utc_us is None:
+        if markets and last_scheduled_at_utc_us is None:
             raise ValueError("market rate state requires last scheduled time")
         ids: list[str] = []
-        for market in value.markets:
+        for market in markets:
             validate_window(market)
-            ids.append(market.market_id)
-            if value.last_scheduled_at_utc_us is not None:
-                if market.accepted_at_utc_us[-1] > value.last_scheduled_at_utc_us:
+            market_id = window_market_id_member.__get__(market, window_type)
+            accepted_at_utc_us = window_accepted_at_member.__get__(
+                market,
+                window_type,
+            )
+            ids.append(market_id)
+            if last_scheduled_at_utc_us is not None:
+                if accepted_at_utc_us[-1] > last_scheduled_at_utc_us:
                     raise ValueError(
                         "rate state contains reservation after last scheduled time"
                     )
-                cutoff = value.last_scheduled_at_utc_us - window_us
-                if market.accepted_at_utc_us[0] <= cutoff:
+                cutoff = last_scheduled_at_utc_us - window_us
+                if accepted_at_utc_us[0] <= cutoff:
                     raise ValueError(
                         "rate state contains reservation outside active window"
                     )
@@ -293,8 +311,8 @@ def _install_rate_gate_authority() -> None:
         accepted_at_utc_us: tuple[int, ...],
     ) -> MarketBookRateWindowState:
         value = object.__new__(window_type)
-        object.__setattr__(value, "market_id", market_id)
-        object.__setattr__(value, "accepted_at_utc_us", accepted_at_utc_us)
+        window_market_id_member.__set__(value, market_id)
+        window_accepted_at_member.__set__(value, accepted_at_utc_us)
         validate_window(value)
         return value
 
@@ -303,13 +321,9 @@ def _install_rate_gate_authority() -> None:
         markets: tuple[MarketBookRateWindowState, ...],
     ) -> MarketBookRateGateState:
         value = object.__new__(state_type)
-        object.__setattr__(value, "policy_version", policy_version)
-        object.__setattr__(
-            value,
-            "last_scheduled_at_utc_us",
-            last_scheduled_at_utc_us,
-        )
-        object.__setattr__(value, "markets", markets)
+        state_policy_version_member.__set__(value, policy_version)
+        state_last_scheduled_member.__set__(value, last_scheduled_at_utc_us)
+        state_markets_member.__set__(value, markets)
         validate_state(value)
         return value
 
@@ -374,30 +388,44 @@ def _install_rate_gate_authority() -> None:
         object_setattr(self, "_next_reservation_generation", 1)
         if state is not None:
             validate_state(state)
+            source_markets = state_markets_member.__get__(state, state_type)
             detached_markets = tuple(
                 make_window(
-                    market.market_id,
-                    tuple(market.accepted_at_utc_us),
+                    window_market_id_member.__get__(market, window_type),
+                    tuple(
+                        window_accepted_at_member.__get__(
+                            market,
+                            window_type,
+                        )
+                    ),
                 )
-                for market in state.markets
+                for market in source_markets
             )
             detached_state = make_state(
-                state.last_scheduled_at_utc_us,
+                state_last_scheduled_member.__get__(state, state_type),
                 detached_markets,
             )
             object_setattr(
                 self,
                 "_last_scheduled_at_utc_us",
-                detached_state.last_scheduled_at_utc_us,
+                state_last_scheduled_member.__get__(detached_state, state_type),
+            )
+            canonical_markets = state_markets_member.__get__(
+                detached_state,
+                state_type,
             )
             object_setattr(
                 self,
                 "_accepted",
                 {
-                    market.market_id: [
-                        (timestamp, 0) for timestamp in market.accepted_at_utc_us
+                    window_market_id_member.__get__(market, window_type): [
+                        (timestamp, 0)
+                        for timestamp in window_accepted_at_member.__get__(
+                            market,
+                            window_type,
+                        )
                     ]
-                    for market in detached_state.markets
+                    for market in canonical_markets
                 },
             )
 

@@ -739,3 +739,56 @@ def test_rate_gate_instance_storage_authority_ignores_rebound_special_methods(
 
     restored = gate_type(snapshot)
     assert restored.snapshot() == snapshot
+
+
+def test_rate_restart_authority_ignores_rebound_state_slot_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    source = gate_type()
+    for index in range(5):
+        assert source.reserve(
+            ["1.234"],
+            scheduled_at=T0 + timedelta(microseconds=index),
+        ).allowed
+    state = source.snapshot()
+
+    monkeypatch.setattr(
+        MarketBookRateGateState,
+        "markets",
+        property(lambda self: ()),
+    )
+
+    restored = gate_type(state)
+    denied = restored.reserve(
+        ["1.234"],
+        scheduled_at=T0 + timedelta(microseconds=5),
+    )
+    assert denied.allowed is False
+
+
+def test_rate_restart_authority_ignores_rebound_window_slot_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    source = gate_type()
+    for index in range(5):
+        assert source.reserve(
+            ["1.234"],
+            scheduled_at=T0 + timedelta(microseconds=index),
+        ).allowed
+    state = source.snapshot()
+    first_timestamp = state.markets[0].accepted_at_utc_us[0]
+
+    monkeypatch.setattr(
+        MarketBookRateWindowState,
+        "accepted_at_utc_us",
+        property(lambda self: (first_timestamp,)),
+    )
+
+    restored = gate_type(state)
+    denied = restored.reserve(
+        ["1.234"],
+        scheduled_at=T0 + timedelta(microseconds=5),
+    )
+    assert denied.allowed is False

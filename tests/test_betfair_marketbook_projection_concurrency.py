@@ -909,3 +909,51 @@ def test_projection_gate_instance_storage_authority_ignores_rebound_special_meth
         observed_at=T0 + timedelta(seconds=1),
     )
     assert restored.snapshot().active == ()
+
+
+def test_projection_restart_authority_ignores_rebound_state_slot_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    source = gate_type()
+    for index in range(3):
+        assert begin_projected(source, f"r{index}").allowed
+    state = source.snapshot()
+
+    monkeypatch.setattr(
+        MarketBookProjectionConcurrencyState,
+        "active",
+        property(lambda self: ()),
+    )
+
+    restored = gate_type(state=state)
+    denied = restored.begin(
+        "r3",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    assert denied.allowed is False
+
+
+def test_projection_live_release_ignores_rebound_lease_generation_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    value = gate_type()
+    first = begin_projected(value, "r0")
+    assert first.lease_generation is not None
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            MarketBookProjectionLease,
+            "generation",
+            property(lambda self: first.lease_generation + 100),
+        )
+        value.complete(
+            "r0",
+            lease_generation=first.lease_generation,
+            observed_at=T0 + timedelta(seconds=1),
+        )
+
+    assert value.snapshot().active == ()

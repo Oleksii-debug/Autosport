@@ -173,6 +173,13 @@ def _install_projection_gate_authority() -> None:
     max_unresolved = _MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
     object_getattribute = object.__getattribute__
     object_setattr = object.__setattr__
+    lease_request_id_member = lease_type.__dict__["request_id"]
+    lease_acquired_at_member = lease_type.__dict__["acquired_at_utc_us"]
+    lease_generation_member = lease_type.__dict__["generation"]
+    state_policy_version_member = state_type.__dict__["policy_version"]
+    state_last_observed_member = state_type.__dict__["last_observed_at_utc_us"]
+    state_active_member = state_type.__dict__["active"]
+    state_next_generation_member = state_type.__dict__["next_lease_generation"]
 
     def validate_request_id(value: object) -> str:
         if type(value) is not str:
@@ -197,10 +204,13 @@ def _install_projection_gate_authority() -> None:
     def validate_lease(value: object) -> None:
         if type(value) is not lease_type:
             raise TypeError("active must contain MarketBookProjectionLease values")
-        validate_request_id(value.request_id)
-        if type(value.acquired_at_utc_us) is not int:
+        request_id = lease_request_id_member.__get__(value, lease_type)
+        acquired_at_utc_us = lease_acquired_at_member.__get__(value, lease_type)
+        generation = lease_generation_member.__get__(value, lease_type)
+        validate_request_id(request_id)
+        if type(acquired_at_utc_us) is not int:
             raise TypeError("acquired_at_utc_us must be a non-boolean int")
-        if type(value.generation) is not int or value.generation < 1:
+        if type(generation) is not int or generation < 1:
             raise ValueError("generation must be a positive non-boolean int")
 
     def validate_state(value: object) -> None:
@@ -208,45 +218,58 @@ def _install_projection_gate_authority() -> None:
             raise TypeError(
                 "state must be MarketBookProjectionConcurrencyState or None"
             )
-        if type(value.policy_version) is not str or value.policy_version != policy_version:
+        policy = state_policy_version_member.__get__(value, state_type)
+        last_observed_at_utc_us = state_last_observed_member.__get__(
+            value,
+            state_type,
+        )
+        active = state_active_member.__get__(value, state_type)
+        next_lease_generation = state_next_generation_member.__get__(
+            value,
+            state_type,
+        )
+        if type(policy) is not str or policy != policy_version:
             raise ValueError(
                 "unsupported Betfair MarketBook projection concurrency policy"
             )
         if (
-            value.last_observed_at_utc_us is not None
-            and type(value.last_observed_at_utc_us) is not int
+            last_observed_at_utc_us is not None
+            and type(last_observed_at_utc_us) is not int
         ):
             raise TypeError(
                 "last_observed_at_utc_us must be a non-boolean int or None"
             )
-        if type(value.active) is not tuple:
+        if type(active) is not tuple:
             raise TypeError("active must be a tuple")
-        if (
-            type(value.next_lease_generation) is not int
-            or value.next_lease_generation < 1
-        ):
+        if type(next_lease_generation) is not int or next_lease_generation < 1:
             raise ValueError(
                 "next_lease_generation must be a positive non-boolean int"
             )
-        if len(value.active) > max_unresolved:
+        if len(active) > max_unresolved:
             raise ValueError(
                 "projection concurrency state exceeds conservative local maximum"
             )
-        if value.active and value.last_observed_at_utc_us is None:
+        if active and last_observed_at_utc_us is None:
             raise ValueError("active leases require last observed time")
         ids: list[str] = []
         generations: list[int] = []
-        for lease in value.active:
+        for lease in active:
             validate_lease(lease)
-            ids.append(lease.request_id)
-            generations.append(lease.generation)
-            if lease.generation >= value.next_lease_generation:
+            request_id = lease_request_id_member.__get__(lease, lease_type)
+            generation = lease_generation_member.__get__(lease, lease_type)
+            acquired_at_utc_us = lease_acquired_at_member.__get__(
+                lease,
+                lease_type,
+            )
+            ids.append(request_id)
+            generations.append(generation)
+            if generation >= next_lease_generation:
                 raise ValueError(
                     "active lease generation must precede next generation"
                 )
             if (
-                value.last_observed_at_utc_us is not None
-                and lease.acquired_at_utc_us > value.last_observed_at_utc_us
+                last_observed_at_utc_us is not None
+                and acquired_at_utc_us > last_observed_at_utc_us
             ):
                 raise ValueError("lease was acquired after last observed time")
         if ids != sorted(ids):
@@ -262,9 +285,9 @@ def _install_projection_gate_authority() -> None:
         generation: int,
     ) -> MarketBookProjectionLease:
         value = object.__new__(lease_type)
-        object.__setattr__(value, "request_id", request_id)
-        object.__setattr__(value, "acquired_at_utc_us", acquired_at_utc_us)
-        object.__setattr__(value, "generation", generation)
+        lease_request_id_member.__set__(value, request_id)
+        lease_acquired_at_member.__set__(value, acquired_at_utc_us)
+        lease_generation_member.__set__(value, generation)
         validate_lease(value)
         return value
 
@@ -274,18 +297,10 @@ def _install_projection_gate_authority() -> None:
         next_lease_generation: int,
     ) -> MarketBookProjectionConcurrencyState:
         value = object.__new__(state_type)
-        object.__setattr__(value, "policy_version", policy_version)
-        object.__setattr__(
-            value,
-            "last_observed_at_utc_us",
-            last_observed_at_utc_us,
-        )
-        object.__setattr__(value, "active", active)
-        object.__setattr__(
-            value,
-            "next_lease_generation",
-            next_lease_generation,
-        )
+        state_policy_version_member.__set__(value, policy_version)
+        state_last_observed_member.__set__(value, last_observed_at_utc_us)
+        state_active_member.__set__(value, active)
+        state_next_generation_member.__set__(value, next_lease_generation)
         validate_state(value)
         return value
 
@@ -345,36 +360,41 @@ def _install_projection_gate_authority() -> None:
         object_setattr(self, "_next_lease_generation", 1)
         if state is not None:
             validate_state(state)
+            source_active = state_active_member.__get__(state, state_type)
             detached_active = tuple(
                 make_lease(
-                    lease.request_id,
-                    lease.acquired_at_utc_us,
-                    lease.generation,
+                    lease_request_id_member.__get__(lease, lease_type),
+                    lease_acquired_at_member.__get__(lease, lease_type),
+                    lease_generation_member.__get__(lease, lease_type),
                 )
-                for lease in state.active
+                for lease in source_active
             )
             detached_state = make_state(
-                state.last_observed_at_utc_us,
+                state_last_observed_member.__get__(state, state_type),
                 detached_active,
-                state.next_lease_generation,
+                state_next_generation_member.__get__(state, state_type),
             )
             object_setattr(
                 self,
                 "_last_observed_at_utc_us",
-                detached_state.last_observed_at_utc_us,
+                state_last_observed_member.__get__(detached_state, state_type),
+            )
+            canonical_active = state_active_member.__get__(
+                detached_state,
+                state_type,
             )
             object_setattr(
                 self,
                 "_active",
                 {
-                    lease.request_id: lease
-                    for lease in detached_state.active
+                    lease_request_id_member.__get__(lease, lease_type): lease
+                    for lease in canonical_active
                 },
             )
             object_setattr(
                 self,
                 "_next_lease_generation",
-                detached_state.next_lease_generation,
+                state_next_generation_member.__get__(detached_state, state_type),
             )
 
     def snapshot(
@@ -385,9 +405,18 @@ def _install_projection_gate_authority() -> None:
             active_by_request = object_getattribute(self, "_active")
             active = tuple(
                 make_lease(
-                    active_by_request[request_id].request_id,
-                    active_by_request[request_id].acquired_at_utc_us,
-                    active_by_request[request_id].generation,
+                    lease_request_id_member.__get__(
+                        active_by_request[request_id],
+                        lease_type,
+                    ),
+                    lease_acquired_at_member.__get__(
+                        active_by_request[request_id],
+                        lease_type,
+                    ),
+                    lease_generation_member.__get__(
+                        active_by_request[request_id],
+                        lease_type,
+                    ),
                 )
                 for request_id in sorted(active_by_request)
             )
@@ -472,7 +501,11 @@ def _install_projection_gate_authority() -> None:
                     with lock:
                         active_by_request = object_getattribute(self, "_active")
                         lease = active_by_request.get(request)
-                        if lease is not None and lease.generation == generation:
+                        if (
+                            lease is not None
+                            and lease_generation_member.__get__(lease, lease_type)
+                            == generation
+                        ):
                             del active_by_request[request]
                 except BaseException as cleanup_exc:
                     if (
@@ -519,7 +552,7 @@ def _install_projection_gate_authority() -> None:
                 raise ValueError(
                     "request_id is not an active projection-bearing request"
                 )
-            if lease.generation != lease_generation:
+            if lease_generation_member.__get__(lease, lease_type) != lease_generation:
                 raise ValueError(
                     "lease_generation does not match active request"
                 )

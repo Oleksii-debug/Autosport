@@ -75,3 +75,54 @@ def test_search_rejects_candidate_leg_subclass_before_member_dispatch() -> None:
 
     with pytest.raises(ValueError, match="must be an exact CandidateLeg"):
         BeamParlayCandidateSearch().search([hostile], minimum_legs=1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("quote_key", "event-1|market-1|selection-1\x00"),
+        ("event_id", "event-1\x00"),
+        ("market_id", "market-1\x00"),
+        ("selection_id", "selection-1\x00"),
+        ("event_id", "event-\ud800"),
+    ),
+)
+def test_ticket_identity_rejects_noncanonical_identity_bytes(
+    field: str,
+    value: str,
+) -> None:
+    leg = _leg()
+    object.__setattr__(leg, field, value)
+
+    with pytest.raises(ValueError, match="canonical string"):
+        leg.ticket_identity()
+
+
+@pytest.mark.parametrize(
+    "quote_key",
+    (
+        "event-1| market-1|selection-1",
+        "event-1|market-1|selection-1 ",
+        "event-1|market-1\x00|selection-1",
+    ),
+)
+def test_legacy_ticket_suffix_cannot_mint_noncanonical_structured_identity(
+    quote_key: str,
+) -> None:
+    leg = CandidateLeg(
+        quote_key=quote_key,
+        event_id="event-1",
+        decimal_odds=Decimal("2"),
+        probability=Decimal("0.5"),
+    )
+
+    with pytest.raises(ValueError, match="canonical string"):
+        leg.ticket_identity()
+
+
+def test_search_rejects_non_utf8_quote_key_before_identity_use() -> None:
+    leg = _leg()
+    object.__setattr__(leg, "quote_key", "event-1|market-1|selection-\ud800")
+
+    with pytest.raises(ValueError, match="quote_key must be a non-empty canonical string"):
+        BeamParlayCandidateSearch().search([leg], minimum_legs=1)

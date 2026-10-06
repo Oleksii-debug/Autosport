@@ -1,6 +1,7 @@
 import pytest
 
 import autosport.provider_capability_manifest as provider_manifest_module
+import autosport.bookmaker_integration_boundary as integration_boundary_module
 
 from autosport.bookmaker_capability import (
     BookmakerCapability,
@@ -968,6 +969,71 @@ def test_manifest_rejects_integration_type_substitution_via_module_global(
             forged,
             manifest_ref="provider-capability-manifest",
             manifest_version=28,
+            observed_at=_T2,
+            source_ref="product-provider-capability-projection",
+            source_payload_sha256=_HASH_C,
+        )
+
+def test_profile_validator_and_type_substitution_cannot_replace_canonical_profile(
+    monkeypatch,
+) -> None:
+    class FakeProfile:
+        __post_init__ = BookmakerCapabilityProfile.__post_init__
+        to_canonical_dict = BookmakerCapabilityProfile.to_canonical_dict
+        profile_id = BookmakerCapabilityProfile.profile_id
+
+    forged_profile = FakeProfile()
+    forged_profile.venue_id = "betfair"
+    forged_profile.account_id = "acct-forged"
+    forged_profile.adapter_id = "betfair-api"
+    forged_profile.adapter_version = "1.0"
+    forged_profile.profile_version = 3
+    forged_profile.facts = (
+        BookmakerCapabilityFact(
+            BookmakerCapability.LIVE_QUOTES_READ,
+            BookmakerCapabilityState.SUPPORTED,
+        ),
+    )
+    forged_profile.observed_at = _T0
+    forged_profile.source_ref = "forged-profile"
+    forged_profile.source_payload_sha256 = _HASH_A
+
+    integration = BookmakerIntegrationEvidence(
+        venue_id=forged_profile.venue_id,
+        adapter_id=forged_profile.adapter_id,
+        adapter_version=forged_profile.adapter_version,
+        profile_id=forged_profile.profile_id,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+
+    monkeypatch.setattr(
+        provider_manifest_module,
+        "_validate_exact_profile",
+        lambda candidate: None,
+    )
+    monkeypatch.setattr(
+        provider_manifest_module,
+        "BookmakerCapabilityProfile",
+        FakeProfile,
+    )
+    monkeypatch.setattr(
+        integration_boundary_module,
+        "BookmakerCapabilityProfile",
+        FakeProfile,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="profile must be an exact BookmakerCapabilityProfile|canonical manifest dependency validator changed",
+    ):
+        build_provider_capability_manifest(
+            forged_profile,
+            integration,
+            manifest_ref="provider-capability-manifest",
+            manifest_version=29,
             observed_at=_T2,
             source_ref="product-provider-capability-projection",
             source_payload_sha256=_HASH_C,

@@ -524,6 +524,23 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         self.assertEqual(projection.mitigation, "[REDACTED]")
         self.assertEqual(projection.residual_risk, "[REDACTED]")
 
+    def test_operator_projection_redacts_common_modern_provider_credential_ids(self) -> None:
+        entry = self._entry(
+            title="AWS key ASIA1234567890ABCD and GitHub github_pat_1234567890abcdefghij",
+            summary="token=plain-secret auth_token='another-secret'",
+        )
+
+        projection = operator_projection(entry)
+
+        self.assertEqual(
+            projection.title,
+            "AWS key [REDACTED] and GitHub [REDACTED]",
+        )
+        self.assertEqual(
+            projection.summary,
+            "[REDACTED] [REDACTED]",
+        )
+
     def test_operator_projection_preserves_noncredential_text(self) -> None:
         entry = self._entry(
             title="Provider session recovered",

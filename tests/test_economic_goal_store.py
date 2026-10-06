@@ -1852,7 +1852,10 @@ def test_store_snapshot_covers_every_captured_contract_slot(
     for name in field_names:
         class ForgedDescriptor:
             def __get__(self, instance, owner=None):
-                raise AssertionError("rebound contract descriptor executed")
+                raise AssertionError("rebound contract descriptor getter executed")
+
+            def __set__(self, instance, value):
+                raise AssertionError("rebound contract descriptor setter executed")
 
         monkeypatch.setattr(EconomicGoalContract, name, ForgedDescriptor())
         snapshot = economic_goal_store_module._snapshot_economic_goal_contract(goal)

@@ -26,6 +26,7 @@ from .economic_goal import (
     validate_automatic_transition,
     _CANONICAL_AUTOMATION_LEVEL_MEMBERS as _CONTRACT_AUTOMATION_LEVEL_MEMBERS,
     _CANONICAL_OBJECTIVE_MEMBER as _CONTRACT_OBJECTIVE_MEMBER,
+    _CANONICAL_CONTRACT_FIELD_SETTERS,
     _canonical_contract_snapshot,
 )
 from .integrity import atomic_write_json
@@ -344,10 +345,10 @@ def _snapshot_economic_goal_contract(
     _goal_type=EconomicGoalContract,
     _goal_validator=EconomicGoalContract.__post_init__,
     _object_new=object.__new__,
-    _object_setattr=object.__setattr__,
     _error_type=EconomicGoalContractError,
     _snapshot=_canonical_contract_snapshot,
-    _ordered_field_names=_CONTRACT_KEYS_ORDERED,
+    _field_setters=_CANONICAL_CONTRACT_FIELD_SETTERS,
+    _zip=zip,
 ) -> EconomicGoalContract:
     """Capture one validated, non-shared contract image for authority decisions."""
 
@@ -362,8 +363,8 @@ def _snapshot_economic_goal_contract(
     if values != final_values:
         raise _error_type("economic goal changed during persistence snapshot")
     snapshot = _object_new(_goal_type)
-    for name, value in zip(_ordered_field_names, final_values):
-        _object_setattr(snapshot, name, value)
+    for setter, value in _zip(_field_setters, final_values):
+        setter(snapshot, value)
     _goal_validator(snapshot)
     return snapshot
 
@@ -501,12 +502,13 @@ def _build_economic_goal_contract(
     _goal_type=EconomicGoalContract,
     _goal_validator=EconomicGoalContract.__post_init__,
     _object_new=object.__new__,
-    _object_setattr=object.__setattr__,
-    _field_names=_CONTRACT_KEYS,
+    _field_setters=_CANONICAL_CONTRACT_FIELD_SETTERS,
+    _field_names=_CONTRACT_KEYS_ORDERED,
+    _zip=zip,
 ) -> EconomicGoalContract:
     contract = _object_new(_goal_type)
-    for name in _field_names:
-        _object_setattr(contract, name, values[name])
+    for setter, name in _zip(_field_setters, _field_names):
+        setter(contract, values[name])
     _goal_validator(contract)
     return contract
 

@@ -401,7 +401,7 @@ def _provenance_for_bound(
     final_snapshot = _contract_snapshot(contract)
     if after != final_snapshot:
         raise _goal_error("economic goal changed during provenance derivation")
-    provenance = _provenance_type(
+    provenance = _provenance_builder(
         schema=_schema,
         schema_version=_schema_version,
         goal_id=values["goal_id"],

@@ -1539,7 +1539,7 @@ class _ContinuousSessionState:
             is not _write_error_checkpoint_code
         ):
             raise ContinuousSessionError(
-                "canonical failure publication authority changed"
+                "canonical failure publication lock authority changed"
             )
         with _durable_path_lock(self.path):
             # Keep failure publication bounded by active cached state. A full

@@ -647,6 +647,12 @@ def _read_economic_goal_text(
             raise _error_type(
                 "persisted economic goal changed after verified read"
             )
+        with _fdopen(post_read_descriptor, "rb", closefd=False) as post_read_handle:
+            post_read_raw = post_read_handle.read(_max_bytes + 1)
+        if raw != post_read_raw:
+            raise _error_type(
+                "persisted economic goal bytes changed after verified read"
+            )
     except _error_type as exc:
         primary_error = exc
         raise

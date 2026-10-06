@@ -2826,3 +2826,62 @@ def test_handler_poll_method_lookup_failure_reaps_child(monkeypatch):
     assert process.killed is True
     assert process.closed is True
     assert receiver.closed is True
+
+def test_close_pipe_endpoints_baseexception_attempts_all_before_reraise():
+    events = []
+
+    class InterruptingEndpoint:
+        def close(self):
+            events.append("interrupting")
+            raise KeyboardInterrupt("cleanup interrupt")
+
+    class LaterEndpoint:
+        def close(self):
+            events.append("later")
+
+    with pytest.raises(KeyboardInterrupt, match="cleanup interrupt"):
+        skill_registry_module._close_pipe_endpoints(
+            InterruptingEndpoint(),
+            LaterEndpoint(),
+        )
+
+    assert events == ["interrupting", "later"]
+
+
+def test_stop_process_baseexception_reaps_before_reraise():
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.kill_calls = 0
+            self.join_calls = 0
+            self.closed = False
+
+        def kill(self):
+            self.kill_calls += 1
+            if self.kill_calls == 1:
+                raise KeyboardInterrupt("stop interrupt")
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            self.join_calls += 1
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            assert self.alive is False
+            self.closed = True
+
+    process = FakeProcess()
+
+    with pytest.raises(KeyboardInterrupt, match="stop interrupt"):
+        skill_registry_module._stop_process_bounded(process)
+
+    assert process.kill_calls == 2
+    assert process.join_calls >= 1
+    assert process.alive is False
+    assert process.closed is True
+

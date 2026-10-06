@@ -252,15 +252,18 @@ def _close_pipe_endpoints(
     BaseException so it cannot replace the original KeyboardInterrupt/SystemExit.
     """
     closed = True
+    first_base_exception: BaseException | None = None
     for endpoint in endpoints:
         try:
             endpoint.close()
         except Exception:
             closed = False
-        except BaseException:
-            if not suppress_base_exceptions:
-                raise
+        except BaseException as exc:
             closed = False
+            if not suppress_base_exceptions and first_base_exception is None:
+                first_base_exception = exc
+    if first_base_exception is not None:
+        raise first_base_exception
     return closed
 
 
@@ -312,6 +315,7 @@ def _stop_process_bounded(
             method = None
         except BaseException:
             if not suppress_base_exceptions:
+                _stop_process_bounded(process, suppress_base_exceptions=True)
                 raise
             method = None
         if method is not None:
@@ -321,6 +325,7 @@ def _stop_process_bounded(
                 pass
             except BaseException:
                 if not suppress_base_exceptions:
+                    _stop_process_bounded(process, suppress_base_exceptions=True)
                     raise
         try:
             process.join(_HANDLER_TIMEOUT_REAP_GRACE_SECONDS)
@@ -328,6 +333,7 @@ def _stop_process_bounded(
             pass
         except BaseException:
             if not suppress_base_exceptions:
+                _stop_process_bounded(process, suppress_base_exceptions=True)
                 raise
         try:
             alive = process.is_alive()
@@ -335,6 +341,7 @@ def _stop_process_bounded(
             alive = None
         except BaseException:
             if not suppress_base_exceptions:
+                _stop_process_bounded(process, suppress_base_exceptions=True)
                 raise
             alive = None
         last_alive = alive

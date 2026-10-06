@@ -282,6 +282,55 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                     setattr(ProductEconomicSession, name, original)
 
 
+    def test_transition_guard_ignores_rebound_introspection_primitives(self) -> None:
+        store = self._store()
+        first = store.current()
+        import autosport.economic_session as economic_session
+
+        field_name = "goal_id"
+        original_descriptor = ProductEconomicSession.__dict__[field_name]
+        marker = object()
+
+        class HostileDescriptor:
+            def __get__(self, instance, owner=None):
+                raise AssertionError("hostile session field descriptor executed")
+
+            def __set__(self, instance, value):
+                raise AssertionError("hostile session field descriptor setter executed")
+
+        rebound = {
+            "type": lambda _value: ProductEconomicSessionStore,
+            "any": lambda _values: False,
+            "tuple": lambda values=(): marker,
+            "getattr": lambda obj, name, default=None: object.__getattribute__(obj, name)
+            if hasattr(obj, name)
+            else default,
+            "callable": lambda value: hasattr(value, "__call__"),
+            "EconomicSessionIntegrityError": RuntimeError,
+        }
+        previous = {
+            name: economic_session.__dict__.get(name, marker)
+            for name in rebound
+        }
+
+        setattr(ProductEconomicSession, field_name, HostileDescriptor())
+        for name, value in rebound.items():
+            setattr(economic_session, name, value)
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.transition_to_current_goal(first)
+        finally:
+            setattr(ProductEconomicSession, field_name, original_descriptor)
+            for name, value in previous.items():
+                if value is marker:
+                    economic_session.__dict__.pop(name, None)
+                else:
+                    setattr(economic_session, name, value)
+
+
     def test_transition_rejects_rebound_product_session_constructor_and_validator(self) -> None:
         store = self._store()
         first = store.current()

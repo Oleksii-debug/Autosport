@@ -921,7 +921,7 @@ def _make_transition_validator_authority(operation):
     return bound
 
 
-_CANONICAL_TRANSITION_VALIDATOR: Final = _make_transition_validator_authority(_CANONICAL_TRANSITION_VALIDATOR: Final = _make_transition_validator_authority(
+_CANONICAL_TRANSITION_VALIDATOR: Final = _make_transition_validator_authority(
     _validate_automatic_transition_bound
 )
 

@@ -623,32 +623,47 @@ class SQLiteMarketStore:
         self.connection.commit()
 
     def _rebuild_current_quotes(self) -> None:
-        """Repair provider-aware current projection from one write-locked history snapshot."""
+        """Repair provider-aware current projection from one write-locked history snapshot.
+
+        Startup memory is bounded by the current projection cardinality rather than
+        the full append-only history.  Every authoritative history row is still
+        decoded and integrity-checked; projection rows retain the same history-witness
+        and repair/fail-closed semantics.
+        """
         latest: dict[tuple[str, str], tuple[tuple[int, str], MarketEvent]] = {}
-        history_by_dedupe: dict[str, MarketEvent] = {}
         self.connection.execute("BEGIN IMMEDIATE")
         try:
-            rows = self.connection.execute(
+            valid_projection_rows: list[
+                tuple[tuple[object, ...], MarketEvent]
+            ] = []
+            needed_history_witnesses: set[str] = set()
+            projection_cursor = self.connection.execute(
+                f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
+            )
+            for projection_row in projection_cursor:
+                try:
+                    projection_event = _event_from_current_payload(projection_row[4])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                valid_projection_rows.append((projection_row, projection_event))
+                needed_history_witnesses.add(projection_event.dedupe_key)
+
+            history_witnesses: dict[str, MarketEvent] = {}
+            history_cursor = self.connection.execute(
                 f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
-            ).fetchall()
-            for row in rows:
+            )
+            for row in history_cursor:
                 event = _event_from_history_row(row)
-                history_by_dedupe[event.dedupe_key] = event
+                if event.dedupe_key in needed_history_witnesses:
+                    history_witnesses[event.dedupe_key] = event
                 order_key = _projection_order_key(event)
                 projection_key = (event.source_id, event.quote_key)
                 previous = latest.get(projection_key)
                 if previous is None or order_key > previous[0]:
                     latest[projection_key] = (order_key, event)
 
-            projection_rows = self.connection.execute(
-                f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
-            ).fetchall()
-            for projection_row in projection_rows:
-                try:
-                    projection_event = _event_from_current_payload(projection_row[4])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                history_event = history_by_dedupe.get(projection_event.dedupe_key)
+            for projection_row, projection_event in valid_projection_rows:
+                history_event = history_witnesses.get(projection_event.dedupe_key)
                 if history_event is None:
                     raise ValueError(
                         "current_quotes projection event is missing from authoritative history"

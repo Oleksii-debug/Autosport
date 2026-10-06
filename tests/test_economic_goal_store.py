@@ -1500,6 +1500,22 @@ def test_store_public_authority_operations_ignore_direct_dict_shadowing(tmp_path
     assert callable(store.persist_automatic_successor)
 
 
+def test_store_authority_seal_ignores_rebound_authority_name_set() -> None:
+    EconomicGoalStore._AUTHORITY_NAMES = frozenset()
+
+    for name, replacement in (
+        ("load", lambda self: None),
+        ("initialize_owner", lambda self, _contract: None),
+        ("persist_automatic_successor", lambda self, _contract: None),
+    ):
+        try:
+            setattr(EconomicGoalStore, name, replacement)
+        except TypeError as exc:
+            assert "authority operation binding is immutable" in str(exc)
+        else:
+            raise AssertionError(f"{name} class binding escaped the sealed name set")
+
+
 def test_store_public_authority_operations_reject_class_rebinding() -> None:
     for name, replacement in (
         ("__init__", lambda self, _workspace: None),

@@ -155,23 +155,6 @@ def _validate_provenance_bound(
     ):
         raise _error_type("contract_sha256 must be lowercase SHA-256 hex")
 
-def _decision_identity_bound(
-    self: EconomicGoalProvenance,
-    _validator=_validate_provenance_bound,
-    _snapshot=_canonical_provenance_snapshot,
-    _error_type=EconomicGoalProvenanceError,
-) -> str:
-    _validator(self)
-    before = _snapshot(self)
-    _validator(self)
-    after = _snapshot(self)
-    if before != after:
-        raise _error_type(
-            "economic-goal provenance changed during identity derivation"
-        )
-    _, _, goal_id, revision, _, contract_sha256 = after
-    return f"{goal_id}@{revision}:{contract_sha256}"
-
 def _make_provenance_post_init_authority(operation):
     operation_code = operation.__code__
     operation_defaults = operation.__defaults__

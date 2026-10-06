@@ -1,7 +1,9 @@
 import hashlib
 import json
 import math
+import os
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from decimal import Decimal
@@ -473,6 +475,118 @@ class DecisionLedgerTests(unittest.TestCase):
                 restored.decision_id,
                 "paper-action-retry-first",
             )
+
+    def test_hardlink_alias_rejects_append_and_verified_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            alias = Path(tmp) / "decisions-alias.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            ledger.append(self._record(decision_id="hardlink-first"))
+            try:
+                os.link(path, alias)
+            except OSError as exc:
+                self.skipTest(f"hard links are unavailable on this test filesystem: {exc}")
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "must not have hard-link aliases",
+            ):
+                JsonlDecisionLedger(alias).append(
+                    self._record(decision_id="hardlink-second")
+                )
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "must not have hard-link aliases",
+            ):
+                ledger.verify_integrity()
+
+            self.assertEqual(path.read_bytes(), alias.read_bytes())
+            self.assertEqual(path.read_bytes().count(b"\n"), 1)
+
+    def test_symlink_alias_converges_on_canonical_ledger_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            alias = Path(tmp) / "decisions-link.jsonl"
+            goal = self._economic_goal()
+            first = DecisionRecord(
+                "run-1",
+                "agent",
+                "2026-01-01T00:00:00+00:00",
+                "PROPOSE_STAKE",
+                {"x": 1, "material_action_id": "paper-action-symlink"},
+                "ctx",
+                decision_id="symlink-first",
+                decision_kind=ECONOMIC_DECISION_KIND,
+            )
+            JsonlDecisionLedger(path).append_economic(first, goal)
+            try:
+                alias.symlink_to(path)
+            except OSError as exc:
+                self.skipTest(f"symlinks are unavailable on this test filesystem: {exc}")
+
+            duplicate = replace(first, decision_id="symlink-second")
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "already contains material_action_id",
+            ):
+                JsonlDecisionLedger(alias).append_economic(duplicate, goal)
+
+            self.assertEqual(JsonlDecisionLedger(path).verify_integrity(), 1)
+
+    def test_concurrent_same_path_retry_appends_material_action_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            goal = self._economic_goal()
+            first = DecisionRecord(
+                "run-1",
+                "agent",
+                "2026-01-01T00:00:00+00:00",
+                "PROPOSE_STAKE",
+                {"x": 1, "material_action_id": "paper-action-concurrent"},
+                "ctx",
+                decision_id="concurrent-first",
+                decision_kind=ECONOMIC_DECISION_KIND,
+            )
+            second = replace(first, decision_id="concurrent-second")
+            barrier = threading.Barrier(3)
+            outcomes: list[tuple[str, object]] = []
+            outcome_lock = threading.Lock()
+
+            def append(record: DecisionRecord) -> None:
+                barrier.wait()
+                try:
+                    result: object = JsonlDecisionLedger(path).append_economic(
+                        record,
+                        goal,
+                    )
+                except BaseException as exc:
+                    result = exc
+                with outcome_lock:
+                    outcomes.append((record.decision_id, result))
+
+            workers = [
+                threading.Thread(target=append, args=(first,)),
+                threading.Thread(target=append, args=(second,)),
+            ]
+            for worker in workers:
+                worker.start()
+            barrier.wait()
+            for worker in workers:
+                worker.join(timeout=10)
+                self.assertFalse(worker.is_alive())
+
+            successes = [
+                result for _decision_id, result in outcomes if isinstance(result, str)
+            ]
+            failures = [
+                result
+                for _decision_id, result in outcomes
+                if isinstance(result, DecisionLedgerIntegrityError)
+            ]
+            self.assertEqual(len(successes), 1)
+            self.assertEqual(len(failures), 1)
+            self.assertRegex(str(failures[0]), "already contains material_action_id")
+            self.assertEqual(JsonlDecisionLedger(path).verify_integrity(), 1)
 
     def test_append_refuses_to_extend_corrupt_existing_history(self):
         with tempfile.TemporaryDirectory() as tmp:

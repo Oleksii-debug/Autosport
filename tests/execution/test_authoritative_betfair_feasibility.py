@@ -444,6 +444,20 @@ def test_forged_structurally_equal_receipt_cannot_issue_positive_truth() -> None
             )
 
 
+@pytest.mark.parametrize("decoder_failure", (ValueError, RecursionError))
+def test_provider_json_decoder_resource_failures_are_normalized(
+    monkeypatch,
+    decoder_failure,
+) -> None:
+    def fail_decode(*args, **kwargs):
+        raise decoder_failure("simulated provider JSON resource failure")
+
+    monkeypatch.setattr(betfair_account_readonly.json, "loads", fail_decode)
+
+    with pytest.raises(BetfairReadOnlyError, match="not valid UTF-8 JSON"):
+        betfair_account_readonly._decode_json(b"{}")
+
+
 def test_extreme_provider_decimal_exponent_is_rejected_before_feasibility_arithmetic() -> None:
     transport = MarketBookTransport(
         back_sizes=(("2.10", "1e999999999"),),

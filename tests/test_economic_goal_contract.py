@@ -475,3 +475,36 @@ def test_contract_successor_method_rejects_validator_injection() -> None:
 
     with pytest.raises(EconomicGoalContractError, match="must not increase"):
         previous.validate_automatic_successor(candidate)
+
+
+def test_transition_proof_uses_isolated_candidate_snapshot() -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+    canonical_snapshotter = economic_goal_module._snapshot_transition_contract
+
+    def snapshot_then_mutate(contract):
+        snapshot = canonical_snapshotter(contract)
+        if contract is candidate:
+            object.__setattr__(candidate, "max_stake_fraction", Decimal("0.99"))
+        return snapshot
+
+    economic_goal_module._validate_automatic_transition_bound(
+        previous,
+        candidate,
+        _snapshotter=snapshot_then_mutate,
+    )
+
+    assert candidate.max_stake_fraction == Decimal("0.99")
+
+
+def test_public_transition_ignores_rebound_snapshotter_alias(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound transition snapshotter executed")
+
+    monkeypatch.setattr(economic_goal_module, "_snapshot_transition_contract", forged)
+
+    validate_automatic_transition(previous, candidate)
+    previous.validate_automatic_successor(candidate)

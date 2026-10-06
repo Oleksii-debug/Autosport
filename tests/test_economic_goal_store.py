@@ -406,3 +406,35 @@ def test_payload_decoder_ignores_rebound_schema_helpers(monkeypatch) -> None:
         monkeypatch.setattr(economic_goal_store_module, name, forged)
 
     assert economic_goal_from_payload(payload) == _goal()
+
+
+
+def test_codec_ignores_rebound_size_bounds(monkeypatch) -> None:
+    payload = economic_goal_to_payload(_goal())
+    body = payload["contract"]
+    assert type(body) is dict
+
+    monkeypatch.setattr(economic_goal_store_module, "_MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS", 10000)
+    monkeypatch.setattr(economic_goal_store_module, "_MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS", 10000)
+    monkeypatch.setattr(economic_goal_store_module, "_MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS", 10000)
+
+    oversized_decimal = economic_goal_to_payload(_goal())
+    decimal_body = oversized_decimal["contract"]
+    assert type(decimal_body) is dict
+    decimal_body["max_turnover_fraction"] = "1" * 513
+    with pytest.raises(EconomicGoalContractError, match="Decimal text exceeds"):
+        economic_goal_from_payload(oversized_decimal)
+
+    oversized_count = economic_goal_to_payload(_goal())
+    count_body = oversized_count["contract"]
+    assert type(count_body) is dict
+    count_body["blocked_sports"] = [f"sport:{index:04d}" for index in range(1025)]
+    with pytest.raises(EconomicGoalContractError, match="restriction-count limit"):
+        economic_goal_from_payload(oversized_count)
+
+    oversized_member = economic_goal_to_payload(_goal())
+    member_body = oversized_member["contract"]
+    assert type(member_body) is dict
+    member_body["blocked_sports"] = ["s" * 513]
+    with pytest.raises(EconomicGoalContractError, match="non-canonical restriction text"):
+        economic_goal_from_payload(oversized_member)

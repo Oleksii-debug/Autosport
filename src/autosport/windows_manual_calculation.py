@@ -218,6 +218,28 @@ def _set_uia(widget: Any, *, name: str, description: str, automation_id: int) ->
     tk_uia.set_automation_id(widget, automation_id)
 
 
+
+def _manual_calculation_dialog_close_handler(app: Any, dialog: Any) -> Any:
+    """Destroy the workbench and restore keyboard focus to its canonical F10 opener."""
+
+    def close() -> None:
+        dialog.destroy()
+        opener = getattr(app, "manual_calculation_button", None)
+        focus_set = getattr(opener, "focus_set", None)
+        if not callable(focus_set):
+            return
+        after_idle = getattr(app, "after_idle", None)
+        if callable(after_idle):
+            after_idle(focus_set)
+        else:
+            # Minimal/headless fixtures may not expose an event-loop scheduler.
+            focus_set()
+
+    protocol = getattr(dialog, "protocol", None)
+    if callable(protocol):
+        protocol("WM_DELETE_WINDOW", close)
+    return close
+
 def show_manual_calculation_workbench(app: Any) -> tk.Toplevel:
     """Open a non-persistent, keyboard-first manual calculation dialog."""
 
@@ -333,10 +355,11 @@ def show_manual_calculation_workbench(app: Any) -> tk.Toplevel:
         takefocus=True,
     )
     clear_button.pack(side="left", padx=(0, 6))
+    close_dialog = _manual_calculation_dialog_close_handler(app, dialog)
     close_button = ttk.Button(
         buttons,
         text=text("ui.windows.manual_calculation.close"),
-        command=dialog.destroy,
+        command=close_dialog,
         takefocus=True,
     )
     close_button.pack(side="right")

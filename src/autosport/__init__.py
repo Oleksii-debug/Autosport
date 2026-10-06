@@ -191,3 +191,22 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# A new #1272 settlement journal has no trusted legacy baseline. Prevent a structurally
+# valid but unanchored pre-existing file from being adopted as positive settlement
+# authority merely because independent monotonic history is absent.
+from . import _betfair_settlement_monotonic_baseline_guard as _betfair_settlement_monotonic_baseline_guard  # noqa: F401,E402
+
+# Preserve the exact canonical provider cleared-order row before adapter normalization
+# drops correction-relevant facts such as betOutcome. Install this before later guards
+# so they capture the corrected canonical settlement behavior.
+from . import _betfair_settlement_provider_row_semantics as _betfair_settlement_provider_row_semantics  # noqa: F401,E402
+
+# Settlement content monotonicity is not a pathname trust boundary. Reject symlink or
+# non-regular journals and bind every append to the exact file just reloaded before
+# the execution-identity guard freezes the final settlement store dispatch graph.
+from . import _betfair_settlement_journal_path_guard as _betfair_settlement_journal_path_guard  # noqa: F401,E402
+
+# Provider settlement must retain the durable execution action's exact requested
+# economics and physically possible provider chronology before a revision is issued.
+from . import _betfair_settlement_execution_identity_guard as _betfair_settlement_execution_identity_guard  # noqa: F401,E402

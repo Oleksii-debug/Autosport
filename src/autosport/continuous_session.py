@@ -2330,8 +2330,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "canonical settlement resolution validator authority changed"
             )
-        if self.outcome_authority is None:
+        outcome_authority = self.outcome_authority
+        if outcome_authority is None:
             return ()
+        resolve_outcome = getattr(outcome_authority, "resolve", None)
+        if not callable(resolve_outcome):
+            raise ContinuousSessionError(
+                "settlement outcome authority resolver is not callable"
+            )
         cutoff = _instant_validator(as_of, "as_of")
         resolutions: list[SettlementResolution] = []
         evidence_by_id: dict[str, SettlementResolution] = {}
@@ -2381,7 +2387,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             record_phase = record.phase
             record_identity = record.identity
             record_settlement_ref = record.settlement_ref
-            resolution = self.outcome_authority.resolve(record, as_of=as_of)
+            resolution = resolve_outcome(record, as_of=as_of)
             if (
                 record.phase is not record_phase
                 or record.identity != record_identity

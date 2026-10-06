@@ -662,6 +662,114 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                     store.resolve_event(retired)
             self.assertEqual(store.resolve_event(third), third_event)
 
+    def test_legacy_migration_accepts_retired_final_quote_with_retained_predecessor(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
+            source = ParlayApiProductSource(
+                _Provider(
+                    [
+                        _batch(
+                            cursor="snapshot-1",
+                            odds="1.80",
+                            sequence=1,
+                            provider_event_id="event-1",
+                        ),
+                        _batch(
+                            cursor="snapshot-2",
+                            odds="1.90",
+                            sequence=2,
+                            provider_event_id="event-1",
+                        ),
+                    ]
+                ),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+
+            first_page = source.fetch_catalog_page(None)
+            first = source.fetch_deltas(None, (), 1)[0]
+            first_event = source.resolve_event(first)
+            _archive_pending_delta(source, first)
+            source.fetch_deltas(_stream_checkpoint(first), (), 1)
+
+            source.fetch_catalog_page(_catalog_checkpoint(first_page))
+            second = source.fetch_deltas(_stream_checkpoint(first), (), 1)[0]
+            second_event = source.resolve_event(second)
+            _archive_pending_delta(source, second)
+            store = source._require_collector_store()
+
+            self.assertEqual(first_event.quote_key, second_event.quote_key)
+            self.assertNotEqual(
+                first.canonical_event_digest,
+                second.canonical_event_digest,
+            )
+
+            legacy = source._read_state()
+            legacy["pending"] = None
+            legacy["event_cache"] = {
+                first.delta_id: first_event.to_dict(),
+                second.delta_id: second_event.to_dict(),
+            }
+            legacy["last_committed_quote_digests"] = {
+                second_event.quote_key: second.canonical_event_digest
+            }
+            legacy["last_committed_dedupe_digests"] = {
+                first_event.dedupe_key: first.canonical_event_digest,
+                second_event.dedupe_key: second.canonical_event_digest,
+            }
+            source._write_state(legacy)
+
+            connection = store._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO collector_delta_tombstones_v1("
+                    "delta_id, source_id, stream_epoch, payload_sha256, "
+                    "compacted_at, plan_id"
+                    ") SELECT delta_id, source_id, stream_epoch, payload_sha256, ?, ? "
+                    "FROM collector_deltas WHERE delta_id=?",
+                    (
+                        "2026-09-20T17:43:00+00:00",
+                        "retired-newer-price",
+                        second.delta_id,
+                    ),
+                )
+                connection.execute(
+                    "DELETE FROM collector_deltas WHERE delta_id=?",
+                    (second.delta_id,),
+                )
+                connection.commit()
+            finally:
+                if connection.in_transaction:
+                    connection.rollback()
+                connection.close()
+
+            self.assertEqual(store.get(first.delta_id), first)
+            self.assertIsNone(store.get(second.delta_id))
+
+            restored = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            restored.bind_collector_store(store)
+
+            migrated = restored._read_state()
+            self.assertEqual(migrated["event_cache"], {})
+            self.assertEqual(migrated["last_committed_quote_digests"], {})
+            self.assertEqual(migrated["last_committed_dedupe_digests"], {})
+            self.assertEqual(store.resolve_event(first), first_event)
+            with self.assertRaisesRegex(ValueError, "not retained exactly"):
+                store.resolve_event(second)
+
     def test_legacy_digest_migration_verifies_in_bounded_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = ParlayApiProductSource(

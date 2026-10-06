@@ -994,10 +994,9 @@ class ParlayApiProductSource:
                 observed = quote_map if quote else dedupe_map
                 for key, digest in chunk:
                     retained_digest = observed.get(key)
-                    if retained_digest is not None:
-                        if retained_digest == digest:
-                            continue
-                    elif key in retired_matches:
+                    if retained_digest == digest:
+                        continue
+                    if key in retired_matches and (quote or retained_digest is None):
                         continue
                     kind = "quote" if quote else "dedupe"
                     raise ProductSourceStateError(

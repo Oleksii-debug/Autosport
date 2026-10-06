@@ -247,7 +247,10 @@ def _close_process_handle(process: Any) -> bool:
         return True
     try:
         close()
-    except (OSError, ValueError):
+    except Exception:
+        # Process-handle cleanup is an infrastructure boundary.  Convert any
+        # ordinary cleanup exception into durable failure truth rather than
+        # allowing the caller's SkillRun to remain stranded in RUNNING.
         return False
     return True
 
@@ -487,7 +490,15 @@ class SkillRegistry:
             if not close_ok:
                 return None,"HANDLER_TIMEOUT_HANDLE_CLOSE_FAILED"
             return None,"HANDLER_TIMEOUT"
-        if not receiver.poll():
+        try:
+            has_result = receiver.poll()
+        except (OSError, ValueError):
+            close_ok = _close_process_handle(process)
+            receiver.close()
+            if not close_ok:
+                return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+            return None,"HANDLER_RESULT_UNAVAILABLE"
+        if not has_result:
             close_ok = _close_process_handle(process)
             receiver.close()
             if not close_ok:
@@ -495,7 +506,7 @@ class SkillRegistry:
             return None,"HANDLER_PROCESS_EXITED"
         try:
             kind,value=receiver.recv()
-        except (EOFError,OSError):
+        except (EOFError,OSError,ValueError):
             close_ok = _close_process_handle(process)
             receiver.close()
             if not close_ok:

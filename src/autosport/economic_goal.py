@@ -269,21 +269,21 @@ _CANONICAL_CONTRACT_TYPE: Final = EconomicGoalContract
 _CANONICAL_CONTRACT_VALIDATOR: Final = EconomicGoalContract.__post_init__
 
 
-def _require_same(name: str, previous: object, candidate: object) -> None:
+def _same_guard(name: str, previous: object, candidate: object) -> None:
     if candidate != previous:
         raise EconomicGoalContractError(
             f"automatic transition must preserve {name}"
         )
 
 
-def _require_cap_not_increased(name: str, previous: Decimal, candidate: Decimal) -> None:
+def _cap_guard(name: str, previous: Decimal, candidate: Decimal) -> None:
     if candidate > previous:
         raise EconomicGoalContractError(
             f"automatic transition must not increase {name}"
         )
 
 
-def _require_optional_cap_not_increased(
+def _optional_cap_guard(
     name: str, previous: Decimal | None, candidate: Decimal | None
 ) -> None:
     if previous is None:
@@ -295,7 +295,7 @@ def _require_optional_cap_not_increased(
         )
 
 
-def _require_floor_not_decreased(
+def _floor_guard(
     name: str, previous: Decimal, candidate: Decimal
 ) -> None:
     if candidate < previous:
@@ -304,14 +304,14 @@ def _require_floor_not_decreased(
         )
 
 
-def _require_int_cap_not_increased(name: str, previous: int, candidate: int) -> None:
+def _int_cap_guard(name: str, previous: int, candidate: int) -> None:
     if candidate > previous:
         raise EconomicGoalContractError(
             f"automatic transition must not increase {name}"
         )
 
 
-def _require_restrictions_not_removed(
+def _restrictions_guard(
     name: str, previous: frozenset[str], candidate: frozenset[str]
 ) -> None:
     if not previous.issubset(candidate):
@@ -323,6 +323,15 @@ def _require_restrictions_not_removed(
 def validate_automatic_transition(
     previous: EconomicGoalContract,
     candidate: EconomicGoalContract,
+    _contract_type=_CANONICAL_CONTRACT_TYPE,
+    _contract_validator=_CANONICAL_CONTRACT_VALIDATOR,
+    _same_guard=_require_same,
+    _cap_guard=_require_cap_not_increased,
+    _optional_cap_guard=_require_optional_cap_not_increased,
+    _floor_guard=_require_floor_not_decreased,
+    _int_cap_guard=_require_int_cap_not_increased,
+    _restrictions_guard=_require_restrictions_not_removed,
+    _error_type=EconomicGoalContractError,
 ) -> None:
     """Prove that ``candidate`` does not enlarge ``previous`` authority.
 
@@ -333,104 +342,104 @@ def validate_automatic_transition(
     """
 
     if (
-        type(previous) is not _CANONICAL_CONTRACT_TYPE
-        or type(candidate) is not _CANONICAL_CONTRACT_TYPE
+        type(previous) is not _contract_type
+        or type(candidate) is not _contract_type
     ):
-        raise EconomicGoalContractError(
+        raise _error_type(
             "automatic transition requires EconomicGoalContract instances"
         )
 
-    _CANONICAL_CONTRACT_VALIDATOR(previous)
-    _CANONICAL_CONTRACT_VALIDATOR(candidate)
+    _contract_validator(previous)
+    _contract_validator(candidate)
 
-    _require_same("goal_id", previous.goal_id, candidate.goal_id)
-    _require_same("bankroll_id", previous.bankroll_id, candidate.bankroll_id)
-    _require_same("currency", previous.currency, candidate.currency)
-    _require_same("objective", previous.objective, candidate.objective)
+    _same_guard("goal_id", previous.goal_id, candidate.goal_id)
+    _same_guard("bankroll_id", previous.bankroll_id, candidate.bankroll_id)
+    _same_guard("currency", previous.currency, candidate.currency)
+    _same_guard("objective", previous.objective, candidate.objective)
 
     if candidate.revision != previous.revision + 1:
         raise EconomicGoalContractError(
             "automatic transition must advance revision by exactly one"
         )
 
-    _require_cap_not_increased(
+    _cap_guard(
         "max_stake_fraction",
         previous.max_stake_fraction,
         candidate.max_stake_fraction,
     )
-    _require_optional_cap_not_increased(
+    _optional_cap_guard(
         "max_stake_amount", previous.max_stake_amount, candidate.max_stake_amount
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_session_loss_fraction",
         previous.max_session_loss_fraction,
         candidate.max_session_loss_fraction,
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_day_loss_fraction",
         previous.max_day_loss_fraction,
         candidate.max_day_loss_fraction,
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_drawdown_fraction",
         previous.max_drawdown_fraction,
         candidate.max_drawdown_fraction,
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_capital_at_risk_fraction",
         previous.max_capital_at_risk_fraction,
         candidate.max_capital_at_risk_fraction,
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_event_concentration_fraction",
         previous.max_event_concentration_fraction,
         candidate.max_event_concentration_fraction,
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_market_concentration_fraction",
         previous.max_market_concentration_fraction,
         candidate.max_market_concentration_fraction,
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_provider_concentration_fraction",
         previous.max_provider_concentration_fraction,
         candidate.max_provider_concentration_fraction,
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_sport_concentration_fraction",
         previous.max_sport_concentration_fraction,
         candidate.max_sport_concentration_fraction,
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_turnover_fraction",
         previous.max_turnover_fraction,
         candidate.max_turnover_fraction,
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_risk_of_ruin", previous.max_risk_of_ruin, candidate.max_risk_of_ruin
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_execution_slippage_fraction",
         previous.max_execution_slippage_fraction,
         candidate.max_execution_slippage_fraction,
     )
-    _require_cap_not_increased(
+    _cap_guard(
         "max_quote_age_seconds",
         previous.max_quote_age_seconds,
         candidate.max_quote_age_seconds,
     )
-    _require_floor_not_decreased(
+    _floor_guard(
         "minimum_data_quality",
         previous.minimum_data_quality,
         candidate.minimum_data_quality,
     )
 
-    _require_int_cap_not_increased(
+    _int_cap_guard(
         "max_concurrent_positions",
         previous.max_concurrent_positions,
         candidate.max_concurrent_positions,
     )
-    _require_int_cap_not_increased(
+    _int_cap_guard(
         "max_parlay_legs", previous.max_parlay_legs, candidate.max_parlay_legs
     )
     if candidate.automation_level > previous.automation_level:
@@ -442,13 +451,13 @@ def validate_automatic_transition(
             "automatic transition must not clear emergency_stop"
         )
 
-    _require_restrictions_not_removed(
+    _restrictions_guard(
         "blocked_sports", previous.blocked_sports, candidate.blocked_sports
     )
-    _require_restrictions_not_removed(
+    _restrictions_guard(
         "blocked_providers", previous.blocked_providers, candidate.blocked_providers
     )
-    _require_restrictions_not_removed(
+    _restrictions_guard(
         "blocked_markets", previous.blocked_markets, candidate.blocked_markets
     )
 

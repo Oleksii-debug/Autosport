@@ -185,6 +185,87 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(result.current_equity, Decimal("100"))
 
 
+    def test_risk_report_holds_operation_lock_during_full_replay(self) -> None:
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg(115),),
+            Decimal("10"),
+            placed_at="2026-09-21T19:25:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        goal = self._goal()
+        entered = threading.Event()
+        release = threading.Event()
+        probe_acquired = threading.Event()
+        report_errors: list[BaseException] = []
+        original = risk_reporting._paper_equity_source_state_sha256
+        calls = 0
+
+        def blocking_source_state(state_book):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise AssertionError("timed out waiting for report release")
+            return original(state_book)
+
+        def build() -> None:
+            try:
+                build_paper_risk_report(book, goal)
+            except BaseException as exc:
+                report_errors.append(exc)
+
+        def probe() -> None:
+            with paper_module._require_paperbook_operation_lock(book):
+                probe_acquired.set()
+
+        with patch.object(
+            risk_reporting,
+            "_paper_equity_source_state_sha256",
+            side_effect=blocking_source_state,
+        ):
+            worker = threading.Thread(target=build)
+            worker.start()
+            self.assertTrue(entered.wait(timeout=2))
+
+            probe_worker = threading.Thread(target=probe)
+            probe_worker.start()
+            self.assertFalse(probe_acquired.wait(timeout=0.1))
+
+            release.set()
+            worker.join(timeout=2)
+            probe_worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(probe_worker.is_alive())
+        self.assertFalse(report_errors)
+        self.assertTrue(probe_acquired.is_set())
+        self.assertGreaterEqual(calls, 2)
+
+
+    def test_risk_report_ignores_rebound_operation_lock_module_dispatch(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        attacker_called = False
+
+        def attacker_lock(_book):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("rebound operation lock executed")
+
+        with patch.object(
+            risk_reporting,
+            "_require_paperbook_operation_lock",
+            side_effect=attacker_lock,
+        ):
+            result = build_paper_risk_report(book, goal)
+
+        self.assertFalse(attacker_called)
+        self.assertEqual(result.current_equity, Decimal("100"))
+
+
     def test_equity_builder_ignores_rebound_locked_capital_helper(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket(

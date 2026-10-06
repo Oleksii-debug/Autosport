@@ -833,6 +833,43 @@ def test_tick_rejects_unregistered_affected_input_id() -> None:
         )
 
 
+def test_tick_rejects_affected_input_routing_identity_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class Index:
+            input_ids = ("input-a",)
+
+            def affected_inputs(self, _batch):
+                self.input_ids = ("phantom",)
+                return ("phantom",)
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = Index()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency index routing mutated input identity state",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
 def test_tick_rejects_phantom_lifecycle_registration() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

@@ -646,7 +646,7 @@ def _bind_contract_successor_operation(operation):
 
 
 EconomicGoalContract.validate_automatic_successor = _bind_contract_successor_operation(
-    _validate_automatic_successor_bound
+    _CANONICAL_TRANSITION_VALIDATOR
 )
 
 
@@ -663,5 +663,5 @@ def _bind_transition_operation(operation):
 
 
 validate_automatic_transition = _bind_transition_operation(
-    _validate_automatic_transition_bound
+    _CANONICAL_TRANSITION_VALIDATOR
 )

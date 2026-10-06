@@ -304,8 +304,133 @@ def _expected_ticket_economics(
     return TicketStatus.WON, payout
 
 
+def _bind_canonical_settlement_evidence_collector(method):
+    """Seal learner settlement evidence type and causal validation roots."""
+
+    resolution_type = SettlementResolution
+    datetime_type = datetime
+    timezone_utc = timezone.utc
+    valid_hex = frozenset("0123456789abcdef")
+    valid_outcomes = frozenset({"win", "loss", "void"})
+
+    def canonical_text(value: object, name: str) -> str:
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or "\x00" in value
+        ):
+            raise ValueError(f"{name} must be canonical non-empty text")
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"{name} must be valid UTF-8") from exc
+        return value
+
+    def canonical_instant(value: object, name: str) -> datetime:
+        raw = canonical_text(value, name)
+        try:
+            parsed = datetime_type.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                f"{name} must be timezone-aware ISO-8601"
+            ) from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{name} must be timezone-aware ISO-8601")
+        return parsed.astimezone(timezone_utc)
+
+    def validate_resolution(
+        resolution: SettlementResolution,
+        *,
+        as_of: str,
+    ) -> None:
+        if type(resolution) is not resolution_type:
+            raise TypeError("settlement resolution must be canonical")
+        canonical_text(resolution.event_identity, "event_identity")
+        canonical_text(resolution.settlement_ref, "settlement_ref")
+        canonical_text(resolution.evidence_id, "evidence_id")
+        digest = resolution.evidence_sha256
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in valid_hex for character in digest)
+        ):
+            raise ValueError(
+                "evidence_sha256 must be lowercase SHA-256 hex"
+            )
+        cutoff = canonical_instant(as_of, "as_of")
+        available = canonical_instant(resolution.available_at, "available_at")
+        if available > cutoff:
+            raise ValueError(
+                "settlement evidence is not causally available at learner cutoff"
+            )
+        quote_outcomes = resolution.quote_outcomes
+        if type(quote_outcomes) is not dict or not quote_outcomes:
+            raise ValueError("quote_outcomes must be a non-empty exact dict")
+        for quote_key, outcome in quote_outcomes.items():
+            canonical_text(quote_key, "quote_outcomes quote_key")
+            if type(outcome) is not str or outcome not in valid_outcomes:
+                raise ValueError("quote_outcomes contains unsupported outcome")
+
+    def guarded(
+        ticket: PaperTicket,
+        resolutions: tuple[SettlementResolution, ...],
+        *,
+        at: str,
+    ):
+        return method(
+            ticket,
+            resolutions,
+            at=at,
+            _settlement_resolution_type=resolution_type,
+            _settlement_resolution_validate=validate_resolution,
+        )
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
 class PaperSettlementLearningBridge:
     """Durable identity bridge from settled PAPER economics to one AgentLoop resolution."""
+
+    settlement_learning_handoff_implementation_id = (
+        "autosport.paper-settlement-learning-bridge-v1"
+    )
+    _AUTHORITY_FIELDS = frozenset(
+        {
+            "_authority_fields_sealed",
+            "state_path",
+            "paper_book_path",
+            "decision_ledger",
+            "agent_loop",
+            "economic_goal",
+            "risk_policy",
+            "settlement_learning_configuration_sha256",
+        }
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        try:
+            sealed = object.__getattribute__(self, "_authority_fields_sealed")
+        except AttributeError:
+            sealed = False
+        if sealed and name in (
+            "_authority_fields_sealed",
+            "state_path",
+            "paper_book_path",
+            "decision_ledger",
+            "agent_loop",
+            "economic_goal",
+            "risk_policy",
+            "settlement_learning_configuration_sha256",
+        ):
+            raise PaperSettlementLearningBridgeError(
+                f"settlement learning authority field {name} is immutable after construction"
+            )
+        object.__setattr__(self, name, value)
 
     def __init__(
         self,
@@ -329,18 +454,100 @@ class PaperSettlementLearningBridge:
             raise PaperSettlementLearningBridgeError(
                 "risk policy is not bound to supplied EconomicGoalContract"
             )
+        self._authority_fields_sealed = False
         self.state_path = Path(state_path)
         self.paper_book_path = Path(paper_book_path)
         self.decision_ledger = decision_ledger
         self.agent_loop = agent_loop
         self.economic_goal = economic_goal
         self.risk_policy = risk_policy
+        agent_loop_snapshot = self.agent_loop.snapshot()
+        owner_goal_fingerprint = provenance_for(self.economic_goal).contract_sha256
+        owner_risk_fingerprint = self.risk_policy.provenance_sha256
+        if agent_loop_snapshot.economic_goal_fingerprint != owner_goal_fingerprint:
+            raise PaperSettlementLearningBridgeError(
+                "AgentLoop economic-goal fingerprint differs from bridge owner contract"
+            )
+        if agent_loop_snapshot.risk_fingerprint != owner_risk_fingerprint:
+            raise PaperSettlementLearningBridgeError(
+                "AgentLoop risk fingerprint differs from bridge owner policy"
+            )
+        self.settlement_learning_configuration_sha256 = _digest(
+            {
+                "implementation_id": self.settlement_learning_handoff_implementation_id,
+                "state_path": str(self.state_path.resolve(strict=False)),
+                "paper_book_path": str(self.paper_book_path.resolve(strict=False)),
+                "decision_ledger_path": str(
+                    self.decision_ledger.path.resolve(strict=False)
+                ),
+                "agent_loop_path": str(self.agent_loop.path.resolve(strict=False)),
+                "agent_loop_identity": {
+                    "loop_id": agent_loop_snapshot.loop_id,
+                    "environment_id": agent_loop_snapshot.environment_id,
+                    "episode_id": agent_loop_snapshot.episode_id,
+                    "policy_id": agent_loop_snapshot.policy_id,
+                    "economic_goal_fingerprint": (
+                        agent_loop_snapshot.economic_goal_fingerprint
+                    ),
+                    "risk_fingerprint": agent_loop_snapshot.risk_fingerprint,
+                    "source_sha256": agent_loop_snapshot.source_sha256,
+                    "config_sha256": agent_loop_snapshot.config_sha256,
+                    "activation_binding_id": agent_loop_snapshot.activation_binding_id,
+                },
+                "economic_goal_fingerprint": owner_goal_fingerprint,
+                "risk_fingerprint": owner_risk_fingerprint,
+            }
+        )
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         with WorkspaceEconomicLock(self.state_path.parent):
             if self.state_path.exists():
-                self._read()
+                state = self._read()
+                book = None
+                if state["bindings"]:
+                    try:
+                        book = PaperBook.load(self.paper_book_path)
+                    except (OSError, ValueError) as exc:
+                        raise PaperSettlementLearningBridgeError(
+                            "durable bridge PaperBook is unavailable or invalid"
+                        ) from exc
+                for binding in state["bindings"].values():
+                    ticket = self._bound_ticket(book, binding)
+                    if binding["status"] != BOUND:
+                        self._require_outbox_matches_ticket(binding, ticket)
+                    if (
+                        binding["economic_goal_fingerprint"]
+                        != owner_goal_fingerprint
+                    ):
+                        raise PaperSettlementLearningBridgeError(
+                            "durable bridge binding belongs to another economic goal"
+                        )
+                    if binding["risk_fingerprint"] != owner_risk_fingerprint:
+                        raise PaperSettlementLearningBridgeError(
+                            "durable bridge binding belongs to another risk policy"
+                        )
+                    if (
+                        binding["environment_id"]
+                        != agent_loop_snapshot.environment_id
+                        or binding["episode_id"]
+                        != agent_loop_snapshot.episode_id
+                    ):
+                        raise PaperSettlementLearningBridgeError(
+                            "durable bridge binding belongs to another AgentLoop episode"
+                        )
+                    baseline = _checkpoint(binding["baseline_checkpoint"])
+                    if (
+                        baseline.environment_id
+                        != agent_loop_snapshot.environment_id
+                        or baseline.episode_id
+                        != agent_loop_snapshot.episode_id
+                        or baseline.policy_id != agent_loop_snapshot.policy_id
+                    ):
+                        raise PaperSettlementLearningBridgeError(
+                            "durable bridge baseline belongs to another AgentLoop identity"
+                        )
             else:
                 self._write({"bindings": {}})
+        self._authority_fields_sealed = True
 
     @property
     def goal_fingerprint(self) -> str:
@@ -470,6 +677,57 @@ class PaperSettlementLearningBridge:
                     raise PaperSettlementLearningBridgeError(
                         "settlement intent belongs to another ticket binding"
                     )
+
+            status = binding["status"]
+            outbox = binding.get("outbox")
+            ack = binding.get("ack")
+            if status == BOUND:
+                if outbox is not None or ack is not None:
+                    raise PaperSettlementLearningBridgeError(
+                        "BOUND bridge binding cannot contain learner outbox or acknowledgement"
+                    )
+                continue
+            if type(outbox) is not dict:
+                raise PaperSettlementLearningBridgeError(
+                    "resolved bridge binding requires durable learner outbox"
+                )
+            outcome, reward, transition, checkpoint = self._outbox_objects(outbox)
+            if (
+                outbox["binding_id"] != binding["binding_id"]
+                or outbox["ticket_id"] != ticket_id
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "durable learner outbox belongs to another ticket binding"
+                )
+            if status == OUTBOX:
+                if ack is not None:
+                    raise PaperSettlementLearningBridgeError(
+                        "OUTBOX bridge binding cannot contain acknowledgement"
+                    )
+                continue
+            if type(ack) is not dict or set(ack) != {
+                "outbox_id",
+                "transition_id",
+                "outcome_id",
+                "reward_id",
+                "next_checkpoint_id",
+                "acked_at",
+            }:
+                raise PaperSettlementLearningBridgeError(
+                    "ACKED bridge binding requires canonical acknowledgement"
+                )
+            canonical_acked_at = _instant_id(ack["acked_at"], "acked_at")
+            if (
+                ack["outbox_id"] != outbox["outbox_id"]
+                or ack["transition_id"] != transition.transition_id
+                or ack["outcome_id"] != outcome.outcome_id
+                or ack["reward_id"] != reward.reward_id
+                or ack["next_checkpoint_id"] != checkpoint.checkpoint_id
+                or ack["acked_at"] != canonical_acked_at
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "durable learner acknowledgement differs from outbox"
+                )
         return state
 
     def _runtime_matches(
@@ -677,6 +935,14 @@ class PaperSettlementLearningBridge:
                 raise PaperSettlementLearningBridgeError(
                     "ticket must be bound before settlement"
                 )
+            if len(ticket.provider_source_ids) != 1:
+                raise PaperSettlementLearningBridgeError(
+                    "settlement learning requires exactly one ticket provider source"
+                )
+            if any(leg.sport is None for leg in ticket.legs):
+                raise PaperSettlementLearningBridgeError(
+                    "settlement learning requires explicit sport on every ticket leg"
+                )
             if _instant(ticket.placed_at, "ticket placed_at") < _instant(
                 action.decided_at, "action decided_at"
             ):
@@ -772,6 +1038,10 @@ class PaperSettlementLearningBridge:
                 raise PaperSettlementLearningBridgeError(
                     "campaign plan anchor requires an existing ticket binding"
                 )
+            book = PaperBook.load(self.paper_book_path)
+            ticket = self._bound_ticket(book, binding)
+            if binding["status"] != BOUND:
+                self._require_outbox_matches_ticket(binding, ticket)
             anchor = binding.get("campaign_plan_anchor")
             if anchor is None:
                 return None
@@ -819,6 +1089,9 @@ class PaperSettlementLearningBridge:
                 raise PaperSettlementLearningBridgeError(
                     "campaign plan anchor requires sealed resolution evidence"
                 )
+            book = PaperBook.load(self.paper_book_path)
+            ticket = self._bound_ticket(book, binding)
+            self._require_outbox_matches_ticket(binding, ticket)
             existing = binding.get("campaign_plan_anchor")
             if existing is not None:
                 if existing != expected:
@@ -842,23 +1115,40 @@ class PaperSettlementLearningBridge:
         return ticket
 
     @staticmethod
+    @_bind_canonical_settlement_evidence_collector
     def _collect_evidence(
         ticket: PaperTicket,
         resolutions: tuple[SettlementResolution, ...],
         *,
         at: str,
+        _settlement_resolution_type: type[SettlementResolution],
+        _settlement_resolution_validate,
     ) -> tuple[list[dict[str, object]], dict[str, str]] | None:
+        if len(ticket.provider_source_ids) != 1:
+            raise PaperSettlementLearningBridgeError(
+                "settlement learning requires exactly one ticket provider source"
+            )
+        if any(leg.sport is None for leg in ticket.legs):
+            raise PaperSettlementLearningBridgeError(
+                "settlement learning requires explicit sport on every ticket leg"
+            )
+        source_id = ticket.provider_source_ids[0]
         leg_keys = {leg.quote_key for leg in ticket.legs}
         known: dict[str, str] = {}
         used: dict[str, dict[str, object]] = {}
-        leg_by_key = {leg.quote_key: leg for leg in ticket.legs}
+        quote_authority: dict[str, str] = {}
+        event_ref_authority: dict[tuple[str, str], str] = {}
+        expected_event_identity_by_key = {
+            leg.quote_key: f"{source_id}:{leg.event_id}"
+            for leg in ticket.legs
+        }
         for resolution in resolutions:
-            if not isinstance(resolution, SettlementResolution):
+            if type(resolution) is not _settlement_resolution_type:
                 raise PaperSettlementLearningBridgeError(
                     "handoff contains non-canonical settlement evidence"
                 )
             try:
-                resolution.validate(as_of=at)
+                _settlement_resolution_validate(resolution, as_of=at)
             except (TypeError, ValueError) as exc:
                 raise PaperSettlementLearningBridgeError(
                     "settlement evidence failed causal validation"
@@ -870,14 +1160,30 @@ class PaperSettlementLearningBridge:
             }
             if not scoped:
                 continue
-            identity_parts = {resolution.event_identity}
-            if ":" in resolution.event_identity:
-                identity_parts.add(resolution.event_identity.split(":", 1)[1])
             for key in scoped:
-                if leg_by_key[key].event_id not in identity_parts:
+                if resolution.event_identity != expected_event_identity_by_key[key]:
                     raise PaperSettlementLearningBridgeError(
-                        "settlement evidence event identity differs from bound ticket leg"
+                        "settlement evidence provider/event identity differs from bound ticket leg"
                     )
+                previous_authority = quote_authority.get(key)
+                if (
+                    previous_authority is not None
+                    and previous_authority != resolution.evidence_id
+                ):
+                    raise PaperSettlementLearningBridgeError(
+                        "bound quote has multiple settlement evidence authorities"
+                    )
+                quote_authority[key] = resolution.evidence_id
+            event_ref = (resolution.event_identity, resolution.settlement_ref)
+            previous_event_ref_authority = event_ref_authority.get(event_ref)
+            if (
+                previous_event_ref_authority is not None
+                and previous_event_ref_authority != resolution.evidence_id
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "settlement event/reference has multiple evidence authorities"
+                )
+            event_ref_authority[event_ref] = resolution.evidence_id
             for key, value in scoped.items():
                 previous = known.get(key)
                 if previous is not None and previous != value:
@@ -1080,6 +1386,52 @@ class PaperSettlementLearningBridge:
                 self._write(state)
         return tuple(prepared)
 
+    def prepared_settlement_resolutions(
+        self,
+        *,
+        paper_book_path: Path,
+    ) -> tuple[SettlementResolution, ...]:
+        """Replay only already-durable settlement intent after an interrupted commit."""
+
+        if Path(paper_book_path) != self.paper_book_path:
+            raise PaperSettlementLearningBridgeError(
+                "continuous session uses another PaperBook path"
+            )
+
+        recovered: dict[str, SettlementResolution] = {}
+        event_ref_authority: dict[tuple[str, str], str] = {}
+        with WorkspaceEconomicLock(self.state_path.parent):
+            state = self._read()
+            book = PaperBook.load(self.paper_book_path)
+            for binding in state["bindings"].values():
+                if binding["status"] != BOUND:
+                    continue
+                intent = binding.get("settlement_intent")
+                if intent is None:
+                    continue
+                self._bound_ticket(book, binding)
+                for resolution in self._intent_resolutions(intent):
+                    previous = recovered.get(resolution.evidence_id)
+                    if previous is not None and previous != resolution:
+                        raise PaperSettlementLearningBridgeError(
+                            "prepared settlement evidence id has multiple authorities"
+                        )
+                    event_ref = (
+                        resolution.event_identity,
+                        resolution.settlement_ref,
+                    )
+                    previous_event_ref = event_ref_authority.get(event_ref)
+                    if (
+                        previous_event_ref is not None
+                        and previous_event_ref != resolution.evidence_id
+                    ):
+                        raise PaperSettlementLearningBridgeError(
+                            "prepared settlement event/reference has multiple authorities"
+                        )
+                    recovered[resolution.evidence_id] = resolution
+                    event_ref_authority[event_ref] = resolution.evidence_id
+        return tuple(recovered[key] for key in sorted(recovered))
+
     def _derive_outbox(
         self,
         binding: dict[str, object],
@@ -1243,6 +1595,64 @@ class PaperSettlementLearningBridge:
     def _outbox_objects(
         outbox: dict[str, object],
     ) -> tuple[Outcome, RewardEvidence, Transition, EnvironmentCheckpoint]:
+        expected_fields = {
+            "outbox_id",
+            "binding_id",
+            "ticket_id",
+            "ticket_status",
+            "ticket_payout",
+            "net_reward",
+            "known_quote_outcomes",
+            "settlement_evidence",
+            "settlement_bundle_sha256",
+            "outcome",
+            "reward",
+            "transition",
+            "next_checkpoint",
+        }
+        if type(outbox) is not dict or set(outbox) != expected_fields:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox fields mismatch"
+            )
+        semantic = {
+            key: outbox[key]
+            for key in expected_fields
+            if key != "outbox_id"
+        }
+        if _sha(outbox["outbox_id"], "outbox_id") != _digest(semantic):
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox digest mismatch"
+            )
+        evidence = outbox["settlement_evidence"]
+        if (
+            type(evidence) is not list
+            or _sha(
+                outbox["settlement_bundle_sha256"],
+                "settlement_bundle_sha256",
+            )
+            != _digest(evidence)
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "durable learner settlement bundle digest mismatch"
+            )
+        _sha(outbox["binding_id"], "outbox binding_id")
+        _text(outbox["ticket_id"], "outbox ticket_id")
+        try:
+            ticket_status = TicketStatus(outbox["ticket_status"])
+            ticket_payout = Decimal(_text(outbox["ticket_payout"], "ticket_payout"))
+            net_reward = Decimal(_text(outbox["net_reward"], "net_reward"))
+        except (ValueError, ArithmeticError) as exc:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox economics are not canonical"
+            ) from exc
+        if ticket_status is TicketStatus.OPEN:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox cannot reference an open PaperTicket"
+            )
+        if not ticket_payout.is_finite() or not net_reward.is_finite():
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox economics must be finite"
+            )
         try:
             raw_outcome = outbox["outcome"]
             raw_reward = outbox["reward"]
@@ -1292,6 +1702,68 @@ class PaperSettlementLearningBridge:
             )
         return outcome, reward, transition, checkpoint
 
+    def _require_outbox_matches_ticket(
+        self,
+        binding: dict[str, object],
+        ticket: PaperTicket,
+    ) -> None:
+        outbox = binding.get("outbox")
+        if type(outbox) is not dict:
+            raise PaperSettlementLearningBridgeError(
+                "resolved bridge binding requires durable learner outbox"
+            )
+        if (
+            ticket.status.value != outbox["ticket_status"]
+            or str(ticket.payout) != outbox["ticket_payout"]
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "PaperBook changed after learner outbox publication"
+            )
+        expected_reward = _exact_subtract(ticket.payout, ticket.stake)
+        outcome, reward, transition, _checkpoint_value = self._outbox_objects(
+            outbox
+        )
+        if (
+            str(expected_reward) != outbox["net_reward"]
+            or reward.reward != expected_reward
+            or outcome.environment_id != binding["environment_id"]
+            or outcome.action_id != binding["action_id"]
+            or transition.environment_id != binding["environment_id"]
+            or transition.episode_id != binding["episode_id"]
+            or transition.observation_id != binding["observation_id"]
+            or transition.action_id != binding["action_id"]
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "learner outbox differs from bound ticket economics or causal identity"
+            )
+
+        replay_semantic = {
+            "binding_id": outbox["binding_id"],
+            "ticket_id": outbox["ticket_id"],
+            "settlement_evidence": outbox["settlement_evidence"],
+            "known_quote_outcomes": outbox["known_quote_outcomes"],
+            "settlement_bundle_sha256": outbox["settlement_bundle_sha256"],
+        }
+        replay_intent = {
+            "intent_id": _digest(replay_semantic),
+            **replay_semantic,
+        }
+        replay_resolutions = self._intent_resolutions(replay_intent)
+        replay_at = max(
+            (resolution.available_at for resolution in replay_resolutions),
+            key=lambda value: _instant(value, "settlement available_at"),
+        )
+        canonical_outbox = self._derive_outbox(
+            binding,
+            ticket,
+            replay_resolutions,
+            at=replay_at,
+        )
+        if canonical_outbox is None or canonical_outbox != outbox:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox is not the canonical derivation of settlement truth"
+            )
+
     def reconcile_after_settlement(
         self,
         *,
@@ -1325,14 +1797,26 @@ class PaperSettlementLearningBridge:
             book = PaperBook.load(self.paper_book_path)
             changed = False
             for ticket_id, binding in state["bindings"].items():
-                if binding["status"] == ACKED:
-                    continue
                 ticket = self._bound_ticket(book, binding)
+                if binding["status"] == ACKED:
+                    self._require_outbox_matches_ticket(binding, ticket)
+                    continue
                 if binding["status"] == BOUND:
                     intent = binding.get("settlement_intent")
                     evidence = resolutions
                     if intent is not None:
-                        evidence = self._intent_resolutions(intent) + resolutions
+                        prepared_evidence = self._intent_resolutions(intent)
+                        # Validate current truth together with the durable intent so
+                        # conflicting quote/evidence authority still fails closed.
+                        # Derive the learner transition from the prepared bundle only:
+                        # evidence arriving after the pre-P&L intent must not move the
+                        # learner's causal reveal time or change its settlement witness.
+                        self._collect_evidence(
+                            ticket,
+                            prepared_evidence + resolutions,
+                            at=at,
+                        )
+                        evidence = prepared_evidence
                     if ticket_id not in settled_ids:
                         if intent is None or ticket.status is TicketStatus.OPEN:
                             continue
@@ -1349,13 +1833,7 @@ class PaperSettlementLearningBridge:
                     changed = True
                 else:
                     outbox = binding["outbox"]
-                    if (
-                        ticket.status.value != outbox["ticket_status"]
-                        or str(ticket.payout) != outbox["ticket_payout"]
-                    ):
-                        raise PaperSettlementLearningBridgeError(
-                            "PaperBook changed after learner outbox publication"
-                        )
+                    self._require_outbox_matches_ticket(binding, ticket)
                 pending.append((ticket_id, binding["outbox"]))
             if changed:
                 self._write(state)
@@ -1384,21 +1862,37 @@ class PaperSettlementLearningBridge:
                     raise PaperSettlementLearningBridgeError(
                         "learner outbox changed during acknowledgement"
                     )
-                ack = {
+                expected_ack_identity = {
                     "outbox_id": outbox["outbox_id"],
                     "transition_id": transition.transition_id,
                     "outcome_id": outcome.outcome_id,
                     "reward_id": reward.reward_id,
                     "next_checkpoint_id": checkpoint.checkpoint_id,
-                    "acked_at": _instant_id(at, "acked_at"),
                 }
-                if binding["ack"] is not None and binding["ack"] != ack:
-                    raise PaperSettlementLearningBridgeError(
-                        "learner acknowledgement conflicts with durable state"
-                    )
-                binding["ack"] = ack
-                binding["status"] = ACKED
-                self._write(state)
+                existing_ack = binding["ack"]
+                if binding["status"] == ACKED:
+                    if (
+                        type(existing_ack) is not dict
+                        or any(
+                            existing_ack.get(key) != value
+                            for key, value in expected_ack_identity.items()
+                        )
+                    ):
+                        raise PaperSettlementLearningBridgeError(
+                            "learner acknowledgement conflicts with durable state"
+                        )
+                else:
+                    if binding["status"] != OUTBOX or existing_ack is not None:
+                        raise PaperSettlementLearningBridgeError(
+                            "learner acknowledgement state transition is invalid"
+                        )
+                    ack = {
+                        **expected_ack_identity,
+                        "acked_at": _instant_id(at, "acked_at"),
+                    }
+                    binding["ack"] = ack
+                    binding["status"] = ACKED
+                    self._write(state)
             acknowledged.append(transition.transition_id)
         return tuple(acknowledged)
 
@@ -1427,6 +1921,9 @@ class PaperSettlementLearningBridge:
                 raise PaperSettlementLearningBridgeError(
                     "ticket has no durable learner outbox"
                 )
+            book = PaperBook.load(self.paper_book_path)
+            ticket = self._bound_ticket(book, binding)
+            self._require_outbox_matches_ticket(binding, ticket)
             outcome, reward, transition, checkpoint = self._outbox_objects(outbox)
             try:
                 raw_observation = binding["observation"]

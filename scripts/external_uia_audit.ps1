@@ -13,6 +13,73 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
 
+$uiaReferences = @(
+    [System.Windows.Automation.Automation].Assembly.Location,
+    [System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location
+) | Select-Object -Unique
+Add-Type -ReferencedAssemblies $uiaReferences -TypeDefinition @'
+using System;
+using System.Threading;
+using System.Windows.Automation;
+
+public sealed class AutosportExternalLiveRegionProbe : IDisposable
+{
+    private readonly AutomationElement _element;
+    private readonly AutomationEventHandler _handler;
+    private int _count;
+    private string _lastAutomationId = "";
+    private string _lastName = "";
+
+    public AutosportExternalLiveRegionProbe(AutomationElement element)
+    {
+        _element = element ?? throw new ArgumentNullException(nameof(element));
+        _handler = OnEvent;
+        Automation.AddAutomationEventHandler(
+            AutomationElementIdentifiers.LiveRegionChangedEvent,
+            _element,
+            TreeScope.Element,
+            _handler
+        );
+    }
+
+    private void OnEvent(object sender, AutomationEventArgs eventArgs)
+    {
+        if (eventArgs == null ||
+            eventArgs.EventId != AutomationElementIdentifiers.LiveRegionChangedEvent)
+        {
+            return;
+        }
+        try
+        {
+            var element = sender as AutomationElement;
+            if (element == null)
+            {
+                return;
+            }
+            _lastAutomationId = element.Current.AutomationId ?? "";
+            _lastName = element.Current.Name ?? "";
+            Interlocked.Increment(ref _count);
+        }
+        catch (ElementNotAvailableException)
+        {
+        }
+    }
+
+    public int Count => Volatile.Read(ref _count);
+    public string LastAutomationId => _lastAutomationId;
+    public string LastName => _lastName;
+
+    public void Dispose()
+    {
+        Automation.RemoveAutomationEventHandler(
+            AutomationElementIdentifiers.LiveRegionChangedEvent,
+            _element,
+            _handler
+        );
+    }
+}
+'@
+
 # This gate describes the semantic HTML/WebView2 surface that ships in the
 # package.  It intentionally validates externally observable UIA semantics, not
 # the legacy Tk widget contract that preceded the WebView2 migration.
@@ -387,6 +454,10 @@ $report = [ordered]@{
     emergency_stop_activation_status = 'NOT_RUN'
     emergency_stop_status_text = $null
     emergency_stop_journal_path = $null
+    live_region_event_status = 'NOT_RUN'
+    live_region_event_count = 0
+    live_region_event_automation_id = $null
+    live_region_event_text = $null
     controls = @()
     failures = @()
     real_money_execution = $false
@@ -396,6 +467,7 @@ $report = [ordered]@{
 
 $process = $null
 $duplicateProcess = $null
+$liveRegionProbe = $null
 $lastFamilyIds = @()
 $uiaRoot = $null
 try {
@@ -741,6 +813,11 @@ try {
             if ($null -eq $stopButton) {
                 throw "packaged emergency STOP action disappeared before activation"
             }
+            $stopStatusBefore = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId 'emergency-stop-status'
+            if ($null -eq $stopStatusBefore) {
+                throw "packaged emergency STOP status disappeared before live-region subscription"
+            }
+            $liveRegionProbe = [AutosportExternalLiveRegionProbe]::new($stopStatusBefore)
             Invoke-ExternalAction -Element $stopButton
 
             $stopDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(5, $TimeoutSeconds))
@@ -764,6 +841,30 @@ try {
             if ([string]::IsNullOrWhiteSpace($confirmedStopText)) {
                 throw "packaged emergency STOP did not expose confirmed durable status text"
             }
+
+            $eventDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
+            while (
+                [DateTime]::UtcNow -lt $eventDeadline -and
+                (
+                    $liveRegionProbe.Count -lt 1 -or
+                    [string]$liveRegionProbe.LastAutomationId -ne 'emergency-stop-status' -or
+                    [string]$liveRegionProbe.LastName -ne $confirmedStopText
+                )
+            ) {
+                Start-Sleep -Milliseconds 50
+            }
+            $report.live_region_event_count = [int]$liveRegionProbe.Count
+            $report.live_region_event_automation_id = [string]$liveRegionProbe.LastAutomationId
+            $report.live_region_event_text = [string]$liveRegionProbe.LastName
+            if (
+                $report.live_region_event_count -lt 1 -or
+                $report.live_region_event_automation_id -ne 'emergency-stop-status' -or
+                $report.live_region_event_text -ne $confirmedStopText
+            ) {
+                throw "packaged emergency STOP did not emit an externally observed LiveRegionChanged event"
+            }
+            $report.live_region_event_status = 'PASS'
+
             $stopFocusDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
             if ($null -eq (Wait-ForFocusedAutomationId -AutomationId 'emergency-stop-status' -Deadline $stopFocusDeadline)) {
                 throw "packaged emergency STOP confirmation did not retain focus on the dedicated status"
@@ -866,6 +967,12 @@ try {
 } catch {
     $report.failures += "$($_.Exception.GetType().Name): $($_.Exception.Message)"
 } finally {
+    if ($null -ne $liveRegionProbe) {
+        try {
+            $liveRegionProbe.Dispose()
+        } catch {}
+        $liveRegionProbe = $null
+    }
     if ($null -ne $duplicateProcess) {
         try {
             $duplicateCleanupIds = @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id | Sort-Object -Unique -Descending)

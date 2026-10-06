@@ -433,5 +433,80 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(actual, expected)
 
 
+
+    def test_portfolio_risk_digest_binds_exchange_side_and_market_semantics(self) -> None:
+        back = PaperBook("100")
+        back.open_ticket(
+            (TicketLeg(
+                "event-1",
+                "market-1",
+                "selection-1",
+                Decimal("3.00"),
+                sport="soccer",
+                exchange_side="back",
+                market_semantics_id="exchange.match.odds.v1",
+            ),),
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+        lay = PaperBook("100")
+        lay.open_ticket(
+            (TicketLeg(
+                "event-1",
+                "market-1",
+                "selection-1",
+                Decimal("3.00"),
+                sport="soccer",
+                exchange_side="lay",
+                market_semantics_id="exchange.match.odds.v1",
+            ),),
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+
+        back_digest = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(back)
+        lay_digest = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(lay)
+
+        self.assertIsNotNone(back_digest)
+        self.assertIsNotNone(lay_digest)
+        self.assertNotEqual(back_digest, lay_digest)
+
+
+    def test_portfolio_risk_digest_binds_market_semantics_revision(self) -> None:
+        first = PaperBook("100")
+        first.open_ticket(
+            (TicketLeg(
+                "event-1",
+                "market-1",
+                "selection-1",
+                Decimal("3.00"),
+                sport="soccer",
+                exchange_side="lay",
+                market_semantics_id="exchange.match.odds.v1",
+            ),),
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+        second = PaperBook("100")
+        second.open_ticket(
+            (TicketLeg(
+                "event-1",
+                "market-1",
+                "selection-1",
+                Decimal("3.00"),
+                sport="soccer",
+                exchange_side="lay",
+                market_semantics_id="exchange.match.odds.v2",
+            ),),
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+
+        self.assertNotEqual(
+            PaperRiskPolicy.risk_of_ruin_portfolio_sha256(first),
+            PaperRiskPolicy.risk_of_ruin_portfolio_sha256(second),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

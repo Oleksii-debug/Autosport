@@ -754,6 +754,64 @@ class PaperBook:
         if winning_quote_keys & void_quote_keys:
             raise ValueError("PaperBook settlement key cannot be both winning and void")
 
+        if any(leg.exchange_side == "lay" for leg in ticket.legs):
+            if len(ticket.legs) != 1:
+                raise ValueError(
+                    "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                )
+            leg = ticket.legs[0]
+            locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                ticket.stake,
+                leg,
+            )
+            if leg.settlement_key in void_quote_keys:
+                status = _CANONICAL_TICKET_STATUS_VOID
+                payout = locked_capital
+            elif leg.settlement_key in winning_quote_keys:
+                status = _CANONICAL_TICKET_STATUS_LOST
+                payout = _CANONICAL_PAPER_DECIMAL_TYPE("0")
+            else:
+                status = _CANONICAL_TICKET_STATUS_WON
+                try:
+                    with _CANONICAL_LOCALCONTEXT(
+                        _CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()
+                    ) as context:
+                        payout = locked_capital + ticket.stake
+                        if context.flags[_CANONICAL_INEXACT_SIGNAL]:
+                            raise ValueError(
+                                "PaperBook LAY payout loses Decimal precision"
+                            )
+                except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+                    raise ValueError(
+                        "PaperBook LAY settlement arithmetic is not representable"
+                    ) from exc
+            _CANONICAL_REQUIRE_FINITE(
+                payout,
+                f"settlement payout for ticket {ticket.ticket_id}",
+            )
+            try:
+                with _CANONICAL_LOCALCONTEXT(
+                    _CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()
+                ) as context:
+                    new_balance = balance + payout
+                    if context.flags[_CANONICAL_INEXACT_SIGNAL]:
+                        raise ValueError(
+                            "PaperBook LAY balance credit loses Decimal precision"
+                        )
+            except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+                raise ValueError(
+                    "PaperBook LAY settlement arithmetic is not representable"
+                ) from exc
+            _CANONICAL_REQUIRE_FINITE(
+                new_balance,
+                f"balance after settling ticket {ticket.ticket_id}",
+            )
+            if payout != 0 and new_balance == balance:
+                raise ValueError(
+                    "PaperBook settlement payout loses all Decimal balance effect"
+                )
+            return status, payout, new_balance
+
         effective_legs = tuple(
             leg for leg in ticket.legs if leg.settlement_key not in void_quote_keys
         )

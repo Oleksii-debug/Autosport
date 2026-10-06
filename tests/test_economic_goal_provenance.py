@@ -800,7 +800,10 @@ def test_snapshot_provenance_ignores_rebound_field_descriptors(monkeypatch) -> N
     )
 
     snapshot = economic_goal_provenance_module._snapshot_provenance(evidence)
-    assert snapshot.contract_sha256 == expected_sha
+    assert (
+        economic_goal_provenance_module._canonical_provenance_snapshot(snapshot)[5]
+        == expected_sha
+    )
 
 
 

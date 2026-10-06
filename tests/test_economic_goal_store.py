@@ -1859,8 +1859,17 @@ def test_store_snapshot_covers_every_captured_contract_slot(
 
         monkeypatch.setattr(EconomicGoalContract, name, ForgedDescriptor())
         snapshot = economic_goal_store_module._snapshot_economic_goal_contract(goal)
-        assert snapshot == economic_goal_store_module._build_economic_goal_contract(
-            dict(zip(field_names, economic_goal_store_module._canonical_contract_snapshot(goal))),
+        rebuilt = economic_goal_store_module._build_economic_goal_contract(
+            dict(
+                zip(
+                    field_names,
+                    economic_goal_store_module._canonical_contract_snapshot(goal),
+                )
+            ),
+        )
+        assert (
+            economic_goal_store_module._canonical_contract_snapshot(snapshot)
+            == economic_goal_store_module._canonical_contract_snapshot(rebuilt)
         )
         monkeypatch.undo()
 
@@ -1891,6 +1900,7 @@ def test_store_successor_rejects_descriptor_laundered_expansion(
     monkeypatch, tmp_path
 ) -> None:
     previous = _goal()
+    previous_snapshot = economic_goal_store_module._canonical_contract_snapshot(previous)
     candidate = replace(
         previous,
         revision=2,
@@ -1912,7 +1922,11 @@ def test_store_successor_rejects_descriptor_laundered_expansion(
     with pytest.raises(EconomicGoalContractError, match="must not increase"):
         store.persist_automatic_successor(candidate)
 
-    assert EconomicGoalStore(tmp_path).load() == previous
+    restored = EconomicGoalStore(tmp_path).load()
+    assert (
+        economic_goal_store_module._canonical_contract_snapshot(restored)
+        == previous_snapshot
+    )
 
 
 def test_payload_snapshot_uses_sealed_contract_constructor_authority(monkeypatch) -> None:

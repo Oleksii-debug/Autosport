@@ -860,7 +860,10 @@ def test_transition_snapshot_helper_ignores_rebound_contract_descriptors(monkeyp
     )
 
     snapshot = economic_goal_module._snapshot_transition_contract(goal)
-    assert snapshot.max_stake_fraction == Decimal("0.03")
+    assert (
+        economic_goal_module._canonical_contract_snapshot(snapshot)[5]
+        == Decimal("0.03")
+    )
 
 
 

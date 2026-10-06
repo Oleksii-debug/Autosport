@@ -37,6 +37,10 @@ def _lstat_regular(path) -> os.stat_result | None:
         raise _settlement.BetfairSettlementRevisionError(
             "settlement journal path must be a regular file"
         )
+    if info.st_nlink != 1:
+        raise _settlement.BetfairSettlementRevisionError(
+            "settlement journal path must not have hard-link aliases"
+        )
     return info
 
 
@@ -63,6 +67,10 @@ def _open_existing_regular(
         if not stat.S_ISREG(opened.st_mode):
             raise _settlement.BetfairSettlementRevisionError(
                 "settlement journal path must be a regular file"
+            )
+        if opened.st_nlink != 1:
+            raise _settlement.BetfairSettlementRevisionError(
+                "settlement journal path must not have hard-link aliases"
             )
         opened_identity = _identity(opened)
         if opened_identity != before_identity:

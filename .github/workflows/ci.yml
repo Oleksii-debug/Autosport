@@ -84,7 +84,7 @@ jobs:
       (github.event.action != 'closed' && github.event.pull_request.draft == false))
     strategy:
       matrix:
-        os: [ubuntu-slim, windows-latest]
+        os: [ubuntu-latest, windows-latest]
         python-version: ['3.11', '3.12']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90

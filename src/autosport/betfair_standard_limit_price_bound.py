@@ -267,11 +267,16 @@ class BetfairStandardLimitPriceBoundEvidence:
             )
 
     @property
-    def evidence_id(self) -> str:
+    def evidence_id(self, _digest=_digest) -> str:
         self._validate()
         return _digest(self.to_dict(include_evidence_id=False))
 
-    def to_dict(self, *, include_evidence_id: bool = True) -> dict[str, Any]:
+    def to_dict(
+        self,
+        *,
+        include_evidence_id: bool = True,
+        _digest=_digest,
+    ) -> dict[str, Any]:
         self._validate()
         payload: dict[str, Any] = {
             "schema": "autosport.betfair_standard_limit_price_bound",

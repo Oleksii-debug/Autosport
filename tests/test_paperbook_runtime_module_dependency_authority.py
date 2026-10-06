@@ -358,3 +358,70 @@ def test_save_rejects_directory_flag_authority_drift_before_parent_creation(
 
     assert not destination.exists()
     assert not destination.parent.exists()
+
+
+
+@pytest.mark.parametrize(
+    ("attribute_name", "message"),
+    (
+        ("exists", r"snapshot exists authority changed"),
+        ("mkdir", r"snapshot mkdir authority changed"),
+    ),
+)
+def test_save_rejects_rebound_snapshot_path_method_before_parent_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    attribute_name: str,
+    message: str,
+) -> None:
+    book = PaperBook("100")
+    path_type = type(paper_module.Path("."))
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError(f"rebound Path.{attribute_name} executed")
+
+    monkeypatch.setattr(path_type, attribute_name, hostile)
+    destination = tmp_path / f"nested-{attribute_name}" / "paper.json"
+
+    with pytest.raises(ValueError, match=message):
+        book.save(destination)
+
+    assert attacker_calls == 0
+    assert not destination.exists()
+    assert not destination.parent.exists()
+
+
+@pytest.mark.parametrize(
+    ("attribute_name", "message"),
+    (
+        ("parent", r"snapshot parent descriptor authority changed"),
+        ("name", r"snapshot name descriptor authority changed"),
+    ),
+)
+def test_save_rejects_rebound_snapshot_path_descriptor_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    attribute_name: str,
+    message: str,
+) -> None:
+    book = PaperBook("100")
+    path_type = type(paper_module.Path("."))
+    original = getattr(path_type, attribute_name)
+
+    class HostileDescriptor:
+        def __get__(self, instance, owner=None):
+            raise AssertionError(f"rebound Path.{attribute_name} descriptor executed")
+
+    monkeypatch.setattr(path_type, attribute_name, HostileDescriptor())
+    destination = tmp_path / f"nested-{attribute_name}" / "paper.json"
+
+    try:
+        with pytest.raises(ValueError, match=message):
+            book.save(destination)
+    finally:
+        monkeypatch.setattr(path_type, attribute_name, original)
+
+    assert not destination.exists()

@@ -256,6 +256,45 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(attempt.execution_odds, Decimal("2.40"))
         self.assertEqual(attempt.execution_stake, Decimal("10.00"))
 
+    def test_authority_dataclasses_ignore_rebound_module_enum_globals(self) -> None:
+        names = ("EvidenceGrade", "PaperAttemptOutcome", "RecoveryDecision")
+        sentinel = object()
+        previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+
+        class ForgedEnum:
+            def __getattr__(self, name: str):
+                raise AssertionError(f"rebound enum global executed: {name}")
+
+        try:
+            forged = ForgedEnum()
+            for name in names:
+                legacy.__dict__[name] = forged
+
+            record = evidence()
+            self.assertIs(record.outcome, PaperAttemptOutcome.ACCEPTED)
+            self.assertIs(record.evidence_grade, EvidenceGrade.EMPIRICAL)
+
+            run = PaperExecutionRun(
+                run_id="run-enum-authority",
+                trigger_id="trigger-enum-authority",
+                plan_id="plan-enum-authority",
+                plan_fingerprint="a" * 64,
+                model_fingerprint="b" * 64,
+                started_at="2026-10-05T00:00:00.100000+00:00",
+                attempts=(),
+                pending_action_ids=(),
+                recovery_decision=RecoveryDecision.NONE,
+                worst_case_exposure=Decimal("0"),
+                completed=True,
+            )
+            self.assertIs(run.recovery_decision, RecoveryDecision.NONE)
+        finally:
+            for name, value in previous.items():
+                if value is sentinel:
+                    legacy.__dict__.pop(name, None)
+                else:
+                    legacy.__dict__[name] = value
+
     def test_attempt_reload_ignores_rebound_module_enum_constructors(self) -> None:
         payload = self._attempt_payload()
         names = ("PaperAttemptOutcome", "EvidenceGrade")

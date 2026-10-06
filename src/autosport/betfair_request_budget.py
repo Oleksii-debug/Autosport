@@ -15,9 +15,11 @@ provide them explicitly. Reconciliation capacity is reserved before ordinary tra
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from fractions import Fraction
+from hashlib import sha256
+import json
 from threading import Lock
 from typing import Iterable
 
@@ -144,6 +146,69 @@ def _positive_int(value: object, field: str) -> int:
     return value
 
 
+def _canonical_rpc_params_json(params: object) -> str:
+    if type(params) is not dict:
+        raise BetfairRequestBudgetError(
+            "listMarketBook params must be an exact mapping"
+        )
+    try:
+        return json.dumps(
+            params,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise BetfairRequestBudgetError(
+            "listMarketBook params must be canonical JSON data"
+        ) from exc
+
+
+def _market_book_components(
+    params: object,
+) -> tuple[tuple[str, ...], tuple[str, ...], int | None, str | None, str | None]:
+    if type(params) is not dict:
+        raise BetfairRequestBudgetError(
+            "listMarketBook params must be an exact mapping"
+        )
+    market_ids = params.get("marketIds")
+    if type(market_ids) is not list:
+        raise BetfairRequestBudgetError(
+            "listMarketBook marketIds must be an exact JSON list"
+        )
+
+    price_projection = params.get("priceProjection")
+    price_data: object = ()
+    best_prices_depth: object = None
+    if price_projection is not None:
+        if type(price_projection) is not dict:
+            raise BetfairRequestBudgetError(
+                "listMarketBook priceProjection must be an exact mapping"
+            )
+        raw_price_data = price_projection.get("priceData", [])
+        if type(raw_price_data) is not list:
+            raise BetfairRequestBudgetError(
+                "listMarketBook priceData must be an exact JSON list"
+            )
+        price_data = tuple(raw_price_data)
+        overrides = price_projection.get("exBestOffersOverrides")
+        if overrides is not None:
+            if type(overrides) is not dict:
+                raise BetfairRequestBudgetError(
+                    "listMarketBook exBestOffersOverrides must be an exact mapping"
+                )
+            best_prices_depth = overrides.get("bestPricesDepth")
+
+    return (
+        tuple(market_ids),
+        tuple(price_data),
+        best_prices_depth,
+        params.get("orderProjection"),
+        params.get("matchProjection"),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class BetfairRequestBudgetPolicy:
     """Product-owned concurrency/backoff policy.
@@ -199,6 +264,12 @@ class BetfairRequestIntent:
     match_projection: str | None = None
     dedupe_key: str | None = None
     reconciliation_for_request_id: str | None = None
+    _market_book_params_json: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         _exact_text(self.request_id, "request_id")
@@ -281,6 +352,48 @@ class BetfairRequestIntent:
                     "place/update/replace must use EXECUTION_MUTATION priority"
                 )
 
+    def _assert_market_book_origin(self) -> str:
+        if self.operation is not BetfairRequestOperation.LIST_MARKET_BOOK:
+            if self._market_book_params_json is not None:
+                raise BetfairRequestBudgetError(
+                    "non-listMarketBook intent cannot carry MarketBook RPC origin"
+                )
+            return ""
+        raw = self._market_book_params_json
+        if type(raw) is not str:
+            raise BetfairRequestBudgetError(
+                "listMarketBook admission requires canonical RPC-param origin"
+            )
+        try:
+            params = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise BetfairRequestBudgetError(
+                "listMarketBook RPC origin is not valid canonical JSON"
+            ) from exc
+        canonical = _canonical_rpc_params_json(params)
+        if canonical != raw:
+            raise BetfairRequestBudgetError(
+                "listMarketBook RPC origin is not canonical"
+            )
+        (
+            market_ids,
+            price_data,
+            best_prices_depth,
+            order_projection,
+            match_projection,
+        ) = _market_book_components(params)
+        if (
+            market_ids != self.market_ids
+            or price_data != self.price_data
+            or best_prices_depth != self.best_prices_depth
+            or order_projection != self.order_projection
+            or match_projection != self.match_projection
+        ):
+            raise BetfairRequestBudgetError(
+                "listMarketBook intent no longer matches its canonical RPC origin"
+            )
+        return raw
+
     def _canonical_market_book_budget(
         self,
     ) -> _marketbook_budget.MarketBookRequestBudget | None:
@@ -351,6 +464,55 @@ class BetfairRequestIntent:
     @property
     def has_order_or_match_projection(self) -> bool:
         return self._has_order_aware_projection()
+
+    @property
+    def market_book_params_sha256(self) -> str | None:
+        if self.operation is not BetfairRequestOperation.LIST_MARKET_BOOK:
+            return None
+        return sha256(self._assert_market_book_origin().encode("utf-8")).hexdigest()
+
+    def assert_matches_market_book_params(self, params: object) -> None:
+        """Fail closed unless transport params are exactly the admitted RPC params."""
+
+        expected = self._assert_market_book_origin()
+        actual = _canonical_rpc_params_json(params)
+        if actual != expected:
+            raise BetfairRequestBudgetError(
+                "listMarketBook transport params do not match admitted RPC origin"
+            )
+
+
+def market_book_intent_from_rpc_params(
+    request_id: str,
+    priority: BetfairRequestPriority,
+    *,
+    params: object,
+    dedupe_key: str | None = None,
+) -> BetfairRequestIntent:
+    """Build one listMarketBook intent from the exact JSON-RPC params snapshot."""
+
+    raw = _canonical_rpc_params_json(params)
+    (
+        market_ids,
+        price_data,
+        best_prices_depth,
+        order_projection,
+        match_projection,
+    ) = _market_book_components(params)
+    intent = BetfairRequestIntent(
+        request_id=request_id,
+        operation=BetfairRequestOperation.LIST_MARKET_BOOK,
+        priority=priority,
+        market_ids=market_ids,
+        price_data=price_data,
+        best_prices_depth=best_prices_depth,
+        order_projection=order_projection,
+        match_projection=match_projection,
+        dedupe_key=dedupe_key,
+    )
+    object.__setattr__(intent, "_market_book_params_json", raw)
+    intent._assert_market_book_origin()
+    return intent
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,6 +734,8 @@ def admit_betfair_request(
     if type(policy) is not BetfairRequestBudgetPolicy:
         raise BetfairRequestBudgetError("policy must be an exact BetfairRequestBudgetPolicy")
     now = _nonnegative_int(now_monotonic_ns, "now_monotonic_ns")
+    if intent.operation is BetfairRequestOperation.LIST_MARKET_BOOK:
+        intent._assert_market_book_origin()
     if intent.request_id in state.in_flight_request_ids:
         return BetfairAdmission(
             BetfairAdmissionDecision.THROTTLE,
@@ -738,6 +902,7 @@ def record_market_book_dispatch(
         raise BetfairRequestBudgetError(
             "record_market_book_dispatch requires listMarketBook intent"
         )
+    intent._assert_market_book_origin()
     now = _nonnegative_int(now_monotonic_ns, "now_monotonic_ns")
     lower_bound = now - _ONE_SECOND_NS
     retained = tuple(
@@ -803,6 +968,8 @@ def release_betfair_request(
         raise BetfairRequestBudgetError("intent must be an exact BetfairRequestIntent")
     if intent.request_id not in state.in_flight_request_ids:
         raise BetfairRequestBudgetError("request_id has no in-flight reservation")
+    if intent.operation is BetfairRequestOperation.LIST_MARKET_BOOK:
+        intent._assert_market_book_origin()
     field = _pool_counter_field(intent.request_pool)
     current = getattr(state, field)
     if current <= 0:

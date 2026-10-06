@@ -417,7 +417,7 @@ class _ContinuousSessionState:
         # then silently adopt the winner's identity.
         with _durable_path_lock(self.path):
             if _path_exists(self.path):
-                raw = _read_method(self)
+                raw = self._read()
             else:
                 resolved_id = _text(
                     session_id or str(uuid.uuid4()),
@@ -448,7 +448,7 @@ class _ContinuousSessionState:
                         "source_state_projection_backlog": False,
                     },
                 )
-                raw = _read_method(self)
+                raw = self._read()
 
             existing_source = raw["source_id"]
             if existing_source != self.source_id:
@@ -1204,7 +1204,7 @@ class _ContinuousSessionState:
                 # Refresh full durable truth only on that external-change edge;
                 # steady-state running checks remain independent of retained
                 # settlement-history size.
-                raw = self._read()
+                raw = _read_method(self)
                 self._generation = raw["generation"]
                 self._cycles_completed = raw["cycles_completed"]
                 self._last_success_at = raw["last_success_at"]
@@ -1288,7 +1288,7 @@ class _ContinuousSessionState:
         # and rereading it are one serialized transaction. atomic_write_json()
         # already re-enters this canonical lock for publication.
         with _durable_path_lock(self.path):
-            raw = self._read()
+            raw = _read_method(self)
             mutation_result = mutate(raw)
             if mutation_result is False:
                 # Explicit no-op mutations do not manufacture a new generation

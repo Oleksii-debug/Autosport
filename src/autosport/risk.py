@@ -16,9 +16,38 @@ from decimal import (
 )
 
 from .domain import MarketEvent, PaperTicket, TicketLeg, TicketStatus
+from .exchange_exposure import locked_capital_for_exchange_side
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .paper import PaperBook
+
+
+def _make_locked_capital_authority():
+    calculator = locked_capital_for_exchange_side
+    calculator_code = calculator.__code__
+
+    def calculate(ticket: PaperTicket) -> Decimal:
+        if calculator.__code__ is not calculator_code:
+            raise ValueError("risk locked-capital exposure authority changed")
+        if type(ticket) is not PaperTicket or type(ticket.legs) is not tuple:
+            raise ValueError("risk ticket must be canonical")
+        if any(leg.exchange_side == "lay" for leg in ticket.legs):
+            if len(ticket.legs) != 1 or type(ticket.legs[0]) is not TicketLeg:
+                raise ValueError(
+                    "risk LAY exposure requires exactly one canonical single-leg ticket"
+                )
+            return calculator(
+                stake=ticket.stake,
+                odds=ticket.legs[0].locked_odds,
+                exchange_side="LAY",
+            )
+        return ticket.stake
+
+    return calculate
+
+
+_CANONICAL_LOCKED_CAPITAL_FOR_TICKET = _make_locked_capital_authority()
+del _make_locked_capital_authority
 
 
 def _canonical_context_text(name: str, value: object) -> str:
@@ -96,6 +125,12 @@ def _canonical_sha256(name: str, value: object) -> str:
     ):
         raise ValueError(f"{name} must be a lowercase 64-character SHA-256 hex digest")
     return digest
+
+
+def _reject_signed_zero_decimal(value: Decimal, name: str) -> None:
+    """Reject signed zero so durable risk evidence has one canonical zero form."""
+    if type(value) is Decimal and value.is_zero() and value.as_tuple().sign:
+        raise ValueError(f"{name} must not use a signed-zero Decimal representation")
 
 
 def _sha256_payload(payload: object) -> str:
@@ -177,7 +212,7 @@ class RiskOfRuinEvidence:
             )
 
         if (
-            not isinstance(self.evaluated_stake, Decimal)
+            type(self.evaluated_stake) is not Decimal
             or not self.evaluated_stake.is_finite()
             or self.evaluated_stake <= 0
         ):
@@ -185,7 +220,7 @@ class RiskOfRuinEvidence:
                 "risk-of-ruin evaluated_stake must be a positive finite exact Decimal"
             )
         if (
-            not isinstance(self.upper_bound, Decimal)
+            type(self.upper_bound) is not Decimal
             or not self.upper_bound.is_finite()
             or self.upper_bound < Decimal("0")
             or self.upper_bound > Decimal("1")
@@ -193,6 +228,7 @@ class RiskOfRuinEvidence:
             raise ValueError(
                 "risk-of-ruin upper_bound must be an exact Decimal between 0 and 1"
             )
+        _reject_signed_zero_decimal(self.upper_bound, "risk-of-ruin upper_bound")
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,20 +307,24 @@ class RiskOfRuinVectorEvidence:
         has_positive = False
         for stake in self.evaluated_stakes:
             if (
-                not isinstance(stake, Decimal)
+                type(stake) is not Decimal
                 or not stake.is_finite()
                 or stake < Decimal("0")
             ):
                 raise ValueError(
                     "vector risk-of-ruin evaluated_stakes must contain non-negative finite exact Decimals"
                 )
+            _reject_signed_zero_decimal(
+                stake,
+                "vector risk-of-ruin evaluated_stake",
+            )
             has_positive = has_positive or stake > 0
         if not has_positive:
             raise ValueError(
                 "vector risk-of-ruin evaluated_stakes must contain a positive stake"
             )
         if (
-            not isinstance(self.upper_bound, Decimal)
+            type(self.upper_bound) is not Decimal
             or not self.upper_bound.is_finite()
             or self.upper_bound < Decimal("0")
             or self.upper_bound > Decimal("1")
@@ -292,6 +332,10 @@ class RiskOfRuinVectorEvidence:
             raise ValueError(
                 "vector risk-of-ruin upper_bound must be an exact Decimal between 0 and 1"
             )
+        _reject_signed_zero_decimal(
+            self.upper_bound,
+            "vector risk-of-ruin upper_bound",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,7 +487,7 @@ class ProposedTicketRiskContext:
         if self.risk_of_ruin_upper_bound is not None:
             bound = self.risk_of_ruin_upper_bound
             if (
-                not isinstance(bound, Decimal)
+                type(bound) is not Decimal
                 or not bound.is_finite()
                 or bound < Decimal("0")
                 or bound > Decimal("1")
@@ -451,12 +495,17 @@ class ProposedTicketRiskContext:
                 raise ValueError(
                     "risk_of_ruin_upper_bound must be an exact Decimal between 0 and 1"
                 )
-        if self.risk_of_ruin_evidence is not None and not isinstance(
-            self.risk_of_ruin_evidence, RiskOfRuinEvidence
-        ):
-            raise ValueError(
-                "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"
-            )
+        if self.risk_of_ruin_evidence is not None:
+            if type(self.risk_of_ruin_evidence) is not RiskOfRuinEvidence:
+                raise ValueError(
+                    "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"
+                )
+            try:
+                RiskOfRuinEvidence.__post_init__(self.risk_of_ruin_evidence)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"
+                ) from exc
 
     @property
     def parlay_leg_count(self) -> int:
@@ -672,7 +721,10 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 ticket for ticket in tickets.values() if ticket.status is TicketStatus.OPEN
             )
             committed_stake = cls._exact_positive_sum(
-                tuple(ticket.stake for ticket in open_tickets)
+                tuple(
+                    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
+                    for ticket in open_tickets
+                )
             )
             open_position_count = len(open_tickets)
         except (ArithmeticError, AttributeError, TypeError, ValueError):
@@ -716,6 +768,9 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                                 "market_id": leg.market_id,
                                 "selection_id": leg.selection_id,
                                 "locked_odds": str(leg.locked_odds),
+                                "exchange_side": leg.exchange_side,
+                                "market_semantics_id": leg.market_semantics_id,
+                                "settlement_key": leg.settlement_key,
                             }
                             for leg in ticket.legs
                         ],
@@ -770,6 +825,9 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     "market_id": leg.market_id,
                     "selection_id": leg.selection_id,
                     "locked_odds": str(leg.locked_odds),
+                    "exchange_side": leg.exchange_side,
+                    "market_semantics_id": leg.market_semantics_id,
+                    "settlement_key": leg.settlement_key,
                 }
                 for leg in sorted(context.legs, key=lambda item: item.quote_key)
             ]
@@ -833,6 +891,18 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             return RiskDecision(
                 False,
                 "portfolio risk-of-ruin provenance-bound evidence is required by economic goal",
+            )
+        if type(evidence) is not RiskOfRuinEvidence:
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin evidence is invalid",
+            )
+        try:
+            RiskOfRuinEvidence.__post_init__(evidence)
+        except (AttributeError, TypeError, ValueError):
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin evidence is invalid",
             )
         if evidence.upper_bound > goal.max_risk_of_ruin:
             return RiskDecision(
@@ -904,7 +974,14 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 False,
                 "multi-candidate portfolio risk-of-ruin requires vector-bound evidence",
             )
-        if not isinstance(evidence, RiskOfRuinVectorEvidence):
+        if type(evidence) is not RiskOfRuinVectorEvidence:
+            return RiskDecision(
+                False,
+                "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
+            )
+        try:
+            RiskOfRuinVectorEvidence.__post_init__(evidence)
+        except (AttributeError, TypeError, ValueError):
             return RiskDecision(
                 False,
                 "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
@@ -1033,11 +1110,12 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     return None
 
                 if action == "open":
+                    locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     replay_balance = PaperBook._debit_balance(
-                        replay_balance, ticket.stake
+                        replay_balance, locked_capital
                     )
                     replay_committed = cls._exact_positive_sum(
-                        (replay_committed, ticket.stake)
+                        (replay_committed, locked_capital)
                     )
                     turnover = cls._exact_positive_sum((turnover, ticket.stake))
                 else:
@@ -1047,11 +1125,12 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                         set(winners_raw),
                         set(voids_raw),
                     )
+                    locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     with localcontext(cls._decimal_context()):
-                        replay_committed = replay_committed - ticket.stake
+                        replay_committed = replay_committed - locked_capital
                         loss = (
-                            ticket.stake - payout
-                            if payout < ticket.stake
+                            locked_capital - payout
+                            if payout < locked_capital
                             else Decimal("0")
                         )
                     if replay_committed < 0:
@@ -1086,7 +1165,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
 
             current_committed = cls._exact_positive_sum(
                 tuple(
-                    ticket.stake
+                    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     for ticket in book.tickets.values()
                     if ticket.status is TicketStatus.OPEN
                 )
@@ -1723,9 +1802,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             )
         if (
             risk_of_ruin_vector_evidence is not None
-            and not isinstance(
-                risk_of_ruin_vector_evidence, RiskOfRuinVectorEvidence
-            )
+            and type(risk_of_ruin_vector_evidence) is not RiskOfRuinVectorEvidence
         ):
             return StakeVectorDecision(
                 "WAIT",

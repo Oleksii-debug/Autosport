@@ -9,7 +9,12 @@ import autosport.risk_reporting as risk_reporting
 from autosport.domain import TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
-from autosport.risk import PaperRiskPolicy
+from autosport.risk import (
+    PaperRiskPolicy,
+    ProposedTicketRiskContext,
+    RiskOfRuinEvidence,
+    RiskOfRuinVectorEvidence,
+)
 from autosport.risk_reporting import (
     DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
     RISK_OF_RUIN_STATUS_UNKNOWN,
@@ -17,6 +22,221 @@ from autosport.risk_reporting import (
     RISK_REPORT_SCOPE_PAPER_ONLY,
     build_paper_risk_report,
 )
+
+
+class RiskOfRuinEvidenceCanonicalityTests(unittest.TestCase):
+    @staticmethod
+    def _kwargs(**overrides):
+        values = {
+            "evidence_id": "risk-evidence",
+            "research_protocol_sha256": "a" * 64,
+            "reproducibility_bundle_sha256": "b" * 64,
+            "producer_identity": "research-run",
+            "causal_cutoff": "2026-09-21T07:00:00+00:00",
+            "evaluated_at": "2026-09-21T07:05:00+00:00",
+            "bankroll_id": "paper-bankroll",
+            "currency": "USD",
+            "base_portfolio_sha256": "c" * 64,
+            "candidate_sha256": "d" * 64,
+            "evaluated_stake": Decimal("10"),
+            "upper_bound": Decimal("0"),
+        }
+        values.update(overrides)
+        return values
+
+    @staticmethod
+    def _vector_kwargs(**overrides):
+        values = RiskOfRuinEvidenceCanonicalityTests._kwargs()
+        del values["candidate_sha256"]
+        del values["evaluated_stake"]
+        values.update(
+            {
+                "candidate_vector_sha256": "e" * 64,
+                "evaluated_stakes": (Decimal("10"),),
+            }
+        )
+        values.update(overrides)
+        return values
+
+    def test_risk_of_ruin_rejects_signed_zero_upper_bound(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "must not use a signed-zero Decimal representation",
+        ):
+            RiskOfRuinEvidence(**self._kwargs(upper_bound=Decimal("-0")))
+
+    def test_vector_risk_of_ruin_rejects_signed_zero_values(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "must not use a signed-zero Decimal representation",
+        ):
+            RiskOfRuinVectorEvidence(
+                **self._vector_kwargs(
+                    evaluated_stakes=(Decimal("-0"), Decimal("10")),
+                )
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "must not use a signed-zero Decimal representation",
+        ):
+            RiskOfRuinVectorEvidence(
+                **self._vector_kwargs(
+                    candidate_vector_sha256="f" * 64,
+                    upper_bound=Decimal("-0"),
+                )
+            )
+
+    def test_ruin_evidence_rejects_decimal_subclass_protocol_forgery(self) -> None:
+        class ForgedDecimal(Decimal):
+            def is_finite(self):
+                return True
+
+            def __le__(self, other):
+                return False
+
+            def __lt__(self, other):
+                return False
+
+            def __gt__(self, other):
+                return False
+
+        forged_nan = ForgedDecimal("NaN")
+
+        for field in ("evaluated_stake", "upper_bound"):
+            with self.subTest(kind="scalar", field=field):
+                with self.assertRaisesRegex(ValueError, "exact Decimal"):
+                    RiskOfRuinEvidence(**self._kwargs(**{field: forged_nan}))
+
+        with self.assertRaisesRegex(ValueError, "exact Decimals"):
+            RiskOfRuinVectorEvidence(
+                **self._vector_kwargs(
+                    evaluated_stakes=(forged_nan, Decimal("10")),
+                )
+            )
+
+        with self.assertRaisesRegex(ValueError, "exact Decimal"):
+            RiskOfRuinVectorEvidence(
+                **self._vector_kwargs(upper_bound=forged_nan)
+            )
+
+    def test_ruin_evidence_subclasses_are_not_executable_authority(self) -> None:
+        class ForgedScalarEvidence(RiskOfRuinEvidence):
+            def __post_init__(self):
+                return None
+
+        class ForgedVectorEvidence(RiskOfRuinVectorEvidence):
+            def __post_init__(self):
+                return None
+
+        forged_scalar = ForgedScalarEvidence(
+            **self._kwargs(upper_bound=Decimal("-1"))
+        )
+        forged_vector = ForgedVectorEvidence(
+            **self._vector_kwargs(upper_bound=Decimal("-1"))
+        )
+        leg = TicketLeg(
+            event_id="event-forged",
+            market_id="market-forged",
+            selection_id="selection-forged",
+            locked_odds=Decimal("2"),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "canonical RiskOfRuinEvidence",
+        ):
+            ProposedTicketRiskContext(
+                legs=(leg,),
+                risk_of_ruin_evidence=forged_scalar,
+            )
+
+        context = ProposedTicketRiskContext(legs=(leg,))
+        object.__setattr__(context, "risk_of_ruin_evidence", forged_scalar)
+        scalar_decision = PaperRiskPolicy._risk_of_ruin_evidence_decision(
+            PaperBook("100"),
+            Decimal("10"),
+            PaperRiskReportingTests._goal(),
+            context,
+        )
+        self.assertIsNotNone(scalar_decision)
+        self.assertFalse(scalar_decision.allowed)
+        self.assertEqual(
+            scalar_decision.reason,
+            "portfolio risk-of-ruin evidence is invalid",
+        )
+
+        vector_decision = PaperRiskPolicy._risk_of_ruin_vector_evidence_decision(
+            PaperBook("100"),
+            PaperRiskReportingTests._goal(),
+            (),
+            (),
+            forged_vector,
+        )
+        self.assertIsNotNone(vector_decision)
+        self.assertFalse(vector_decision.allowed)
+        self.assertEqual(
+            vector_decision.reason,
+            "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
+        )
+
+    def test_ruin_evidence_is_revalidated_after_object_setattr_mutation(self) -> None:
+        leg = TicketLeg(
+            event_id="event-mutated",
+            market_id="market-mutated",
+            selection_id="selection-mutated",
+            locked_odds=Decimal("2"),
+        )
+
+        mutated_before_context = RiskOfRuinEvidence(**self._kwargs())
+        object.__setattr__(
+            mutated_before_context,
+            "upper_bound",
+            Decimal("-1"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "canonical RiskOfRuinEvidence",
+        ):
+            ProposedTicketRiskContext(
+                legs=(leg,),
+                risk_of_ruin_evidence=mutated_before_context,
+            )
+
+        scalar_evidence = RiskOfRuinEvidence(**self._kwargs())
+        context = ProposedTicketRiskContext(
+            legs=(leg,),
+            risk_of_ruin_evidence=scalar_evidence,
+        )
+        object.__setattr__(scalar_evidence, "upper_bound", Decimal("-1"))
+        scalar_decision = PaperRiskPolicy._risk_of_ruin_evidence_decision(
+            PaperBook("100"),
+            Decimal("10"),
+            PaperRiskReportingTests._goal(),
+            context,
+        )
+        self.assertIsNotNone(scalar_decision)
+        self.assertFalse(scalar_decision.allowed)
+        self.assertEqual(
+            scalar_decision.reason,
+            "portfolio risk-of-ruin evidence is invalid",
+        )
+
+        vector_evidence = RiskOfRuinVectorEvidence(**self._vector_kwargs())
+        object.__setattr__(vector_evidence, "upper_bound", Decimal("-1"))
+        vector_decision = PaperRiskPolicy._risk_of_ruin_vector_evidence_decision(
+            PaperBook("100"),
+            PaperRiskReportingTests._goal(),
+            (),
+            (),
+            vector_evidence,
+        )
+        self.assertIsNotNone(vector_decision)
+        self.assertFalse(vector_decision.allowed)
+        self.assertEqual(
+            vector_decision.reason,
+            "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
+        )
 
 
 class PaperRiskReportingTests(unittest.TestCase):
@@ -431,6 +651,81 @@ class PaperRiskReportingTests(unittest.TestCase):
             setcontext(original)
 
         self.assertEqual(actual, expected)
+
+
+
+    def test_portfolio_risk_digest_binds_exchange_side_and_market_semantics(self) -> None:
+        back = PaperBook("100")
+        back.open_ticket(
+            (TicketLeg(
+                "event-1",
+                "market-1",
+                "selection-1",
+                Decimal("3.00"),
+                sport="soccer",
+                exchange_side="back",
+                market_semantics_id="exchange.match.odds.v1",
+            ),),
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+        lay = PaperBook("100")
+        lay.open_ticket(
+            (TicketLeg(
+                "event-1",
+                "market-1",
+                "selection-1",
+                Decimal("3.00"),
+                sport="soccer",
+                exchange_side="lay",
+                market_semantics_id="exchange.match.odds.v1",
+            ),),
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+
+        back_digest = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(back)
+        lay_digest = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(lay)
+
+        self.assertIsNotNone(back_digest)
+        self.assertIsNotNone(lay_digest)
+        self.assertNotEqual(back_digest, lay_digest)
+
+
+    def test_portfolio_risk_digest_binds_market_semantics_revision(self) -> None:
+        first = PaperBook("100")
+        first.open_ticket(
+            (TicketLeg(
+                "event-1",
+                "market-1",
+                "selection-1",
+                Decimal("3.00"),
+                sport="soccer",
+                exchange_side="lay",
+                market_semantics_id="exchange.match.odds.v1",
+            ),),
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+        second = PaperBook("100")
+        second.open_ticket(
+            (TicketLeg(
+                "event-1",
+                "market-1",
+                "selection-1",
+                Decimal("3.00"),
+                sport="soccer",
+                exchange_side="lay",
+                market_semantics_id="exchange.match.odds.v2",
+            ),),
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+
+        self.assertNotEqual(
+            PaperRiskPolicy.risk_of_ruin_portfolio_sha256(first),
+            PaperRiskPolicy.risk_of_ruin_portfolio_sha256(second),
+        )
 
 
 if __name__ == "__main__":

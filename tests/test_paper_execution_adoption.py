@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from collections.abc import Mapping
 from decimal import Decimal
+from unittest.mock import patch
 from pathlib import Path
 
+import autosport._paper_execution_lay_adoption_guard as lay_guard
+import autosport.paper_execution_adoption as adoption_module
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
@@ -27,6 +31,71 @@ from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 QUOTE_AT = "2026-09-20T06:00:00+00:00"
 STARTED_AT = "2026-09-20T06:00:00.100000+00:00"
 EXPIRES_AT = "2026-09-20T06:01:00+00:00"
+
+
+class _MutatingObservationMapping(Mapping):
+    def __init__(self, key: str, value, prepared_value: PreparedPaperExecution) -> None:
+        self.key = key
+        self.value = value
+        self.prepared_value = prepared_value
+        self.mutations = 0
+
+    def __iter__(self):
+        if self.mutations == 0:
+            self.mutations += 1
+            object.__setattr__(
+                self.prepared_value.exposure_bindings[0],
+                "bankroll_id",
+                "mutated-during-mapping",
+            )
+        return iter((self.key,))
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, key):
+        if key != self.key:
+            raise KeyError(key)
+        return self.value
+
+
+class _HostilePaperBook(PaperBook):
+    authority_reads = 0
+
+    def __getattribute__(self, name):
+        if name in {
+            "initial_bankroll",
+            "balance",
+            "tickets",
+            "_lifecycle",
+            "_settlement_times",
+        }:
+            type(self).authority_reads += 1
+        return super().__getattribute__(name)
+
+
+class _HostileExchangeSide(str):
+    comparisons = 0
+
+    def __hash__(self) -> int:
+        type(self).comparisons += 1
+        return super().__hash__()
+
+    def __eq__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__eq__(other)
+
+
+class _HostileProtocolText(str):
+    comparisons = 0
+
+    def __eq__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__ne__(other)
 
 
 def action(
@@ -106,6 +175,7 @@ def evidence(
     *,
     odds: str | None = None,
     stake: str | None = None,
+    grade: EvidenceGrade = EvidenceGrade.CONFIGURED,
 ):
     return PaperExecutionEvidenceRecord(
         action_id=current.action_id,
@@ -118,7 +188,7 @@ def evidence(
         quote_id=current.quote_id,
         outcome=outcome,
         observed_at=STARTED_AT,
-        evidence_grade=EvidenceGrade.CONFIGURED,
+        evidence_grade=grade,
         evidence_source="fixture-observation",
         accepted_odds=odds,
         accepted_stake=stake,
@@ -154,24 +224,1212 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         )
         return book, ledger, runtime
 
-    def test_paper_value_lay_fails_before_execution_or_book_mutation(self):
+    def test_lay_recovery_rejects_paperbook_subclass_before_state_reads(self):
         with tempfile.TemporaryDirectory() as tmp:
-            book, _ledger, runtime = self.runtime(tmp)
+            _book, _ledger, runtime = self.runtime(tmp)
+            current = action("recovery-book-subclass", side="LAY")
+            current_prepared = prepared(runtime, current)
+            hostile = _HostilePaperBook("100.00")
+            _HostilePaperBook.authority_reads = 0
+
+            with self.assertRaisesRegex(TypeError, "exact PaperBook"):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=hostile,
+                    prepared=current_prepared,
+                    trigger_id="recovery-book-subclass",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(_HostilePaperBook.authority_reads, 0)
+
+    def test_recovery_dispatch_rejects_mutated_action_side_without_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("recovery-hostile-side", side="BACK")
+            current_prepared = prepared(runtime, current)
+            _HostileExchangeSide.comparisons = 0
+            object.__setattr__(
+                current,
+                "side",
+                _HostileExchangeSide("LAY"),
+            )
+
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,
-                "LAY PAPER adoption is unavailable",
+                "prepared action side|canonical ExecutionAction side authority",
+            ):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=book,
+                    prepared=current_prepared,
+                    trigger_id="recovery-hostile-side",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(ledger.events(), [])
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_binding_mutation_after_execution_cannot_redirect_materialized_exposure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("post-run-binding-mutation", side="BACK")
+            current_prepared = prepared(runtime, current)
+            binding = current_prepared.exposure_bindings[0]
+            original_execute = adoption_module.execute_paper_plan
+
+            def execute_then_mutate(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(binding, "bankroll_id", "redirected-bankroll")
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                execute_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "authority changed after mint",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="post-run-binding-mutation",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            run_events = [
+                event
+                for event in ledger.events()
+                if event["event_type"] == "RUN_COMPLETED"
+            ]
+            self.assertEqual(len(run_events), 1)
+
+    def test_decision_id_mutation_after_execution_cannot_rewrite_materialized_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("post-run-decision-mutation", side="BACK")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+
+            def execute_then_mutate(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(
+                    current_prepared.execution_plan,
+                    "decision_id",
+                    "redirected-decision",
+                )
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                execute_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "authority changed after mint",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="post-run-decision-mutation",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            run_events = [
+                event
+                for event in ledger.events()
+                if event["event_type"] == "RUN_COMPLETED"
+            ]
+            self.assertEqual(len(run_events), 1)
+
+    def test_preflight_decision_mutation_fails_before_live_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("preflight-decision-mutation", side="BACK")
+            current_prepared = prepared(runtime, current)
+            original_preflight = lay_guard._preflight_materialization_batch
+            original_materialize = runtime._materialize_attempt
+            materialize_calls = 0
+
+            def preflight_then_mutate(*args, **kwargs):
+                result = original_preflight(*args, **kwargs)
+                object.__setattr__(
+                    current_prepared.execution_plan,
+                    "decision_id",
+                    "redirected-after-preflight",
+                )
+                return result
+
+            def count_materialize(*args, **kwargs):
+                nonlocal materialize_calls
+                materialize_calls += 1
+                return original_materialize(*args, **kwargs)
+
+            with patch.object(
+                lay_guard,
+                "_preflight_materialization_batch",
+                preflight_then_mutate,
+            ), patch.object(
+                runtime,
+                "_materialize_attempt",
+                count_materialize,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "authority changed after mint",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="preflight-decision-mutation",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(materialize_calls, 0)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_existing_ticket_with_forged_decision_provenance_is_not_restart_equivalent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("forged-ticket-decision", side="BACK")
+            current_prepared = prepared(runtime, current)
+
+            first = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="forged-ticket-decision",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            self.assertEqual(len(first.ticket_ids), 1)
+            ticket = next(iter(book.tickets.values()))
+            object.__setattr__(
+                ticket,
+                "strategy_reason",
+                ticket.strategy_reason.replace(
+                    "decision_id=decision-1",
+                    "decision_id=forged-decision",
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "existing PaperBook exposure conflicts with durable execution attempt",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="forged-ticket-decision",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+    def test_runtime_book_replacement_after_attempt_fails_before_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("runtime-book-replacement", side="BACK")
+            current_prepared = prepared(runtime, current)
+            replacement = PaperBook("100.00")
+            original_execute = adoption_module.execute_paper_plan
+
+            def execute_then_replace(**kwargs):
+                run = original_execute(**kwargs)
+                runtime.book = replacement
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                execute_then_replace,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "runtime authority object changed after construction",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="runtime-book-replacement",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(replacement.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(replacement.balance, Decimal("100.00"))
+
+    def test_atomic_save_failure_restores_live_paperbook_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("save-failure-rollback", stake="10.00")
+            current_prepared = prepared(runtime, current)
+
+            def fail_before_replace(_book, _path):
+                raise OSError("simulated atomic snapshot failure")
+
+            with patch.object(PaperBook, "save", fail_before_replace):
+                with self.assertRaisesRegex(OSError, "simulated atomic snapshot failure"):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="save-failure-rollback",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(book.committed_capital, Decimal("0"))
+
+    def test_save_callback_cannot_redirect_durable_verification_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("save-path-redirection", side="BACK")
+            current_prepared = prepared(runtime, current)
+            original_save = PaperBook.save
+            canonical_path = runtime.paper_book_path
+            redirected_path = Path(tmp) / "redirected-paper-book.json"
+
+            def save_then_redirect(target, path):
+                result = original_save(target, path)
+                redirected_path.write_bytes(Path(path).read_bytes())
+                runtime.paper_book_path = redirected_path
+                return result
+
+            with patch.object(PaperBook, "save", save_then_redirect):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "runtime configuration changed after construction",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="save-path-redirection",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertTrue(Path(canonical_path).exists())
+            self.assertTrue(redirected_path.exists())
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+    def test_post_run_ticket_marker_mutation_cannot_redirect_restart_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("post-run-ticket-marker", side="BACK")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+            canonical_marker = PaperExecutionAdoptionRuntime._TICKET_MARKER
+
+            def execute_then_mutate_protocol(**kwargs):
+                run = original_execute(**kwargs)
+                PaperExecutionAdoptionRuntime._TICKET_MARKER = "forged_attempt_id="
+                return run
+
+            try:
+                with patch.object(
+                    adoption_module,
+                    "execute_paper_plan",
+                    execute_then_mutate_protocol,
+                ):
+                    with self.assertRaisesRegex(
+                        PaperExecutionAdoptionError,
+                        "runtime configuration changed after construction",
+                    ):
+                        runtime.execute(
+                            prepared=current_prepared,
+                            trigger_id="post-run-ticket-marker",
+                            started_at=STARTED_AT,
+                            materialize_exposure=True,
+                        )
+            finally:
+                PaperExecutionAdoptionRuntime._TICKET_MARKER = canonical_marker
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_hostile_protocol_marker_is_rejected_without_comparison_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("hostile-protocol-marker", side="BACK"),
+            )
+            canonical_marker = PaperExecutionAdoptionRuntime._TICKET_MARKER
+            _HostileProtocolText.comparisons = 0
+
+            try:
+                PaperExecutionAdoptionRuntime._TICKET_MARKER = _HostileProtocolText(
+                    canonical_marker
+                )
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "runtime configuration changed after construction",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="hostile-protocol-marker",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+            finally:
+                PaperExecutionAdoptionRuntime._TICKET_MARKER = canonical_marker
+
+            self.assertEqual(_HostileProtocolText.comparisons, 0)
+            self.assertEqual(ledger.events(), [])
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_post_mint_binding_mutation_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("binding-mutation", side="BACK")
+            current_prepared = prepared(runtime, current)
+            binding = current_prepared.exposure_bindings[0]
+            object.__setattr__(binding, "bankroll_id", "other-bankroll")
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "authority changed after mint",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="binding-mutation",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_post_mint_valid_action_mutation_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("action-mutation", odds="2.50", stake="10.00", side="BACK")
+            current_prepared = prepared(runtime, current)
+            object.__setattr__(current, "requested_stake", Decimal("11.00"))
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "authority changed after mint",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="action-mutation",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_post_init_config_mutation_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("config-mutation", side="BACK"))
+            object.__setattr__(runtime.config, "model_version", "mutated-model-version")
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                Exception,
+                "execution config|canonical|changed",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="config-mutation",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_runtime_ledger_replacement_fails_before_any_redirected_durable_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("ledger-replacement", side="BACK"))
+            redirected = PaperExecutionLedger(Path(tmp) / "redirected-paper-execution.jsonl")
+            runtime.ledger = redirected
+            original_events = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "runtime authority object changed",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="ledger-replacement",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), original_events)
+            self.assertEqual(redirected.events(), [])
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_runtime_book_replacement_fails_before_execution_or_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("book-replacement", side="BACK"))
+            runtime.book = PaperBook("100.00")
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "runtime authority object changed",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="book-replacement",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_forged_runtime_witness_attribute_cannot_authorize_ledger_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("forged-runtime-witness", side="BACK"))
+            redirected = PaperExecutionLedger(Path(tmp) / "forged-redirect.jsonl")
+            runtime.ledger = redirected
+            runtime._autosport_lay_runtime_authority_witness = {
+                "book": runtime.book,
+                "ledger": runtime.ledger,
+                "config": runtime.config,
+                "config_fingerprint": runtime.config.fingerprint,
+                "paper_book_path": runtime.paper_book_path,
+                "max_quote_age": runtime.max_quote_age,
+                "execution_lock": runtime._execution_lock,
+                "prepared_authorities": runtime._prepared_authorities,
+            }
+            original_events = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "runtime authority object changed",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="forged-runtime-witness",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), original_events)
+            self.assertEqual(redirected.events(), [])
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_forged_prepared_witness_attribute_cannot_authorize_post_mint_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("forged-prepared-witness", odds="2.50", stake="10.00", side="BACK")
+            current_prepared = prepared(runtime, current)
+            object.__setattr__(current, "requested_stake", Decimal("11.00"))
+            runtime._autosport_lay_prepared_authority_witnesses = {
+                id(current_prepared): "forged-current-witness"
+            }
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "authority changed after mint",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="forged-prepared-witness",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_invalid_started_at_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("invalid-started-at", side="BACK"))
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(Exception, "started_at|ISO-8601|canonical"):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="invalid-started-at",
+                    started_at="not-a-timestamp",
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_observation_mapping_callback_cannot_mutate_minted_binding_before_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("mapping-callback-mutation", side="BACK")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.50",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            events_before = list(ledger.events())
+            observations = _MutatingObservationMapping(
+                current.action_id,
+                registered.as_observation(),
+                current_prepared,
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "authority changed after mint",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="mapping-callback-mutation",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                    observations=observations,
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(observations.mutations, 1)
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_adoption_uses_durable_observation_snapshot_after_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("adoption-observation-snapshot", side="BACK")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.50",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            observation = registered.as_observation()
+            original_verify = lay_guard._reality._impl._verify_observation_authority
+
+            def verify_then_mutate(*, action, observation: object, registry):
+                record = original_verify(
+                    action=action,
+                    observation=observation,
+                    registry=registry,
+                )
+                object.__setattr__(observation, "accepted_odds", Decimal("99.00"))
+                object.__setattr__(observation, "accepted_stake", Decimal("1.00"))
+                return record
+
+            with patch.object(
+                lay_guard._reality._impl,
+                "_verify_observation_authority",
+                verify_then_mutate,
+            ):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="adoption-observation-snapshot",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                    observations={current.action_id: observation},
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(result.run.attempts[0].execution_odds, Decimal("2.50"))
+            self.assertEqual(result.run.attempts[0].execution_stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertEqual(len(book.tickets), 1)
+
+    def test_unknown_observation_key_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("known-action", side="BACK"))
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                Exception,
+                "observation.*outside execution plan",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="unknown-observation",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                    observations={"foreign-action": object()},
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_unknown_suspension_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("known-suspension", side="BACK"))
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                Exception,
+                "suspended_action_ids.*outside execution plan",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="unknown-suspension",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                    suspended_action_ids=frozenset({"foreign-action"}),
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_post_mint_decimal_resource_bomb_fails_before_digest_or_durable_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("resource-bomb", odds="2.50", stake="10.00", side="BACK")
+            current_prepared = prepared(runtime, current)
+            object.__setattr__(current, "requested_odds", Decimal("1E+9000"))
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "Decimal resource bounds",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="resource-bomb",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_cross_ledger_observation_fails_before_exposure_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("cross-ledger-scope", side="BACK")
+            current_prepared = prepared(runtime, current)
+            evidence_ledger = PaperExecutionLedger(
+                Path(tmp) / "other-paper-execution.jsonl"
+            )
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.50",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(evidence_ledger)
+            registry.register(registered)
+            runtime_events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                Exception,
+                "bound to the exact runtime ledger",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="cross-ledger-scope",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                    observations={current.action_id: registered.as_observation()},
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(ledger.events(), runtime_events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_observation_digest_mismatch_fails_before_exposure_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("digest-mismatch-scope", side="BACK")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.50",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            observation = registered.as_observation()
+            object.__setattr__(observation, "evidence_sha256", "0" * 64)
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                Exception,
+                "digest mismatch",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="digest-mismatch-scope",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                    observations={current.action_id: observation},
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_paper_value_rejects_mutated_side_subclass_without_comparison_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            event = market_event("back")
+            _HostileExchangeSide.comparisons = 0
+            object.__setattr__(
+                event,
+                "exchange_side",
+                _HostileExchangeSide("lay"),
+            )
+            events_before = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "exact canonical string",
             ):
                 runtime.prepare_paper_value_action(
-                    event=market_event("lay"),
+                    event=event,
                     stake=Decimal("10.00"),
-                    decision_id="decision-lay",
+                    decision_id="decision-hostile-side",
                     account_id="paper-account",
                     bankroll_id="paper-bankroll",
                     currency="EUR",
                 )
 
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(len(ledger.events()), events_before)
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_paper_value_lay_prepares_canonical_lay_without_book_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            prepared_lay = runtime.prepare_paper_value_action(
+                event=market_event("lay"),
+                stake=Decimal("10.00"),
+                decision_id="decision-lay",
+                account_id="paper-account",
+                bankroll_id="paper-bankroll",
+                currency="EUR",
+            )
+
+            self.assertEqual(prepared_lay.execution_plan.actions[0].side, "LAY")
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_paper_value_lay_executes_through_empirical_attempt_into_paperbook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            prepared_lay = runtime.prepare_paper_value_action(
+                event=market_event("lay"),
+                stake=Decimal("10.00"),
+                decision_id="decision-lay-e2e",
+                account_id="paper-account",
+                bankroll_id="paper-bankroll",
+                currency="EUR",
+            )
+            current = prepared_lay.execution_plan.actions[0]
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds=str(current.requested_odds),
+                stake=str(current.requested_stake),
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            result = runtime.execute(
+                prepared=prepared_lay,
+                trigger_id="trigger-lay-e2e",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(result.run.attempts[0].side, "LAY")
+            self.assertEqual(len(result.ticket_ids), 1)
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("2.50"))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("85.00"))
+            self.assertEqual(book.committed_capital, Decimal("15.00"))
+
+    def test_empirical_accepted_lay_materializes_liability_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("lay-adoption", odds="5.00", stake="10.00", side="LAY")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            first = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-adoption",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+            second = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-adoption",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(first.run, second.run)
+            self.assertEqual(first.ticket_ids, second.ticket_ids)
+            self.assertEqual(len(book.tickets), 1)
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("5.00"))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("60.00"))
+            self.assertEqual(book.committed_capital, Decimal("40.00"))
+
+    def test_lay_adoption_bypasses_post_import_module_authority_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action(
+                "lay-sealed-module-graph",
+                odds="5.00",
+                stake="10.00",
+                side="LAY",
+            )
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("post-import adoption authority replacement executed")
+
+            targets = (
+                (adoption_module, "execute_paper_plan"),
+                (adoption_module.copy, "deepcopy"),
+                (lay_guard._paper, "_install_validated_ticket_opening_authority"),
+                (lay_guard._paper, "_install_validated_paperbook_causal_history_authority"),
+                (lay_guard._reality, "_require_canonical_execution_plan_surface"),
+                (lay_guard._reality, "_require_canonical_execution_config_surface"),
+                (lay_guard._reality, "_validate_lay_execution_surface"),
+                (lay_guard._reality._impl, "_run_id"),
+                (lay_guard._reality._impl, "_verify_observation_authority"),
+                (lay_guard._reality._impl, "_observed_attempt"),
+                (lay_guard, "_validate_decimal_text_resource_bound"),
+            )
+            patches = [
+                patch.object(owner, name, forbidden)
+                for owner, name in targets
+            ]
+            for current_patch in patches:
+                current_patch.start()
+            try:
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-lay-sealed-module-graph",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                    observations={current.action_id: registered.as_observation()},
+                    evidence_registry=registry,
+                )
+            finally:
+                for current_patch in reversed(patches):
+                    current_patch.stop()
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertTrue(result.run.completed)
+            self.assertEqual(result.run.worst_case_exposure, Decimal("40.0000"))
+            self.assertEqual(len(book.tickets), 1)
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("60.00"))
+            self.assertEqual(book.committed_capital, Decimal("40.00"))
+
+    def test_empirical_accepted_lay_liability_uses_accepted_odds_not_requested_odds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action(
+                "lay-accepted-odds-move",
+                odds="5.00",
+                stake="10.00",
+                side="LAY",
+            )
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="4.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            result = runtime.execute(
+                prepared=prepared(runtime, current),
+                trigger_id="trigger-lay-accepted-odds-move",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(result.run.worst_case_exposure, Decimal("30.00"))
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("4.00"))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("70.00"))
+            self.assertEqual(book.committed_capital, Decimal("30.00"))
+
+    def test_lay_recovery_class_open_ticket_override_cannot_replace_reconstruction_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            pre_action_book = PaperBook("100.00")
+            current_prepared = prepared(
+                runtime,
+                action(
+                    "lay-recovery-open-ticket-class-override",
+                    odds="5.00",
+                    stake="10.00",
+                    side="LAY",
+                ),
+            )
+            runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-recovery-open-ticket-class-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class open_ticket override must not own recovery reconstruction")
+
+            with patch.object(PaperBook, "open_ticket", new=forbidden):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=pre_action_book,
+                    prepared=current_prepared,
+                    trigger_id="trigger-lay-recovery-open-ticket-class-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("60.00"))
+
+    def test_lay_recovery_instance_load_override_cannot_replace_durable_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            pre_action_book = PaperBook("100.00")
+            current = action(
+                "lay-recovery-ledger-instance-override",
+                odds="5.00",
+                stake="10.00",
+                side="LAY",
+            )
+            current_prepared = prepared(runtime, current)
+
+            runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-recovery-ledger-instance-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            hostile_calls = 0
+
+            def hostile_load_run(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("hostile instance load_run executed")
+
+            with patch.object(ledger, "load_run", hostile_load_run):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=pre_action_book,
+                    prepared=current_prepared,
+                    trigger_id="trigger-lay-recovery-ledger-instance-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("60.00"))
+
+    def test_empirical_lay_recovery_replays_durable_observation_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            pre_action_book = PaperBook("100.00")
+            current = action("lay-recovery-evidence", odds="5.00", stake="10.00", side="LAY")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-recovery-evidence",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            runtime.assert_recoverable_book_state(
+                pre_action_book=pre_action_book,
+                prepared=current_prepared,
+                trigger_id="trigger-lay-recovery-evidence",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(book.balance, Decimal("60.00"))
+            self.assertEqual(book.committed_capital, Decimal("40.00"))
+            self.assertEqual(len(book.tickets), 1)
+
+    def test_empirical_accepted_lay_restart_reuses_same_durable_exposure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            book_path = Path(tmp) / "paper-book.json"
+            current = action("lay-restart", odds="5.00", stake="10.00", side="LAY")
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            first = runtime.execute(
+                prepared=prepared(runtime, current),
+                trigger_id="trigger-lay-restart",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            reloaded_book = PaperBook.load(book_path)
+            restarted = PaperExecutionAdoptionRuntime(
+                book=reloaded_book,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=book_path,
+            )
+            second = restarted.execute(
+                prepared=prepared(restarted, current),
+                trigger_id="trigger-lay-restart",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(first.run, second.run)
+            self.assertEqual(first.ticket_ids, second.ticket_ids)
+            self.assertEqual(len(reloaded_book.tickets), 1)
+            ticket = next(iter(reloaded_book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(reloaded_book.balance, Decimal("60.00"))
+            self.assertEqual(reloaded_book.committed_capital, Decimal("40.00"))
+
+    def test_empirical_partial_lay_materializes_only_partial_liability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("lay-partial", odds="5.00", stake="10.00", side="LAY")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.PARTIAL,
+                odds="4.50",
+                stake="4.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-partial",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(len(result.ticket_ids), 1)
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("4.50"))
+            self.assertEqual(ticket.stake, Decimal("4.00"))
+            self.assertEqual(book.balance, Decimal("86.00"))
+            self.assertEqual(book.committed_capital, Decimal("14.00"))
 
     def test_paper_value_back_and_legacy_side_remain_back_compatible(self):
         for exchange_side in ("back", None):
@@ -187,24 +1445,24 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 )
                 self.assertEqual(current.execution_plan.actions[0].side, "BACK")
 
-    def test_materializer_rejects_non_back_action_before_attempt_adoption(self):
+    def test_materializer_rejects_noncanonical_action_side_before_attempt_adoption(self):
         with tempfile.TemporaryDirectory() as tmp:
             _book, _ledger, runtime = self.runtime(tmp)
             binding = PaperExposureBinding(
-                action_id="lay-action",
+                action_id="bad-side-action",
                 sport="soccer",
                 bankroll_id="paper-bankroll",
                 currency="EUR",
             )
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,
-                "PaperBook materialization supports BACK execution only",
+                "canonical BACK or LAY",
             ):
                 runtime._materialize_attempt(
                     attempt=object(),
-                    action=action("lay-action", side="LAY"),
+                    action=action("bad-side-action", side="SIDEWAYS"),
                     binding=binding,
-                    decision_id="decision-lay",
+                    decision_id="decision-bad-side",
                 )
 
     def test_moved_accepted_quote_materializes_execution_truth_once(self):
@@ -357,6 +1615,282 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(len(committed_book.tickets), 1)
             self.assertEqual(PaperBook.load(book_path).tickets, committed_book.tickets)
 
+    def test_materialization_bypasses_post_execution_instance_ledger_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("durable-instance-override", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+
+            def forbidden(*args, **kwargs):
+                raise AssertionError("instance ledger override must not own durable truth")
+
+            def execute_then_override_instance_ledger(**kwargs):
+                run = original_execute(**kwargs)
+                ledger.events = forbidden
+                ledger.load_run = forbidden
+                return run
+
+            try:
+                with patch.object(
+                    adoption_module,
+                    "execute_paper_plan",
+                    execute_then_override_instance_ledger,
+                ):
+                    result = runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="trigger-durable-instance-override",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+            finally:
+                ledger.__dict__.pop("events", None)
+                ledger.__dict__.pop("load_run", None)
+
+            self.assertEqual(result.run.attempts[0].execution_stake, Decimal("10.00"))
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+    def test_materialization_bypasses_post_execution_class_ledger_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("durable-class-override", stake="10.00"),
+            )
+            original_execute = adoption_module.execute_paper_plan
+            original_events = PaperExecutionLedger.events
+            original_load_run = PaperExecutionLedger.load_run
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class ledger override must not own durable truth")
+
+            def execute_then_override_class_ledger(**kwargs):
+                run = original_execute(**kwargs)
+                PaperExecutionLedger.events = forbidden
+                PaperExecutionLedger.load_run = forbidden
+                return run
+
+            try:
+                with patch.object(
+                    adoption_module,
+                    "execute_paper_plan",
+                    execute_then_override_class_ledger,
+                ):
+                    result = runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="trigger-durable-class-override",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+            finally:
+                PaperExecutionLedger.events = original_events
+                PaperExecutionLedger.load_run = original_load_run
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(result.run.attempts[0].execution_stake, Decimal("10.00"))
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+    def test_lay_recovery_class_load_override_cannot_replace_durable_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            pre_action_book = PaperBook("100.00")
+            current_prepared = prepared(
+                runtime,
+                action(
+                    "lay-recovery-ledger-class-override",
+                    odds="5.00",
+                    stake="10.00",
+                    side="LAY",
+                ),
+            )
+            runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-recovery-ledger-class-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class load_run override must not own recovery truth")
+
+            with patch.object(PaperExecutionLedger, "load_run", new=forbidden):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=pre_action_book,
+                    prepared=current_prepared,
+                    trigger_id="trigger-lay-recovery-ledger-class-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("60.00"))
+
+    def test_materialization_reloads_durable_attempt_economics_after_execution_callback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("durable-return-reload", odds="2.50", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+
+            def execute_then_mutate_returned_attempt(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(
+                    run.attempts[0],
+                    "execution_stake",
+                    Decimal("1.00"),
+                )
+                object.__setattr__(
+                    run.attempts[0],
+                    "execution_odds",
+                    Decimal("9.00"),
+                )
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                execute_then_mutate_returned_attempt,
+            ):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-durable-return-reload",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(result.run.attempts[0].execution_stake, Decimal("10.00"))
+            self.assertEqual(result.run.attempts[0].execution_odds, Decimal("2.50"))
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("2.50"))
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+    def test_single_live_materialization_corruption_rolls_back_economic_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("single-live-corruption", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            original_open_ticket = PaperBook.open_ticket
+
+            def open_then_corrupt_live_balance(target, *args, **kwargs):
+                ticket = original_open_ticket(target, *args, **kwargs)
+                if target is book:
+                    target.balance = Decimal("89.00")
+                return ticket
+
+            with patch.object(
+                PaperBook,
+                "open_ticket",
+                open_then_corrupt_live_balance,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "invalid after batch materialization",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="trigger-single-live-corruption",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(book.committed_capital, Decimal("0"))
+
+    def test_live_batch_runtime_book_swap_restores_pinned_economic_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            first = action("batch-book-swap-a1", stake="10.00")
+            second = action("batch-book-swap-a2", stake="10.00")
+            current_prepared = prepared(runtime, first, second)
+            original_open_ticket = PaperBook.open_ticket
+            replacement = PaperBook("999.00")
+            live_calls = 0
+
+            def open_then_swap_runtime_book(target, *args, **kwargs):
+                nonlocal live_calls
+                ticket = original_open_ticket(target, *args, **kwargs)
+                if target is book:
+                    live_calls += 1
+                    if live_calls == 1:
+                        runtime.book = replacement
+                return ticket
+
+            with patch.object(
+                PaperBook,
+                "open_ticket",
+                open_then_swap_runtime_book,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "runtime authority object changed",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="trigger-batch-book-swap",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(live_calls, 1)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(book.committed_capital, Decimal("0"))
+
+    def test_live_batch_callback_mutation_rolls_back_prior_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            first = action("batch-atomic-a1", stake="10.00")
+            second = action("batch-atomic-a2", stake="10.00")
+            current_prepared = prepared(runtime, first, second)
+            second_binding = current_prepared.exposure_bindings[1]
+            original_open_ticket = PaperBook.open_ticket
+            live_calls = 0
+
+            def open_then_mutate_later_authority(target, *args, **kwargs):
+                nonlocal live_calls
+                ticket = original_open_ticket(target, *args, **kwargs)
+                if target is book:
+                    live_calls += 1
+                    if live_calls == 1:
+                        object.__setattr__(
+                            second_binding,
+                            "bankroll_id",
+                            "mutated-after-first-live-open",
+                        )
+                return ticket
+
+            with patch.object(
+                PaperBook,
+                "open_ticket",
+                open_then_mutate_later_authority,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "authority changed after mint",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="trigger-batch-atomic-callback",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(live_calls, 1)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(book.committed_capital, Decimal("0"))
+
     def test_second_action_rejection_keeps_only_first_accepted_exposure(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)
@@ -486,6 +2020,550 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertTrue(result.run.completed)
             self.assertEqual(result.ticket_ids, ())
             self.assertEqual(book.tickets, {})
+
+
+    def test_restart_ticket_matching_rejects_mutated_ticket_before_hostile_comparison(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("restart-hostile-ticket")
+            current_prepared = prepared(runtime, current)
+            first = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-restart-hostile-ticket",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            self.assertEqual(len(first.ticket_ids), 1)
+            ticket = next(iter(book.tickets.values()))
+            object.__setattr__(
+                ticket,
+                "bankroll_id",
+                _HostileExchangeSide(ticket.bankroll_id),
+            )
+            _HostileExchangeSide.comparisons = 0
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "PaperBook state is invalid before execution materialization",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-restart-hostile-ticket",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(len(book.tickets), 1)
+
+
+    def test_post_execution_callback_mutation_fails_before_hostile_action_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("post-exec-action")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+
+            def mutate_after_execution(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(
+                    current_prepared.execution_plan.actions[0],
+                    "action_id",
+                    _HostileExchangeSide("post-exec-action"),
+                )
+                _HostileExchangeSide.comparisons = 0
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                side_effect=mutate_after_execution,
+            ), self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared action action_id must retain exact canonical text authority",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-post-exec-action",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(book.tickets, {})
+
+    def test_post_execution_callback_binding_mutation_fails_before_hostile_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("post-exec-binding")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+
+            def mutate_after_execution(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(
+                    current_prepared.exposure_bindings[0],
+                    "action_id",
+                    _HostileExchangeSide("post-exec-binding"),
+                )
+                _HostileExchangeSide.comparisons = 0
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                side_effect=mutate_after_execution,
+            ), self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared binding action_id must retain exact canonical text authority",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-post-exec-binding",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(book.tickets, {})
+
+    def test_post_execution_runtime_redirect_fails_before_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("post-exec-ledger"))
+            original_execute = adoption_module.execute_paper_plan
+
+            def redirect_after_execution(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(
+                    runtime,
+                    "ledger",
+                    PaperExecutionLedger(Path(tmp) / "redirected-ledger.jsonl"),
+                )
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                side_effect=redirect_after_execution,
+            ), self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "runtime authority object changed after construction",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-post-exec-ledger",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(book.tickets, {})
+            self.assertIsNot(runtime.ledger, ledger)
+
+
+    def test_multi_accept_batch_insufficient_bankroll_is_atomic_in_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            a1 = action("atomic-a1", stake="60.00")
+            a2 = action("atomic-a2", stake="60.00")
+            current_prepared = prepared(runtime, a1, a2)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "accepted PAPER batch cannot be materialized atomically",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-atomic-batch",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(book.committed_capital, Decimal("0"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse((Path(tmp) / "paper-book.json").exists())
+
+    def test_multi_accept_lay_batch_preflights_aggregate_liability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            # Each 20 @ 4.0 LAY consumes 60 liability. The second accepted fill
+            # would exceed the 100 bankroll if live mutation happened first.
+            a1 = action("atomic-lay-a1", odds="4.00", stake="20.00", side="LAY")
+            a2 = action("atomic-lay-a2", odds="4.00", stake="20.00", side="LAY")
+            current_prepared = prepared(runtime, a1, a2)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "accepted PAPER batch cannot be materialized atomically",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-atomic-lay-batch",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(book.committed_capital, Decimal("0"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse((Path(tmp) / "paper-book.json").exists())
+
+
+    def test_multi_accept_batch_preflight_keeps_authorized_success_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            a1 = action("atomic-ok-a1", stake="20.00")
+            a2 = action("atomic-ok-a2", stake="20.00")
+
+            result = runtime.execute(
+                prepared=prepared(runtime, a1, a2),
+                trigger_id="trigger-atomic-ok",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(len(result.ticket_ids), 2)
+            self.assertEqual(len(book.tickets), 2)
+            self.assertEqual(book.balance, Decimal("60.00"))
+            self.assertEqual(book.committed_capital, Decimal("40.00"))
+            durable = PaperBook.load(Path(tmp) / "paper-book.json")
+            self.assertEqual(durable.balance, Decimal("60.00"))
+            self.assertEqual(len(durable.tickets), 2)
+
+
+    def test_instance_save_override_cannot_replace_persistence_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("instance-save-override", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            book_path = Path(tmp) / "paper-book.json"
+            hostile_calls = 0
+
+            def hostile_save(_path):
+                nonlocal hostile_calls
+                hostile_calls += 1
+
+            book.save = hostile_save
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="instance-save-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertTrue(book_path.exists())
+            durable = PaperBook.load(book_path)
+            self.assertEqual(durable.balance, Decimal("90.00"))
+            self.assertEqual(durable.tickets, book.tickets)
+
+
+    def test_class_save_override_cannot_replace_persistence_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("class-save-override", stake="10.00"))
+            book_path = Path(tmp) / "paper-book.json"
+            hostile_calls = 0
+
+            def hostile_save(_book, _path):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("hostile class save executed")
+
+            with patch.object(PaperBook, "save", new=hostile_save):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="class-save-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            durable = PaperBook.load(book_path)
+            self.assertEqual(durable.balance, Decimal("90.00"))
+            self.assertEqual(durable.tickets, book.tickets)
+
+    def test_class_load_override_cannot_replace_reload_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("class-load-override", stake="10.00"))
+            book_path = Path(tmp) / "paper-book.json"
+            hostile_calls = 0
+
+            def hostile_load(_path):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("hostile class load executed")
+
+            with patch.object(PaperBook, "load", new=hostile_load):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="class-load-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            durable = PaperBook.load(book_path)
+            self.assertEqual(durable.balance, Decimal("90.00"))
+            self.assertEqual(durable.tickets, book.tickets)
+
+
+    def test_class_open_ticket_override_cannot_replace_money_moving_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("class-open-ticket-override", stake="10.00"),
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class open_ticket override must not run")
+
+            with patch.object(PaperBook, "open_ticket", new=forbidden):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="class-open-ticket-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertEqual(len(book.tickets), 1)
+
+    def test_instance_open_ticket_override_cannot_replace_money_moving_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("instance-open-ticket-override", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            hostile_calls = 0
+
+            def hostile_open_ticket(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("instance open_ticket override must not run")
+
+            book.open_ticket = hostile_open_ticket
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="instance-open-ticket-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertEqual(len(book.tickets), 1)
+
+    def test_instance_materialize_override_cannot_replace_adoption_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("instance-materialize-override", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            hostile_calls = 0
+
+            def hostile_materialize(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("instance materialization override must not run")
+
+            runtime._materialize_attempt = hostile_materialize
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="instance-materialize-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertEqual(len(book.tickets), 1)
+
+
+    def test_instance_execute_unlocked_override_cannot_bypass_guard_entrypoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("instance-execute-unlocked-override", stake="10.00"),
+            )
+            hostile_calls = 0
+
+            def hostile_execute_unlocked(**_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("instance _execute_unlocked override must not run")
+
+            runtime._execute_unlocked = hostile_execute_unlocked
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="instance-execute-unlocked-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertEqual(len(book.tickets), 1)
+
+    def test_instance_authority_method_overrides_cannot_redirect_canonical_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("instance-authority-method-overrides", stake="10.00"),
+            )
+            calls = {"minted": 0, "run_id": 0, "scope": 0}
+
+            def hostile_minted(*_args, **_kwargs):
+                calls["minted"] += 1
+                raise AssertionError("instance _require_minted override must not run")
+
+            def hostile_run_id(*_args, **_kwargs):
+                calls["run_id"] += 1
+                return "forged-run-id"
+
+            def hostile_scope(*_args, **_kwargs):
+                calls["scope"] += 1
+                raise AssertionError("instance exposure-scope override must not run")
+
+            runtime._require_minted = hostile_minted
+            runtime.expected_run_id = hostile_run_id
+            runtime._publish_exposure_scope = hostile_scope
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="instance-authority-method-overrides",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(calls, {"minted": 0, "run_id": 0, "scope": 0})
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+
+    def test_class_attempt_identity_override_cannot_replace_materialization_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("class-attempt-identity-override", stake="10.00"),
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class attempt identity override executed")
+
+            with patch.object(
+                PaperExecutionAdoptionRuntime,
+                "_require_attempt_action_identity",
+                new=forbidden,
+            ):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="class-attempt-identity-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+    def test_class_assert_same_book_override_cannot_replace_reload_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("class-assert-same-book-override", stake="10.00"),
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class assert_same_book_state override executed")
+
+            with patch.object(
+                PaperExecutionAdoptionRuntime,
+                "_assert_same_book_state",
+                new=forbidden,
+            ):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="class-assert-same-book-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+    def test_lay_recovery_class_same_book_override_cannot_replace_state_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            pre_action_book = PaperBook("100.00")
+            current_prepared = prepared(
+                runtime,
+                action(
+                    "class-same-book-recovery",
+                    odds="5.00",
+                    stake="10.00",
+                    side="LAY",
+                ),
+            )
+            runtime.execute(
+                prepared=current_prepared,
+                trigger_id="class-same-book-recovery",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                return True
+
+            with patch.object(
+                PaperExecutionAdoptionRuntime,
+                "_same_book_state",
+                new=forbidden,
+            ):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=pre_action_book,
+                    prepared=current_prepared,
+                    trigger_id="class-same-book-recovery",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(book.balance, Decimal("60.00"))
+            self.assertEqual(len(book.tickets), 1)
 
 
 if __name__ == "__main__":

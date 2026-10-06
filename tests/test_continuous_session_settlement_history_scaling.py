@@ -1121,26 +1121,30 @@ def test_sidecar_close_failure_does_not_mask_primary_integrity_error(monkeypatch
         state.record_failure(code="CANONICAL_FAILURE")
 
         original_close = continuous_session.os.close
+        original_lseek = continuous_session.os.lseek
+        seek_calls = 0
 
         def failing_close(descriptor: int) -> None:
             original_close(descriptor)
             raise OSError("simulated close failure")
 
-        def failing_bounded_reader(_descriptor: int, _limit: int) -> bytes:
-            raise continuous_session.ContinuousSessionError(
-                "simulated primary bounded-read integrity failure"
-            )
+        def second_seek_fails(descriptor: int, offset: int, whence: int) -> int:
+            nonlocal seek_calls
+            seek_calls += 1
+            if seek_calls == 2:
+                raise OSError("simulated primary verification failure")
+            return original_lseek(descriptor, offset, whence)
 
         monkeypatch.setattr(continuous_session.os, "close", failing_close)
+        monkeypatch.setattr(continuous_session.os, "lseek", second_seek_fails)
 
         try:
             state._read_error_checkpoint_bytes(
                 _os_close=failing_close,
-                _bounded_descriptor_read=failing_bounded_reader,
-                _bounded_descriptor_read_code=failing_bounded_reader.__code__,
+                _os_lseek=second_seek_fails,
             )
         except continuous_session.ContinuousSessionError as exc:
-            assert "primary bounded-read integrity failure" in str(exc)
+            assert "cannot verify continuous session operational error checkpoint file" in str(exc)
             assert any(
                 "descriptor close also failed" in note
                 for note in (exc.__notes__ or [])

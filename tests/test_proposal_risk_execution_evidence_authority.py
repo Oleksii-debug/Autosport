@@ -342,7 +342,7 @@ def _row_impl(
         candidate_vector_sha256=(
             candidate_vector_sha256 or precommit.candidate_vector_sha256
         ),
-        executed_stakes=executed_stakes or precommit.evaluated_stakes,
+        executed_capital_at_risk=executed_stakes or precommit.evaluated_stakes,
         execution_engine_sha256=_sha(engine),
         source_sha256=_sha(source),
         observed_at=observed_at,
@@ -532,7 +532,7 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
             self._row(
                 "member-a",
                 source="a",
-                executed_stakes=(Decimal("4"), Decimal("1")),
+                executed_capital_at_risk=(Decimal("4"), Decimal("1")),
             ),
         )
         for bad in bad_rows:
@@ -3816,6 +3816,8 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
         self.assertTrue(result.evaluation_identity_proven)
         self.assertTrue(result.base_portfolio_identity_proven)
         self.assertTrue(result.counterfactual_target_stake_reservation_proven)
+        self.assertTrue(result.counterfactual_target_capital_reservation_proven)
+        self.assertEqual(result.evaluated_capital_at_risk, result.evaluated_stakes)
         self.assertTrue(result.terminal_payout_reconstruction_proven)
         self.assertTrue(result.counterfactual_minimum_cash_floor_proven)
         self.assertFalse(result.per_market_terminal_space_exact)
@@ -3967,7 +3969,7 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
         payouts, terminal, minimum = cash_floor_authority._member_cash_path(
             base_balance=Decimal("10"),
             post_open_balance=post_open,
-            stakes=(Decimal("0"), Decimal("2"), Decimal("0")),
+            capital_at_risk=(Decimal("0"), Decimal("2"), Decimal("0")),
             candidate_profits=(
                 Decimal("0"),
                 Decimal("-2"),
@@ -4004,7 +4006,7 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
                     cash_floor_authority._member_cash_path(
                         base_balance=Decimal("10"),
                         post_open_balance=Decimal("9"),
-                        stakes=(Decimal("1"),),
+                        capital_at_risk=(Decimal("1"),),
                         candidate_profits=(Decimal("-1"),),
                         total_profit=Decimal("-1"),
                         member_index=invalid,
@@ -4013,12 +4015,12 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
     def test_cash_path_rejects_negative_member_stake(self) -> None:
         with self.assertRaisesRegex(
             ProductProposalRiskCounterfactualCashFloorError,
-            "member target stake cannot be negative",
+            "member target capital at risk cannot be negative",
         ):
             cash_floor_authority._member_cash_path(
                 base_balance=Decimal("10"),
                 post_open_balance=Decimal("9"),
-                stakes=(Decimal("-1"),),
+                capital_at_risk=(Decimal("-1"),),
                 candidate_profits=(Decimal("1"),),
                 total_profit=Decimal("0"),
                 member_index=0,
@@ -4032,7 +4034,7 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
             cash_floor_authority._member_cash_path(
                 base_balance=Decimal("10"),
                 post_open_balance=Decimal("11"),
-                stakes=(Decimal("1"),),
+                capital_at_risk=(Decimal("1"),),
                 candidate_profits=(Decimal("0"),),
                 total_profit=Decimal("0"),
                 member_index=0,
@@ -4046,7 +4048,7 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
             cash_floor_authority._member_cash_path(
                 base_balance=Decimal("10"),
                 post_open_balance=Decimal("9"),
-                stakes=[Decimal("1")],
+                capital_at_risk=[Decimal("1")],
                 candidate_profits=(Decimal("0"),),
                 total_profit=Decimal("0"),
                 member_index=0,
@@ -4060,7 +4062,7 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
             cash_floor_authority._member_cash_path(
                 base_balance=Decimal("10"),
                 post_open_balance=Decimal("9"),
-                stakes=(Decimal("1"),),
+                capital_at_risk=(Decimal("1"),),
                 candidate_profits=(Decimal("-2"),),
                 total_profit=Decimal("-2"),
                 member_index=0,

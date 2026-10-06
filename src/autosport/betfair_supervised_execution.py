@@ -429,6 +429,26 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
             request,
             timeout=timeout_seconds,
         ) as response:
+            status = getattr(
+                response,
+                "status",
+                getattr(response, "code", None),
+            )
+            if status != 200:
+                raise BetfairReadOnlyError(
+                    "Betfair HTTP response status must be exactly 200, "
+                    f"got {status!r}"
+                )
+            geturl = getattr(response, "geturl", None)
+            final_url = (
+                geturl()
+                if callable(geturl)
+                else getattr(response, "url", None)
+            )
+            if final_url != url:
+                raise BetfairReadOnlyError(
+                    "Betfair HTTP response origin changed"
+                )
             payload = response.read(transport._max_response_bytes + 1)
         private_dispatch = getattr(private_opener, "__dict__", {})
         if (

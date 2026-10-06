@@ -445,8 +445,9 @@ def test_payload_encoder_rejects_bound_default_rebinding() -> None:
     assert original_defaults is not None
 
     operation.__defaults__ = (
+        original_defaults[0],
         lambda value: value,
-        *original_defaults[1:],
+        *original_defaults[2:],
     )
     try:
         with pytest.raises(
@@ -515,7 +516,7 @@ def test_payload_decoder_rejects_bound_nested_default_rebinding() -> None:
     operation = economic_goal_store_module._BOUND_ECONOMIC_GOAL_FROM_PAYLOAD
     original_defaults = operation.__defaults__
     assert original_defaults is not None
-    snapshotter = original_defaults[1]
+    snapshotter = original_defaults[2]
     snapshot_defaults = snapshotter.__defaults__
     assert snapshot_defaults is not None
 
@@ -550,8 +551,9 @@ def test_json_decoder_rejects_bound_payload_decoder_default_rebinding() -> None:
 
     operation.__defaults__ = (
         original_defaults[0],
+        original_defaults[1],
         lambda value: _goal(),
-        *original_defaults[2:],
+        *original_defaults[3:],
     )
     try:
         with pytest.raises(
@@ -617,8 +619,10 @@ def test_store_load_rejects_bound_default_rebinding(tmp_path) -> None:
     assert original_defaults is not None
 
     operation.__defaults__ = (
+        original_defaults[0],
+        original_defaults[1],
         lambda _text: _goal(),
-        *original_defaults[1:],
+        *original_defaults[3:],
     )
     try:
         with pytest.raises(
@@ -642,7 +646,7 @@ def test_store_successor_rejects_nested_transition_default_rebinding(tmp_path) -
     operation = economic_goal_store_module._BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR
     original_defaults = operation.__defaults__
     assert original_defaults is not None
-    transition = original_defaults[1]
+    transition = original_defaults[3]
     transition_defaults = transition.__defaults__
     assert transition_defaults is not None
 

@@ -878,6 +878,7 @@ def _validate_automatic_transition_bound(
     _optional_cap_guard=_require_optional_cap_not_increased,
     _floor_guard=_require_floor_not_decreased,
     _int_cap_guard=_require_int_cap_not_increased,
+    _automation_value=int.__index__,
     _restrictions_guard=_require_restrictions_not_removed,
     _snapshot=_canonical_contract_snapshot,
     _field_names=_CONTRACT_FIELD_NAMES,
@@ -937,7 +938,10 @@ def _validate_automatic_transition_bound(
 
     _int_cap_guard("max_concurrent_positions", previous_view["max_concurrent_positions"], candidate_view["max_concurrent_positions"])
     _int_cap_guard("max_parlay_legs", previous_view["max_parlay_legs"], candidate_view["max_parlay_legs"])
-    if candidate_view["automation_level"] > previous_view["automation_level"]:
+    if (
+        _automation_value(candidate_view["automation_level"])
+        > _automation_value(previous_view["automation_level"])
+    ):
         raise _error_type("automatic transition must not increase automation_level")
     if previous_view["emergency_stop"] and not candidate_view["emergency_stop"]:
         raise _error_type("automatic transition must not clear emergency_stop")

@@ -622,6 +622,46 @@ def test_automatic_transition_ignores_rebound_authority_guards(monkeypatch) -> N
         previous.validate_automatic_successor(candidate)
 
 
+def test_automatic_transition_ignores_rebound_automation_ordering_protocol(
+    monkeypatch,
+) -> None:
+    previous = _goal(automation_level=AutomationLevel.SUPERVISED_EXECUTION)
+    candidate = replace(
+        previous,
+        revision=2,
+        automation_level=AutomationLevel.BOUNDED_AUTONOMY,
+    )
+
+    monkeypatch.setattr(
+        AutomationLevel,
+        "__gt__",
+        lambda self, other: False,
+    )
+    monkeypatch.setattr(
+        AutomationLevel,
+        "__index__",
+        lambda self: 0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        AutomationLevel,
+        "__int__",
+        lambda self: 0,
+    )
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="must not increase automation_level",
+    ):
+        validate_automatic_transition(previous, candidate)
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="must not increase automation_level",
+    ):
+        previous.validate_automatic_successor(candidate)
+
+
 def test_automatic_transition_ignores_rebound_contract_type_and_error_bindings(monkeypatch) -> None:
     previous = _goal()
     candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.03"))

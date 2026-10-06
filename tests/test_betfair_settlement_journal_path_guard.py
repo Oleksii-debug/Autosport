@@ -34,6 +34,49 @@ def test_settlement_store_rejects_symlink_journal_on_reload(tmp_path: Path) -> N
     assert target.read_bytes() == b""
 
 
+def test_settlement_store_rejects_hard_link_alias_on_reload(tmp_path: Path) -> None:
+    path = tmp_path / "settlement.jsonl"
+    path.write_bytes(b"")
+    alias = tmp_path / "settlement-alias.jsonl"
+    try:
+        os.link(path, alias)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"hard-link creation unavailable on this platform: {exc}")
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="must not have hard-link aliases",
+    ):
+        settlement.BetfairSettlementRevisionStore(path)
+
+    assert path.read_bytes() == b""
+    assert alias.read_bytes() == b""
+
+
+def test_append_rejects_hard_link_added_after_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settlement.jsonl"
+    path.write_bytes(b"")
+    store = settlement.BetfairSettlementRevisionStore(path)
+    alias = tmp_path / "late-alias.jsonl"
+    try:
+        os.link(path, alias)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"hard-link creation unavailable on this platform: {exc}")
+    _stub_record_unsigned(monkeypatch)
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="must not have hard-link aliases",
+    ):
+        store._append(object())
+
+    assert path.read_bytes() == b""
+    assert alias.read_bytes() == b""
+
+
 def test_first_append_rejects_path_that_appeared_after_absent_reload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

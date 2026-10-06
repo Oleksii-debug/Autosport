@@ -64,6 +64,30 @@ _RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CODE = getattr(
     "__code__",
     None,
 )
+_RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CLOSURE = getattr(
+    _RISK_LOCKED_CAPITAL_FOR_PROPOSAL,
+    "__closure__",
+    None,
+)
+_RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CLOSURE_VALUES = tuple(
+    cell.cell_contents
+    for cell in (_RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CLOSURE or ())
+)
+_RISK_EXCHANGE_CALCULATOR = _risk_module.locked_capital_for_exchange_side
+_RISK_EXCHANGE_CALCULATOR_CODE = getattr(
+    _RISK_EXCHANGE_CALCULATOR,
+    "__code__",
+    None,
+)
+_RISK_EXCHANGE_CALCULATOR_CLOSURE = getattr(
+    _RISK_EXCHANGE_CALCULATOR,
+    "__closure__",
+    None,
+)
+_RISK_EXCHANGE_CALCULATOR_CLOSURE_VALUES = tuple(
+    cell.cell_contents
+    for cell in (_RISK_EXCHANGE_CALCULATOR_CLOSURE or ())
+)
 
 _BOOK_LOAD_DESCRIPTOR = PaperBook.__dict__["load"]
 _BOOK_LOAD_FUNCTION = _BOOK_LOAD_DESCRIPTOR.__func__
@@ -1244,6 +1268,32 @@ def _require_dispatch() -> None:
         is not _RISK_LOCKED_CAPITAL_FOR_PROPOSAL
         or getattr(_RISK_LOCKED_CAPITAL_FOR_PROPOSAL, "__code__", None)
         is not _RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CODE
+        or getattr(_RISK_LOCKED_CAPITAL_FOR_PROPOSAL, "__closure__", None)
+        is not _RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CLOSURE
+        or len(_RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CLOSURE or ())
+        != len(_RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CLOSURE_VALUES)
+        or any(
+            cell.cell_contents is not expected
+            for cell, expected in zip(
+                _RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CLOSURE or (),
+                _RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CLOSURE_VALUES,
+            )
+        )
+        or _risk_module.locked_capital_for_exchange_side
+        is not _RISK_EXCHANGE_CALCULATOR
+        or getattr(_RISK_EXCHANGE_CALCULATOR, "__code__", None)
+        is not _RISK_EXCHANGE_CALCULATOR_CODE
+        or getattr(_RISK_EXCHANGE_CALCULATOR, "__closure__", None)
+        is not _RISK_EXCHANGE_CALCULATOR_CLOSURE
+        or len(_RISK_EXCHANGE_CALCULATOR_CLOSURE or ())
+        != len(_RISK_EXCHANGE_CALCULATOR_CLOSURE_VALUES)
+        or any(
+            cell.cell_contents is not expected
+            for cell, expected in zip(
+                _RISK_EXCHANGE_CALCULATOR_CLOSURE or (),
+                _RISK_EXCHANGE_CALCULATOR_CLOSURE_VALUES,
+            )
+        )
         or PaperBook.__dict__.get("load") is not _BOOK_LOAD_DESCRIPTOR
         or _BOOK_LOAD_DESCRIPTOR.__func__ is not _BOOK_LOAD_FUNCTION
         or getattr(_BOOK_LOAD_FUNCTION, "__code__", None) is not _BOOK_LOAD_CODE

@@ -281,7 +281,10 @@ def evaluate_registered_input_current_view(
         "market_ids": dependency_evidence.market_ids,
         "selection_ids": dependency_evidence.selection_ids,
     }
-    raw_snapshot = updates.mirror.view(**selectors)
+    # Reuse the exact mirror whose identity was already checked against the
+    # dependency index. Re-reading updates.mirror here would reopen a TOCTOU
+    # window where caller mutation could redirect the view after coherence proof.
+    raw_snapshot = mirror.view(**selectors)
 
     component_evidence: list[LiveMarketComponentEvidence] = []
     aggregate_reasons: set[LiveInputWaitReason] = set()

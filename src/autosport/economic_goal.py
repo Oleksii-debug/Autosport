@@ -45,82 +45,230 @@ class AutomationLevel(IntEnum):
 
 _ZERO: Final = Decimal("0")
 _ONE: Final = Decimal("1")
+_MAX_CANONICAL_TEXT_CHARS: Final = 512
+_MAX_RESTRICTION_MEMBERS: Final = 1024
+_CANONICAL_OBJECTIVE_MEMBER: Final = (
+    EconomicObjective.LONG_RUN_RISK_ADJUSTED_BANKROLL_GROWTH
+)
+_CANONICAL_AUTOMATION_LEVEL_MEMBERS: Final = (
+    AutomationLevel.ANALYSIS_ONLY,
+    AutomationLevel.RECOMMENDATION,
+    AutomationLevel.SUPERVISED_EXECUTION,
+    AutomationLevel.BOUNDED_AUTONOMY,
+    AutomationLevel.HIGHER_AUTONOMY,
+)
+_CONTRACT_OBJECT_SETATTR: Final = object.__setattr__
 
 
-def _canonical_text(name: str, value: object) -> str:
-    if not isinstance(value, str):
-        raise EconomicGoalContractError(f"{name} must be a string")
+class _EconomicGoalContractMeta(type):
+    """Seal the public automatic-successor method after canonical binding."""
+
+    _AUTHORITY_NAMES: Final = frozenset(
+        {
+            "__init__",
+            "__post_init__",
+            "validate_automatic_successor",
+            "_authority_operations_sealed",
+        }
+    )
+
+    def __setattr__(
+        cls,
+        name: str,
+        value: object,
+        _authority_names=_AUTHORITY_NAMES,
+    ) -> None:
+        if (
+            cls.__dict__.get("_authority_operations_sealed", False)
+            and name in _authority_names
+        ):
+            raise TypeError(
+                "economic-goal public authority operation binding is immutable"
+            )
+        super().__setattr__(name, value)
+
+    def __delattr__(
+        cls,
+        name: str,
+        _authority_names=_AUTHORITY_NAMES,
+    ) -> None:
+        if (
+            cls.__dict__.get("_authority_operations_sealed", False)
+            and name in _authority_names
+        ):
+            raise TypeError(
+                "economic-goal public authority operation binding is immutable"
+            )
+        super().__delattr__(name)
+
+
+
+def _build_contract_class_guard(name: str):
+    """Block direct base-metaclass mutation of sealed contract authority names."""
+
+    class _ContractClassGuard:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            for ancestor in instance.__mro__:
+                if name in ancestor.__dict__:
+                    binding = ancestor.__dict__[name]
+                    break
+            else:
+                raise AttributeError(name)
+            descriptor_get = getattr(binding, "__get__", None)
+            if descriptor_get is None:
+                return binding
+            return descriptor_get(None, instance)
+
+        def __set__(self, _instance, _value) -> None:
+            raise TypeError(
+                "economic-goal public authority operation binding is immutable"
+            )
+
+        def __delete__(self, _instance) -> None:
+            raise TypeError(
+                "economic-goal public authority operation binding is immutable"
+            )
+
+    return _ContractClassGuard()
+
+
+def _canonical_text(
+    name: str,
+    value: object,
+    _max_chars=_MAX_CANONICAL_TEXT_CHARS,
+    _error_type=EconomicGoalContractError,
+) -> str:
+    if type(value) is not str:
+        raise _error_type(f"{name} must be a string")
     if not value or value != value.strip():
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"{name} must be a non-empty canonical string"
         )
+    if len(value) > _max_chars:
+        raise _error_type(
+            f"{name} exceeds the canonical text size limit"
+        )
     if "\x00" in value:
-        raise EconomicGoalContractError(f"{name} must not contain NUL")
+        raise _error_type(f"{name} must not contain NUL")
     try:
         value.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
-        raise EconomicGoalContractError(f"{name} must be valid UTF-8 text") from exc
+        raise _error_type(f"{name} must be valid UTF-8 text") from exc
     return value
 
 
-def _decimal(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal):
-        raise EconomicGoalContractError(f"{name} must be an exact Decimal")
+def _decimal(
+    name: str,
+    value: object,
+    _decimal_type=Decimal,
+    _error_type=EconomicGoalContractError,
+) -> Decimal:
+    if type(value) is not _decimal_type:
+        raise _error_type(f"{name} must be an exact Decimal")
     if not value.is_finite():
-        raise EconomicGoalContractError(f"{name} must be finite")
+        raise _error_type(f"{name} must be finite")
+    if value.is_zero() and value.is_signed():
+        raise _error_type(f"{name} must not use signed zero")
     return value
 
 
-def _fraction(name: str, value: object) -> Decimal:
-    result = _decimal(name, value)
-    if result < _ZERO or result > _ONE:
-        raise EconomicGoalContractError(f"{name} must be between 0 and 1 inclusive")
+def _fraction(
+    name: str,
+    value: object,
+    _decimal_validator=_decimal,
+    _zero=_ZERO,
+    _one=_ONE,
+    _error_type=EconomicGoalContractError,
+) -> Decimal:
+    result = _decimal_validator(name, value)
+    if result < _zero or result > _one:
+        raise _error_type(f"{name} must be between 0 and 1 inclusive")
     return result
 
 
-def _nonnegative_decimal(name: str, value: object) -> Decimal:
-    result = _decimal(name, value)
-    if result < _ZERO:
-        raise EconomicGoalContractError(f"{name} must be non-negative")
+def _nonnegative_decimal(
+    name: str,
+    value: object,
+    _decimal_validator=_decimal,
+    _zero=_ZERO,
+    _error_type=EconomicGoalContractError,
+) -> Decimal:
+    result = _decimal_validator(name, value)
+    if result < _zero:
+        raise _error_type(f"{name} must be non-negative")
     return result
 
 
-def _optional_nonnegative_decimal(name: str, value: object) -> Decimal | None:
+def _optional_nonnegative_decimal(
+    name: str,
+    value: object,
+    _validator=_nonnegative_decimal,
+) -> Decimal | None:
     if value is None:
         return None
-    return _nonnegative_decimal(name, value)
+    return _validator(name, value)
 
 
-def _nonnegative_int(name: str, value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise EconomicGoalContractError(f"{name} must be a non-boolean integer")
+def _nonnegative_int(
+    name: str,
+    value: object,
+    _error_type=EconomicGoalContractError,
+) -> int:
+    if type(value) is not int:
+        raise _error_type(f"{name} must be a non-boolean integer")
     if value < 0:
-        raise EconomicGoalContractError(f"{name} must be non-negative")
+        raise _error_type(f"{name} must be non-negative")
     return value
 
 
-def _positive_int(name: str, value: object) -> int:
-    result = _nonnegative_int(name, value)
+def _positive_int(
+    name: str,
+    value: object,
+    _validator=_nonnegative_int,
+    _error_type=EconomicGoalContractError,
+) -> int:
+    result = _validator(name, value)
     if result == 0:
-        raise EconomicGoalContractError(f"{name} must be positive")
+        raise _error_type(f"{name} must be positive")
     return result
 
 
-def _canonical_restrictions(name: str, value: object) -> frozenset[str]:
-    if not isinstance(value, frozenset):
-        raise EconomicGoalContractError(f"{name} must be a frozenset of strings")
+def _canonical_restrictions(
+    name: str,
+    value: object,
+    _max_members=_MAX_RESTRICTION_MEMBERS,
+    _text_validator=_canonical_text,
+    _error_type=EconomicGoalContractError,
+) -> frozenset[str]:
+    if type(value) is not frozenset:
+        raise _error_type(f"{name} must be a frozenset of strings")
+    if len(value) > _max_members:
+        raise _error_type(
+            f"{name} exceeds the canonical restriction-count limit"
+        )
     normalized: set[str] = set()
     for item in value:
-        normalized.add(_canonical_text(f"{name} member", item))
+        normalized.add(_text_validator(f"{name} member", item))
     if len(normalized) != len(value):
         # Defensive only; frozenset already removes exact duplicates.  Keep the
         # invariant explicit if its input contract ever changes.
-        raise EconomicGoalContractError(f"{name} must contain unique members")
+        raise _error_type(f"{name} must contain unique members")
     return value
 
 
+def _is_canonical_member(value: object, members: tuple[object, ...]) -> bool:
+    for member in members:
+        if value is member:
+            return True
+    return False
+
+
 @dataclass(frozen=True, slots=True)
-class EconomicGoalContract:
+class EconomicGoalContract(metaclass=_EconomicGoalContractMeta):
     """Immutable owner-level economic objective and authority ceiling.
 
     Fractions are exact :class:`~decimal.Decimal` values in ``[0, 1]``.
@@ -167,66 +315,91 @@ class EconomicGoalContract:
     blocked_providers: frozenset[str] = frozenset()
     blocked_markets: frozenset[str] = frozenset()
 
-    def __post_init__(self) -> None:
-        _canonical_text("goal_id", self.goal_id)
-        _positive_int("revision", self.revision)
-        _canonical_text("bankroll_id", self.bankroll_id)
+    _authority_operations_sealed = False
 
-        currency = _canonical_text("currency", self.currency)
+    def __post_init__(
+        self,
+        _text_validator=_canonical_text,
+        _positive_int_validator=_positive_int,
+        _fraction_validator=_fraction,
+        _optional_nonnegative_decimal_validator=_optional_nonnegative_decimal,
+        _nonnegative_decimal_validator=_nonnegative_decimal,
+        _nonnegative_int_validator=_nonnegative_int,
+        _restrictions_validator=_canonical_restrictions,
+        _member_validator=_is_canonical_member,
+        _objective_type=EconomicObjective,
+        _objective_member=_CANONICAL_OBJECTIVE_MEMBER,
+        _automation_type=AutomationLevel,
+        _automation_members=_CANONICAL_AUTOMATION_LEVEL_MEMBERS,
+        _error_type=EconomicGoalContractError,
+    ) -> None:
+        _text_validator("goal_id", self.goal_id)
+        _positive_int_validator("revision", self.revision)
+        _text_validator("bankroll_id", self.bankroll_id)
+
+        currency = _text_validator("currency", self.currency)
         if len(currency) != 3 or not currency.isascii() or not currency.isalpha():
-            raise EconomicGoalContractError(
+            raise _error_type(
                 "currency must be a three-letter uppercase ASCII code"
             )
         if currency != currency.upper():
-            raise EconomicGoalContractError(
+            raise _error_type(
                 "currency must be a three-letter uppercase ASCII code"
             )
 
-        if not isinstance(self.objective, EconomicObjective):
-            raise EconomicGoalContractError("objective must be an EconomicObjective")
+        if (
+            type(self.objective) is not _objective_type
+            or self.objective is not _objective_member
+        ):
+            raise _error_type("objective must be an EconomicObjective")
 
-        _fraction("max_stake_fraction", self.max_stake_fraction)
-        _optional_nonnegative_decimal("max_stake_amount", self.max_stake_amount)
-        _fraction("max_session_loss_fraction", self.max_session_loss_fraction)
-        _fraction("max_day_loss_fraction", self.max_day_loss_fraction)
-        _fraction("max_drawdown_fraction", self.max_drawdown_fraction)
-        _fraction(
+        _fraction_validator("max_stake_fraction", self.max_stake_fraction)
+        _optional_nonnegative_decimal_validator("max_stake_amount", self.max_stake_amount)
+        _fraction_validator("max_session_loss_fraction", self.max_session_loss_fraction)
+        _fraction_validator("max_day_loss_fraction", self.max_day_loss_fraction)
+        _fraction_validator("max_drawdown_fraction", self.max_drawdown_fraction)
+        _fraction_validator(
             "max_capital_at_risk_fraction", self.max_capital_at_risk_fraction
         )
-        _fraction(
+        _fraction_validator(
             "max_event_concentration_fraction", self.max_event_concentration_fraction
         )
-        _fraction(
+        _fraction_validator(
             "max_market_concentration_fraction", self.max_market_concentration_fraction
         )
-        _fraction(
+        _fraction_validator(
             "max_provider_concentration_fraction",
             self.max_provider_concentration_fraction,
         )
-        _fraction(
+        _fraction_validator(
             "max_sport_concentration_fraction", self.max_sport_concentration_fraction
         )
-        _nonnegative_decimal("max_turnover_fraction", self.max_turnover_fraction)
-        _fraction("max_risk_of_ruin", self.max_risk_of_ruin)
-        _fraction(
+        _nonnegative_decimal_validator("max_turnover_fraction", self.max_turnover_fraction)
+        _fraction_validator("max_risk_of_ruin", self.max_risk_of_ruin)
+        _fraction_validator(
             "max_execution_slippage_fraction",
             self.max_execution_slippage_fraction,
         )
-        _nonnegative_decimal("max_quote_age_seconds", self.max_quote_age_seconds)
-        _fraction("minimum_data_quality", self.minimum_data_quality)
+        _nonnegative_decimal_validator("max_quote_age_seconds", self.max_quote_age_seconds)
+        _fraction_validator("minimum_data_quality", self.minimum_data_quality)
 
-        _nonnegative_int("max_concurrent_positions", self.max_concurrent_positions)
-        _positive_int("max_parlay_legs", self.max_parlay_legs)
-        if not isinstance(self.automation_level, AutomationLevel):
-            raise EconomicGoalContractError(
+        _nonnegative_int_validator(
+            "max_concurrent_positions", self.max_concurrent_positions
+        )
+        _positive_int_validator("max_parlay_legs", self.max_parlay_legs)
+        if (
+            type(self.automation_level) is not _automation_type
+            or not _member_validator(self.automation_level, _automation_members)
+        ):
+            raise _error_type(
                 "automation_level must be an AutomationLevel"
             )
-        if not isinstance(self.emergency_stop, bool):
-            raise EconomicGoalContractError("emergency_stop must be a bool")
+        if type(self.emergency_stop) is not bool:
+            raise _error_type("emergency_stop must be a bool")
 
-        _canonical_restrictions("blocked_sports", self.blocked_sports)
-        _canonical_restrictions("blocked_providers", self.blocked_providers)
-        _canonical_restrictions("blocked_markets", self.blocked_markets)
+        _restrictions_validator("blocked_sports", self.blocked_sports)
+        _restrictions_validator("blocked_providers", self.blocked_providers)
+        _restrictions_validator("blocked_markets", self.blocked_markets)
 
     def validate_automatic_successor(self, candidate: "EconomicGoalContract") -> None:
         """Validate a machine-proposed successor without authority expansion.
@@ -239,63 +412,535 @@ class EconomicGoalContract:
         boundary.
         """
 
-        validate_automatic_transition(self, candidate)
+        _CANONICAL_TRANSITION_VALIDATOR(self, candidate)
+
+_CANONICAL_CONTRACT_TYPE: Final = EconomicGoalContract
+
+_CONTRACT_FIELD_NAMES: Final = (
+    "goal_id",
+    "revision",
+    "bankroll_id",
+    "currency",
+    "objective",
+    "max_stake_fraction",
+    "max_stake_amount",
+    "max_session_loss_fraction",
+    "max_day_loss_fraction",
+    "max_drawdown_fraction",
+    "max_capital_at_risk_fraction",
+    "max_event_concentration_fraction",
+    "max_market_concentration_fraction",
+    "max_provider_concentration_fraction",
+    "max_sport_concentration_fraction",
+    "max_turnover_fraction",
+    "max_risk_of_ruin",
+    "max_execution_slippage_fraction",
+    "max_quote_age_seconds",
+    "minimum_data_quality",
+    "max_concurrent_positions",
+    "max_parlay_legs",
+    "automation_level",
+    "emergency_stop",
+    "blocked_sports",
+    "blocked_providers",
+    "blocked_markets",
+)
+
+# Capture the original slot descriptors once so class-level rebinding cannot
+# redirect economic-goal construction, validation or identity reads to a forged
+# descriptor. Constructor writes use the captured member-descriptor setters
+# directly rather than object.__setattr__, which would redispatch through the
+# mutable class dictionary before validation.
+_CANONICAL_CONTRACT_FIELD_DESCRIPTORS: Final = tuple(
+    (name, EconomicGoalContract.__dict__[name])
+    for name in _CONTRACT_FIELD_NAMES
+)
+_CANONICAL_CONTRACT_FIELD_GETTERS: Final = tuple(
+    (name, descriptor.__get__)
+    for name, descriptor in _CANONICAL_CONTRACT_FIELD_DESCRIPTORS
+)
+_CANONICAL_CONTRACT_FIELD_SETTERS: Final = tuple(
+    descriptor.__set__
+    for _, descriptor in _CANONICAL_CONTRACT_FIELD_DESCRIPTORS
+)
 
 
-def _require_same(name: str, previous: object, candidate: object) -> None:
+def _canonical_contract_snapshot(
+    contract: EconomicGoalContract,
+    _field_getters=_CANONICAL_CONTRACT_FIELD_GETTERS,
+    _contract_type=_CANONICAL_CONTRACT_TYPE,
+) -> tuple[object, ...]:
+    return tuple(
+        getter(contract, _contract_type)
+        for _, getter in _field_getters
+    )
+
+
+def _validate_contract_bound(
+    self: EconomicGoalContract,
+    _field_getters=_CANONICAL_CONTRACT_FIELD_GETTERS,
+    _contract_type=_CANONICAL_CONTRACT_TYPE,
+    _text_validator=_canonical_text,
+    _positive_int_validator=_positive_int,
+    _fraction_validator=_fraction,
+    _optional_nonnegative_decimal_validator=_optional_nonnegative_decimal,
+    _nonnegative_decimal_validator=_nonnegative_decimal,
+    _nonnegative_int_validator=_nonnegative_int,
+    _restrictions_validator=_canonical_restrictions,
+    _member_validator=_is_canonical_member,
+    _snapshot=_canonical_contract_snapshot,
+    _objective_type=EconomicObjective,
+    _objective_member=_CANONICAL_OBJECTIVE_MEMBER,
+    _automation_type=AutomationLevel,
+    _automation_members=_CANONICAL_AUTOMATION_LEVEL_MEMBERS,
+    _error_type=EconomicGoalContractError,
+) -> None:
+    """Validate contract fields through captured slot descriptors."""
+
+    if type(self) is not _contract_type:
+        raise _error_type("economic goal must use the exact contract type")
+    values = _snapshot(self, _field_getters)
+    (
+        goal_id, revision, bankroll_id, currency, objective,
+        max_stake_fraction, max_stake_amount, max_session_loss_fraction,
+        max_day_loss_fraction, max_drawdown_fraction, max_capital_at_risk_fraction,
+        max_event_concentration_fraction, max_market_concentration_fraction,
+        max_provider_concentration_fraction, max_sport_concentration_fraction,
+        max_turnover_fraction, max_risk_of_ruin, max_execution_slippage_fraction,
+        max_quote_age_seconds, minimum_data_quality, max_concurrent_positions,
+        max_parlay_legs, automation_level, emergency_stop,
+        blocked_sports, blocked_providers, blocked_markets,
+    ) = values
+
+    _text_validator("goal_id", goal_id)
+    _positive_int_validator("revision", revision)
+    _text_validator("bankroll_id", bankroll_id)
+    currency = _text_validator("currency", currency)
+    if len(currency) != 3 or not currency.isascii() or not currency.isalpha():
+        raise _error_type("currency must be a three-letter uppercase ASCII code")
+    if currency != currency.upper():
+        raise _error_type("currency must be a three-letter uppercase ASCII code")
+    if (
+        type(objective) is not _objective_type
+        or objective is not _objective_member
+    ):
+        raise _error_type("objective must be an EconomicObjective")
+
+    _fraction_validator("max_stake_fraction", max_stake_fraction)
+    _optional_nonnegative_decimal_validator("max_stake_amount", max_stake_amount)
+    _fraction_validator("max_session_loss_fraction", max_session_loss_fraction)
+    _fraction_validator("max_day_loss_fraction", max_day_loss_fraction)
+    _fraction_validator("max_drawdown_fraction", max_drawdown_fraction)
+    _fraction_validator("max_capital_at_risk_fraction", max_capital_at_risk_fraction)
+    _fraction_validator("max_event_concentration_fraction", max_event_concentration_fraction)
+    _fraction_validator("max_market_concentration_fraction", max_market_concentration_fraction)
+    _fraction_validator("max_provider_concentration_fraction", max_provider_concentration_fraction)
+    _fraction_validator("max_sport_concentration_fraction", max_sport_concentration_fraction)
+    _nonnegative_decimal_validator("max_turnover_fraction", max_turnover_fraction)
+    _fraction_validator("max_risk_of_ruin", max_risk_of_ruin)
+    _fraction_validator("max_execution_slippage_fraction", max_execution_slippage_fraction)
+    _nonnegative_decimal_validator("max_quote_age_seconds", max_quote_age_seconds)
+    _fraction_validator("minimum_data_quality", minimum_data_quality)
+
+    _nonnegative_int_validator("max_concurrent_positions", max_concurrent_positions)
+    _positive_int_validator("max_parlay_legs", max_parlay_legs)
+    if (
+        type(automation_level) is not _automation_type
+        or not _member_validator(automation_level, _automation_members)
+    ):
+        raise _error_type("automation_level must be an AutomationLevel")
+    if type(emergency_stop) is not bool:
+        raise _error_type("emergency_stop must be a bool")
+
+    _restrictions_validator("blocked_sports", blocked_sports)
+    _restrictions_validator("blocked_providers", blocked_providers)
+    _restrictions_validator("blocked_markets", blocked_markets)
+
+
+def _capture_callable_authority_graph(root):
+    """Capture every callable reachable through function defaults, cycle-safely."""
+
+    captured = []
+    seen: set[int] = set()
+
+    def visit(candidate) -> None:
+        if not callable(candidate):
+            return
+        identity = id(candidate)
+        if identity in seen:
+            return
+        seen.add(identity)
+        defaults = getattr(candidate, "__defaults__", None)
+        kwdefaults = getattr(candidate, "__kwdefaults__", None)
+        kwdefault_items = tuple((kwdefaults or {}).items())
+        captured.append(
+            (
+                candidate,
+                getattr(candidate, "__code__", None),
+                defaults,
+                kwdefaults,
+                kwdefault_items,
+            )
+        )
+        for value in defaults or ():
+            if callable(value):
+                visit(value)
+        for _, value in kwdefault_items:
+            if callable(value):
+                visit(value)
+
+    visit(root)
+    return tuple(captured)
+
+
+def _make_contract_post_init_authority(operation):
+    authority_graph = _capture_callable_authority_graph(operation)
+    error_type = EconomicGoalContractError
+
+    def require_authority() -> None:
+        for index, (
+            callable_object,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_kwdefault_items,
+        ) in enumerate(authority_graph):
+            if getattr(callable_object, "__code__", None) is not expected_code:
+                if index == 0:
+                    raise error_type("economic-goal contract validator authority changed")
+                raise error_type("economic-goal contract nested validator authority changed")
+            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                if index == 0:
+                    raise error_type("economic-goal contract validator defaults authority changed")
+                raise error_type("economic-goal contract nested validator defaults authority changed")
+            current_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
+            if (
+                current_kwdefaults is not expected_kwdefaults
+                or tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
+            ):
+                if index == 0:
+                    raise error_type(
+                        "economic-goal contract validator keyword defaults authority changed"
+                    )
+                raise error_type(
+                    "economic-goal contract nested validator keyword defaults authority changed"
+                )
+
+    def bound(self: EconomicGoalContract) -> None:
+        require_authority()
+        operation(self)
+        require_authority()
+
+    return bound
+
+_CANONICAL_CONTRACT_VALIDATOR: Final = _make_contract_post_init_authority(
+    _validate_contract_bound
+)
+EconomicGoalContract.__post_init__ = _CANONICAL_CONTRACT_VALIDATOR
+
+
+# The custom initializer writes all slots directly and then invokes the captured
+# canonical validator, so constructor-time validation never dispatches through a
+# mutable class-level __post_init__ alias.
+def _contract_init_authority(
+    self: EconomicGoalContract,
+    goal_id: str,
+    revision: int,
+    bankroll_id: str,
+    currency: str,
+    objective: EconomicObjective = EconomicObjective.LONG_RUN_RISK_ADJUSTED_BANKROLL_GROWTH,
+    max_stake_fraction: Decimal = Decimal("0.02"),
+    max_stake_amount: Decimal | None = None,
+    max_session_loss_fraction: Decimal = Decimal("0.05"),
+    max_day_loss_fraction: Decimal = Decimal("0.05"),
+    max_drawdown_fraction: Decimal = Decimal("0.20"),
+    max_capital_at_risk_fraction: Decimal = Decimal("0.20"),
+    max_event_concentration_fraction: Decimal = Decimal("1"),
+    max_market_concentration_fraction: Decimal = Decimal("1"),
+    max_provider_concentration_fraction: Decimal = Decimal("1"),
+    max_sport_concentration_fraction: Decimal = Decimal("1"),
+    max_turnover_fraction: Decimal = Decimal("1"),
+    max_risk_of_ruin: Decimal = Decimal("0.01"),
+    max_execution_slippage_fraction: Decimal = Decimal("0.01"),
+    max_quote_age_seconds: Decimal = Decimal("5"),
+    minimum_data_quality: Decimal = Decimal("0"),
+    max_concurrent_positions: int = 1,
+    max_parlay_legs: int = 1,
+    automation_level: AutomationLevel = AutomationLevel.ANALYSIS_ONLY,
+    emergency_stop: bool = False,
+    blocked_sports: frozenset[str] = frozenset(),
+    blocked_providers: frozenset[str] = frozenset(),
+    blocked_markets: frozenset[str] = frozenset(),
+    _validator=_CANONICAL_CONTRACT_VALIDATOR,
+    _field_setters=_CANONICAL_CONTRACT_FIELD_SETTERS,
+    _zip=zip,
+) -> None:
+    for setter, value in _zip(
+        _field_setters,
+        (
+            goal_id,
+            revision,
+            bankroll_id,
+            currency,
+            objective,
+            max_stake_fraction,
+            max_stake_amount,
+            max_session_loss_fraction,
+            max_day_loss_fraction,
+            max_drawdown_fraction,
+            max_capital_at_risk_fraction,
+            max_event_concentration_fraction,
+            max_market_concentration_fraction,
+            max_provider_concentration_fraction,
+            max_sport_concentration_fraction,
+            max_turnover_fraction,
+            max_risk_of_ruin,
+            max_execution_slippage_fraction,
+            max_quote_age_seconds,
+            minimum_data_quality,
+            max_concurrent_positions,
+            max_parlay_legs,
+            automation_level,
+            emergency_stop,
+            blocked_sports,
+            blocked_providers,
+            blocked_markets,
+        ),
+    ):
+        setter(self, value)
+    _validator(self)
+
+
+def _make_contract_constructor_authority(operation):
+    authority_graph = _capture_callable_authority_graph(operation)
+    error_type = EconomicGoalContractError
+
+    def require_authority() -> None:
+        for index, (
+            callable_object,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_kwdefault_items,
+        ) in enumerate(authority_graph):
+            if getattr(callable_object, "__code__", None) is not expected_code:
+                if index == 0:
+                    raise error_type("economic-goal constructor authority changed")
+                raise error_type("economic-goal constructor nested authority changed")
+            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                if index == 0:
+                    raise error_type("economic-goal constructor defaults authority changed")
+                raise error_type("economic-goal constructor nested defaults authority changed")
+            current_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
+            if (
+                current_kwdefaults is not expected_kwdefaults
+                or tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
+            ):
+                if index == 0:
+                    raise error_type(
+                        "economic-goal constructor keyword defaults authority changed"
+                    )
+                raise error_type(
+                    "economic-goal constructor nested keyword defaults authority changed"
+                )
+
+    def bound(*args, **kwargs):
+        require_authority()
+        result = operation(*args, **kwargs)
+        require_authority()
+        return result
+
+    return bound
+
+def _bind_contract_constructor(operation):
+    bound_operation = _make_contract_constructor_authority(operation)
+
+    def bound(
+        self: EconomicGoalContract,
+        goal_id: str,
+        revision: int,
+        bankroll_id: str,
+        currency: str,
+        objective: EconomicObjective = EconomicObjective.LONG_RUN_RISK_ADJUSTED_BANKROLL_GROWTH,
+        max_stake_fraction: Decimal = Decimal("0.02"),
+        max_stake_amount: Decimal | None = None,
+        max_session_loss_fraction: Decimal = Decimal("0.05"),
+        max_day_loss_fraction: Decimal = Decimal("0.05"),
+        max_drawdown_fraction: Decimal = Decimal("0.20"),
+        max_capital_at_risk_fraction: Decimal = Decimal("0.20"),
+        max_event_concentration_fraction: Decimal = Decimal("1"),
+        max_market_concentration_fraction: Decimal = Decimal("1"),
+        max_provider_concentration_fraction: Decimal = Decimal("1"),
+        max_sport_concentration_fraction: Decimal = Decimal("1"),
+        max_turnover_fraction: Decimal = Decimal("1"),
+        max_risk_of_ruin: Decimal = Decimal("0.01"),
+        max_execution_slippage_fraction: Decimal = Decimal("0.01"),
+        max_quote_age_seconds: Decimal = Decimal("5"),
+        minimum_data_quality: Decimal = Decimal("0"),
+        max_concurrent_positions: int = 1,
+        max_parlay_legs: int = 1,
+        automation_level: AutomationLevel = AutomationLevel.ANALYSIS_ONLY,
+        emergency_stop: bool = False,
+        blocked_sports: frozenset[str] = frozenset(),
+        blocked_providers: frozenset[str] = frozenset(),
+        blocked_markets: frozenset[str] = frozenset(),
+    ) -> None:
+        bound_operation(
+            self,
+            goal_id,
+            revision,
+            bankroll_id,
+            currency,
+            objective,
+            max_stake_fraction,
+            max_stake_amount,
+            max_session_loss_fraction,
+            max_day_loss_fraction,
+            max_drawdown_fraction,
+            max_capital_at_risk_fraction,
+            max_event_concentration_fraction,
+            max_market_concentration_fraction,
+            max_provider_concentration_fraction,
+            max_sport_concentration_fraction,
+            max_turnover_fraction,
+            max_risk_of_ruin,
+            max_execution_slippage_fraction,
+            max_quote_age_seconds,
+            minimum_data_quality,
+            max_concurrent_positions,
+            max_parlay_legs,
+            automation_level,
+            emergency_stop,
+            blocked_sports,
+            blocked_providers,
+            blocked_markets,
+        )
+
+    return bound
+
+
+_CANONICAL_CONTRACT_INIT: Final = _bind_contract_constructor(
+    _contract_init_authority
+)
+
+# Replace the dataclass-generated constructor with the captured canonical
+# constructor. The generated constructor dispatches through self.__post_init__
+# dynamically; that is too weak for an authority-bearing economic contract.
+EconomicGoalContract.__init__ = _CANONICAL_CONTRACT_INIT
+
+
+def _snapshot_transition_contract(
+    contract: EconomicGoalContract,
+    _contract_type=_CANONICAL_CONTRACT_TYPE,
+    _contract_validator=_CANONICAL_CONTRACT_VALIDATOR,
+    _object_new=object.__new__,
+    _error_type=EconomicGoalContractError,
+    _snapshot=_canonical_contract_snapshot,
+    _field_setters=_CANONICAL_CONTRACT_FIELD_SETTERS,
+    _zip=zip,
+) -> EconomicGoalContract:
+    if type(contract) is not _contract_type:
+        raise _error_type(
+            "automatic transition requires EconomicGoalContract instances"
+        )
+    snapshot = _object_new(_contract_type)
+    values = _snapshot(contract)
+    for setter, value in _zip(_field_setters, values):
+        setter(snapshot, value)
+    _contract_validator(snapshot)
+    return snapshot
+
+
+def _require_same(
+    name: str,
+    previous: object,
+    candidate: object,
+    _error_type=EconomicGoalContractError,
+) -> None:
     if candidate != previous:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must preserve {name}"
         )
 
 
-def _require_cap_not_increased(name: str, previous: Decimal, candidate: Decimal) -> None:
+def _require_cap_not_increased(
+    name: str,
+    previous: Decimal,
+    candidate: Decimal,
+    _error_type=EconomicGoalContractError,
+) -> None:
     if candidate > previous:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must not increase {name}"
         )
 
 
 def _require_optional_cap_not_increased(
-    name: str, previous: Decimal | None, candidate: Decimal | None
+    name: str,
+    previous: Decimal | None,
+    candidate: Decimal | None,
+    _error_type=EconomicGoalContractError,
 ) -> None:
     if previous is None:
         # Moving from no contract-level absolute cap to a finite one is tighter.
         return
     if candidate is None or candidate > previous:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must not increase or remove {name}"
         )
 
 
 def _require_floor_not_decreased(
-    name: str, previous: Decimal, candidate: Decimal
+    name: str,
+    previous: Decimal,
+    candidate: Decimal,
+    _error_type=EconomicGoalContractError,
 ) -> None:
     if candidate < previous:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must not decrease {name}"
         )
 
 
-def _require_int_cap_not_increased(name: str, previous: int, candidate: int) -> None:
+def _require_int_cap_not_increased(
+    name: str,
+    previous: int,
+    candidate: int,
+    _error_type=EconomicGoalContractError,
+) -> None:
     if candidate > previous:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must not increase {name}"
         )
 
 
 def _require_restrictions_not_removed(
-    name: str, previous: frozenset[str], candidate: frozenset[str]
+    name: str,
+    previous: frozenset[str],
+    candidate: frozenset[str],
+    _error_type=EconomicGoalContractError,
 ) -> None:
     if not previous.issubset(candidate):
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must not remove {name} restrictions"
         )
 
 
-def validate_automatic_transition(
+def _validate_automatic_transition_bound(
     previous: EconomicGoalContract,
     candidate: EconomicGoalContract,
+    _contract_type=_CANONICAL_CONTRACT_TYPE,
+    _contract_validator=_CANONICAL_CONTRACT_VALIDATOR,
+    _same_guard=_require_same,
+    _cap_guard=_require_cap_not_increased,
+    _optional_cap_guard=_require_optional_cap_not_increased,
+    _floor_guard=_require_floor_not_decreased,
+    _int_cap_guard=_require_int_cap_not_increased,
+    _automation_value=int.__index__,
+    _restrictions_guard=_require_restrictions_not_removed,
+    _snapshot=_canonical_contract_snapshot,
+    _field_names=_CONTRACT_FIELD_NAMES,
+    _error_type=EconomicGoalContractError,
 ) -> None:
     """Prove that ``candidate`` does not enlarge ``previous`` authority.
 
@@ -305,118 +950,168 @@ def validate_automatic_transition(
     *non-expansion*, not that every revision necessarily tightens a limit.
     """
 
-    if not isinstance(previous, EconomicGoalContract) or not isinstance(
-        candidate, EconomicGoalContract
+    if (
+        type(previous) is not _contract_type
+        or type(candidate) is not _contract_type
     ):
-        raise EconomicGoalContractError(
-            "automatic transition requires EconomicGoalContract instances"
-        )
+        raise _error_type("automatic transition requires EconomicGoalContract instances")
 
-    _require_same("goal_id", previous.goal_id, candidate.goal_id)
-    _require_same("bankroll_id", previous.bankroll_id, candidate.bankroll_id)
-    _require_same("currency", previous.currency, candidate.currency)
-    _require_same("objective", previous.objective, candidate.objective)
+    _contract_validator(previous)
+    _contract_validator(candidate)
+    previous_before = _snapshot(previous)
+    candidate_before = _snapshot(candidate)
+    _contract_validator(previous)
+    _contract_validator(candidate)
+    previous_after = _snapshot(previous)
+    candidate_after = _snapshot(candidate)
+    if previous_before != previous_after or candidate_before != candidate_after:
+        raise _error_type("economic goal changed during automatic transition validation")
 
-    if candidate.revision != previous.revision + 1:
-        raise EconomicGoalContractError(
-            "automatic transition must advance revision by exactly one"
-        )
+    previous_view = dict(zip(_field_names, previous_after))
+    candidate_view = dict(zip(_field_names, candidate_after))
 
-    _require_cap_not_increased(
-        "max_stake_fraction",
-        previous.max_stake_fraction,
-        candidate.max_stake_fraction,
-    )
-    _require_optional_cap_not_increased(
-        "max_stake_amount", previous.max_stake_amount, candidate.max_stake_amount
-    )
-    _require_cap_not_increased(
-        "max_session_loss_fraction",
-        previous.max_session_loss_fraction,
-        candidate.max_session_loss_fraction,
-    )
-    _require_cap_not_increased(
-        "max_day_loss_fraction",
-        previous.max_day_loss_fraction,
-        candidate.max_day_loss_fraction,
-    )
-    _require_cap_not_increased(
-        "max_drawdown_fraction",
-        previous.max_drawdown_fraction,
-        candidate.max_drawdown_fraction,
-    )
-    _require_cap_not_increased(
-        "max_capital_at_risk_fraction",
-        previous.max_capital_at_risk_fraction,
-        candidate.max_capital_at_risk_fraction,
-    )
-    _require_cap_not_increased(
-        "max_event_concentration_fraction",
-        previous.max_event_concentration_fraction,
-        candidate.max_event_concentration_fraction,
-    )
-    _require_cap_not_increased(
-        "max_market_concentration_fraction",
-        previous.max_market_concentration_fraction,
-        candidate.max_market_concentration_fraction,
-    )
-    _require_cap_not_increased(
-        "max_provider_concentration_fraction",
-        previous.max_provider_concentration_fraction,
-        candidate.max_provider_concentration_fraction,
-    )
-    _require_cap_not_increased(
-        "max_sport_concentration_fraction",
-        previous.max_sport_concentration_fraction,
-        candidate.max_sport_concentration_fraction,
-    )
-    _require_cap_not_increased(
-        "max_turnover_fraction",
-        previous.max_turnover_fraction,
-        candidate.max_turnover_fraction,
-    )
-    _require_cap_not_increased(
-        "max_risk_of_ruin", previous.max_risk_of_ruin, candidate.max_risk_of_ruin
-    )
-    _require_cap_not_increased(
-        "max_execution_slippage_fraction",
-        previous.max_execution_slippage_fraction,
-        candidate.max_execution_slippage_fraction,
-    )
-    _require_cap_not_increased(
-        "max_quote_age_seconds",
-        previous.max_quote_age_seconds,
-        candidate.max_quote_age_seconds,
-    )
-    _require_floor_not_decreased(
-        "minimum_data_quality",
-        previous.minimum_data_quality,
-        candidate.minimum_data_quality,
-    )
+    _same_guard("goal_id", previous_view["goal_id"], candidate_view["goal_id"])
+    _same_guard("bankroll_id", previous_view["bankroll_id"], candidate_view["bankroll_id"])
+    _same_guard("currency", previous_view["currency"], candidate_view["currency"])
+    _same_guard("objective", previous_view["objective"], candidate_view["objective"])
 
-    _require_int_cap_not_increased(
-        "max_concurrent_positions",
-        previous.max_concurrent_positions,
-        candidate.max_concurrent_positions,
-    )
-    _require_int_cap_not_increased(
-        "max_parlay_legs", previous.max_parlay_legs, candidate.max_parlay_legs
-    )
-    if candidate.automation_level > previous.automation_level:
-        raise EconomicGoalContractError(
-            "automatic transition must not increase automation_level"
-        )
-    if previous.emergency_stop and not candidate.emergency_stop:
-        raise EconomicGoalContractError(
-            "automatic transition must not clear emergency_stop"
-        )
+    if candidate_view["revision"] != previous_view["revision"] + 1:
+        raise _error_type("automatic transition must advance revision by exactly one")
 
-    _require_restrictions_not_removed(
-        "blocked_sports", previous.blocked_sports, candidate.blocked_sports
+    _cap_guard("max_stake_fraction", previous_view["max_stake_fraction"], candidate_view["max_stake_fraction"])
+    _optional_cap_guard("max_stake_amount", previous_view["max_stake_amount"], candidate_view["max_stake_amount"])
+    _cap_guard("max_session_loss_fraction", previous_view["max_session_loss_fraction"], candidate_view["max_session_loss_fraction"])
+    _cap_guard("max_day_loss_fraction", previous_view["max_day_loss_fraction"], candidate_view["max_day_loss_fraction"])
+    _cap_guard("max_drawdown_fraction", previous_view["max_drawdown_fraction"], candidate_view["max_drawdown_fraction"])
+    _cap_guard("max_capital_at_risk_fraction", previous_view["max_capital_at_risk_fraction"], candidate_view["max_capital_at_risk_fraction"])
+    _cap_guard("max_event_concentration_fraction", previous_view["max_event_concentration_fraction"], candidate_view["max_event_concentration_fraction"])
+    _cap_guard("max_market_concentration_fraction", previous_view["max_market_concentration_fraction"], candidate_view["max_market_concentration_fraction"])
+    _cap_guard("max_provider_concentration_fraction", previous_view["max_provider_concentration_fraction"], candidate_view["max_provider_concentration_fraction"])
+    _cap_guard("max_sport_concentration_fraction", previous_view["max_sport_concentration_fraction"], candidate_view["max_sport_concentration_fraction"])
+    _cap_guard("max_turnover_fraction", previous_view["max_turnover_fraction"], candidate_view["max_turnover_fraction"])
+    _cap_guard("max_risk_of_ruin", previous_view["max_risk_of_ruin"], candidate_view["max_risk_of_ruin"])
+    _cap_guard("max_execution_slippage_fraction", previous_view["max_execution_slippage_fraction"], candidate_view["max_execution_slippage_fraction"])
+    _cap_guard("max_quote_age_seconds", previous_view["max_quote_age_seconds"], candidate_view["max_quote_age_seconds"])
+    _floor_guard("minimum_data_quality", previous_view["minimum_data_quality"], candidate_view["minimum_data_quality"])
+
+    _int_cap_guard("max_concurrent_positions", previous_view["max_concurrent_positions"], candidate_view["max_concurrent_positions"])
+    _int_cap_guard("max_parlay_legs", previous_view["max_parlay_legs"], candidate_view["max_parlay_legs"])
+    if (
+        _automation_value(candidate_view["automation_level"])
+        > _automation_value(previous_view["automation_level"])
+    ):
+        raise _error_type("automatic transition must not increase automation_level")
+    if previous_view["emergency_stop"] and not candidate_view["emergency_stop"]:
+        raise _error_type("automatic transition must not clear emergency_stop")
+
+    _restrictions_guard("blocked_sports", previous_view["blocked_sports"], candidate_view["blocked_sports"])
+    _restrictions_guard("blocked_providers", previous_view["blocked_providers"], candidate_view["blocked_providers"])
+    _restrictions_guard("blocked_markets", previous_view["blocked_markets"], candidate_view["blocked_markets"])
+
+
+def _make_transition_validator_authority(operation):
+    authority_graph = _capture_callable_authority_graph(operation)
+
+    def require_authority() -> None:
+        for index, (
+            callable_object,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_kwdefault_items,
+        ) in enumerate(authority_graph):
+            if getattr(callable_object, "__code__", None) is not expected_code:
+                if index == 0:
+                    raise EconomicGoalContractError(
+                        "automatic transition validator authority changed"
+                    )
+                raise EconomicGoalContractError(
+                    "automatic transition nested validator authority changed"
+                )
+            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                if index == 0:
+                    raise EconomicGoalContractError(
+                        "automatic transition validator defaults authority changed"
+                    )
+                raise EconomicGoalContractError(
+                    "automatic transition nested validator defaults authority changed"
+                )
+            current_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
+            if (
+                current_kwdefaults is not expected_kwdefaults
+                or tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
+            ):
+                if index == 0:
+                    raise EconomicGoalContractError(
+                        "automatic transition validator keyword defaults authority changed"
+                    )
+                raise EconomicGoalContractError(
+                    "automatic transition nested validator keyword defaults authority changed"
+                )
+
+    def bound(
+        previous: EconomicGoalContract,
+        candidate: EconomicGoalContract,
+    ) -> None:
+        require_authority()
+        operation(previous, candidate)
+        require_authority()
+
+    return bound
+
+_CANONICAL_TRANSITION_VALIDATOR: Final = _make_transition_validator_authority(
+    _validate_automatic_transition_bound
+)
+
+# Bind the convenience method to the canonical transition function object after
+# its definition.  This avoids resolving a mutable module alias when an owner
+# contract validates a machine-proposed successor.
+def _validate_automatic_successor_bound(
+    self: EconomicGoalContract,
+    candidate: EconomicGoalContract,
+    _validator=_CANONICAL_TRANSITION_VALIDATOR,
+) -> None:
+    _validator(self, candidate)
+
+
+def _bind_contract_successor_operation(operation):
+    def bound(
+        self: EconomicGoalContract,
+        candidate: EconomicGoalContract,
+    ) -> None:
+        operation(self, candidate)
+
+    return bound
+
+
+EconomicGoalContract.validate_automatic_successor = _bind_contract_successor_operation(
+    _CANONICAL_TRANSITION_VALIDATOR
+)
+
+# Freeze the public method once its closure has captured the canonical validator.
+EconomicGoalContract._authority_operations_sealed = True
+
+for _sealed_contract_name in _EconomicGoalContractMeta._AUTHORITY_NAMES:
+    setattr(
+        _EconomicGoalContractMeta,
+        _sealed_contract_name,
+        _build_contract_class_guard(_sealed_contract_name),
     )
-    _require_restrictions_not_removed(
-        "blocked_providers", previous.blocked_providers, candidate.blocked_providers
-    )
-    _require_restrictions_not_removed(
-        "blocked_markets", previous.blocked_markets, candidate.blocked_markets
-    )
+del _sealed_contract_name
+
+
+# Keep the public transition proof noninjectable while capturing the canonical
+# implementation object against later module rebinding.
+def _bind_transition_operation(operation):
+    def bound(
+        previous: EconomicGoalContract,
+        candidate: EconomicGoalContract,
+    ) -> None:
+        operation(previous, candidate)
+
+    return bound
+
+
+validate_automatic_transition = _bind_transition_operation(
+    _CANONICAL_TRANSITION_VALIDATOR
+)

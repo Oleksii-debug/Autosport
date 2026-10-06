@@ -363,10 +363,12 @@ class RuntimeResourceCoverageTruthTests(unittest.TestCase):
     def test_required_resource_classes_exceed_current_observed_subset(self) -> None:
         namespace = self._runner_namespace()
         required = tuple(namespace["_REQUIRED_RESOURCE_CLASSES"])
-        observed = tuple(namespace["_OBSERVED_RESOURCE_CLASSES"])
+        observed = tuple(namespace["_BASE_OBSERVED_RESOURCE_CLASSES"])
 
         self.assertIn("owned_threads", observed)
-        self.assertIn("workspace_handles", observed)
+        self.assertNotIn("workspace_handles", observed)
+        self.assertIn("internal_queues", observed)
+        self.assertIn("temporary_artifacts", observed)
         self.assertIn("provider_transports", required)
         self.assertIn("timers_scheduled_jobs", required)
         self.assertIn("subscriptions_listeners", required)
@@ -374,6 +376,15 @@ class RuntimeResourceCoverageTruthTests(unittest.TestCase):
         self.assertIn("persistence_handles", required)
         self.assertTrue(set(observed).issubset(required))
         self.assertTrue(set(required) - set(observed))
+
+
+
+    def test_workspace_handle_coverage_requires_windows_probe_evidence(self) -> None:
+        namespace = self._runner_namespace()
+        base_observed = tuple(namespace["_BASE_OBSERVED_RESOURCE_CLASSES"])
+
+        self.assertNotIn("workspace_handles", base_observed)
+        self.assertIn("workspace_handles", tuple(namespace["_REQUIRED_RESOURCE_CLASSES"]))
 
     def test_missing_required_resource_instrumentation_is_inconclusive(self) -> None:
         namespace = self._runner_namespace()

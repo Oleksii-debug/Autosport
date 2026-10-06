@@ -919,7 +919,10 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 ticket for ticket in tickets.values() if ticket.status is TicketStatus.OPEN
             )
             committed_stake = cls._exact_positive_sum(
-                tuple(ticket.stake for ticket in open_tickets)
+                tuple(
+                    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
+                    for ticket in open_tickets
+                )
             )
             open_position_count = len(open_tickets)
         except (ArithmeticError, AttributeError, TypeError, ValueError):
@@ -967,6 +970,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                                 "locked_odds": str(leg.locked_odds),
                                 "sport": leg.sport,
                                 "exchange_side": leg.exchange_side,
+                                "market_semantics_id": leg.market_semantics_id,
                             }
                             for leg in ticket.legs
                         ],
@@ -1369,12 +1373,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     return None
 
                 if action == "open":
+                    locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(
                         replay_balance,
-                        ticket.stake,
+                        locked_capital,
                     )
                     replay_committed = cls._exact_positive_sum(
-                        (replay_committed, ticket.stake)
+                        (replay_committed, locked_capital)
                     )
                     turnover = cls._exact_positive_sum((turnover, ticket.stake))
                 else:
@@ -1384,11 +1389,12 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                         set(winners_raw),
                         set(voids_raw),
                     )
+                    locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     with localcontext(cls._decimal_context()):
-                        replay_committed = replay_committed - ticket.stake
+                        replay_committed = replay_committed - locked_capital
                         loss = (
-                            ticket.stake - payout
-                            if payout < ticket.stake
+                            locked_capital - payout
+                            if payout < locked_capital
                             else Decimal("0")
                         )
                     if replay_committed < 0:
@@ -1423,7 +1429,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
 
             current_committed = cls._exact_positive_sum(
                 tuple(
-                    ticket.stake
+                    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     for ticket in book.tickets.values()
                     if ticket.status is TicketStatus.OPEN
                 )

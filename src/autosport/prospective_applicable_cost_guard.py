@@ -212,16 +212,16 @@ def _build_guard():
     ) -> ProspectiveApplicableCostResolution:
         """Return fresh source-backed truth only after canonical product verification."""
 
-        if type(asserted) is not resolution_cls:
+        if canonical_type(asserted) is not resolution_cls:
             raise error_cls(
                 "prospective applicable-cost assertion must use the exact canonical type"
             )
         sealed_validate_resolution(asserted)
-        if type(intent) is not intent_cls:
+        if canonical_type(intent) is not intent_cls:
             raise error_cls("intent must be the exact canonical OpportunityIntent type")
-        if type(plan) is not plan_cls:
+        if canonical_type(plan) is not plan_cls:
             raise error_cls("plan must be the exact canonical PortfolioPlan type")
-        if type(router_store) is not router_store_cls:
+        if canonical_type(router_store) is not router_store_cls:
             raise error_cls(
                 "router_store must be the exact canonical ModelComputeRouterStore type"
             )
@@ -243,7 +243,7 @@ def _build_guard():
         )
         if canonical_slippage_resolver.__code__ is not canonical_slippage_resolver_code:
             raise error_cls("canonical Betfair applicable-cost resolver authority changed")
-        if type(canonical) is not resolution_cls:
+        if canonical_type(canonical) is not resolution_cls:
             raise error_cls(
                 "canonical applicable-cost resolver returned a non-canonical resolution type"
             )
@@ -256,16 +256,16 @@ def _build_guard():
                 )
         asserted_components = slot_value(asserted, "components")
         canonical_components = slot_value(canonical, "components")
-        if type(asserted_components) is not tuple or type(canonical_components) is not tuple:
+        if canonical_type(asserted_components) is not tuple or canonical_type(canonical_components) is not tuple:
             raise error_cls(
                 "prospective applicable-cost component collections must be canonical tuples"
             )
-        if len(asserted_components) != len(canonical_components):
+        if canonical_len(asserted_components) != canonical_len(canonical_components):
             raise error_cls(
                 "prospective applicable-cost assertion component count does not match canonical re-resolution"
             )
-        for index, (asserted_component, canonical_component) in enumerate(
-            zip(asserted_components, canonical_components, strict=True)
+        for index, (asserted_component, canonical_component) in canonical_enumerate(
+            canonical_zip(asserted_components, canonical_components, strict=True)
         ):
             assert_component_matches(
                 asserted_component,

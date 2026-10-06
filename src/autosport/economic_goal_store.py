@@ -30,6 +30,7 @@ ECONOMIC_GOAL_SCHEMA_VERSION: Final = 1
 _MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS: Final = 512
 _MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS: Final = 1024
 _MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS: Final = 512
+_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS: Final = 2 * 1024 * 1024
 
 _CONTRACT_KEYS: Final = frozenset(
     {
@@ -336,11 +337,14 @@ def economic_goal_from_json(
     _loads=strict_json_loads,
     _payload_decoder=economic_goal_from_payload,
     _error_type=EconomicGoalContractError,
+    _max_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
 ) -> EconomicGoalContract:
     """Decode one strict JSON document into a validated contract."""
 
     if type(text) is not str:
         raise _error_type("economic goal JSON must be text")
+    if len(text) > _max_chars:
+        raise _error_type("economic goal JSON text exceeds the canonical size limit")
     try:
         payload = _loads(text)
     except (TypeError, ValueError) as exc:

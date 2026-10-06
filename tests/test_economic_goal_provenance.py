@@ -675,3 +675,20 @@ def test_contract_sha256_rejects_bound_keyword_default_rebinding() -> None:
     finally:
         operation.__kwdefaults__ = original_kwdefaults
 
+
+def test_provenance_for_rejects_in_place_builder_keyword_default_mutation() -> None:
+    contract = _goal()
+    builder = economic_goal_provenance_module._build_provenance
+    original_kwdefaults = builder.__kwdefaults__
+    assert original_kwdefaults is not None
+    original_validator = original_kwdefaults["_validator"]
+
+    original_kwdefaults["_validator"] = lambda _evidence: None
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="provenance operation nested keyword defaults authority changed",
+        ):
+            provenance_for(contract)
+    finally:
+        original_kwdefaults["_validator"] = original_validator

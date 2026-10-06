@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 
 import pytest
@@ -178,6 +179,65 @@ def _ingest(store, ledger, plan, action, capture):
     )
 
 
+def _test_digest(value: object) -> str:
+    return sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _rehashed_record(
+    record: dict[str, object],
+    **revision_changes: object,
+) -> dict[str, object]:
+    result = dict(record)
+    revision = dict(result["revision"])
+    revision.update(revision_changes)
+    semantic_fields = (
+        "bookmaker_id",
+        "account_id",
+        "adapter_id",
+        "adapter_version",
+        "plan_id",
+        "action_id",
+        "attempt_id",
+        "external_bet_id",
+        "event_id",
+        "market_id",
+        "selection_id",
+        "side",
+        "provider_status",
+        "placed_date",
+        "settled_date",
+        "price_requested",
+        "price_matched",
+        "size_settled",
+        "provider_profit",
+    )
+    revision["content_sha256"] = _test_digest(
+        {field: revision[field] for field in semantic_fields}
+    )
+    revision["revision_id"] = _test_digest(
+        {
+            "schema": result["schema"],
+            "schema_version": result["schema_version"],
+            "previous_revision_id": revision["previous_revision_id"],
+            "revision_number": revision["revision_number"],
+            "content_sha256": revision["content_sha256"],
+        }
+    )
+    result["revision"] = revision
+    unsigned = dict(result)
+    unsigned.pop("record_sha256")
+    result["record_sha256"] = _test_digest(unsigned)
+    return result
+
+
 def test_identical_reread_is_idempotent_and_restart_safe(tmp_path) -> None:
     transport = _Transport()
     ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
@@ -199,6 +259,48 @@ def test_identical_reread_is_idempotent_and_restart_safe(tmp_path) -> None:
 
     restarted = BetfairSettlementRevisionStore(path)
     assert restarted.current("betfair", "acct-1", "bet-777") == first.revision
+
+
+@pytest.mark.parametrize(
+    ("revision_changes", "message"),
+    (
+        ({"side": "back"}, "side must be canonical BACK or LAY"),
+        (
+            {"placed_date": "2026-09-21T19:00:01+00:00"},
+            "settlement provider chronology predates order placement",
+        ),
+        ({"price_requested": "0"}, "price_requested must be positive"),
+        ({"price_matched": "-0.01"}, "price_matched must be non-negative"),
+        ({"size_settled": "-0.01"}, "size_settled must be non-negative"),
+    ),
+)
+def test_rehashed_unanchored_baseline_rejects_impossible_durable_semantics(
+    tmp_path,
+    revision_changes,
+    message,
+) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    canonical_path = tmp_path / "canonical-settlement.jsonl"
+    canonical_store = BetfairSettlementRevisionStore(canonical_path)
+    _ingest(
+        canonical_store,
+        ledger,
+        plan,
+        action,
+        _capture(client, provider_ref),
+    )
+
+    record = json.loads(canonical_path.read_text(encoding="utf-8"))
+    forged = _rehashed_record(record, **revision_changes)
+    unanchored_path = tmp_path / "unanchored-settlement.jsonl"
+    unanchored_path.write_text(
+        json.dumps(forged, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(BetfairSettlementRevisionError, match=message):
+        BetfairSettlementRevisionStore(unanchored_path)
 
 
 def test_long_lived_reader_refreshes_after_other_store_commits_correction(

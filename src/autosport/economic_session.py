@@ -798,6 +798,9 @@ _ECONOMIC_SESSION_CODE_AUTHORITIES: Final = tuple(
     )
     for label, authority in (
         ("uuid4", _UUID4),
+        ("economic_session_lock_scope", _economic_session_lock_scope),
+        ("construct_economic_goal_store", _construct_economic_goal_store),
+        ("construct_economic_authority", _construct_economic_authority),
         ("EconomicGoalStore.load", _ECONOMIC_GOAL_LOAD),
         ("MonotonicWorkspaceAuthority.recover", _AUTHORITY_RECOVER),
         ("MonotonicWorkspaceAuthority.prepare", _AUTHORITY_PREPARE),

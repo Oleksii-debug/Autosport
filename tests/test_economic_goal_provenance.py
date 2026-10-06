@@ -186,6 +186,26 @@ def test_provenance_rejects_schema_subclass_before_comparison() -> None:
     assert TextSubclass.comparisons == 0
 
 
+def test_provenance_rejects_oversize_identity_text() -> None:
+    with pytest.raises(EconomicGoalProvenanceError, match="identity size limit"):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="g" * 513,
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
+        )
+
+
+def test_decision_identity_revalidates_post_construction_mutation() -> None:
+    provenance = provenance_for(_goal())
+    object.__setattr__(provenance, "goal_id", "")
+
+    with pytest.raises(EconomicGoalProvenanceError):
+        _ = provenance.decision_identity
+
+
 def test_provenance_operations_revalidate_post_construction_mutation() -> None:
     goal = _goal()
     provenance = provenance_for(goal)

@@ -1193,5 +1193,55 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         self.assertEqual(store.require_current(evidence), evidence)
 
 
+
+
+def test_read_regular_bytes_normalizes_close_failure_without_masking_primary_error(tmp_path) -> None:
+    target = tmp_path / "economic-session.json"
+    target.write_bytes(b"{\"schema\":\"ok\"}")
+
+    def failing_close(_descriptor: int) -> None:
+        raise OSError("close failure")
+
+    with pytest.raises(
+        economic_session.EconomicSessionIntegrityError,
+        match="cannot close test reader descriptor",
+    ):
+        economic_session._read_regular_bytes(
+            target,
+            limit=4096,
+            label="test reader",
+            _close=failing_close,
+        )
+
+
+def test_read_regular_bytes_preserves_primary_domain_error_when_close_also_fails(
+    tmp_path,
+) -> None:
+    target = tmp_path / "economic-session.json"
+    target.write_bytes(b"{\"schema\":\"ok\"}")
+
+    def failing_close(_descriptor: int) -> None:
+        raise OSError("secondary close failure")
+
+    with pytest.raises(
+        economic_session.EconomicSessionIntegrityError,
+        match="opened identity is invalid",
+    ):
+        economic_session._read_regular_bytes(
+            target,
+            limit=4096,
+            _fstat=lambda _descriptor: type(
+                "Stat",
+                (),
+                {
+                    "st_mode": 0,
+                    "st_nlink": 1,
+                    "st_size": 1,
+                },
+            )(),
+            _close=failing_close,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

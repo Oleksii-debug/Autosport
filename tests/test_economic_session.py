@@ -429,6 +429,69 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         self.assertEqual(calls, 0)
 
 
+    def test_lock_and_constructor_in_place_code_mutation_fails_closed(self) -> None:
+        import autosport.economic_session as economic_session
+
+        lock_type = economic_session._WORKSPACE_LOCK_TYPE
+        store = self._store()
+        code_mutations = (
+            ("lock __init__", lock_type.__init__),
+            ("lock __enter__", lock_type.__enter__),
+            ("lock __exit__", lock_type.__exit__),
+            ("lock acquire", lock_type.acquire),
+            ("lock release", lock_type.release),
+        )
+
+        for label, authority in code_mutations:
+            with self.subTest(label=label):
+                original_code = authority.__code__
+
+                def hostile(*_args, **_kwargs):
+                    raise AssertionError(f"hostile {label} executed")
+
+                try:
+                    authority.__code__ = hostile.__code__
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.current()
+                finally:
+                    authority.__code__ = original_code
+
+        constructor_mutations = (
+            ("goal store init", EconomicGoalStore),
+            ("monotonic authority init", MonotonicWorkspaceAuthority),
+        )
+        original_goal_init = EconomicGoalStore.__init__
+        original_authority_init = MonotonicWorkspaceAuthority.__init__
+        try:
+            for label, target in constructor_mutations:
+                with self.subTest(label=label):
+                    authority = target.__init__
+                    original_code = authority.__code__
+
+                    def hostile_constructor(*_args, **_kwargs):
+                        raise AssertionError(f"hostile {label} constructor executed")
+
+                    try:
+                        authority.__code__ = hostile_constructor.__code__
+                        with self.assertRaisesRegex(
+                            EconomicSessionIntegrityError,
+                            "constructor (authority changed|changed)",
+                        ):
+                            ProductEconomicSessionStore(
+                                self.workspace,
+                                authority_root=self.authority_root,
+                                _test_clock=self.clock,
+                            )
+                    finally:
+                        authority.__code__ = original_code
+        finally:
+            EconomicGoalStore.__init__ = original_goal_init
+            MonotonicWorkspaceAuthority.__init__ = original_authority_init
+
+
     def test_instance_configuration_rebinding_fails_closed(self) -> None:
         store = self._store()
         store.current()

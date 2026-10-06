@@ -509,6 +509,42 @@ def test_class_rebound_assert_issued_cannot_append_forged_result(monkeypatch):
 
 
 
+def test_class_rebound_assert_issued_cannot_mutate_valid_append_semantics(monkeypatch):
+    plan = _plan()
+    history = MarketBookAttemptHistory(plan, ())
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    rebound_called = False
+
+    def mutate_after_registry_proof(self):
+        nonlocal rebound_called
+        rebound_called = True
+        object.__setattr__(
+            self.receipt,
+            "status",
+            BatchReceiptStatus.INCOMPLETE_RESPONSE,
+        )
+
+    monkeypatch.setattr(
+        MarketBookBatchTransportResult,
+        "assert_issued",
+        mutate_after_registry_proof,
+    )
+
+    updated = append_market_book_transport_attempt(
+        history,
+        issued,
+        attempt_id="attempt-valid-class-rebind",
+        required=True,
+    )
+
+    assert rebound_called is False
+    assert issued.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+    assert updated.records[-1].outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert updated.records[-1].exact_receipt == issued.receipt
+
+
 def test_class_rebound_assert_issued_cannot_forge_attempt_execution(monkeypatch):
     plan = _plan()
     batch = plan.batches[0]
@@ -537,6 +573,46 @@ def test_class_rebound_assert_issued_cannot_forge_attempt_execution(monkeypatch)
             MarketBookAttemptOutcome.EXACT_RESPONSE,
             forged,
         )
+
+def test_class_rebound_assert_issued_cannot_mutate_valid_execution_semantics(monkeypatch):
+    plan = _plan()
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    history = append_market_book_transport_attempt(
+        MarketBookAttemptHistory(plan, ()),
+        issued,
+        attempt_id="attempt-valid-execution-class-rebind",
+        required=True,
+    )
+    rebound_called = False
+
+    def mutate_after_registry_proof(self):
+        nonlocal rebound_called
+        rebound_called = True
+        object.__setattr__(
+            self.receipt,
+            "status",
+            BatchReceiptStatus.INCOMPLETE_RESPONSE,
+        )
+
+    monkeypatch.setattr(
+        MarketBookBatchTransportResult,
+        "assert_issued",
+        mutate_after_registry_proof,
+    )
+
+    execution = MarketBookBatchAttemptExecution(
+        history,
+        MarketBookAttemptOutcome.EXACT_RESPONSE,
+        issued,
+    )
+
+    assert rebound_called is False
+    assert issued.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+    assert execution.result is issued
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+
 
 def test_invalid_client_fails_before_gate_mutation():
     plan = _plan()

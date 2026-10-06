@@ -113,7 +113,11 @@ class _ContinuousSessionCoordinatorMeta(type):
         raise TypeError("canonical settlement consumer metaclass is not extensible")
 
     def __new__(mcls, name, bases, namespace, **kwargs):
-        protected = {"_settle", "_settlement_consumer_bindings_sealed"}
+        protected = {
+            "_settle",
+            "_open_quote_keys_for_book",
+            "_settlement_consumer_bindings_sealed",
+        }
         inherits_sealed_consumer = any(
             any(
                 ancestor.__dict__.get(
@@ -135,6 +139,7 @@ class _ContinuousSessionCoordinatorMeta(type):
         )
         if sealed and name in {
             "_settle",
+            "_open_quote_keys_for_book",
             "_settlement_consumer_bindings_sealed",
         }:
             raise TypeError("canonical settlement consumer entry binding is immutable")
@@ -147,6 +152,7 @@ class _ContinuousSessionCoordinatorMeta(type):
         )
         if sealed and name in {
             "_settle",
+            "_open_quote_keys_for_book",
             "_settlement_consumer_bindings_sealed",
         }:
             raise TypeError("canonical settlement consumer entry binding is immutable")
@@ -1908,7 +1914,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "settlement engine constructor returned non-canonical type"
                 )
             for resolution in unique.values():
-                allowed = self._open_quote_keys_for_book(book, resolution.event_identity)
+                allowed = ContinuousSessionCoordinator._open_quote_keys_for_book(
+                    book,
+                    resolution.event_identity,
+                )
                 scoped = {
                     quote_key: outcome
                     for quote_key, outcome in resolution.quote_outcomes.items()

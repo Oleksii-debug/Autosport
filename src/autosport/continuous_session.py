@@ -1489,6 +1489,10 @@ class _ContinuousSessionState:
         expected_after_delta_id: str | None | object = _EXPECTED_PROJECTION_UNSET,
         _update_method: Callable[..., dict[str, Any]] = _update,
         _update_method_code: object = _update.__code__,
+        _text_validator: Callable[[object, str], str] = _text,
+        _text_validator_code: object = _text.__code__,
+        _delta_validate: Callable[[CollectorDelta], None] = CollectorDelta.validate,
+        _delta_validate_code: object = CollectorDelta.validate.__code__,
     ) -> None:
         if (
             type(self)._update is not _update_method
@@ -1496,6 +1500,15 @@ class _ContinuousSessionState:
         ):
             raise ContinuousSessionError(
                 "canonical source-projection read-modify-write authority changed"
+            )
+        if (
+            _text is not _text_validator
+            or getattr(_text_validator, "__code__", None) is not _text_validator_code
+            or CollectorDelta.validate is not _delta_validate
+            or getattr(_delta_validate, "__code__", None) is not _delta_validate_code
+        ):
+            raise ContinuousSessionError(
+                "canonical source-projection validation authority changed"
             )
         if type(deltas) is not tuple:
             raise TypeError("deltas must be an exact tuple")
@@ -1505,7 +1518,7 @@ class _ContinuousSessionState:
             expected_after_delta_id is not _EXPECTED_PROJECTION_UNSET
             and expected_after_delta_id is not None
         ):
-            _text(expected_after_delta_id, "expected_after_delta_id")
+            _text_validator(expected_after_delta_id, "expected_after_delta_id")
         if backlog and not deltas:
             raise ContinuousSessionError(
                 "source-state projection backlog requires at least one delta"
@@ -1516,7 +1529,7 @@ class _ContinuousSessionState:
         for delta in deltas:
             if type(delta) is not CollectorDelta:
                 raise TypeError("deltas must contain exact CollectorDelta values")
-            delta.validate()
+            _delta_validate(delta)
             if delta.source_id != self.source_id:
                 raise ContinuousSessionError(
                     "source-state projection delta belongs to another source"

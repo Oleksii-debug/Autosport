@@ -713,6 +713,8 @@ class ProductEconomicSessionStore:
         _path_new=_PATH_NEW,
         _path_expanduser=_PATH_EXPANDUSER,
         _path_resolve=_PATH_RESOLVE,
+        _product_time_ns=_PRODUCT_TIME_NS,
+        _live_time_ns=time.time_ns,
     ) -> None:
         if Path is not _path_factory or _path_factory.__new__ is not _path_new:
             raise EconomicSessionIntegrityError(
@@ -759,7 +761,18 @@ class ProductEconomicSessionStore:
                 "economic-session EconomicGoalStore constructor helper authority changed"
             )
         self.goal_store = _construct_economic_goal_store(self.workspace)
-        self._clock = _PRODUCT_TIME_NS if _test_clock is None else _test_clock
+        if _test_clock is None:
+            if (
+                _PRODUCT_TIME_NS is not _product_time_ns
+                or time.time_ns is not _live_time_ns
+                or _product_time_ns is not _live_time_ns
+            ):
+                raise EconomicSessionIntegrityError(
+                    "economic-session product clock authority changed"
+                )
+            self._clock = _product_time_ns
+        else:
+            self._clock = _test_clock
         if not callable(self._clock):
             raise EconomicSessionIntegrityError("_test_clock must be callable")
         self._product_clock = _test_clock is None
@@ -800,6 +813,8 @@ class ProductEconomicSessionStore:
         self._authority_namespace_marker_path_witness = self._authority.namespace_marker_path
         self._clock_witness = self._clock
         self._product_clock_witness = self._product_clock
+        self._product_time_ns_witness = _product_time_ns
+        self._live_time_ns_witness = _live_time_ns
         self._uuid4_witness = _UUID4
         self._opening_paperbook_sha256_witness = _opening_paperbook_sha256
         self._workspace_lock_type_witness = _WORKSPACE_LOCK_TYPE
@@ -897,6 +912,15 @@ class ProductEconomicSessionStore:
             )
             or self._clock is not self._clock_witness
             or self._product_clock is not self._product_clock_witness
+            or (
+                self._product_clock_witness
+                and (
+                    _PRODUCT_TIME_NS is not self._product_time_ns_witness
+                    or time.time_ns is not self._live_time_ns_witness
+                    or self._product_time_ns_witness
+                    is not self._live_time_ns_witness
+                )
+            )
             or _ECONOMIC_GOAL_STORE_TYPE is not self._economic_goal_store_type_witness
             or _ECONOMIC_GOAL_STORE_NEW is not self._economic_goal_store_new_witness
             or _ECONOMIC_GOAL_STORE_INIT is not self._economic_goal_store_init_witness

@@ -5352,3 +5352,36 @@ def test_desktop_failure_restores_invalidation_buffer_rebind() -> None:
         assert coordinator.invalidation_buffer is canonical
         assert coordinator._state.snapshot().last_error_code == "RuntimeError"
 
+def test_collector_malformed_matched_keys_are_restored_without_sorting_tampered_state() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop ran after malformed routing state")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after malformed routing state")
+
+        def mutate() -> None:
+            index._matched_keys["input-a"].add(("provider-a", "forged-quote"))
+            index._matched_keys["input-a"].add(object())
+
+        coordinator.collector = _Collector(callback=mutate)
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency routing authority changed during collector observation",
+        ):
+            coordinator.tick()
+
+        assert index.matching_keys("input-a") == ()
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+

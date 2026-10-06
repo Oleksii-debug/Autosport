@@ -2942,6 +2942,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         collector = self.collector
         collector_run_cycle = collector.run_cycle
         collector_source_id = collector.source_id
+        if (
+            type(collector_source_id) is not str
+            or not collector_source_id
+            or collector_source_id.strip() != collector_source_id
+            or collector_source_id != self._state.source_id
+        ):
+            raise ContinuousSessionError(
+                "collector source identity does not match continuous session"
+            )
         collector_delta_store = collector.delta_store
         collector_delta_reader = collector_delta_store.deltas_after_commit
         collector_max_items = collector.config.max_items

@@ -18,6 +18,7 @@ from pathlib import Path
 from secrets import token_bytes as _token_bytes
 from typing import Callable, Mapping, Sequence
 
+from . import betfair_execution_confirmation as _betfair_confirmation
 from .betfair_account_readonly import (
     BETTING_JSON_RPC_ENDPOINT,
     BetfairExecutionReadbackEnvelope,
@@ -74,6 +75,44 @@ class BetfairSupervisedExecutionError(RuntimeError):
 
 class BetfairPlaceOrdersAmbiguous(BetfairSupervisedExecutionError):
     """The provider effect is unknown and requires readback before retry."""
+
+
+class BetfairFinalConfirmationDenied(BetfairSupervisedExecutionError):
+    """Durable operator confirmation denied before the irreversible provider POST."""
+
+
+_BETFAIR_CONFIRMATION_ERROR = _betfair_confirmation.BetfairExecutionConfirmationError
+_CONSUME_BETFAIR_CONFIRMATION = (
+    _betfair_confirmation.consume_betfair_execution_confirmation
+)
+_CONSUME_BETFAIR_CONFIRMATION_CODE = getattr(
+    _CONSUME_BETFAIR_CONFIRMATION,
+    "__code__",
+    None,
+)
+_REQUIRE_CURRENT_BETFAIR_CONFIRMATION = (
+    _betfair_confirmation.require_consumed_betfair_execution_confirmation_current
+)
+_REQUIRE_CURRENT_BETFAIR_CONFIRMATION_CODE = getattr(
+    _REQUIRE_CURRENT_BETFAIR_CONFIRMATION,
+    "__code__",
+    None,
+)
+
+
+def _betfair_confirmation_graph_unchanged() -> bool:
+    return (
+        _betfair_confirmation.BetfairExecutionConfirmationError
+        is _BETFAIR_CONFIRMATION_ERROR
+        and _betfair_confirmation.consume_betfair_execution_confirmation
+        is _CONSUME_BETFAIR_CONFIRMATION
+        and getattr(_CONSUME_BETFAIR_CONFIRMATION, "__code__", None)
+        is _CONSUME_BETFAIR_CONFIRMATION_CODE
+        and _betfair_confirmation.require_consumed_betfair_execution_confirmation_current
+        is _REQUIRE_CURRENT_BETFAIR_CONFIRMATION
+        and getattr(_REQUIRE_CURRENT_BETFAIR_CONFIRMATION, "__code__", None)
+        is _REQUIRE_CURRENT_BETFAIR_CONFIRMATION_CODE
+    )
 
 
 class PlaceOrdersOutcome(str, Enum):
@@ -1772,13 +1811,23 @@ def _build_canonical_place_action_dispatch():
     place_action_code = place_action.__code__
     sealed_init_code = sealed_init.__code__
 
+    def public_place_action_disabled(self, *args, **kwargs):
+        raise BetfairSupervisedExecutionError(
+            "direct public Betfair provider write is disabled; "
+            "use execute_betfair_supervised_action"
+        )
+
+    public_place_action_disabled_code = public_place_action_disabled.__code__
+    client_type.place_action = public_place_action_disabled
+
     def preflight(client: BetfairSupervisedPlaceOrdersClient) -> None:
         if (
             type(client) is not client_type
             or client_type.__getattribute__ is not canonical_client_getattribute
             or client_type.__dict__.get("__init__") is not sealed_init
             or sealed_init.__code__ is not sealed_init_code
-            or client_type.__dict__.get("place_action") is not place_action
+            or client_type.__dict__.get("place_action") is not public_place_action_disabled
+            or public_place_action_disabled.__code__ is not public_place_action_disabled_code
             or place_action.__code__ is not place_action_code
             or not static_authority_current()
         ):
@@ -2128,8 +2177,27 @@ def _place_action_with_final_durable_authority(
     client: BetfairSupervisedPlaceOrdersClient,
     provider_order_ref: str,
     execution_workspace: Path,
+    confirmation_receipt_id: str | None,
+    confirmation_review_sha256: str | None,
 ) -> BetfairPlaceExecutionReport:
-    """Hold durable approval stable and fsync SUBMITTED at the provider boundary."""
+    """Hold durable approval + exact operator confirmation through the provider boundary."""
+
+    if confirmation_receipt_id is None or confirmation_review_sha256 is None:
+        raise BetfairSupervisedExecutionError(
+            "final Betfair provider send requires durable operator confirmation"
+        )
+    confirmation_receipt_id = _sha(
+        confirmation_receipt_id,
+        "confirmation_receipt_id",
+    )
+    confirmation_review_sha256 = _sha(
+        confirmation_review_sha256,
+        "confirmation_review_sha256",
+    )
+    if not _betfair_confirmation_graph_unchanged():
+        raise BetfairSupervisedExecutionError(
+            "durable Betfair confirmation authority changed"
+        )
 
     def operation() -> BetfairPlaceExecutionReport:
         view = ledger.verified_execution_view(bound.execution_plan.plan_id)
@@ -2214,6 +2282,118 @@ def _place_action_with_final_durable_authority(
             submitted_request_sha256 = request_sha256
             submitted = True
 
+            if not _betfair_confirmation_graph_unchanged():
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair confirmation authority changed before consumption"
+                )
+            try:
+                _CONSUME_BETFAIR_CONFIRMATION(
+                    execution_workspace,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id=attempt_id,
+                    receipt_id=confirmation_receipt_id,
+                    expected_review_sha256=confirmation_review_sha256,
+                    request_sha256=request_sha256,
+                    submitted_at=send_at,
+                )
+            except _BETFAIR_CONFIRMATION_ERROR as exc:
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair operator confirmation denied final provider send"
+                ) from exc
+
+            final_send_at = _supervised_execution_runtime._trusted_now()
+            if not _betfair_confirmation_graph_unchanged():
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair confirmation authority changed after consumption"
+                )
+            try:
+                review_expires_at = _REQUIRE_CURRENT_BETFAIR_CONFIRMATION(
+                    execution_workspace,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id=attempt_id,
+                    receipt_id=confirmation_receipt_id,
+                    expected_review_sha256=confirmation_review_sha256,
+                    request_sha256=request_sha256,
+                    submitted_at=send_at,
+                    current_at=final_send_at,
+                )
+            except _BETFAIR_CONFIRMATION_ERROR as exc:
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair operator confirmation changed before provider send"
+                ) from exc
+
+            _require_approval(bound, approval, final_send_at)
+            _require_durable_approval(ledger, bound, approval)
+            final_send_instant = _time(final_send_at, "final send time")
+            submitted_instant = _time(send_at, "submitted_at")
+            if final_send_instant < submitted_instant:
+                raise BetfairFinalConfirmationDenied(
+                    "trusted Betfair final-send clock moved backwards"
+                )
+            if final_send_instant >= _time(
+                action.expires_at,
+                "action expires_at",
+            ):
+                raise BetfairFinalConfirmationDenied(
+                    "Betfair action quote expired after durable confirmation"
+                )
+
+            durable_view = ledger.verified_execution_view(
+                bound.execution_plan.plan_id
+            )
+            durable_attempts = [
+                item
+                for item in durable_view.attempts
+                if item.attempt.attempt_id == attempt_id
+            ]
+            if len(durable_attempts) != 1:
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair submission identity disappeared before provider send"
+                )
+            durable_attempt = durable_attempts[0]
+            if (
+                durable_attempt.state is not AttemptState.SUBMITTED
+                or durable_attempt.action != action
+                or durable_attempt.provider_order_ref != provider_ref
+                or durable_attempt.submitted_at != send_at
+                or durable_attempt.request_sha256 != request_sha256
+            ):
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair submission identity changed before provider send"
+                )
+
+            # Last clock sample is immediately adjacent to the irreversible POST.
+            # All durable I/O is complete; only pure in-memory expiry checks follow.
+            provider_send_at = _supervised_execution_runtime._trusted_now()
+            provider_send_instant = _time(provider_send_at, "provider send time")
+            if provider_send_instant < final_send_instant:
+                raise BetfairFinalConfirmationDenied(
+                    "trusted Betfair final-send clock moved backwards at provider seam"
+                )
+            if provider_send_instant >= _time(
+                review_expires_at,
+                "confirmation review expires_at",
+            ):
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair operator confirmation expired before provider send"
+                )
+            _require_approval(bound, approval, provider_send_at)
+            if provider_send_instant >= _time(
+                action.expires_at,
+                "action expires_at",
+            ):
+                raise BetfairFinalConfirmationDenied(
+                    "Betfair action quote expired at provider send seam"
+                )
+            if not _betfair_confirmation_graph_unchanged():
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair confirmation authority changed at provider seam"
+                )
+
         try:
             report = _canonical_place_action_dispatch(
                 client,
@@ -2232,6 +2412,8 @@ def _place_action_with_final_durable_authority(
                     "placeOrders report request digest mismatches durable submission"
                 )
             return report
+        except BetfairFinalConfirmationDenied:
+            raise
         except BetfairPlaceOrdersAmbiguous:
             raise
         except Exception as exc:
@@ -2254,6 +2436,8 @@ def execute_betfair_supervised_action(
     profile: BookmakerCapabilityProfile,
     client: BetfairSupervisedPlaceOrdersClient,
     clock: Callable[[], str] | None = None,
+    confirmation_receipt_id: str | None = None,
+    confirmation_review_sha256: str | None = None,
 ) -> BetfairSupervisedExecutionResult:
     """Reserve -> submit -> placeOrders -> report -> canonical ledger transition."""
 
@@ -2316,6 +2500,8 @@ def execute_betfair_supervised_action(
                 client=client,
                 provider_order_ref=provider_order_ref,
                 execution_workspace=execution_workspace,
+                confirmation_receipt_id=confirmation_receipt_id,
+                confirmation_review_sha256=confirmation_review_sha256,
             )
         except BetfairPlaceOrdersAmbiguous:
             ledger.mark_unknown(

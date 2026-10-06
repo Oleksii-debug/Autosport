@@ -59,6 +59,7 @@ def _canonical_precommit(
     test: unittest.TestCase,
     *,
     threshold: Decimal = Decimal("10"),
+    lay_first: bool = False,
 ) -> ProductProposalRiskEvaluationPrecommit:
     temp = tempfile.TemporaryDirectory()
     test.addCleanup(temp.cleanup)
@@ -103,18 +104,28 @@ def _canonical_precommit(
     quote_ts = "2026-09-18T13:19:59+00:00"
     contexts = []
     for suffix in ("a", "b"):
+        is_lay = lay_first and suffix == "a"
+        odds = Decimal("5") if is_lay else Decimal("2")
+        exchange_side = "lay" if is_lay else None
+        market_semantics_id = (
+            "exchange.match.odds.v1"
+            if is_lay
+            else None
+        )
         leg = TicketLeg(
             event_id=f"event-{suffix}",
             market_id=f"market-{suffix}",
             selection_id=f"selection-{suffix}",
-            locked_odds=Decimal("2"),
+            locked_odds=odds,
             sport="table_tennis",
+            exchange_side=exchange_side,
+            market_semantics_id=market_semantics_id,
         )
         quote = MarketEvent(
             event_id=leg.event_id,
             market_id=leg.market_id,
             selection_id=leg.selection_id,
-            decimal_odds=Decimal("2"),
+            decimal_odds=odds,
             observed_ts=quote_ts,
             source_id="betfair_exchange_historical",
             sequence=1,
@@ -123,6 +134,8 @@ def _canonical_precommit(
             ingest_ts=quote_ts,
             metadata={},
             sport="table_tennis",
+            exchange_side=exchange_side,
+            market_semantics_id=market_semantics_id,
         )
         contexts.append(
             ProposedTicketRiskContext(

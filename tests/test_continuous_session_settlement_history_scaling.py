@@ -795,6 +795,46 @@ def test_sidecar_serializer_and_publisher_ignore_runtime_rebinding(monkeypatch) 
         assert payload["last_error_code"] == "CANONICAL_FAILURE"
 
 
+def test_sidecar_atomic_serializer_rebinding_fails_before_publication(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        error_path = root / "continuous_session.json.operational_error.json"
+
+        def attacker_dump(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("runtime-rebound json.dump executed")
+
+        monkeypatch.setattr(continuous_session.json, "dump", attacker_dump)
+
+        try:
+            state.record_failure(code="CANONICAL_FAILURE")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "writer code identity" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound json.dump was accepted")
+
+        assert not error_path.exists()
+
+
+def test_sidecar_verified_read_ignores_runtime_method_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        def attacker_read(*_args: object, **_kwargs: object) -> bytes:
+            raise AssertionError("runtime-rebound sidecar byte reader executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_read_error_checkpoint_bytes",
+            attacker_read,
+        )
+
+        checkpoint = state._read_error_checkpoint()
+        assert checkpoint["last_error_code"] == "CANONICAL_FAILURE"
+
+
 def test_invalid_sidecar_success_timestamp_is_normalized_to_domain_error() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

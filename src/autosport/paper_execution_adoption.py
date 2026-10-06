@@ -11,7 +11,12 @@ from threading import RLock
 from typing import Mapping
 
 from . import _paper_execution_reality_legacy as _paper_impl
-from .domain import MarketEvent, PaperTicket, TicketLeg
+from .domain import (
+    MarketEvent,
+    PaperTicket,
+    TicketLeg,
+    _canonical_semantic_identity,
+)
 from .opportunity import QuoteRef
 from .paper import PaperBook
 from .paper_execution_reality import (
@@ -28,7 +33,24 @@ from .portfolio_plan import (
     PortfolioPlan,
     _portfolio_intent_evidence_json,
 )
-from .real_execution_ledger import ExecutionAction, ExecutionPlan
+from .real_execution_ledger import (
+    ExecutionAction,
+    ExecutionPlan,
+    _decimal_text as _ledger_decimal_text,
+)
+
+
+_CANONICAL_ADOPTION_SEMANTIC_IDENTITY = _canonical_semantic_identity
+_CANONICAL_ADOPTION_TICKET_LEG_TYPE = TicketLeg
+_CANONICAL_ADOPTION_MARKET_EVENT_TYPE = MarketEvent
+_CANONICAL_ADOPTION_EXECUTION_PLAN_TYPE = ExecutionPlan
+_CANONICAL_ADOPTION_EXECUTION_ACTION_TYPE = ExecutionAction
+_CANONICAL_ADOPTION_DECIMAL_TYPE = Decimal
+_CANONICAL_ADOPTION_PORTFOLIO_PLAN_TYPE = PortfolioPlan
+_CANONICAL_ADOPTION_OPPORTUNITY_INTENT_TYPE = OpportunityIntent
+_CANONICAL_ADOPTION_JSON_DUMPS = json.dumps
+_CANONICAL_ADOPTION_SHA256 = hashlib.sha256
+_CANONICAL_ADOPTION_DECIMAL_TEXT = _ledger_decimal_text
 
 
 class PaperExecutionAdoptionError(RuntimeError):
@@ -41,10 +63,24 @@ class PaperExposureBinding:
     sport: str | None
     bankroll_id: str | None
     currency: str | None
+    market_semantics_id: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.action_id) is not str or not self.action_id:
             raise ValueError("action_id must be non-empty text")
+        for field_name in ("sport", "bankroll_id", "currency", "market_semantics_id"):
+            value = getattr(self, field_name)
+            if value is not None and (
+                type(value) is not str
+                or not value
+                or value.strip() != value
+            ):
+                raise ValueError(f"{field_name} must be canonical text or None")
+        if self.market_semantics_id is not None:
+            _CANONICAL_ADOPTION_SEMANTIC_IDENTITY(
+                self.market_semantics_id,
+                "market_semantics_id",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,12 +90,12 @@ class PreparedPaperExecution:
     intent_evidence_json: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.execution_plan, ExecutionPlan):
-            raise TypeError("execution_plan must be ExecutionPlan")
+        if type(self.execution_plan) is not _CANONICAL_ADOPTION_EXECUTION_PLAN_TYPE:
+            raise TypeError("execution_plan must be canonical ExecutionPlan")
         if (
             type(self.exposure_bindings) is not tuple
             or any(
-                not isinstance(item, PaperExposureBinding)
+                type(item) is not PaperExposureBinding
                 for item in self.exposure_bindings
             )
         ):
@@ -89,14 +125,169 @@ class PaperExecutionAdoptionResult:
 
 
 def _digest(payload: object) -> str:
-    encoded = json.dumps(
+    encoded = _CANONICAL_ADOPTION_JSON_DUMPS(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return _CANONICAL_ADOPTION_SHA256(encoded).hexdigest()
+
+
+_CANONICAL_ADOPTION_DIGEST = _digest
+
+
+def _canonical_execution_plan_payload(plan: object) -> dict[str, object]:
+    if type(plan) is not _CANONICAL_ADOPTION_EXECUTION_PLAN_TYPE:
+        raise PaperExecutionAdoptionError(
+            "prepared execution plan must remain canonical"
+        )
+    for field_name in (
+        "plan_id",
+        "bookmaker_profile_version",
+        "decision_id",
+        "approval_id",
+        "created_at",
+    ):
+        value = getattr(plan, field_name)
+        if type(value) is not str or not value:
+            raise PaperExecutionAdoptionError(
+                f"prepared execution plan {field_name} must remain canonical text"
+            )
+    if type(plan.schema_version) is not int:
+        raise PaperExecutionAdoptionError(
+            "prepared execution plan schema_version must remain an exact int"
+        )
+    if type(plan.actions) is not tuple or not plan.actions:
+        raise PaperExecutionAdoptionError(
+            "prepared execution actions must remain a non-empty canonical tuple"
+        )
+    actions: list[dict[str, object]] = []
+    for action in plan.actions:
+        if type(action) is not _CANONICAL_ADOPTION_EXECUTION_ACTION_TYPE:
+            raise PaperExecutionAdoptionError(
+                "prepared execution actions must remain canonical"
+            )
+        text_names = (
+            "action_id",
+            "bookmaker_id",
+            "account_id",
+            "event_id",
+            "market_id",
+            "selection_id",
+            "side",
+            "quote_id",
+            "quote_observed_at",
+            "expires_at",
+        )
+        for field_name in text_names:
+            value = getattr(action, field_name)
+            if type(value) is not str or not value:
+                raise PaperExecutionAdoptionError(
+                    "prepared execution action text must remain canonical"
+                )
+        if (
+            type(action.requested_odds) is not _CANONICAL_ADOPTION_DECIMAL_TYPE
+            or type(action.requested_stake) is not _CANONICAL_ADOPTION_DECIMAL_TYPE
+            or not action.requested_odds.is_finite()
+            or not action.requested_stake.is_finite()
+        ):
+            raise PaperExecutionAdoptionError(
+                "prepared execution action economics must remain exact finite Decimal values"
+            )
+        actions.append(
+            {
+                "action_id": action.action_id,
+                "bookmaker_id": action.bookmaker_id,
+                "account_id": action.account_id,
+                "event_id": action.event_id,
+                "market_id": action.market_id,
+                "selection_id": action.selection_id,
+                "side": action.side,
+                "requested_odds": _CANONICAL_ADOPTION_DECIMAL_TEXT(action.requested_odds),
+                "requested_stake": _CANONICAL_ADOPTION_DECIMAL_TEXT(action.requested_stake),
+                "quote_id": action.quote_id,
+                "quote_observed_at": action.quote_observed_at,
+                "expires_at": action.expires_at,
+            }
+        )
+    return {
+        "schema_version": plan.schema_version,
+        "plan_id": plan.plan_id,
+        "bookmaker_profile_version": plan.bookmaker_profile_version,
+        "decision_id": plan.decision_id,
+        "approval_id": plan.approval_id,
+        "created_at": plan.created_at,
+        "actions": actions,
+    }
+
+
+_CANONICAL_ADOPTION_EXECUTION_PLAN_PAYLOAD = _canonical_execution_plan_payload
+_CANONICAL_ADOPTION_EXPOSURE_SCOPE_SCHEMA = "autosport.paper_execution.exposure_scope_binding"
+_CANONICAL_ADOPTION_EXPOSURE_SCOPE_EVENT_TYPE = "PAPER_EXPOSURE_SCOPE_BOUND"
+
+
+def _canonical_exposure_scope_payload(
+    prepared: object,
+    _prepared_type=PreparedPaperExecution,
+    _binding_type=PaperExposureBinding,
+    _plan_payload=_CANONICAL_ADOPTION_EXECUTION_PLAN_PAYLOAD,
+    _digest=_CANONICAL_ADOPTION_DIGEST,
+    _sha256=_CANONICAL_ADOPTION_SHA256,
+    _schema=_CANONICAL_ADOPTION_EXPOSURE_SCOPE_SCHEMA,
+) -> dict[str, object]:
+    if type(prepared) is not _prepared_type:
+        raise PaperExecutionAdoptionError(
+            "prepared execution must be canonical before durable scope binding"
+        )
+    if type(prepared.exposure_bindings) is not tuple or any(
+        type(binding) is not _binding_type
+        for binding in prepared.exposure_bindings
+    ):
+        raise PaperExecutionAdoptionError(
+            "prepared exposure bindings must be canonical before durable scope binding"
+        )
+    bindings: list[dict[str, object]] = []
+    for binding in prepared.exposure_bindings:
+        if type(binding.action_id) is not str or not binding.action_id:
+            raise PaperExecutionAdoptionError(
+                "prepared scope action_id must remain canonical text"
+            )
+        for field_name in ("sport", "bankroll_id", "currency", "market_semantics_id"):
+            value = getattr(binding, field_name)
+            if value is not None and type(value) is not str:
+                raise PaperExecutionAdoptionError(
+                    f"prepared scope {field_name} must remain canonical text or None"
+                )
+        body: dict[str, object] = {
+            "action_id": binding.action_id,
+            "sport": binding.sport,
+            "bankroll_id": binding.bankroll_id,
+            "currency": binding.currency,
+        }
+        if binding.market_semantics_id is not None:
+            body["market_semantics_id"] = binding.market_semantics_id
+        bindings.append(body)
+    if type(prepared.intent_evidence_json) is not str or not prepared.intent_evidence_json:
+        raise PaperExecutionAdoptionError(
+            "prepared intent evidence must remain canonical text"
+        )
+    plan_payload = _plan_payload(prepared.execution_plan)
+    scope: dict[str, object] = {
+        "schema": _schema,
+        "schema_version": 1,
+        "plan_id": plan_payload["plan_id"],
+        "plan_fingerprint": _digest(plan_payload),
+        "intent_evidence_sha256": _sha256(
+            prepared.intent_evidence_json.encode("utf-8")
+        ).hexdigest(),
+        "bindings": bindings,
+    }
+    return {**scope, "binding_sha256": _digest(scope)}
+
+
+_CANONICAL_ADOPTION_EXPOSURE_SCOPE_PAYLOAD = _canonical_exposure_scope_payload
 
 
 def _utc_timestamp(value: str, field_name: str) -> datetime:
@@ -141,8 +332,8 @@ class PaperExecutionAdoptionRuntime:
     """
 
     _TICKET_MARKER = "paper_execution_attempt_id="
-    _EXPOSURE_SCOPE_EVENT_TYPE = "PAPER_EXPOSURE_SCOPE_BOUND"
-    _EXPOSURE_SCOPE_SCHEMA = "autosport.paper_execution.exposure_scope_binding"
+    _EXPOSURE_SCOPE_EVENT_TYPE = _CANONICAL_ADOPTION_EXPOSURE_SCOPE_EVENT_TYPE
+    _EXPOSURE_SCOPE_SCHEMA = _CANONICAL_ADOPTION_EXPOSURE_SCOPE_SCHEMA
 
     def __init__(
         self,
@@ -172,7 +363,10 @@ class PaperExecutionAdoptionRuntime:
         # In-process capability registry. Object identity is intentional: serialized,
         # copied, reconstructed, or caller-authored PreparedPaperExecution values do
         # not carry execution authority. Restart re-mints from canonical inputs.
-        self._prepared_authorities: dict[int, PreparedPaperExecution] = {}
+        self._prepared_authorities: dict[
+            int,
+            tuple[PreparedPaperExecution, tuple[object, ...]],
+        ] = {}
         self.paper_book_path = Path(paper_book_path)
         if self.paper_book_path.exists():
             durable_book = PaperBook.load(self.paper_book_path)
@@ -210,16 +404,90 @@ class PaperExecutionAdoptionRuntime:
         if self.max_quote_age <= timedelta(0):
             raise ValueError("effective max_quote_age must be positive")
 
+    @staticmethod
+    def _prepared_commitment(
+        prepared: PreparedPaperExecution,
+        _prepared_type=PreparedPaperExecution,
+        _binding_type=PaperExposureBinding,
+        _semantic_identity=_CANONICAL_ADOPTION_SEMANTIC_IDENTITY,
+        _plan_payload=_CANONICAL_ADOPTION_EXECUTION_PLAN_PAYLOAD,
+        _digest=_CANONICAL_ADOPTION_DIGEST,
+    ) -> tuple[object, ...]:
+        if type(prepared) is not _prepared_type:
+            raise TypeError("prepared must be canonical PreparedPaperExecution")
+        if type(prepared.exposure_bindings) is not tuple or any(
+            type(binding) is not _binding_type
+            for binding in prepared.exposure_bindings
+        ):
+            raise PaperExecutionAdoptionError(
+                "prepared exposure bindings must remain canonical"
+            )
+        for binding in prepared.exposure_bindings:
+            if type(binding.action_id) is not str or not binding.action_id:
+                raise PaperExecutionAdoptionError(
+                    "prepared binding action_id must remain canonical text"
+                )
+            for field_name in (
+                "sport",
+                "bankroll_id",
+                "currency",
+                "market_semantics_id",
+            ):
+                value = getattr(binding, field_name)
+                if value is not None and type(value) is not str:
+                    raise PaperExecutionAdoptionError(
+                        f"prepared binding {field_name} must remain canonical text"
+                    )
+            if binding.market_semantics_id is not None:
+                _semantic_identity(
+                    binding.market_semantics_id,
+                    "market_semantics_id",
+                )
+        plan = prepared.execution_plan
+        plan_payload = _plan_payload(plan)
+        if (
+            type(prepared.intent_evidence_json) is not str
+            or not prepared.intent_evidence_json
+        ):
+            raise PaperExecutionAdoptionError(
+                "prepared intent evidence must remain canonical text"
+            )
+        binding_commitment = tuple(
+            (
+                binding.action_id,
+                binding.sport,
+                binding.bankroll_id,
+                binding.currency,
+                binding.market_semantics_id,
+            )
+            for binding in prepared.exposure_bindings
+        )
+        return (
+            _digest(plan_payload),
+            binding_commitment,
+            prepared.intent_evidence_json,
+        )
+
     def _mint_prepared(self, prepared: PreparedPaperExecution) -> PreparedPaperExecution:
-        if not isinstance(prepared, PreparedPaperExecution):
-            raise TypeError("prepared must be PreparedPaperExecution")
-        self._prepared_authorities[id(prepared)] = prepared
+        if type(prepared) is not PreparedPaperExecution:
+            raise TypeError("prepared must be canonical PreparedPaperExecution")
+        commitment = self._prepared_commitment(prepared)
+        self._prepared_authorities[id(prepared)] = (prepared, commitment)
         return prepared
 
     def _require_minted(self, prepared: PreparedPaperExecution) -> None:
-        if self._prepared_authorities.get(id(prepared)) is not prepared:
+        if type(prepared) is not PreparedPaperExecution:
+            raise PaperExecutionAdoptionError(
+                "prepared execution must be canonical PreparedPaperExecution"
+            )
+        authority = self._prepared_authorities.get(id(prepared))
+        if authority is None or authority[0] is not prepared:
             raise PaperExecutionAdoptionError(
                 "prepared execution was not minted by this runtime from canonical authority"
+            )
+        if self._prepared_commitment(prepared) != authority[1]:
+            raise PaperExecutionAdoptionError(
+                "prepared execution changed after canonical authority minting"
             )
 
     def prepare(
@@ -229,10 +497,10 @@ class PaperExecutionAdoptionRuntime:
         intents: tuple[OpportunityIntent, ...],
         decision_id: str,
     ) -> PreparedPaperExecution | None:
-        if not isinstance(plan, PortfolioPlan):
-            raise TypeError("plan must be PortfolioPlan")
+        if type(plan) is not _CANONICAL_ADOPTION_PORTFOLIO_PLAN_TYPE:
+            raise TypeError("plan must be canonical PortfolioPlan")
         if type(intents) is not tuple or any(
-            not isinstance(intent, OpportunityIntent) for intent in intents
+            type(intent) is not _CANONICAL_ADOPTION_OPPORTUNITY_INTENT_TYPE for intent in intents
         ):
             raise TypeError("intents must be a tuple of OpportunityIntent values")
         if type(decision_id) is not str or not decision_id:
@@ -255,7 +523,7 @@ class PaperExecutionAdoptionRuntime:
         bindings: list[PaperExposureBinding] = []
 
         for index, (intent, stake) in enumerate(zip(intents, plan.stakes, strict=True)):
-            if not isinstance(stake, Decimal) or not stake.is_finite() or stake < 0:
+            if type(stake) is not _CANONICAL_ADOPTION_DECIMAL_TYPE or not stake.is_finite() or stake < 0:
                 raise PaperExecutionAdoptionError(
                     "PortfolioPlan execution stake must be a non-negative exact Decimal"
                 )
@@ -285,16 +553,7 @@ class PaperExecutionAdoptionRuntime:
                 raise PaperExecutionAdoptionError(
                     "risk quote bytes do not match canonical Opportunity quote reference"
                 )
-            if (
-                leg.event_id != event.event_id
-                or leg.market_id != event.market_id
-                or leg.selection_id != event.selection_id
-                or leg.sport != event.sport
-                or leg.exchange_side != event.exchange_side
-            ):
-                raise PaperExecutionAdoptionError(
-                    "ticket leg identity does not match canonical execution quote"
-                )
+            self._require_leg_quote_identity(leg, event)
             self._require_back_compatible_exchange_side(event.exchange_side)
 
             account_by_source = dict(context.provider_accounts)
@@ -343,6 +602,7 @@ class PaperExecutionAdoptionRuntime:
                     sport=leg.sport,
                     bankroll_id=context.bankroll_id,
                     currency=context.currency,
+                    market_semantics_id=leg.market_semantics_id,
                 )
             )
 
@@ -377,7 +637,67 @@ class PaperExecutionAdoptionRuntime:
         )
 
     @staticmethod
+    def _require_leg_quote_identity(leg: TicketLeg, event: MarketEvent) -> None:
+        if (
+            type(leg) is not _CANONICAL_ADOPTION_TICKET_LEG_TYPE
+            or type(event) is not _CANONICAL_ADOPTION_MARKET_EVENT_TYPE
+        ):
+            raise PaperExecutionAdoptionError(
+                "ticket leg and execution quote must be canonical values"
+            )
+        for owner, value in (
+            ("leg event_id", leg.event_id),
+            ("leg market_id", leg.market_id),
+            ("leg selection_id", leg.selection_id),
+            ("event event_id", event.event_id),
+            ("event market_id", event.market_id),
+            ("event selection_id", event.selection_id),
+        ):
+            if type(value) is not str or not value:
+                raise PaperExecutionAdoptionError(
+                    f"{owner} must remain canonical text"
+                )
+        for owner, value in (
+            ("leg sport", leg.sport),
+            ("leg exchange_side", leg.exchange_side),
+            ("leg market_semantics_id", leg.market_semantics_id),
+            ("event sport", event.sport),
+            ("event exchange_side", event.exchange_side),
+            ("event market_semantics_id", event.market_semantics_id),
+        ):
+            if value is not None and type(value) is not str:
+                raise PaperExecutionAdoptionError(
+                    f"{owner} must remain canonical text or None"
+                )
+        for value in (leg.market_semantics_id, event.market_semantics_id):
+            if value is not None:
+                try:
+                    _CANONICAL_ADOPTION_SEMANTIC_IDENTITY(
+                        value,
+                        "market_semantics_id",
+                    )
+                except ValueError as exc:
+                    raise PaperExecutionAdoptionError(
+                        "market_semantics_id must remain canonical"
+                    ) from exc
+        if (
+            leg.event_id != event.event_id
+            or leg.market_id != event.market_id
+            or leg.selection_id != event.selection_id
+            or leg.sport != event.sport
+            or leg.exchange_side != event.exchange_side
+            or leg.market_semantics_id != event.market_semantics_id
+        ):
+            raise PaperExecutionAdoptionError(
+                "ticket leg identity does not match canonical execution quote"
+            )
+
+    @staticmethod
     def _require_back_compatible_exchange_side(exchange_side: str | None) -> None:
+        if exchange_side is not None and type(exchange_side) is not str:
+            raise PaperExecutionAdoptionError(
+                "PAPER adoption exchange side must remain canonical text or None"
+            )
         if exchange_side == "lay":
             raise PaperExecutionAdoptionError(
                 "LAY PAPER adoption is unavailable until canonical liability "
@@ -405,9 +725,9 @@ class PaperExecutionAdoptionRuntime:
         authorized single-leg stake into the same immutable execution plan/run
         authority used by the persistent live loop.
         """
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be MarketEvent")
-        if not isinstance(stake, Decimal) or not stake.is_finite() or stake <= 0:
+        if type(event) is not _CANONICAL_ADOPTION_MARKET_EVENT_TYPE:
+            raise TypeError("event must be canonical MarketEvent")
+        if type(stake) is not _CANONICAL_ADOPTION_DECIMAL_TYPE or not stake.is_finite() or stake <= 0:
             raise ValueError("stake must be a positive finite exact Decimal")
         if type(decision_id) is not str or not decision_id or decision_id.strip() != decision_id:
             raise ValueError("decision_id must be non-empty canonical text")
@@ -486,6 +806,7 @@ class PaperExecutionAdoptionRuntime:
                         sport=event.sport,
                         bankroll_id=bankroll_id,
                         currency=currency,
+                        market_semantics_id=event.market_semantics_id,
                     ),
                 ),
                 intent_evidence_json=evidence_json,
@@ -510,32 +831,17 @@ class PaperExecutionAdoptionRuntime:
     def _exposure_scope_payload(
         cls,
         prepared: PreparedPaperExecution,
+        _builder=_CANONICAL_ADOPTION_EXPOSURE_SCOPE_PAYLOAD,
     ) -> dict[str, object]:
-        body: dict[str, object] = {
-            "schema": cls._EXPOSURE_SCOPE_SCHEMA,
-            "schema_version": 1,
-            "plan_id": prepared.execution_plan.plan_id,
-            "plan_fingerprint": prepared.execution_plan.fingerprint,
-            "intent_evidence_sha256": hashlib.sha256(
-                prepared.intent_evidence_json.encode("utf-8")
-            ).hexdigest(),
-            "bindings": [
-                {
-                    "action_id": binding.action_id,
-                    "sport": binding.sport,
-                    "bankroll_id": binding.bankroll_id,
-                    "currency": binding.currency,
-                }
-                for binding in prepared.exposure_bindings
-            ],
-        }
-        return {**body, "binding_sha256": _digest(body)}
+        return _builder(prepared)
 
     def _publish_exposure_scope(
         self,
         *,
         prepared: PreparedPaperExecution,
         run_id: str,
+        _payload_builder=_CANONICAL_ADOPTION_EXPOSURE_SCOPE_PAYLOAD,
+        _event_type=_CANONICAL_ADOPTION_EXPOSURE_SCOPE_EVENT_TYPE,
     ) -> None:
         """Persist the already-minted #646 scope into the canonical #623 ledger.
 
@@ -547,10 +853,10 @@ class PaperExecutionAdoptionRuntime:
         """
         self._require_minted(prepared)
         self.ledger._append_event(
-            event_type=self._EXPOSURE_SCOPE_EVENT_TYPE,
+            event_type=_event_type,
             run_id=run_id,
             key=f"{run_id}:exposure-scope",
-            payload=self._exposure_scope_payload(prepared),
+            payload=_payload_builder(prepared),
         )
 
     @staticmethod
@@ -650,6 +956,7 @@ class PaperExecutionAdoptionRuntime:
                         locked_odds=attempt.execution_odds,
                         sport=binding.sport,
                         exchange_side="back",
+                        market_semantics_id=binding.market_semantics_id,
                     )
                 ],
                 attempt.execution_stake,
@@ -855,6 +1162,7 @@ class PaperExecutionAdoptionRuntime:
                     locked_odds=attempt.execution_odds,
                     sport=binding.sport,
                     exchange_side="back",
+                    market_semantics_id=binding.market_semantics_id,
                 )
             ],
             attempt.execution_stake,
@@ -908,6 +1216,7 @@ class PaperExecutionAdoptionRuntime:
             and leg.locked_odds == attempt.execution_odds
             and leg.sport == binding.sport
             and leg.exchange_side == "back"
+            and leg.market_semantics_id == binding.market_semantics_id
         )
 
 

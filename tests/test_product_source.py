@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from decimal import Decimal
@@ -400,6 +401,26 @@ class ParlayApiProductSourceTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ProductSourceError, "AUTOSPORT_PRODUCT_WORKSPACE"):
                 create_parlay_product_source()
+
+    def test_factory_explicit_workspace_bypasses_only_workspace_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "strategy-workspace"
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                    "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(
+                        Path(directory) / "monotonic-authority"
+                    ),
+                },
+                clear=True,
+            ):
+                source = create_parlay_product_source(workspace=workspace)
+
+                self.assertEqual(source.workspace, workspace.resolve(strict=False))
+                self.assertNotIn("AUTOSPORT_PRODUCT_WORKSPACE", os.environ)
 
     def test_factory_requires_secret_and_operator_authority_environment(self) -> None:
         with patch.dict(

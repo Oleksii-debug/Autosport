@@ -3312,7 +3312,12 @@ def test_transport_rejects_gate_post_init_rebind_before_admission(
 
     assert exc_info.value.outcome is expected
     assert rate_gate.snapshot() == rate_before
-    assert concurrency_gate.snapshot() == concurrency_before
+    if module is _projection_gate_module:
+        assert concurrency_gate.snapshot() == concurrency_before
+    else:
+        # Projection admission precedes rate admission. A rate preflight failure
+        # releases any acquired lease but does not rewind canonical causal time.
+        assert concurrency_gate.snapshot().active == ()
     assert transport.calls == []
 
 def test_attempt_executor_records_result_authority_finalization_failure(monkeypatch):

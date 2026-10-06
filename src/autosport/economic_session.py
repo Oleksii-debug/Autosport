@@ -1567,32 +1567,32 @@ class ProductEconomicSessionStore:
     ) -> ProductEconomicSession:
         self._require_configuration_authority()
         return self._product_economic_session_type_witness(
-            workspace_instance_id=str(payload["workspace_instance_id"]),
-            session_id=str(payload["session_id"]),
-            goal_id=str(payload["goal_id"]),
-            goal_revision=int(payload["goal_revision"]),
-            bankroll_id=str(payload["bankroll_id"]),
-            currency=str(payload["currency"]),
-            goal_contract_sha256=str(payload["goal_contract_sha256"]),
-            started_at=str(payload["started_at"]),
-            opening_paperbook_sha256=str(payload["opening_paperbook_sha256"]),
+            workspace_instance_id=payload["workspace_instance_id"],
+            session_id=payload["session_id"],
+            goal_id=payload["goal_id"],
+            goal_revision=payload["goal_revision"],
+            bankroll_id=payload["bankroll_id"],
+            currency=payload["currency"],
+            goal_contract_sha256=payload["goal_contract_sha256"],
+            started_at=payload["started_at"],
+            opening_paperbook_sha256=payload["opening_paperbook_sha256"],
             state_sha256=state_sha256,
             authority_generation=generation,
-            product_clock_authoritative=bool(payload["product_clock_authoritative"]),
+            product_clock_authoritative=payload["product_clock_authoritative"],
             predecessor_session_id=(
                 None
                 if payload["predecessor_session_id"] is None
-                else str(payload["predecessor_session_id"])
+                else payload["predecessor_session_id"]
             ),
             predecessor_state_sha256=(
                 None
                 if payload["predecessor_state_sha256"] is None
-                else str(payload["predecessor_state_sha256"])
+                else payload["predecessor_state_sha256"]
             ),
             predecessor_ended_at=(
                 None
                 if payload["predecessor_ended_at"] is None
-                else str(payload["predecessor_ended_at"])
+                else payload["predecessor_ended_at"]
             ),
         )
 

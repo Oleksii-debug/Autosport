@@ -120,6 +120,37 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             (("provider-a", "event-1|market-1|selection-c"),),
         )
 
+    def test_force_full_refresh_discards_partial_keys_and_emits_one_rebuild_fence(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=4)
+        runtime.accept_persisted(self.event(selection="a", sequence=1))
+        runtime.accept_persisted(self.event(selection="b", sequence=1))
+
+        self.assertEqual(runtime.pending_count, 2)
+        runtime.force_full_refresh()
+
+        self.assertEqual(runtime.pending_count, 0)
+        self.assertTrue(runtime.full_refresh_required)
+        recovery = runtime.drain(max_items=1)
+        self.assertEqual(recovery.changed_keys, ())
+        self.assertTrue(recovery.full_refresh_required)
+        self.assertFalse(recovery.has_more)
+        self.assertFalse(runtime.full_refresh_required)
+
+    def test_force_full_refresh_is_idempotent_until_recovery_drain(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        runtime.force_full_refresh()
+        runtime.force_full_refresh()
+
+        self.assertTrue(runtime.full_refresh_required)
+        first = runtime.drain()
+        second = runtime.drain()
+
+        self.assertTrue(first.full_refresh_required)
+        self.assertFalse(second.full_refresh_required)
+        self.assertEqual(second.changed_keys, ())
+
     def test_bounded_drain_preserves_first_dirty_order_and_reports_more(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=4)

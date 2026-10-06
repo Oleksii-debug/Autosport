@@ -59,11 +59,17 @@ _DATETIME_FROMTIMESTAMP: Final = datetime.fromtimestamp
 _UUID4 = uuid.uuid4
 _WORKSPACE_LOCK_TYPE: Final = WorkspaceEconomicLock
 _WORKSPACE_LOCK_NEW: Final = WorkspaceEconomicLock.__new__
+_WORKSPACE_LOCK_NEW_CODE: Final = getattr(_WORKSPACE_LOCK_NEW, "__code__", None)
 _WORKSPACE_LOCK_INIT: Final = WorkspaceEconomicLock.__init__
+_WORKSPACE_LOCK_INIT_CODE: Final = getattr(_WORKSPACE_LOCK_INIT, "__code__", None)
 _WORKSPACE_LOCK_ENTER: Final = WorkspaceEconomicLock.__enter__
+_WORKSPACE_LOCK_ENTER_CODE: Final = getattr(_WORKSPACE_LOCK_ENTER, "__code__", None)
 _WORKSPACE_LOCK_EXIT: Final = WorkspaceEconomicLock.__exit__
+_WORKSPACE_LOCK_EXIT_CODE: Final = getattr(_WORKSPACE_LOCK_EXIT, "__code__", None)
 _WORKSPACE_LOCK_ACQUIRE: Final = WorkspaceEconomicLock.acquire
+_WORKSPACE_LOCK_ACQUIRE_CODE: Final = getattr(_WORKSPACE_LOCK_ACQUIRE, "__code__", None)
 _WORKSPACE_LOCK_RELEASE: Final = WorkspaceEconomicLock.release
+_WORKSPACE_LOCK_RELEASE_CODE: Final = getattr(_WORKSPACE_LOCK_RELEASE, "__code__", None)
 _OBJECT_SETATTR: Final = object.__setattr__
 _METHOD_TYPE: Final = MethodType
 _PAPERBOOK_LOAD = PaperBook.load
@@ -71,10 +77,14 @@ _PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
 _ECONOMIC_GOAL_LOAD = EconomicGoalStore.load
 _ECONOMIC_GOAL_STORE_TYPE: Final = EconomicGoalStore
 _ECONOMIC_GOAL_STORE_NEW: Final = EconomicGoalStore.__new__
+_ECONOMIC_GOAL_STORE_NEW_CODE: Final = getattr(_ECONOMIC_GOAL_STORE_NEW, "__code__", None)
 _ECONOMIC_GOAL_STORE_INIT: Final = EconomicGoalStore.__init__
+_ECONOMIC_GOAL_STORE_INIT_CODE: Final = getattr(_ECONOMIC_GOAL_STORE_INIT, "__code__", None)
 _AUTHORITY_TYPE: Final = MonotonicWorkspaceAuthority
 _AUTHORITY_NEW: Final = MonotonicWorkspaceAuthority.__new__
+_AUTHORITY_NEW_CODE: Final = getattr(_AUTHORITY_NEW, "__code__", None)
 _AUTHORITY_INIT: Final = MonotonicWorkspaceAuthority.__init__
+_AUTHORITY_INIT_CODE: Final = getattr(_AUTHORITY_INIT, "__code__", None)
 _AUTHORITY_RECOVER = MonotonicWorkspaceAuthority.recover
 _AUTHORITY_PREPARE = MonotonicWorkspaceAuthority.prepare
 _AUTHORITY_COMMIT = MonotonicWorkspaceAuthority.commit
@@ -109,6 +119,10 @@ def _economic_session_lock_scope(
     else:
         _exit(lock, None, None, None)
 
+
+_ECONOMIC_SESSION_LOCK_SCOPE_CODE: Final = _economic_session_lock_scope.__code__
+
+
 def _construct_economic_goal_store(
     workspace: Path,
     _type=_ECONOMIC_GOAL_STORE_TYPE,
@@ -126,6 +140,9 @@ def _construct_economic_goal_store(
     instance = _new(_type)
     _init(instance, workspace)
     return instance
+
+
+_CONSTRUCT_ECONOMIC_GOAL_STORE_CODE: Final = _construct_economic_goal_store.__code__
 
 
 def _construct_economic_authority(
@@ -156,6 +173,8 @@ def _construct_economic_authority(
     )
     return instance
 
+
+_CONSTRUCT_ECONOMIC_AUTHORITY_CODE: Final = _construct_economic_authority.__code__
 
 
 _STATE_KEYS: Final = frozenset(

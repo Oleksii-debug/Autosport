@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import tempfile
 import weakref
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
@@ -243,6 +244,94 @@ _CANONICAL_OS_SAMEOPENFILE: Final = os.path.sameopenfile
 _CANONICAL_OS_CLOSE: Final = os.close
 _CANONICAL_STAT_ISREG: Final = stat.S_ISREG
 _CANONICAL_JSON_DUMPS: Final = json.dumps
+_CANONICAL_JSON_DUMP: Final = json.dump
+_CANONICAL_NAMED_TEMPORARY_FILE: Final = tempfile.NamedTemporaryFile
+_CANONICAL_OS_LINK: Final = os.link
+_CANONICAL_OS_UNLINK: Final = os.unlink
+_CANONICAL_OS_FSYNC: Final = os.fsync
+
+
+def _atomic_create_owner_json(
+    path: Path,
+    payload: dict[str, object],
+    _named_temporary_file=_CANONICAL_NAMED_TEMPORARY_FILE,
+    _json_dump=_CANONICAL_JSON_DUMP,
+    _fsync=_CANONICAL_OS_FSYNC,
+    _link=_CANONICAL_OS_LINK,
+    _unlink=_CANONICAL_OS_UNLINK,
+    _error_type=EconomicGoalContractError,
+) -> None:
+    """Atomically publish the first owner contract without replacing an incumbent.
+
+    The fully-written same-directory staging file is hard-linked into the authority
+    pathname. Hard-link creation is an atomic create-if-absent operation: if another
+    actor wins the pathname after the caller's existence precheck, publication fails
+    closed instead of using os.replace() to overwrite that newly durable authority.
+    """
+
+    temporary_name: str | None = None
+    primary_error: BaseException | None = None
+    linked = False
+    try:
+        with _named_temporary_file(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".owner-init.tmp",
+            delete=False,
+        ) as handle:
+            temporary_name = handle.name
+            _json_dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            handle.write("\n")
+            handle.flush()
+            _fsync(handle.fileno())
+
+        try:
+            _link(temporary_name, path)
+            linked = True
+        except FileExistsError as exc:
+            primary_error = _error_type(
+                "persisted economic goal already exists; owner replacement requires "
+                "a separate authority boundary"
+            )
+            raise primary_error from exc
+        except OSError as exc:
+            primary_error = _error_type(
+                f"cannot atomically create persisted economic goal: {exc}"
+            )
+            raise primary_error from exc
+    except BaseException as exc:
+        if primary_error is None:
+            primary_error = exc
+        raise
+    finally:
+        if temporary_name is not None:
+            try:
+                _unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                if primary_error is None:
+                    if linked:
+                        raise _error_type(
+                            "cannot remove economic goal owner-initialization staging link"
+                        ) from exc
+                    raise _error_type(
+                        "cannot remove economic goal owner-initialization staging file"
+                    ) from exc
+
+
+_CANONICAL_ATOMIC_CREATE_OWNER_JSON: Final = _atomic_create_owner_json
+
 
 def _make_store_binding_registry(
     _mapping_proxy=MappingProxyType,
@@ -975,7 +1064,7 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
         _type_error=TypeError,
         _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
         _payload_encoder=economic_goal_to_payload,
-        _writer=_CANONICAL_ATOMIC_WRITE_JSON,
+        _writer=_CANONICAL_ATOMIC_CREATE_OWNER_JSON,
         _binding_resolver=_resolve_store_binding,
         _error_type=EconomicGoalContractError,
         _lock_scope=_workspace_lock_scope,

@@ -696,9 +696,10 @@ def _build_canonical_place_action_dispatch():
     if not callable(original_init) or getattr(original_init, "__code__", None) is None:
         raise RuntimeError("canonical Betfair client constructor is unavailable")
     original_init_code = original_init.__code__
-    bindings: weakref.WeakKeyDictionary[BetfairSupervisedPlaceOrdersClient, tuple[object, object, object, object]] = (
-        weakref.WeakKeyDictionary()
-    )
+    bindings: weakref.WeakKeyDictionary[
+        BetfairSupervisedPlaceOrdersClient,
+        tuple[object, ...],
+    ] = weakref.WeakKeyDictionary()
 
     def sealed_init(self, *args, **kwargs):
         if (
@@ -727,11 +728,41 @@ def _build_canonical_place_action_dispatch():
             raise BetfairSupervisedExecutionError(
                 "Betfair client dependency dispatch is unavailable"
             )
+        credentials = namespace.get("_credentials")
+        clock = namespace.get("_clock")
+        timeout_seconds = namespace.get("_timeout_seconds")
+        if credentials is None or clock is None or timeout_seconds is None:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client runtime dependencies were not initialized canonically"
+            )
+        gate_state = tuple(
+            object_getattribute(gate, name)
+            for name in (
+                "enabled",
+                "bookmaker_id",
+                "account_id",
+                "profile_sha256",
+                "authority_ref",
+                "authority_sha256",
+                "economic_goal_store",
+                "economic_goal_workspace",
+            )
+        )
+        credential_state = (
+            credentials,
+            object_getattribute(credentials, "application_key"),
+            object_getattribute(credentials, "session_token"),
+        )
         bindings[self] = (
             gate,
             gate_method,
+            gate_state,
             transport,
             transport_method,
+            credential_state,
+            clock,
+            getattr(clock, "__code__", None),
+            timeout_seconds,
         )
 
     client_type.__init__ = sealed_init
@@ -741,6 +772,117 @@ def _build_canonical_place_action_dispatch():
         raise RuntimeError("canonical Betfair place_action dispatch is unavailable")
     place_action_code = place_action.__code__
     sealed_init_code = sealed_init.__code__
+
+    def preflight(client: BetfairSupervisedPlaceOrdersClient) -> None:
+        if (
+            type(client) is not client_type
+            or client_type.__dict__.get("__init__") is not sealed_init
+            or sealed_init.__code__ is not sealed_init_code
+            or client_type.__dict__.get("place_action") is not place_action
+            or place_action.__code__ is not place_action_code
+        ):
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair client dispatch changed"
+            )
+        namespace = object_getattribute(client, "__dict__")
+        if type(namespace) is not dict or "place_action" in namespace:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client shadows canonical place_action dispatch"
+            )
+        binding = bindings.get(client)
+        if binding is None:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client has no canonical dependency binding"
+            )
+        (
+            bound_gate,
+            gate_method,
+            gate_state,
+            bound_transport,
+            transport_method,
+            credential_state,
+            bound_clock,
+            bound_clock_code,
+            bound_timeout_seconds,
+        ) = binding
+        current_gate = namespace.get("_gate")
+        current_transport = namespace.get("_transport")
+        current_credentials = namespace.get("_credentials")
+        current_clock = namespace.get("_clock")
+        current_timeout_seconds = namespace.get("_timeout_seconds")
+        if (
+            current_gate is not bound_gate
+            or current_transport is not bound_transport
+            or current_credentials is not credential_state[0]
+            or current_clock is not bound_clock
+            or current_timeout_seconds != bound_timeout_seconds
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency binding changed"
+            )
+        current_gate_state = tuple(
+            object_getattribute(bound_gate, name)
+            for name in (
+                "enabled",
+                "bookmaker_id",
+                "account_id",
+                "profile_sha256",
+                "authority_ref",
+                "authority_sha256",
+                "economic_goal_store",
+                "economic_goal_workspace",
+            )
+        )
+        if current_gate_state != gate_state:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client gate authority state changed"
+            )
+        if (
+            object_getattribute(current_credentials, "application_key")
+            != credential_state[1]
+            or object_getattribute(current_credentials, "session_token")
+            != credential_state[2]
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client credential authority changed"
+            )
+        current_gate_method = type(bound_gate).__dict__.get("require")
+        current_transport_method = type(bound_transport).__dict__.get("post")
+        if (
+            current_gate_method is not gate_method
+            or getattr(gate_method, "__code__", None)
+            is not getattr(current_gate_method, "__code__", None)
+            or current_transport_method is not transport_method
+            or getattr(transport_method, "__code__", None)
+            is not getattr(current_transport_method, "__code__", None)
+            or getattr(bound_clock, "__code__", None) is not bound_clock_code
+            or "require" in getattr(bound_gate, "__dict__", {})
+            or "post" in getattr(bound_transport, "__dict__", {})
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency dispatch changed"
+            )
+
+    def dispatch(
+        client: BetfairSupervisedPlaceOrdersClient,
+        action: ExecutionAction,
+        *,
+        profile: BookmakerCapabilityProfile,
+        bound: BoundSupervisedExecutionPlan,
+        provider_order_ref: str,
+        execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None,
+    ) -> BetfairPlaceExecutionReport:
+        preflight(client)
+        return place_action(
+            client,
+            action,
+            profile=profile,
+            bound=bound,
+            provider_order_ref=provider_order_ref,
+            execution_workspace=execution_workspace,
+            _before_transport=_before_transport,
+        )
 
     def dispatch(
         client: BetfairSupervisedPlaceOrdersClient,
@@ -807,7 +949,9 @@ def _build_canonical_place_action_dispatch():
     return dispatch
 
 
-_canonical_place_action_dispatch = _build_canonical_place_action_dispatch()
+_canonical_place_action_dispatch, _canonical_place_client_preflight = (
+    _build_canonical_place_action_dispatch()
+)
 del _build_canonical_place_action_dispatch
 
 
@@ -1240,6 +1384,7 @@ def execute_betfair_supervised_action(
     # API compatibility only: execution-authority time is product-owned.
     _ = clock
     trusted_now = _supervised_execution_runtime._trusted_now
+    _canonical_place_client_preflight(client)
     execution_workspace = ledger.path.parent.resolve()
 
     # Serialize the current owner authority through the actual provider-write

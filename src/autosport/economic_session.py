@@ -773,7 +773,18 @@ class ProductEconomicSessionStore:
             "_require_configuration_authority",
         ):
             cls = object.__getattribute__(self, "__class__")
-            descriptor = cls.__dict__[name]
+            try:
+                witnesses = object.__getattribute__(
+                    self, "_protected_method_witnesses"
+                )
+            except AttributeError:
+                descriptor = cls.__dict__[name]
+            else:
+                descriptor = next(
+                    candidate
+                    for protected_name, candidate in witnesses
+                    if protected_name == name
+                )
             return descriptor.__get__(self, cls)
         return object.__getattribute__(self, name)
 
@@ -803,6 +814,22 @@ class ProductEconomicSessionStore:
         _path_expanduser=_PATH_EXPANDUSER,
         _path_resolve=_PATH_RESOLVE,
     ) -> None:
+        canonical_methods = _PRODUCT_ECONOMIC_SESSION_STORE_METHODS
+        if canonical_methods is None:
+            raise EconomicSessionIntegrityError(
+                "economic-session store method authority is not initialized"
+            )
+        cls = object.__getattribute__(self, "__class__")
+        for method_name, descriptor in canonical_methods:
+            if cls.__dict__.get(method_name) is not descriptor:
+                raise EconomicSessionIntegrityError(
+                    "economic-session store method authority changed"
+                )
+        object.__setattr__(
+            self,
+            "_protected_method_witnesses",
+            canonical_methods,
+        )
         if Path is not _path_factory or _path_factory.__new__ is not _path_new:
             raise EconomicSessionIntegrityError(
                 "economic-session Path constructor authority changed"
@@ -1088,6 +1115,12 @@ class ProductEconomicSessionStore:
             or _PRODUCT_ECONOMIC_SESSION_TYPE is not self._product_economic_session_type_witness
             or ProductEconomicSession is not self._product_economic_session_type_witness
             or ProductEconomicSession.__eq__ is not self._product_economic_session_eq_witness
+            or self._protected_method_witnesses
+            is not _PRODUCT_ECONOMIC_SESSION_STORE_METHODS
+            or _any(
+                _type(self).__dict__.get(name) is not descriptor
+                for name, descriptor in self._protected_method_witnesses
+            )
             or _type(self).__dict__.get("current") is not self._current_method_witness
             or (
                 self._current_method_code_witness is not None
@@ -1442,6 +1475,18 @@ class ProductEconomicSessionStore:
             ),
         )
 
+
+_PRODUCT_ECONOMIC_SESSION_STORE_METHODS: tuple[tuple[str, object], ...] | None = tuple(
+    (name, ProductEconomicSessionStore.__dict__[name])
+    for name in (
+        "current",
+        "require_current",
+        "transition_to_current_goal",
+        "_publish_new",
+        "_evidence",
+        "_require_configuration_authority",
+    )
+)
 
 __all__ = [
     "EconomicSessionError",

@@ -3907,6 +3907,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         desktop_drain = getattr(desktop_consumer, "drain", None)
         invalidation_buffer = self.invalidation_buffer
         invalidation_drain = getattr(invalidation_buffer, "drain", None)
+        invalidation_buffer_mirror: object | None = None
+        invalidation_dirty_storage: object | None = None
+        invalidation_buffer_lock: object | None = None
+        invalidation_max_dirty_keys: object | None = None
+        if type(invalidation_buffer) is _invalidation_buffer_type:
+            invalidation_buffer_mirror = invalidation_buffer._mirror
+            invalidation_dirty_storage = invalidation_buffer._dirty
+            invalidation_buffer_lock = invalidation_buffer._lock
+            invalidation_max_dirty_keys = invalidation_buffer._max_dirty_keys
         dependency_index = self.dependency_index
         dependency_affected_inputs = getattr(
             dependency_index,
@@ -4050,6 +4059,43 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "continuous-session invalidation buffer authority changed during tick"
                 )
 
+        def restore_invalidation_buffer_structure_authority() -> bool:
+            if type(invalidation_buffer) is not _invalidation_buffer_type:
+                return False
+            changed = (
+                invalidation_buffer._mirror is not invalidation_buffer_mirror
+                or invalidation_buffer._dirty is not invalidation_dirty_storage
+                or invalidation_buffer._lock is not invalidation_buffer_lock
+                or invalidation_buffer._max_dirty_keys != invalidation_max_dirty_keys
+            )
+            object.__setattr__(
+                invalidation_buffer,
+                "_mirror",
+                invalidation_buffer_mirror,
+            )
+            object.__setattr__(
+                invalidation_buffer,
+                "_dirty",
+                invalidation_dirty_storage,
+            )
+            object.__setattr__(
+                invalidation_buffer,
+                "_lock",
+                invalidation_buffer_lock,
+            )
+            object.__setattr__(
+                invalidation_buffer,
+                "_max_dirty_keys",
+                invalidation_max_dirty_keys,
+            )
+            return changed
+
+        def require_invalidation_buffer_structure_authority() -> None:
+            if restore_invalidation_buffer_structure_authority():
+                raise ContinuousSessionError(
+                    "continuous-session invalidation buffer structure changed during tick"
+                )
+
         def require_invalidation_buffer_dispatch_authority() -> None:
             if type(invalidation_buffer) is not _invalidation_buffer_type:
                 return
@@ -4146,6 +4192,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         "canonical event lifecycle dispatch authority changed"
                     )
 
+        require_invalidation_buffer_structure_authority()
         require_invalidation_buffer_dispatch_authority()
         require_lifecycle_dispatch_authority()
 
@@ -4191,6 +4238,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         def refresh_tick_dependency_routing_authority() -> None:
             require_invalidation_buffer_identity()
+            require_invalidation_buffer_structure_authority()
             nonlocal tick_dependency_input_ids
             nonlocal tick_dependency_fingerprints
             nonlocal tick_dependency_entries
@@ -4305,6 +4353,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         def require_tick_dependency_routing_authority(message: str) -> None:
             require_invalidation_buffer_identity()
+            require_invalidation_buffer_structure_authority()
             require_lifecycle_dispatch_authority()
             if type(dependency_index) is not _dependency_index_type:
                 return
@@ -4392,6 +4441,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
             require_state_identity()
             require_dependency_index_identity()
+            require_invalidation_buffer_structure_authority()
             require_invalidation_buffer_dispatch_authority()
             require_lifecycle_dispatch_authority()
             require_tick_dependency_routing_authority(
@@ -4401,6 +4451,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             state_was_rebound = restore_state_identity()
             dependency_index_was_rebound = restore_dependency_index_identity()
             invalidation_buffer_was_rebound = restore_invalidation_buffer_identity()
+            invalidation_structure_was_rebound = (
+                restore_invalidation_buffer_structure_authority()
+            )
+            if invalidation_structure_was_rebound:
+                try:
+                    exc.add_note(
+                        "continuous-session invalidation buffer structure was changed "
+                        "during collector observation and was restored"
+                    )
+                except BaseException:
+                    pass
             if invalidation_buffer_was_rebound:
                 try:
                     exc.add_note(
@@ -4461,6 +4522,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # continuous-session snapshot path here: retained settlement history
                 # must not amplify an operational provider failure into O(history).
                 try:
+                    require_invalidation_buffer_structure_authority()
                     require_invalidation_buffer_dispatch_authority()
                     if type(invalidation_buffer) is _invalidation_buffer_type:
                         pending_count = _invalidation_pending_getter(
@@ -4499,6 +4561,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     invalidation_buffer_was_rebound = (
                         restore_invalidation_buffer_identity()
                     )
+                    invalidation_structure_was_rebound = (
+                        restore_invalidation_buffer_structure_authority()
+                    )
+                    if invalidation_structure_was_rebound:
+                        try:
+                            exc.add_note(
+                                "continuous-session invalidation buffer structure was "
+                                "changed during provider-unavailable backlog inspection "
+                                "and was restored"
+                            )
+                        except BaseException:
+                            pass
                     if invalidation_buffer_was_rebound:
                         try:
                             exc.add_note(
@@ -4913,6 +4987,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 state_was_rebound = restore_state_identity()
                 dependency_index_was_rebound = restore_dependency_index_identity()
                 invalidation_buffer_was_rebound = restore_invalidation_buffer_identity()
+                invalidation_structure_was_rebound = (
+                    restore_invalidation_buffer_structure_authority()
+                )
+                if invalidation_structure_was_rebound:
+                    try:
+                        exc.add_note(
+                            "continuous-session invalidation buffer structure was changed "
+                            "during tick effects and was restored"
+                        )
+                    except BaseException:
+                        pass
                 if invalidation_buffer_was_rebound:
                     try:
                         exc.add_note(

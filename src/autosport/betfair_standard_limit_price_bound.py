@@ -428,7 +428,14 @@ def _capture_canonical_instruction(
     }
 
 
-def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]:
+_CANONICAL_CAPTURE_INSTRUCTION = _capture_canonical_instruction
+_CANONICAL_INSTRUCTION_DIGEST = _digest
+
+
+def _canonical_instruction_projection(
+    action: ExecutionAction,
+    _capture=_CANONICAL_CAPTURE_INSTRUCTION,
+) -> dict[str, Any]:
     """Return the exact semantic projection emitted by the real write request."""
 
     if type(action) is not ExecutionAction:
@@ -446,7 +453,7 @@ def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]
             "canonical Betfair placeOrders implementation is unavailable"
         )
 
-    instruction = _capture_canonical_instruction(action)
+    instruction = _capture(action)
     limit_order = instruction.get("limitOrder")
     if type(limit_order) is not dict or set(limit_order) != {
         "size",
@@ -532,6 +539,11 @@ def resolve_betfair_standard_limit_price_bound(
     *,
     bound: BoundSupervisedExecutionPlan,
     action_id: str,
+    _issue=_issue_evidence,
+    _digest=_CANONICAL_INSTRUCTION_DIGEST,
+    *,
+    bound: BoundSupervisedExecutionPlan,
+    action_id: str,
 ) -> BetfairStandardLimitPriceBoundEvidence:
     """Re-resolve one exact current standard BACK LIMIT adverse-price bound.
 
@@ -578,7 +590,7 @@ def resolve_betfair_standard_limit_price_bound(
         )
 
     instruction = _canonical_instruction_projection(action)
-    return _issue_evidence(
+    return _issue(
         bound=bound,
         action=action,
         instruction_sha256=_digest(instruction),

@@ -3429,9 +3429,39 @@ def test_final_send_approval_alias_rebinding_fails_closed(monkeypatch) -> None:
 
 def test_final_send_durable_approval_code_swap_fails_closed(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-final-durable-approval-code-swap"
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
+        spec = betfair_execution_confirmation_spec(
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            review_id="review-final-durable-approval-code-swap",
+            risk_evidence_sha256="f" * 64,
+        )
+        authority = SupervisedConfirmationAuthority(
+            Path(tmp) / CONFIRMATION_FILENAME,
+            clock=lambda: datetime.fromisoformat(
+                "2026-09-19T08:00:02.200000+00:00"
+            ),
+        )
+        review = authority.prepare_review(
+            review_id=spec.review_id,
+            decision_id=spec.decision_id,
+            bookmaker_id=spec.bookmaker_id,
+            account_id=spec.account_id,
+            decision_sha256=spec.decision_sha256,
+            approval_evidence_sha256=spec.approval_evidence_sha256,
+            risk_evidence_sha256=spec.risk_evidence_sha256,
+            review_payload=spec.review_payload,
+            ttl_seconds=120,
+        )
+        receipt = authority.confirm_review(
+            review_id=review.review_id,
+            expected_review_sha256=review.review_sha256,
+        )
 
         durable_guard = betfair_execution._require_durable_approval
 
@@ -3449,13 +3479,12 @@ def test_final_send_durable_approval_code_swap_fails_closed(monkeypatch) -> None
                 bound,
                 approval,
                 action_id=action.action_id,
-                attempt_id="attempt-final-durable-approval-code-swap",
+                attempt_id=attempt_id,
                 profile=profile,
                 client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
             )
 
         assert transport.calls == []
-        assert (
-            ledger.attempt_state("attempt-final-durable-approval-code-swap")
-            is AttemptState.RESERVED
-        )
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED

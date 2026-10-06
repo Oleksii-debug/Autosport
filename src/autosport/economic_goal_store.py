@@ -800,44 +800,110 @@ _BOUND_STORE_INITIALIZE_OWNER = EconomicGoalStore.initialize_owner
 _BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR = EconomicGoalStore.persist_automatic_successor
 
 
+def _make_store_callable_authority(operation, label: str):
+    operation_code = operation.__code__
+    operation_defaults = operation.__defaults__
+    nested_callables = tuple(
+        value
+        for value in (operation_defaults or ())
+        if callable(value)
+    )
+    nested_authority = tuple(
+        (
+            callable_object,
+            getattr(callable_object, "__code__", None),
+            getattr(callable_object, "__defaults__", None),
+            getattr(callable_object, "__kwdefaults__", None),
+        )
+        for callable_object in nested_callables
+    )
+
+    def require_authority() -> None:
+        if operation.__code__ is not operation_code:
+            raise EconomicGoalContractError(f"{label} authority changed")
+        if operation.__defaults__ is not operation_defaults:
+            raise EconomicGoalContractError(f"{label} defaults authority changed")
+        for callable_object, expected_code, expected_defaults, expected_kwdefaults in nested_authority:
+            if getattr(callable_object, "__code__", None) is not expected_code:
+                raise EconomicGoalContractError(f"{label} nested authority changed")
+            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                raise EconomicGoalContractError(f"{label} nested defaults authority changed")
+            if getattr(callable_object, "__kwdefaults__", None) is not expected_kwdefaults:
+                raise EconomicGoalContractError(
+                    f"{label} nested keyword defaults authority changed"
+                )
+
+    def bound(*args, **kwargs):
+        require_authority()
+        result = operation(*args, **kwargs)
+        require_authority()
+        return result
+
+    return bound
+
+
 def _bind_goal_encoder(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal payload encoder"
+    )
+
     def bound(contract: EconomicGoalContract) -> dict[str, object]:
-        return operation(contract)
+        return bound_operation(contract)
 
     return bound
 
 
 def _bind_goal_payload_decoder(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal payload decoder"
+    )
+
     def bound(payload: object) -> EconomicGoalContract:
-        return operation(payload)
+        return bound_operation(payload)
 
     return bound
 
 
 def _bind_goal_json_decoder(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal JSON decoder"
+    )
+
     def bound(text: str) -> EconomicGoalContract:
-        return operation(text)
+        return bound_operation(text)
 
     return bound
 
 
 def _bind_store_init(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal store constructor"
+    )
+
     def bound(self: EconomicGoalStore, workspace: str | Path) -> None:
-        operation(self, workspace)
+        bound_operation(self, workspace)
 
     return bound
 
 
 def _bind_store_load(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal store load"
+    )
+
     def bound(self: EconomicGoalStore) -> EconomicGoalContract:
-        return operation(self)
+        return bound_operation(self)
 
     return bound
 
 
 def _bind_store_contract_write(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal store write"
+    )
+
     def bound(self: EconomicGoalStore, contract: EconomicGoalContract) -> None:
-        operation(self, contract)
+        bound_operation(self, contract)
 
     return bound
 

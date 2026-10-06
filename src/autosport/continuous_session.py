@@ -2296,52 +2296,69 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "canonical coordinator running-fence authority changed"
             )
         self._require_running()
+        observation_token = self._state._checkpoint_token
         now = self.clock()
         _instant(now, "now")
+
         try:
             cycle = self.collector.run_cycle()
-            if cycle.provider_unavailable:
+        except Exception as exc:
+            try:
                 with _running_fence(self._state):
-                    # A provider-unavailable collector cycle commits no source deltas,
-                    # so there is no new source projection to publish. Avoid the full
-                    # continuous-session snapshot path here: retained settlement history
-                    # must not amplify an operational provider failure into O(history).
-                    failure = self._state.record_failure(
-                        code="ProviderUnavailableError"
-                    )
-                return ContinuousTickResult(
-                    session_id=failure.session_id,
-                    cycle_index=failure.cycles_completed,
-                    source_id=cycle.source_id,
-                    source_provider_unavailable=True,
-                    source_gap_states=(
-                        ()
-                        if failure.source_gap_state is None
-                        else (failure.source_gap_state,)
-                    ),
-                    source_sync_states=(
-                        ()
-                        if failure.source_sync_state is None
-                        else (failure.source_sync_state,)
-                    ),
-                    committed_delta_ids=cycle.committed_delta_ids,
-                    delivered_delta_ids=(),
-                    affected_input_ids=(),
-                    registered_input_ids=(),
-                    retired_input_ids=(),
-                    full_refresh_required=bool(
-                        self.invalidation_buffer.full_refresh_required
-                    ),
-                    invalidation_backlog=(
-                        self.invalidation_buffer.pending_count > 0
-                        or self.invalidation_buffer.full_refresh_required
-                    ),
-                    settled_ticket_ids=(),
-                    settlement_evidence_ids=(),
-                    last_success_at=failure.last_success_at,
-                )
+                    # Collector observation happens outside the long-lived product
+                    # fence so operator pause remains responsive during provider I/O.
+                    # Publish its failure only if no newer canonical generation won
+                    # while that observation was in flight.
+                    if self._state._checkpoint_token == observation_token:
+                        self._state.record_failure(code=type(exc).__name__)
+            except (SessionPausedError, SessionStoppedError):
+                # An operator transition supersedes the in-flight observation error.
+                pass
+            raise
 
+        if cycle.provider_unavailable:
             with _running_fence(self._state):
+                # A provider-unavailable collector cycle commits no source deltas,
+                # so there is no new source projection to publish. Avoid the full
+                # continuous-session snapshot path here: retained settlement history
+                # must not amplify an operational provider failure into O(history).
+                failure = self._state.record_failure(
+                    code="ProviderUnavailableError"
+                )
+            return ContinuousTickResult(
+                session_id=failure.session_id,
+                cycle_index=failure.cycles_completed,
+                source_id=cycle.source_id,
+                source_provider_unavailable=True,
+                source_gap_states=(
+                    ()
+                    if failure.source_gap_state is None
+                    else (failure.source_gap_state,)
+                ),
+                source_sync_states=(
+                    ()
+                    if failure.source_sync_state is None
+                    else (failure.source_sync_state,)
+                ),
+                committed_delta_ids=cycle.committed_delta_ids,
+                delivered_delta_ids=(),
+                affected_input_ids=(),
+                registered_input_ids=(),
+                retired_input_ids=(),
+                full_refresh_required=bool(
+                    self.invalidation_buffer.full_refresh_required
+                ),
+                invalidation_backlog=(
+                    self.invalidation_buffer.pending_count > 0
+                    or self.invalidation_buffer.full_refresh_required
+                ),
+                settled_ticket_ids=(),
+                settlement_evidence_ids=(),
+                last_success_at=failure.last_success_at,
+            )
+
+        with _running_fence(self._state):
+            try:
                 source_snapshot = self._refresh_source_state_projection()
                 source_gap_states = (
                     ()
@@ -2421,42 +2438,41 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     full_refresh=full_refresh,
                     settlement_evidence=resolutions,
                 )
-
-            return ContinuousTickResult(
-                session_id=self.session_id,
-                cycle_index=cycle_index,
-                source_id=cycle.source_id,
-                source_provider_unavailable=False,
-                source_gap_states=source_gap_states,
-                source_sync_states=source_sync_states,
-                committed_delta_ids=cycle.committed_delta_ids,
-                delivered_delta_ids=delivered,
-                affected_input_ids=affected,
-                registered_input_ids=tuple(newly_registered),
-                retired_input_ids=tuple(retired),
-                full_refresh_required=full_refresh,
-                invalidation_backlog=backlog,
-                settled_ticket_ids=settled,
-                settlement_evidence_ids=evidence_ids,
-                last_success_at=self._state.snapshot().last_success_at or now,
-            )
-        except (SessionPausedError, SessionStoppedError):
-            raise
-        except Exception as exc:
-            try:
-                with _running_fence(self._state):
-                    self._state.record_failure(code=type(exc).__name__)
             except (SessionPausedError, SessionStoppedError):
-                # Preserve the original failure if an operator pause/stop became
-                # authoritative while provider observation or error handling was
-                # in flight. The operator reason remains canonical.
-                pass
-            except Exception as checkpoint_exc:
-                exc.add_note(
-                    "operational failure checkpoint could not be persisted: "
-                    f"{type(checkpoint_exc).__name__}"
-                )
-            raise
+                raise
+            except Exception as exc:
+                # The running fence is still held here, so no other canonical
+                # generation can overtake this failure publication.
+                try:
+                    self._state.record_failure(code=type(exc).__name__)
+                except Exception as publication_error:
+                    try:
+                        exc.add_note(
+                            "continuous session failure publication also failed: "
+                            f"{type(publication_error).__name__}: {publication_error}"
+                        )
+                    except BaseException:
+                        pass
+                raise
+
+        return ContinuousTickResult(
+            session_id=self.session_id,
+            cycle_index=cycle_index,
+            source_id=cycle.source_id,
+            source_provider_unavailable=False,
+            source_gap_states=source_gap_states,
+            source_sync_states=source_sync_states,
+            committed_delta_ids=cycle.committed_delta_ids,
+            delivered_delta_ids=delivered,
+            affected_input_ids=affected,
+            registered_input_ids=tuple(newly_registered),
+            retired_input_ids=tuple(retired),
+            full_refresh_required=full_refresh,
+            invalidation_backlog=backlog,
+            settled_ticket_ids=settled,
+            settlement_evidence_ids=evidence_ids,
+            last_success_at=self._state.snapshot().last_success_at or now,
+        )
 
 # Seal the consumer entry after class creation. The metaclass data descriptor also
 # makes direct type.__setattr__/type.__delattr__ respect the same class-level fence.

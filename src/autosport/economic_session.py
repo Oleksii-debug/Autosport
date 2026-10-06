@@ -759,6 +759,37 @@ _PRODUCT_ECONOMIC_SESSION_FIELD_DESCRIPTORS: Final = tuple(
 
 _DECODE_STATE_CODE: Final = _decode_state.__code__
 
+_ECONOMIC_SESSION_CODE_AUTHORITIES: Final = tuple(
+    (label, authority, getattr(authority, "__code__", None))
+    for label, authority in (
+        ("uuid4", _UUID4),
+        ("EconomicGoalStore.load", _ECONOMIC_GOAL_LOAD),
+        ("MonotonicWorkspaceAuthority.recover", _AUTHORITY_RECOVER),
+        ("MonotonicWorkspaceAuthority.prepare", _AUTHORITY_PREPARE),
+        ("MonotonicWorkspaceAuthority.commit", _AUTHORITY_COMMIT),
+        ("PaperBook.load", _PAPERBOOK_LOAD),
+        ("PaperBook._validate_loaded_state", _PAPERBOOK_VALIDATE_LOADED_STATE),
+        ("clock_instant", _clock_instant),
+        ("parse_instant", _parse_instant),
+        ("is_sha256", _is_sha256),
+        ("is_transition_id", _is_transition_id),
+        ("state_sha256", _state_sha256),
+        ("semantic_binding", _semantic_binding),
+        ("tx_id", _tx_id),
+        ("canonical_json_bytes", _canonical_json_bytes),
+        ("read_regular_bytes", _read_regular_bytes),
+        ("decode_state", _decode_state),
+        ("state_payload", _state_payload),
+        ("opening_paperbook_sha256", _opening_paperbook_sha256),
+        ("strict_json_loads", strict_json_loads),
+        ("open_read_only_descriptor", _open_read_only_descriptor),
+        ("provenance_for", provenance_for),
+        ("atomic_write_json", atomic_write_json),
+        ("json.dumps", json.dumps),
+        ("os.path.lexists", os.path.lexists),
+    )
+)
+
 
 class ProductEconomicSessionStore:
     """Issue/re-resolve one active economic session for one workspace."""
@@ -839,6 +870,19 @@ class ProductEconomicSessionStore:
             self,
             "_protected_method_witnesses",
             canonical_methods,
+        )
+        for label, authority, code in _ECONOMIC_SESSION_CODE_AUTHORITIES:
+            if (
+                code is not None
+                and getattr(authority, "__code__", None) is not code
+            ):
+                raise EconomicSessionIntegrityError(
+                    f"economic-session {label} callable code authority changed"
+                )
+        object.__setattr__(
+            self,
+            "_code_authority_witnesses",
+            _ECONOMIC_SESSION_CODE_AUTHORITIES,
         )
         if Path is not _path_factory or _path_factory.__new__ is not _path_new:
             raise EconomicSessionIntegrityError(
@@ -1127,6 +1171,13 @@ class ProductEconomicSessionStore:
             or ProductEconomicSession.__eq__ is not self._product_economic_session_eq_witness
             or self._protected_method_witnesses
             is not _PRODUCT_ECONOMIC_SESSION_STORE_METHODS
+            or self._code_authority_witnesses
+            is not _ECONOMIC_SESSION_CODE_AUTHORITIES
+            or _any(
+                code is not None
+                and _getattr(authority, "__code__", None) is not code
+                for _label, authority, code in self._code_authority_witnesses
+            )
             or _any(
                 _type(self).__dict__.get(name) is not descriptor
                 or (

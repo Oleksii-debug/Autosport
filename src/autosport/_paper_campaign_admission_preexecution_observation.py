@@ -211,6 +211,61 @@ def _install() -> None:
     campaign_source_spec_type = CampaignInceptionSourceSpec
     campaign_protocol_type = ForwardEvidenceProtocolEnvelope
     campaign_cycle_receipt_type = CampaignCompleteBoardCycleReceipt
+    campaign_receipt_field_names = (
+        "receipt_sha256",
+        "campaign_id",
+        "source_id",
+        "evaluation_universe_sha256",
+        "observation_not_before",
+        "observation_not_after",
+    )
+    campaign_receipt_field_descriptors = tuple(
+        (name, campaign_receipt_type.__dict__[name])
+        for name in campaign_receipt_field_names
+    )
+    cycle_receipt_field_names = (
+        "campaign_id",
+        "source_id",
+        "campaign_receipt_sha256",
+        "receipt_sha256",
+        "provider_captured_at",
+    )
+    cycle_receipt_field_descriptors = tuple(
+        (name, campaign_cycle_receipt_type.__dict__[name])
+        for name in cycle_receipt_field_names
+    )
+
+    def read_authority_fields(
+        value: object,
+        *,
+        expected_type: type,
+        descriptors: tuple[tuple[str, object], ...],
+        label: str,
+    ) -> dict[str, object]:
+        if type(value) is not expected_type:
+            raise _origin.PaperExecutionDecisionOriginError(
+                f"{label} requires exact canonical type"
+            )
+        if any(
+            expected_type.__dict__.get(name) is not descriptor
+            for name, descriptor in descriptors
+        ):
+            raise _origin.PaperExecutionDecisionOriginError(
+                f"{label} descriptor authority changed"
+            )
+        values = {
+            name: descriptor.__get__(value, expected_type)
+            for name, descriptor in descriptors
+        }
+        if any(
+            expected_type.__dict__.get(name) is not descriptor
+            for name, descriptor in descriptors
+        ):
+            raise _origin.PaperExecutionDecisionOriginError(
+                f"{label} descriptor authority changed"
+            )
+        return values
+
     campaign_binding_keys = _FORWARD_OBSERVATION_BINDING_KEYS
     campaign_id_key = _FORWARD_OBSERVATION_CAMPAIGN_ID
     campaign_source_id_key = _FORWARD_OBSERVATION_SOURCE_ID
@@ -299,20 +354,32 @@ def _install() -> None:
                 raise _origin.PaperExecutionDecisionOriginError(
                     "campaign inception authority could not be established canonically"
                 )
-            if campaign_forward_protocol.campaign_id != receipt.campaign_id:
+            receipt_fields = read_authority_fields(
+                receipt,
+                expected_type=campaign_receipt_type,
+                descriptors=campaign_receipt_field_descriptors,
+                label="campaign inception receipt",
+            )
+            cycle_fields = read_authority_fields(
+                campaign_cycle_receipt,
+                expected_type=campaign_cycle_receipt_type,
+                descriptors=cycle_receipt_field_descriptors,
+                label="campaign cycle receipt",
+            )
+            if campaign_forward_protocol.campaign_id != receipt_fields["campaign_id"]:
                 raise _origin.PaperExecutionDecisionOriginError(
                     "forward protocol campaign differs from campaign inception"
                 )
             if (
-                campaign_cycle_receipt.campaign_id != receipt.campaign_id
-                or campaign_cycle_receipt.source_id != receipt.source_id
-                or campaign_cycle_receipt.campaign_receipt_sha256
-                != receipt.receipt_sha256
+                cycle_fields["campaign_id"] != receipt_fields["campaign_id"]
+                or cycle_fields["source_id"] != receipt_fields["source_id"]
+                or cycle_fields["campaign_receipt_sha256"]
+                != receipt_fields["receipt_sha256"]
             ):
                 raise _origin.PaperExecutionDecisionOriginError(
                     "forward cycle receipt differs from campaign inception"
                 )
-            cycle_receipt_sha256 = campaign_cycle_receipt.receipt_sha256
+            cycle_receipt_sha256 = cycle_fields["receipt_sha256"]
             if (
                 type(cycle_receipt_sha256) is not str
                 or len(cycle_receipt_sha256) != 64
@@ -325,7 +392,7 @@ def _install() -> None:
                 raise _origin.PaperExecutionDecisionOriginError(
                     "forward cycle receipt identity is invalid"
                 )
-            cycle_provider_captured_at = campaign_cycle_receipt.provider_captured_at
+            cycle_provider_captured_at = cycle_fields["provider_captured_at"]
             _utc(cycle_provider_captured_at, "forward cycle provider_captured_at")
             protocol_sha256 = campaign_forward_protocol.protocol_sha256
             if (
@@ -343,12 +410,12 @@ def _install() -> None:
                 campaign_source_spec,
                 campaign_forward_protocol,
                 campaign_cycle_receipt,
-                receipt.receipt_sha256,
-                receipt.campaign_id,
-                receipt.source_id,
-                receipt.evaluation_universe_sha256,
-                receipt.observation_not_before,
-                receipt.observation_not_after,
+                receipt_fields["receipt_sha256"],
+                receipt_fields["campaign_id"],
+                receipt_fields["source_id"],
+                receipt_fields["evaluation_universe_sha256"],
+                receipt_fields["observation_not_before"],
+                receipt_fields["observation_not_after"],
                 cycle_receipt_sha256,
                 cycle_provider_captured_at,
                 protocol_sha256,
@@ -436,27 +503,37 @@ def _install() -> None:
                 store=campaign_collector_store,
                 source_spec=campaign_source_spec,
             )
+            current_receipt_fields = read_authority_fields(
+                current_receipt,
+                expected_type=campaign_receipt_type,
+                descriptors=campaign_receipt_field_descriptors,
+                label="campaign inception receipt",
+            )
+            current_cycle_fields = read_authority_fields(
+                campaign_cycle_receipt,
+                expected_type=campaign_cycle_receipt_type,
+                descriptors=cycle_receipt_field_descriptors,
+                label="campaign cycle receipt",
+            )
             if (
                 stable_establish_campaign_inception.__code__
                 is not stable_establish_campaign_inception_code
-                or type(current_receipt) is not campaign_receipt_type
-                or current_receipt.receipt_sha256 != expected_receipt_sha256
-                or current_receipt.campaign_id != expected_campaign_id
-                or current_receipt.source_id != expected_source_id
-                or current_receipt.evaluation_universe_sha256
+                or current_receipt_fields["receipt_sha256"] != expected_receipt_sha256
+                or current_receipt_fields["campaign_id"] != expected_campaign_id
+                or current_receipt_fields["source_id"] != expected_source_id
+                or current_receipt_fields["evaluation_universe_sha256"]
                 != expected_plan_sha256
-                or current_receipt.observation_not_before
+                or current_receipt_fields["observation_not_before"]
                 != expected_observation_not_before
-                or current_receipt.observation_not_after
+                or current_receipt_fields["observation_not_after"]
                 != expected_observation_not_after
-                or type(campaign_cycle_receipt) is not campaign_cycle_receipt_type
-                or campaign_cycle_receipt.campaign_id != expected_campaign_id
-                or campaign_cycle_receipt.source_id != expected_source_id
-                or campaign_cycle_receipt.campaign_receipt_sha256
+                or current_cycle_fields["campaign_id"] != expected_campaign_id
+                or current_cycle_fields["source_id"] != expected_source_id
+                or current_cycle_fields["campaign_receipt_sha256"]
                 != expected_receipt_sha256
-                or campaign_cycle_receipt.receipt_sha256
+                or current_cycle_fields["receipt_sha256"]
                 != expected_cycle_receipt_sha256
-                or campaign_cycle_receipt.provider_captured_at
+                or current_cycle_fields["provider_captured_at"]
                 != expected_cycle_provider_captured_at
                 or type(campaign_forward_protocol) is not campaign_protocol_type
                 or campaign_forward_protocol.campaign_id != expected_campaign_id
@@ -470,7 +547,7 @@ def _install() -> None:
                 observed_at,
                 "decision-time learning observed_at",
             ) < _utc(
-                current_receipt.observation_not_before,
+                current_receipt_fields["observation_not_before"],
                 "campaign observation_not_before",
             ):
                 raise _origin.PaperExecutionDecisionOriginError(
@@ -489,12 +566,12 @@ def _install() -> None:
                     "provider cycle evidence"
                 )
             campaign_evidence = (
-                (campaign_id_key, current_receipt.campaign_id),
-                (campaign_source_id_key, current_receipt.source_id),
-                (campaign_receipt_key, current_receipt.receipt_sha256),
+                (campaign_id_key, current_receipt_fields["campaign_id"]),
+                (campaign_source_id_key, current_receipt_fields["source_id"]),
+                (campaign_receipt_key, current_receipt_fields["receipt_sha256"]),
                 (
                     campaign_plan_key,
-                    current_receipt.evaluation_universe_sha256,
+                    current_receipt_fields["evaluation_universe_sha256"],
                 ),
                 (campaign_protocol_key, expected_protocol_sha256),
                 (campaign_cycle_receipt_key, expected_cycle_receipt_sha256),

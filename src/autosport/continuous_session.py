@@ -4476,29 +4476,27 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             return True
 
         def restore_dependency_index_identity() -> bool:
+            type_changed = restore_dependency_index_type_authority()
             if self.dependency_index is dependency_index:
-                return False
+                return type_changed
             self.dependency_index = dependency_index
             return True
 
         def require_dependency_index_identity() -> None:
-            type_changed = restore_dependency_index_type_authority()
-            identity_changed = restore_dependency_index_identity()
-            if type_changed or identity_changed:
+            if restore_dependency_index_identity():
                 raise ContinuousSessionError(
                     "continuous-session dependency index authority changed during tick"
                 )
 
         def restore_invalidation_buffer_identity() -> bool:
+            type_changed = restore_invalidation_buffer_type_authority()
             if self.invalidation_buffer is invalidation_buffer:
-                return False
+                return type_changed
             self.invalidation_buffer = invalidation_buffer
             return True
 
         def require_invalidation_buffer_identity() -> None:
-            type_changed = restore_invalidation_buffer_type_authority()
-            identity_changed = restore_invalidation_buffer_identity()
-            if type_changed or identity_changed:
+            if restore_invalidation_buffer_identity():
                 raise ContinuousSessionError(
                     "continuous-session invalidation buffer authority changed during tick"
                 )
@@ -4903,10 +4901,19 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         except Exception as exc:
             state_was_rebound = restore_state_identity()
             dependency_index_was_rebound = restore_dependency_index_identity()
+            lifecycle_type_was_changed = restore_lifecycle_type_authority()
             invalidation_buffer_was_rebound = restore_invalidation_buffer_identity()
             invalidation_structure_was_rebound = (
                 restore_invalidation_buffer_structure_authority()
             )
+            if lifecycle_type_was_changed:
+                try:
+                    exc.add_note(
+                        "canonical event lifecycle runtime type was changed "
+                        "during collector observation and was restored"
+                    )
+                except BaseException:
+                    pass
             if invalidation_structure_was_rebound:
                 try:
                     exc.add_note(
@@ -5011,9 +5018,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     # state while the provider-unavailable result is being handled.
                     state_was_rebound = restore_state_identity()
                     dependency_index_was_rebound = restore_dependency_index_identity()
+                    lifecycle_type_was_changed = restore_lifecycle_type_authority()
                     invalidation_buffer_was_rebound = (
                         restore_invalidation_buffer_identity()
                     )
+                    if lifecycle_type_was_changed:
+                        try:
+                            exc.add_note(
+                                "canonical event lifecycle runtime type was changed "
+                                "during provider-unavailable handling and was restored"
+                            )
+                        except BaseException:
+                            pass
                     invalidation_structure_was_rebound = (
                         restore_invalidation_buffer_structure_authority()
                     )
@@ -5439,10 +5455,19 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # authority before failing.
                 state_was_rebound = restore_state_identity()
                 dependency_index_was_rebound = restore_dependency_index_identity()
+                lifecycle_type_was_changed = restore_lifecycle_type_authority()
                 invalidation_buffer_was_rebound = restore_invalidation_buffer_identity()
                 invalidation_structure_was_rebound = (
                     restore_invalidation_buffer_structure_authority()
                 )
+                if lifecycle_type_was_changed:
+                    try:
+                        exc.add_note(
+                            "canonical event lifecycle runtime type was changed "
+                            "during tick effects and was restored"
+                        )
+                    except BaseException:
+                        pass
                 if invalidation_structure_was_rebound:
                     try:
                         exc.add_note(

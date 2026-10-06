@@ -2113,8 +2113,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _replace: Callable[..., ContinuousSessionStatus] = replace,
         _replace_code: object = replace.__code__,
     ) -> ContinuousSessionStatus:
+        state = self._state if state is None else state
         if (
-            type(self._state).snapshot is not _snapshot_method
+            type(state).snapshot is not _snapshot_method
             or getattr(_snapshot_method, "__code__", None)
             is not _snapshot_method_code
             or type(self.collector).status is not _collector_status_method
@@ -2126,7 +2127,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "canonical coordinator status authority changed"
             )
-        snapshot = _snapshot_method(self._state)
+        snapshot = _snapshot_method(state)
         source_status = _collector_status_method(self.collector)
         if type(source_status) is not dict:
             raise ContinuousSessionError(
@@ -2413,6 +2414,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     def _refresh_source_state_projection(
         self,
         *,
+        state: _ContinuousSessionState | None = None,
         collector: HeadlessCollectorService | None = None,
         source_id: str | None = None,
         delta_store: Any | None = None,
@@ -2433,7 +2435,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             type(self._state).snapshot is not _snapshot_method
             or getattr(_snapshot_method, "__code__", None)
             is not _snapshot_method_code
-            or type(self._state).record_source_projection
+            or type(state).record_source_projection
             is not _record_source_projection_method
             or getattr(_record_source_projection_method, "__code__", None)
             is not _record_source_projection_method_code
@@ -2477,12 +2479,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         backlog = len(deltas) > max_items
         selected = deltas[:max_items]
         _record_source_projection_method(
-            self._state,
+            state,
             deltas=selected,
             backlog=backlog,
             expected_after_delta_id=snapshot.source_state_delta_id,
         )
-        return _snapshot_method(self._state)
+        return _snapshot_method(state)
 
     def _settlement_resolutions(
         self,
@@ -2923,19 +2925,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
     ) -> ContinuousTickResult:
+        state = self._state
         if (
-            type(self._state).running_fence is not _running_fence
+            type(state).running_fence is not _running_fence
             or getattr(_running_fence, "__code__", None) is not _running_fence_code
             or type(self)._require_running is not _require_running_method
             or getattr(_require_running_method, "__code__", None)
             is not _require_running_method_code
-            or type(self._state).record_failure is not _record_failure_method
+            or type(state).record_failure is not _record_failure_method
             or getattr(_record_failure_method, "__code__", None)
             is not _record_failure_method_code
-            or type(self._state).record_success is not _record_success_method
+            or type(state).record_success is not _record_success_method
             or getattr(_record_success_method, "__code__", None)
             is not _record_success_method_code
-            or type(self._state).validate_settlement_evidence
+            or type(state).validate_settlement_evidence
             is not _validate_settlement_evidence_method
             or getattr(_validate_settlement_evidence_method, "__code__", None)
             is not _validate_settlement_evidence_method_code
@@ -2971,7 +2974,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "canonical coordinator running-fence authority changed"
             )
         _require_running_method(self)
-        observation_token = self._state._checkpoint_token
+        observation_token = state._checkpoint_token
         collector = self.collector
         collector_run_cycle = collector.run_cycle
         collector_source_id = collector.source_id
@@ -2979,7 +2982,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             type(collector_source_id) is not str
             or not collector_source_id
             or collector_source_id.strip() != collector_source_id
-            or collector_source_id != self._state.source_id
+            or collector_source_id != state.source_id
         ):
             raise ContinuousSessionError(
                 "collector source identity does not match continuous session"
@@ -3098,6 +3101,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "continuous-session clock authority is unavailable"
             )
 
+        def require_state_identity() -> None:
+            if self._state is not state:
+                raise ContinuousSessionError(
+                    "continuous session state authority changed during tick"
+                )
+
         def require_economic_context() -> None:
             if (
                 self.workspace != workspace
@@ -3139,16 +3148,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "collector returned invalid continuous-session cycle metadata"
                 )
+            require_state_identity()
         except Exception as exc:
             try:
-                with _running_fence(self._state):
+                with _running_fence(state):
                     # Collector observation happens outside the long-lived product
                     # fence so operator pause remains responsive during provider I/O.
                     # Publish its failure only if no newer canonical generation won
                     # while that observation was in flight.
-                    if self._state._checkpoint_token == observation_token:
+                    if state._checkpoint_token == observation_token:
                         _record_failure_method(
-                            self._state,
+                            state,
                             code=type(exc).__name__,
                         )
             except (SessionPausedError, SessionStoppedError):
@@ -3165,8 +3175,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise
 
         if cycle_provider_unavailable:
-            with _running_fence(self._state):
-                if self._state._checkpoint_token != observation_token:
+            with _running_fence(state):
+                if state._checkpoint_token != observation_token:
                     raise ContinuousSessionError(
                         "provider-unavailable observation was superseded by "
                         "a newer canonical session generation"
@@ -3176,7 +3186,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # continuous-session snapshot path here: retained settlement history
                 # must not amplify an operational provider failure into O(history).
                 failure = _record_failure_method(
-                    self._state,
+                    state,
                     code="ProviderUnavailableError",
                 )
                 pending_count = invalidation_buffer.pending_count
@@ -3189,6 +3199,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     raise ContinuousSessionError(
                         "invalidation buffer backlog state is invalid"
                     )
+                require_state_identity()
             return ContinuousTickResult(
                 session_id=failure.session_id,
                 cycle_index=failure.cycles_completed,
@@ -3218,8 +3229,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 last_success_at=failure.last_success_at,
             )
 
-        with _running_fence(self._state):
-            if self._state._checkpoint_token != observation_token:
+        with _running_fence(state):
+            if state._checkpoint_token != observation_token:
                 raise ContinuousSessionError(
                     "collector observation was superseded by a newer "
                     "canonical session generation"
@@ -3228,6 +3239,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 require_economic_context()
                 source_snapshot = _refresh_source_state_projection_method(
                     self,
+                    state=state,
                     collector=collector,
                     source_id=collector_source_id,
                     delta_store=collector_delta_store,
@@ -3244,10 +3256,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     if source_snapshot.source_sync_state is None
                     else (source_snapshot.source_sync_state,)
                 )
+                require_state_identity()
                 delivered = desktop_drain(
                     as_of=now,
                     view=causal_view,
                 )
+                require_state_identity()
                 if (
                     type(delivered) is not tuple
                     or any(
@@ -3270,6 +3284,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     max_batches=max_invalidation_batches,
                     max_items=max_invalidation_items,
                 )
+                require_state_identity()
 
                 newly_registered: list[str] = []
                 retired: list[str] = []
@@ -3300,6 +3315,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     register_input=register,
                     retire_input=retire,
                 )
+                require_state_identity()
                 if (
                     type(registered) is not tuple
                     or any(
@@ -3332,8 +3348,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     records_reader=lifecycle_records,
                     resolve_outcome=outcome_resolver,
                 )
+                require_state_identity()
                 _validate_settlement_evidence_method(
-                    self._state,
+                    state,
                     settlement_evidence=resolutions,
                 )
                 require_economic_context()
@@ -3345,8 +3362,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         ),
                         at=now,
                     )
+                    require_state_identity()
                     require_economic_context()
                 settled, evidence_ids = self._settle(resolutions=resolutions)
+                require_state_identity()
                 require_economic_context()
                 if reconcile_after_settlement is not None:
                     reconcile_after_settlement(
@@ -3357,15 +3376,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         settled_ticket_ids=settled,
                         at=now,
                     )
+                    require_state_identity()
                     require_economic_context()
 
                 cycle_index = _record_success_method(
-                    self._state,
+                    state,
                     at=now,
                     full_refresh=full_refresh,
                     settlement_evidence=resolutions,
                 )
-                committed_last_success_at = self._state._last_success_at
+                committed_last_success_at = state._last_success_at
             except (SessionPausedError, SessionStoppedError):
                 raise
             except Exception as exc:
@@ -3373,7 +3393,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # generation can overtake this failure publication.
                 try:
                     _record_failure_method(
-                        self._state,
+                        state,
                         code=type(exc).__name__,
                     )
                 except Exception as publication_error:
@@ -3387,7 +3407,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise
 
         return ContinuousTickResult(
-            session_id=self.session_id,
+            session_id=state.session_id,
             cycle_index=cycle_index,
             source_id=cycle_source_id,
             source_provider_unavailable=False,

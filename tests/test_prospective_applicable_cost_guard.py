@@ -141,6 +141,27 @@ def test_exact_class_positive_object_new_forge_fails_before_rebound_resolver_exe
     assert attacker_called is False
 
 
+def test_guard_ignores_rebound_builtin_dispatch(monkeypatch):
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+
+        def hostile(*args, **kwargs):
+            raise AssertionError("rebound guard builtin executed")
+
+        monkeypatch.setattr(guard, "type", hostile, raising=False)
+        monkeypatch.setattr(guard, "len", hostile, raising=False)
+        monkeypatch.setattr(guard, "enumerate", hostile, raising=False)
+        monkeypatch.setattr(guard, "zip", hostile, raising=False)
+
+        accepted = _require(asserted, case)
+
+    assert accepted is not asserted
+
+
 def test_guard_ignores_rebound_object_getattribute(monkeypatch):
     with canonical_applicable_cost_case() as case:
         canonical = _canonical(case)

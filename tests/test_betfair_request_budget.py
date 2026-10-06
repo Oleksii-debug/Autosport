@@ -12,6 +12,7 @@ from autosport.betfair_request_budget import (
     BetfairStreamState,
     admit_betfair_request,
     clear_read_backpressure,
+    market_book_intent_from_rpc_params,
     order_betfair_intents,
     record_market_book_dispatch,
     record_read_backpressure,
@@ -38,12 +39,13 @@ def _market(
     projection: bool = False,
     dedupe_key: str | None = None,
 ) -> BetfairRequestIntent:
-    return BetfairRequestIntent(
-        request_id=request_id,
-        operation=BetfairRequestOperation.LIST_MARKET_BOOK,
-        priority=priority,
-        market_ids=(market,),
-        order_projection="ALL" if projection else None,
+    params: dict[str, object] = {"marketIds": [market]}
+    if projection:
+        params["orderProjection"] = "ALL"
+    return market_book_intent_from_rpc_params(
+        request_id,
+        priority,
+        params=params,
         dedupe_key=dedupe_key,
     )
 
@@ -74,46 +76,66 @@ def test_weighted_market_request_over_200_points_fails_before_dispatch() -> None
         BetfairRequestBudgetError,
         match="exceeds 200 points",
     ):
-        BetfairRequestIntent(
-            request_id="market-heavy",
-            operation=BetfairRequestOperation.LIST_MARKET_BOOK,
-            priority=BetfairRequestPriority.EXECUTION_READ,
-            market_ids=tuple(f"1.{index:03d}" for index in range(12)),
-            price_data=("EX_ALL_OFFERS",),
+        market_book_intent_from_rpc_params(
+            "market-heavy",
+            BetfairRequestPriority.EXECUTION_READ,
+            params={
+                "marketIds": [f"1.{index:03d}" for index in range(12)],
+                "priceProjection": {"priceData": ["EX_ALL_OFFERS"]},
+            },
         )
 
 
 def test_market_weight_and_order_pool_are_canonical_not_caller_asserted() -> None:
-    exact = BetfairRequestIntent(
-        request_id="market-exact",
-        operation=BetfairRequestOperation.LIST_MARKET_BOOK,
-        priority=BetfairRequestPriority.EXECUTION_READ,
-        market_ids=tuple(f"1.{index:03d}" for index in range(12)),
-        price_data=("EX_BEST_OFFERS",),
-        best_prices_depth=10,
-        match_projection="ROLLED_UP_BY_PRICE",
+    params = {
+        "marketIds": [f"1.{index:03d}" for index in range(12)],
+        "priceProjection": {
+            "priceData": ["EX_BEST_OFFERS"],
+            "exBestOffersOverrides": {"bestPricesDepth": 10},
+        },
+        "matchProjection": "ROLLED_UP_BY_PRICE",
+    }
+    exact = market_book_intent_from_rpc_params(
+        "market-exact",
+        BetfairRequestPriority.EXECUTION_READ,
+        params=params,
     )
 
     assert exact.total_market_data_points == 200
     assert exact.request_pool is BetfairRequestPool.SHARED_ORDER_READ
+    assert exact.market_book_params_sha256 is not None
+    exact.assert_matches_market_book_params(params)
 
-    with pytest.raises(TypeError):
-        BetfairRequestIntent(
-            request_id="caller-lowball",
-            operation=BetfairRequestOperation.LIST_MARKET_BOOK,
-            priority=BetfairRequestPriority.EXECUTION_READ,
-            market_ids=tuple(f"1.{index:03d}" for index in range(12)),
-            price_data=("EX_ALL_OFFERS",),
-            market_data_weight_per_market=1,
+    unbound = BetfairRequestIntent(
+        request_id="caller-lowball",
+        operation=BetfairRequestOperation.LIST_MARKET_BOOK,
+        priority=BetfairRequestPriority.EXECUTION_READ,
+        market_ids=("1.001",),
+    )
+    with pytest.raises(BetfairRequestBudgetError, match="canonical RPC-param origin"):
+        admit_betfair_request(
+            unbound,
+            state=BetfairRequestBudgetState(),
+            policy=_policy(),
+            now_monotonic_ns=0,
+        )
+
+    with pytest.raises(BetfairRequestBudgetError, match="transport params do not match"):
+        exact.assert_matches_market_book_params(
+            {
+                **params,
+                "priceProjection": {"priceData": ["EX_ALL_OFFERS"]},
+            }
         )
 
     with pytest.raises(BetfairRequestBudgetError, match="canonical Betfair projection"):
-        BetfairRequestIntent(
-            request_id="bad-projection",
-            operation=BetfairRequestOperation.LIST_MARKET_BOOK,
-            priority=BetfairRequestPriority.EXECUTION_READ,
-            market_ids=("1.234",),
-            match_projection="CALLER_SAYS_CHEAP",
+        market_book_intent_from_rpc_params(
+            "bad-projection",
+            BetfairRequestPriority.EXECUTION_READ,
+            params={
+                "marketIds": ["1.234"],
+                "matchProjection": "CALLER_SAYS_CHEAP",
+            },
         )
 
 

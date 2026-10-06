@@ -377,6 +377,19 @@ def test_opening_commitment_ignores_rebound_slot_descriptors(monkeypatch) -> Non
     paper_module._require_ticket_opening_authority(book)
 
 
+def test_opening_registry_rejects_in_place_ticket_id_mutation() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    original_ticket_id = ticket.ticket_id
+    object.__setattr__(ticket, "ticket_id", "forged-ticket-id")
+
+    with pytest.raises(ValueError, match="opening economic identity changed"):
+        paper_module._require_ticket_opening_authority(book)
+
+    assert book.tickets[original_ticket_id] is ticket
+    assert book.balance == Decimal("90")
+
+
 def test_opening_registry_ignores_rebound_commitment_module_dispatch(monkeypatch) -> None:
     book = PaperBook("100")
     book.open_ticket([_leg()], "10", placed_at=_TS)

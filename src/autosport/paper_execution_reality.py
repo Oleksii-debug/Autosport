@@ -6,7 +6,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
 from . import _paper_execution_reality_legacy as _impl
-from .real_execution_ledger import ExecutionAction, ExecutionPlan
+from .exchange_exposure import locked_capital_for_exchange_side
+from .real_execution_ledger import (
+    ExecutionAction,
+    ExecutionPlan,
+    _validate_decimal_text_resource_bound,
+)
 
 
 PaperExecutionRealityError = _impl.PaperExecutionRealityError
@@ -24,8 +29,11 @@ PaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
 
 
 def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
+    if type(value) is not Decimal:
+        raise ValueError("Decimal must be an exact canonical Decimal")
     if not value.is_finite():
         raise ValueError("Decimal must be finite")
+    _validate_decimal_text_resource_bound(value)
     parts = value.as_tuple()
     coefficient = 0
     for digit in parts.digits:
@@ -38,7 +46,9 @@ def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
 def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
     sign = 1 if coefficient < 0 else 0
     digits = tuple(int(ch) for ch in str(abs(coefficient)))
-    return Decimal((sign, digits, exponent))
+    value = Decimal((sign, digits, exponent))
+    _validate_decimal_text_resource_bound(value)
+    return value
 
 
 def _decimal_add_exact(left: Decimal, right: Decimal) -> Decimal:
@@ -65,6 +75,42 @@ def _decimal_scale_bps_exact(value: Decimal, basis_points: int) -> Decimal:
     return _decimal_from_coefficient(coefficient * basis_points, exponent - 4)
 
 
+def _attempt_locked_capital(attempt: PaperLegAttempt) -> Decimal:
+    if attempt.outcome not in {
+        PaperAttemptOutcome.ACCEPTED,
+        PaperAttemptOutcome.PARTIAL,
+    }:
+        raise PaperExecutionIntegrityError(
+            "locked capital requires ACCEPTED or PARTIAL execution truth"
+        )
+    if attempt.execution_stake is None or attempt.execution_odds is None:
+        raise PaperExecutionIntegrityError(
+            "accepted/partial attempt is missing execution stake or odds"
+        )
+    try:
+        return locked_capital_for_exchange_side(
+            stake=attempt.execution_stake,
+            odds=attempt.execution_odds,
+            exchange_side=attempt.side,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionIntegrityError(
+            "accepted/partial attempt has invalid exchange exposure economics"
+        ) from exc
+
+
+def _unknown_exposure_increment(attempt: PaperLegAttempt) -> Decimal:
+    if attempt.side == "BACK":
+        return attempt.requested_stake
+    if attempt.side == "LAY":
+        raise PaperExecutionStateError(
+            "UNKNOWN LAY exposure has no canonical upper-odds liability bound"
+        )
+    raise PaperExecutionIntegrityError(
+        "durable attempt has noncanonical exchange side"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _DerivedRunEconomics:
     pending_action_ids: tuple[str, ...]
@@ -86,23 +132,37 @@ def _derive_run_economics(
     for index, attempt in enumerate(attempts):
         if attempt.sequence != index or attempt.action_id != action_ids[index]:
             raise PaperExecutionIntegrityError("durable attempts are not a reserved plan prefix")
+        if type(attempt.side) is not str or attempt.side not in {"BACK", "LAY"}:
+            raise PaperExecutionIntegrityError(
+                "durable attempt has noncanonical exchange side"
+            )
         if terminal_seen:
             raise PaperExecutionIntegrityError(
                 "durable attempts continue after a non-ACCEPTED terminal outcome"
             )
 
-        if attempt.outcome in {
-            PaperAttemptOutcome.ACCEPTED,
-            PaperAttemptOutcome.PARTIAL,
-        }:
-            assert attempt.execution_stake is not None
-            known_exposure = _decimal_add_exact(known_exposure, attempt.execution_stake)
-            worst_case = max(worst_case, known_exposure)
-        elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
-            worst_case = max(
-                worst_case,
-                _decimal_add_exact(known_exposure, attempt.requested_stake),
-            )
+        try:
+            if attempt.outcome in {
+                PaperAttemptOutcome.ACCEPTED,
+                PaperAttemptOutcome.PARTIAL,
+            }:
+                known_exposure = _decimal_add_exact(
+                    known_exposure,
+                    _attempt_locked_capital(attempt),
+                )
+                worst_case = max(worst_case, known_exposure)
+            elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
+                worst_case = max(
+                    worst_case,
+                    _decimal_add_exact(
+                        known_exposure,
+                        _unknown_exposure_increment(attempt),
+                    ),
+                )
+        except ValueError as exc:
+            raise PaperExecutionIntegrityError(
+                "durable attempt exposure arithmetic exceeds canonical resource bounds"
+            ) from exc
 
         if attempt.outcome is not PaperAttemptOutcome.ACCEPTED:
             terminal_seen = True
@@ -141,6 +201,66 @@ def _derive_run_economics(
 
 class PaperExecutionLedger(_impl.PaperExecutionLedger):
     """PAPER ledger with mechanically derived completion economics."""
+
+    def reserve_run(
+        self,
+        *,
+        run_id: str,
+        trigger_id: str,
+        plan: ExecutionPlan,
+        config: PaperExecutionModelConfig,
+        started_at: str,
+        observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str] = frozenset(),
+    ) -> None:
+        if type(suspended_action_ids) is not frozenset or any(
+            type(item) is not str for item in suspended_action_ids
+        ):
+            raise TypeError("suspended_action_ids must be a frozenset[str]")
+        action_ids = tuple(action.action_id for action in plan.actions)
+        if suspended_action_ids - set(action_ids):
+            raise PaperExecutionStateError(
+                "suspended_action_ids contain action outside execution plan"
+            )
+        base_payload = {
+            "trigger_id": trigger_id,
+            "plan_id": plan.plan_id,
+            "plan_fingerprint": plan.fingerprint,
+            "model_fingerprint": config.fingerprint,
+            "started_at": started_at,
+            "action_ids": list(action_ids),
+            "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
+        }
+        payload = {
+            **base_payload,
+            "suspended_action_ids": sorted(suspended_action_ids),
+        }
+
+        existing = [
+            event
+            for event in self.events(run_id)
+            if event["event_type"] == "RUN_RESERVED"
+        ]
+        if existing:
+            if len(existing) != 1:
+                raise PaperExecutionIntegrityError(
+                    "run needs exactly one reservation"
+                )
+            prior_payload = existing[0]["payload"]
+            if prior_payload == payload:
+                return
+            if not suspended_action_ids and prior_payload == base_payload:
+                return
+            raise PaperExecutionStateError(
+                "run execution-control state conflicts with durable reservation"
+            )
+
+        self._append_event(
+            event_type="RUN_RESERVED",
+            run_id=run_id,
+            key=f"{run_id}:reserve",
+            payload=payload,
+        )
 
     def _append_completion_unlocked(
         self,
@@ -281,6 +401,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         config: PaperExecutionModelConfig,
         started_at: str,
         observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str] | None = None,
     ) -> PaperExecutionRun | None:
         events = self.events(run_id)
         if not events:
@@ -297,7 +418,39 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             "action_ids": [action.action_id for action in plan.actions],
             "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
         }
-        if reserve[0]["payload"] != expected_reserve:
+        durable_reserve = reserve[0]["payload"]
+        if "suspended_action_ids" in durable_reserve:
+            raw_suspended = durable_reserve.get("suspended_action_ids")
+            if (
+                type(raw_suspended) is not list
+                or any(type(item) is not str for item in raw_suspended)
+                or raw_suspended != sorted(set(raw_suspended))
+                or set(raw_suspended)
+                - {action.action_id for action in plan.actions}
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable suspended_action_ids are invalid"
+                )
+            expected_reserve = {
+                **expected_reserve,
+                "suspended_action_ids": raw_suspended,
+            }
+            if suspended_action_ids is not None:
+                if type(suspended_action_ids) is not frozenset or any(
+                    type(item) is not str for item in suspended_action_ids
+                ):
+                    raise TypeError(
+                        "suspended_action_ids must be a frozenset[str] or None"
+                    )
+                if sorted(suspended_action_ids) != raw_suspended:
+                    raise PaperExecutionStateError(
+                        "run execution-control state conflicts with durable reservation"
+                    )
+        elif suspended_action_ids:
+            raise PaperExecutionStateError(
+                "legacy reservation cannot prove requested suspended_action_ids"
+            )
+        if durable_reserve != expected_reserve:
             raise PaperExecutionStateError("run identity conflicts with durable reservation")
 
         attempt_events = [
@@ -341,7 +494,11 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             try:
                 recovery = RecoveryDecision(payload["recovery_decision"])
                 pending = tuple(payload["pending_action_ids"])
-                exposure = Decimal(payload["worst_case_exposure"])
+                exposure = _impl._serialized_decimal(
+                    payload["worst_case_exposure"],
+                    "completion worst_case_exposure",
+                    allow_zero=True,
+                )
             except (KeyError, ValueError, InvalidOperation, TypeError) as exc:
                 raise PaperExecutionIntegrityError("invalid completion payload") from exc
             if (
@@ -391,10 +548,12 @@ def _synthetic_attempt(
     started_at: str,
     suspended: bool,
 ) -> PaperLegAttempt:
-    if action.side != "BACK":
+    if action.side != "BACK" and not (
+        action.side == "LAY" and suspended
+    ):
         raise PaperExecutionStateError(
             "synthetic PAPER exposure model supports BACK only; non-BACK must use "
-            "explicit empirical/configured execution evidence"
+            "explicit empirical execution evidence"
         )
     start = _impl._timestamp(started_at, "started_at")
     delay_span = config.max_delay_ms - config.min_delay_ms
@@ -500,6 +659,179 @@ def _synthetic_attempt(
     )
 
 
+def _require_canonical_execution_config_surface(
+    config: PaperExecutionModelConfig,
+) -> None:
+    if type(config) is not PaperExecutionModelConfig:
+        raise TypeError("config must be exact PaperExecutionModelConfig")
+    for name in ("model_id", "model_version", "evidence_source", "seed"):
+        if type(getattr(config, name)) is not str:
+            raise PaperExecutionStateError(
+                f"execution config {name} must retain exact canonical text authority"
+            )
+    if type(config.evidence_grade) is not EvidenceGrade:
+        raise PaperExecutionStateError(
+            "execution config evidence_grade must retain canonical evidence authority"
+        )
+    for name in (
+        "max_quote_age_ms",
+        "min_delay_ms",
+        "max_delay_ms",
+        "rejected_bps",
+        "partial_bps",
+        "unknown_bps",
+        "partial_fill_bps",
+        "max_slippage_bps",
+    ):
+        value = getattr(config, name)
+        if type(value) is not int or value < 0:
+            raise PaperExecutionStateError(
+                f"execution config {name} must retain canonical non-negative integer authority"
+            )
+    if config.max_delay_ms < config.min_delay_ms:
+        raise PaperExecutionStateError(
+            "execution config delay bounds are no longer canonical"
+        )
+    if config.max_quote_age_ms <= 0:
+        raise PaperExecutionStateError(
+            "execution config max_quote_age_ms must remain positive"
+        )
+    if config.rejected_bps + config.partial_bps + config.unknown_bps > 10_000:
+        raise PaperExecutionStateError(
+            "execution config outcome basis points exceed canonical total"
+        )
+    if not 0 < config.partial_fill_bps < 10_000:
+        raise PaperExecutionStateError(
+            "execution config partial_fill_bps left canonical range"
+        )
+    if config.max_slippage_bps >= 10_000:
+        raise PaperExecutionStateError(
+            "execution config max_slippage_bps left canonical range"
+        )
+
+
+    try:
+        canonical = PaperExecutionModelConfig(
+            model_id=config.model_id,
+            model_version=config.model_version,
+            evidence_grade=config.evidence_grade,
+            evidence_source=config.evidence_source,
+            seed=config.seed,
+            max_quote_age_ms=config.max_quote_age_ms,
+            min_delay_ms=config.min_delay_ms,
+            max_delay_ms=config.max_delay_ms,
+            rejected_bps=config.rejected_bps,
+            partial_bps=config.partial_bps,
+            unknown_bps=config.unknown_bps,
+            partial_fill_bps=config.partial_fill_bps,
+            max_slippage_bps=config.max_slippage_bps,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionStateError(
+            "execution config no longer satisfies canonical value invariants"
+        ) from exc
+    if canonical != config:
+        raise PaperExecutionStateError(
+            "execution config changed outside canonical construction authority"
+        )
+
+
+def _require_canonical_execution_plan_surface(plan: ExecutionPlan) -> None:
+    if type(plan) is not ExecutionPlan:
+        raise TypeError("plan must be exact ExecutionPlan")
+    for name in (
+        "plan_id",
+        "bookmaker_profile_version",
+        "decision_id",
+        "approval_id",
+        "created_at",
+    ):
+        if type(getattr(plan, name)) is not str:
+            raise PaperExecutionStateError(
+                f"execution plan {name} must retain exact canonical text authority"
+            )
+    if type(plan.schema_version) is not int:
+        raise PaperExecutionStateError(
+            "execution plan schema_version must retain canonical integer authority"
+        )
+    if type(plan.actions) is not tuple or not plan.actions:
+        raise PaperExecutionStateError(
+            "execution plan actions must retain canonical tuple authority"
+        )
+
+
+    try:
+        _impl._text(plan.plan_id, "plan_id")
+        _impl._text(plan.bookmaker_profile_version, "bookmaker_profile_version")
+        _impl._text(plan.decision_id, "decision_id")
+        _impl._text(plan.approval_id, "approval_id")
+        _impl._timestamp(plan.created_at, "created_at")
+    except ValueError as exc:
+        raise PaperExecutionStateError(
+            "execution plan no longer satisfies canonical value invariants"
+        ) from exc
+
+
+def _validate_lay_execution_surface(
+    *,
+    plan: ExecutionPlan,
+    observations: Mapping[str, ObservedPaperExecution],
+    suspended_action_ids: frozenset[str],
+) -> None:
+    _require_canonical_execution_plan_surface(plan)
+    for action in plan.actions:
+        _impl._require_canonical_action_surface(action)
+        if action.side not in {"BACK", "LAY"}:
+            raise PaperExecutionStateError(
+                "PAPER execution requires canonical BACK or LAY action side "
+                "before reservation"
+            )
+    try:
+        canonical_plan = ExecutionPlan(
+            plan_id=plan.plan_id,
+            bookmaker_profile_version=plan.bookmaker_profile_version,
+            decision_id=plan.decision_id,
+            approval_id=plan.approval_id,
+            created_at=plan.created_at,
+            actions=plan.actions,
+            schema_version=plan.schema_version,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionStateError(
+            "execution plan no longer satisfies canonical aggregate invariants"
+        ) from exc
+    if canonical_plan != plan:
+        raise PaperExecutionStateError(
+            "execution plan changed outside canonical construction authority"
+        )
+
+    lay_actions = tuple(
+        action for action in plan.actions if action.side == "LAY"
+    )
+    if not lay_actions:
+        return
+    if len(plan.actions) != 1 or len(lay_actions) != 1:
+        raise PaperExecutionStateError(
+            "LAY PAPER execution is limited to one single-leg action"
+        )
+    action = lay_actions[0]
+    observation = observations.get(action.action_id)
+    if observation is None:
+        if action.action_id in suspended_action_ids:
+            return
+        raise PaperExecutionStateError(
+            "LAY PAPER execution requires explicit empirical execution evidence"
+        )
+    if observation.evidence_grade is not EvidenceGrade.EMPIRICAL:
+        raise PaperExecutionStateError(
+            "configured/synthetic LAY execution cannot establish liability truth"
+        )
+    if observation.outcome is PaperAttemptOutcome.UNKNOWN:
+        raise PaperExecutionStateError(
+            "UNKNOWN LAY exposure has no canonical upper-odds liability bound"
+        )
+
+
 def execute_paper_plan(
     *,
     plan: ExecutionPlan,
@@ -512,18 +844,26 @@ def execute_paper_plan(
     suspended_action_ids: frozenset[str] = frozenset(),
 ) -> PaperExecutionRun:
     """Execute/resume one PAPER/SHADOW run without provider writes or real money."""
-    if not isinstance(plan, ExecutionPlan):
-        raise TypeError("plan must be ExecutionPlan")
-    if not isinstance(config, PaperExecutionModelConfig):
-        raise TypeError("config must be PaperExecutionModelConfig")
-    if not isinstance(ledger, PaperExecutionLedger):
-        raise TypeError("ledger must be PaperExecutionLedger")
+    _require_canonical_execution_plan_surface(plan)
+    _require_canonical_execution_config_surface(config)
+    if type(ledger) is not PaperExecutionLedger:
+        raise TypeError("ledger must be exact PaperExecutionLedger")
     trigger_id = _impl._text(trigger_id, "trigger_id")
     _impl._timestamp(started_at, "started_at")
     if observations is None:
         observations = {}
     if not isinstance(observations, Mapping):
         raise TypeError("observations must be a mapping")
+    try:
+        observations = dict(observations)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("observations must be a stable mapping") from exc
+    if any(type(action_id) is not str for action_id in observations):
+        raise TypeError("observation keys must be exact str action ids")
+    if type(suspended_action_ids) is not frozenset or any(
+        type(item) is not str for item in suspended_action_ids
+    ):
+        raise TypeError("suspended_action_ids must be a frozenset[str]")
     action_by_id = {action.action_id: action for action in plan.actions}
     if set(observations) - set(action_by_id):
         raise PaperExecutionStateError("observations contain action outside execution plan")
@@ -531,12 +871,9 @@ def execute_paper_plan(
         raise PaperExecutionStateError(
             "suspended_action_ids contain action outside execution plan"
         )
-    if observations and not isinstance(
-        evidence_registry,
-        PaperExecutionEvidenceRegistry,
-    ):
+    if observations and type(evidence_registry) is not PaperExecutionEvidenceRegistry:
         raise PaperExecutionStateError(
-            "configured/empirical observations require a durable evidence registry"
+            "configured/empirical observations require the exact durable evidence registry authority"
         )
 
     observation_evidence_ids: dict[str, str] = {}
@@ -549,7 +886,30 @@ def execute_paper_plan(
         )
         observation_evidence_ids[action_id] = observation.evidence_id
 
+    _validate_lay_execution_surface(
+        plan=plan,
+        observations=observations,
+        suspended_action_ids=suspended_action_ids,
+    )
+
     run_id = _impl._run_id(plan, trigger_id, config)
+    # Validate every empirical/configured observation through the exact canonical
+    # attempt constructor before the first durable write. Invalid fill/suspension,
+    # freshness, expiry or stake facts must not strand a RUN_RESERVED record.
+    for sequence, action in enumerate(plan.actions):
+        observation = observations.get(action.action_id)
+        if observation is None:
+            continue
+        _impl._observed_attempt(
+            run_id=run_id,
+            plan=plan,
+            action=action,
+            sequence=sequence,
+            config=config,
+            observation=observation,
+            started_at=started_at,
+        )
+
     ledger.reserve_run(
         run_id=run_id,
         trigger_id=trigger_id,
@@ -557,6 +917,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
     )
     existing = ledger.load_run(
         run_id=run_id,
@@ -565,6 +926,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
     )
     assert existing is not None
     if existing.completed:
@@ -589,6 +951,7 @@ def execute_paper_plan(
             config=config,
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspended_action_ids,
         )
         assert result is not None
         return result
@@ -597,20 +960,14 @@ def execute_paper_plan(
     worst_case_exposure = Decimal("0")
     for prior in attempts:
         assert prior.outcome is PaperAttemptOutcome.ACCEPTED
-        assert prior.execution_stake is not None
         known_exposure = _decimal_add_exact(
             known_exposure,
-            prior.execution_stake,
+            _attempt_locked_capital(prior),
         )
         worst_case_exposure = max(worst_case_exposure, known_exposure)
 
     for sequence in range(len(attempts), len(plan.actions)):
         action = plan.actions[sequence]
-        if action.side != "BACK":
-            raise PaperExecutionStateError(
-                "PAPER execution-reality exposure model supports BACK only "
-                "until canonical LAY liability authority exists"
-            )
         observation = observations.get(action.action_id)
         if observation is not None:
             attempt = _impl._observed_attempt(
@@ -639,10 +996,9 @@ def execute_paper_plan(
             PaperAttemptOutcome.ACCEPTED,
             PaperAttemptOutcome.PARTIAL,
         }:
-            assert attempt.execution_stake is not None
             known_exposure = _decimal_add_exact(
                 known_exposure,
-                attempt.execution_stake,
+                _attempt_locked_capital(attempt),
             )
             worst_case_exposure = max(worst_case_exposure, known_exposure)
         elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
@@ -650,7 +1006,7 @@ def execute_paper_plan(
                 worst_case_exposure,
                 _decimal_add_exact(
                     known_exposure,
-                    attempt.requested_stake,
+                    _unknown_exposure_increment(attempt),
                 ),
             )
 
@@ -676,6 +1032,7 @@ def execute_paper_plan(
                 config=config,
                 started_at=started_at,
                 observation_evidence_ids=observation_evidence_ids,
+                suspended_action_ids=suspended_action_ids,
             )
             assert result is not None
             return result
@@ -693,6 +1050,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
     )
     assert result is not None
     return result

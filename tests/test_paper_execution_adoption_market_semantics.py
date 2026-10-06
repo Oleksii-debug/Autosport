@@ -1,10 +1,12 @@
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import autosport.paper_execution_adoption as adoption_module
+import autosport._paper_execution_lay_adoption_guard as lay_adoption_guard
 
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.paper import PaperBook
@@ -13,6 +15,7 @@ from autosport.paper_execution_adoption import (
     PaperExecutionAdoptionRuntime,
     PaperExposureBinding,
 )
+from autosport.real_execution_ledger import ExecutionAction
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperExecutionLedger,
@@ -499,6 +502,94 @@ def test_paper_value_action_identity_changes_with_market_semantics(tmp_path) -> 
     assert first_action.quote_id != second_action.quote_id
     assert first_action.action_id != second_action.action_id
     assert first.execution_plan.plan_id != second.execution_plan.plan_id
+
+
+def test_lay_materialization_preserves_market_semantics_identity() -> None:
+    book = PaperBook("100")
+    action = ExecutionAction(
+        action_id="lay-semantics-action",
+        bookmaker_id="paper-venue",
+        account_id="paper-account",
+        event_id="event-lay-semantics",
+        market_id="market-lay-semantics",
+        selection_id="selection-lay-semantics",
+        side="LAY",
+        requested_odds="5.00",
+        requested_stake="10.00",
+        quote_id="quote-lay-semantics",
+        quote_observed_at=_QUOTE_AT,
+        expires_at="2026-10-05T00:01:00+00:00",
+    )
+    binding = PaperExposureBinding(
+        action_id=action.action_id,
+        sport="soccer",
+        bankroll_id="paper-bankroll",
+        currency="EUR",
+        market_semantics_id=_S1,
+    )
+    attempt = SimpleNamespace(
+        attempt_id="attempt-lay-semantics",
+        run_id="run-lay-semantics",
+        action_id=action.action_id,
+        bookmaker_id=action.bookmaker_id,
+        account_id=action.account_id,
+        event_id=action.event_id,
+        market_id=action.market_id,
+        selection_id=action.selection_id,
+        side=action.side,
+        decision_quote_id=action.quote_id,
+        decision_odds=action.requested_odds,
+        requested_stake=action.requested_stake,
+        execution_odds=Decimal("5.00"),
+        execution_stake=Decimal("10.00"),
+        execution_observed_at=_STARTED_AT,
+    )
+
+    class Harness:
+        _TICKET_MARKER = "execution_attempt_id="
+
+        def __init__(self) -> None:
+            self.book = book
+
+        @staticmethod
+        def _require_attempt_action_identity(_attempt, _action) -> None:
+            return None
+
+        @staticmethod
+        def _ticket_matches_attempt(**kwargs) -> bool:
+            return lay_adoption_guard._ticket_matches_attempt(**kwargs)
+
+    ticket = lay_adoption_guard._materialize_attempt(
+        Harness(),
+        attempt=attempt,
+        action=action,
+        binding=binding,
+        decision_id="decision-lay-semantics",
+    )
+
+    assert ticket.legs[0].exchange_side == "lay"
+    assert ticket.legs[0].market_semantics_id == _S1
+    assert ticket.legs[0].settlement_identity[1] == _S1
+    assert lay_adoption_guard._ticket_matches_attempt(
+        ticket=ticket,
+        attempt=attempt,
+        action=action,
+        binding=binding,
+    )
+
+    conflicting = PaperExposureBinding(
+        action_id=action.action_id,
+        sport="soccer",
+        bankroll_id="paper-bankroll",
+        currency="EUR",
+        market_semantics_id=_S2,
+    )
+    assert not lay_adoption_guard._ticket_matches_attempt(
+        ticket=ticket,
+        attempt=attempt,
+        action=action,
+        binding=conflicting,
+    )
 
 
 def test_paper_value_materialization_preserves_market_semantics(tmp_path) -> None:

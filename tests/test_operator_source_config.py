@@ -210,7 +210,7 @@ def test_oversized_mutable_bytes_like_payload_fails_before_copy(payload) -> None
 
 
 def test_memoryview_size_uses_bytes_not_element_count() -> None:
-    payload = memoryview(bytearray(4097)).cast("I")
+    payload = memoryview(bytearray(4100)).cast("I")
     assert len(payload) < payload.nbytes
     assert payload.nbytes > 4096
 

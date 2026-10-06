@@ -638,14 +638,14 @@ class EconomicGoalStore:
                 _bindings.pop(store_id, None)
 
         store_ref = _weakref_ref(self, release_binding)
-        path_stat = path.stat
+        path_lstat = path.lstat
         path_open = path.open
 
         def path_exists(
             _error_type=EconomicGoalContractError,
         ) -> bool:
             try:
-                path_stat()
+                path_lstat()
             except FileNotFoundError:
                 return False
             except OSError as exc:

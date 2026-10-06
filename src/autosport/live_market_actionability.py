@@ -118,8 +118,8 @@ def _canonical_max_age(value: object) -> timedelta:
     # Do not let caller-defined timedelta comparison dispatch influence freshness.
     if type(value) is not timedelta:
         raise TypeError("max_age must be an exact timedelta")
-    if value < timedelta(0):
-        raise LiveMarketActionabilityError("max_age must be non-negative")
+    if value <= timedelta(0):
+        raise LiveMarketActionabilityError("max_age must be positive")
     return value
 
 
@@ -312,7 +312,7 @@ def evaluate_registered_input_current_view(
             else:
                 age = boundary - freshness
                 age_microseconds = _timedelta_microseconds(age)
-                if age > age_limit:
+                if age >= age_limit:
                     reasons.add(LiveInputWaitReason.STALE)
 
         event_sha256 = _canonical_json_sha256(event.to_dict())

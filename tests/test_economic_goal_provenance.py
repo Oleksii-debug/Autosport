@@ -435,6 +435,26 @@ def test_provenance_creation_and_identity_ignore_rebound_constructor(monkeypatch
     verify_provenance(goal, evidence)
 
 
+def test_provenance_snapshot_covers_every_captured_field(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    field_names = economic_goal_provenance_module._PROVENANCE_FIELD_NAMES
+    expected = economic_goal_provenance_module._canonical_provenance_snapshot(
+        evidence
+    )
+
+    for index, name in enumerate(field_names):
+        class ForgedDescriptor:
+            def __get__(self, instance, owner=None):
+                return object()
+
+        monkeypatch.setattr(EconomicGoalProvenance, name, ForgedDescriptor())
+        snapshot = economic_goal_provenance_module._canonical_provenance_snapshot(
+            evidence
+        )
+        assert snapshot[index] == expected[index]
+        monkeypatch.undo()
+
+
 def test_snapshot_provenance_ignores_rebound_field_descriptors(monkeypatch) -> None:
     evidence = provenance_for(_goal())
     expected_sha = evidence.contract_sha256

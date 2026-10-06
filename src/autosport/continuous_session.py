@@ -436,6 +436,11 @@ class _ContinuousSessionState:
     ) -> bytes:
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
+        # A path can be replaced after lstat() but before open().  On POSIX,
+        # opening a FIFO/device-like replacement without O_NONBLOCK could hang
+        # the coordinator before descriptor-type verification gets a chance to
+        # fail closed.  Regular files ignore this flag.
+        flags |= getattr(os, "O_NONBLOCK", 0)
         descriptor: int | None = None
         try:
             before = self._error_path.lstat()

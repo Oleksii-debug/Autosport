@@ -10,6 +10,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from supervised_clock_test_support import install_trusted_clock
+
+# Install one stable deterministic supervised-execution clock before test collection
+# imports Betfair provider-write composition. Individual tests vary only the helper's
+# private state; the function identity/code captured by production authority seals
+# remains unchanged.
+install_trusted_clock()
+
 # Root-selection production now correctly treats post-composition replacement of the
 # OS account-location resolver as an authority violation. Tests that need a sandbox
 # must therefore install one stable process-local resolver *before* importing the

@@ -146,51 +146,71 @@ _CANONICAL_TIMESTAMP_FORMATTER = _timestamp_text
 _CANONICAL_TIMESTAMP_FORMATTER_CODE = _timestamp_text.__code__
 
 
-def _decimal(
-    value: object,
-    name: str,
-    *,
-    allow_zero: bool = False,
-) -> Decimal:
+def _build_decimal_parser():
     validator = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR
-    if validator.__code__ is not _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE:
-        raise ValueError("decimal resource validator authority changed")
+    validator_code = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE
     decimal_type = _CANONICAL_DECIMAL_TYPE
     invalid_operation = _CANONICAL_INVALID_OPERATION
-    if type(value) is decimal_type:
-        parsed = value
-    elif type(value) is str:
-        if len(value) > _CANONICAL_DECIMAL_INPUT_TEXT_LIMIT:
-            raise ValueError("decimal input text exceeds resource limit")
-        try:
+    input_text_limit = _CANONICAL_DECIMAL_INPUT_TEXT_LIMIT
+    input_int_max_bits = _CANONICAL_DECIMAL_INPUT_INT_MAX_BITS
+
+    def parse(
+        value: object,
+        name: str,
+        *,
+        allow_zero: bool = False,
+    ) -> Decimal:
+        if validator.__code__ is not validator_code:
+            raise ValueError("decimal resource validator authority changed")
+        if type(value) is decimal_type:
+            parsed = value
+        elif type(value) is str:
+            if len(value) > input_text_limit:
+                raise ValueError("decimal input text exceeds resource limit")
+            try:
+                parsed = decimal_type(value)
+            except (invalid_operation, ValueError) as exc:
+                raise ValueError(f"{name} must be a finite Decimal") from exc
+        elif type(value) is int:
+            if value.bit_length() > input_int_max_bits:
+                raise ValueError("decimal integer input exceeds resource limit")
             parsed = decimal_type(value)
-        except (invalid_operation, ValueError) as exc:
-            raise ValueError(f"{name} must be a finite Decimal") from exc
-    elif type(value) is int:
-        if value.bit_length() > _CANONICAL_DECIMAL_INPUT_INT_MAX_BITS:
-            raise ValueError("decimal integer input exceeds resource limit")
-        parsed = decimal_type(value)
-    else:
-        raise ValueError(f"{name} must be a Decimal, decimal string, or int")
-    if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
-        comparator = ">= 0" if allow_zero else "> 0"
-        raise ValueError(f"{name} must be finite and {comparator}")
-    validator(parsed)
-    return parsed
+        else:
+            raise ValueError(f"{name} must be a Decimal, decimal string, or int")
+        if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
+            comparator = ">= 0" if allow_zero else "> 0"
+            raise ValueError(f"{name} must be finite and {comparator}")
+        validator(parsed)
+        return parsed
+
+    return parse
 
 
-def _preflight_decimal_text_fields(*values: Decimal | None) -> None:
-    """Validate every sibling Decimal before any fixed-point string is allocated."""
+_decimal = _build_decimal_parser()
+del _build_decimal_parser
+
+
+def _build_decimal_preflight():
     validator = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR
-    if validator.__code__ is not _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE:
-        raise ValueError("decimal resource validator authority changed")
+    validator_code = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE
     decimal_type = _CANONICAL_DECIMAL_TYPE
-    for value in values:
-        if value is None:
-            continue
-        if type(value) is not decimal_type or not value.is_finite():
-            raise ValueError("Decimal must be finite")
-        validator(value)
+
+    def preflight(*values: Decimal | None) -> None:
+        """Validate every sibling Decimal before fixed-point string allocation."""
+        if validator.__code__ is not validator_code:
+            raise ValueError("decimal resource validator authority changed")
+        for value in values:
+            if value is None:
+                continue
+            if type(value) is not decimal_type or not value.is_finite():
+                raise ValueError("Decimal must be finite")
+            validator(value)
+
+    return preflight
+
+
+_preflight_decimal_text_fields = _build_decimal_preflight()
+del _build_decimal_preflight
 
 
 _CANONICAL_DECIMAL_PARSER = _decimal
@@ -199,12 +219,22 @@ _CANONICAL_DECIMAL_PREFLIGHT = _preflight_decimal_text_fields
 _CANONICAL_DECIMAL_PREFLIGHT_CODE = _preflight_decimal_text_fields.__code__
 
 
-def _decimal_text(value: Decimal) -> str:
+def _build_decimal_text_formatter():
     preflight = _CANONICAL_DECIMAL_PREFLIGHT
-    if preflight.__code__ is not _CANONICAL_DECIMAL_PREFLIGHT_CODE:
-        raise ValueError("decimal preflight authority changed")
-    preflight(value)
-    return _CANONICAL_DECIMAL_FORMATTER(value, "f")
+    preflight_code = _CANONICAL_DECIMAL_PREFLIGHT_CODE
+    decimal_formatter = _CANONICAL_DECIMAL_FORMATTER
+
+    def decimal_text(value: Decimal) -> str:
+        if preflight.__code__ is not preflight_code:
+            raise ValueError("decimal preflight authority changed")
+        preflight(value)
+        return decimal_formatter(value, "f")
+
+    return decimal_text
+
+
+_decimal_text = _build_decimal_text_formatter()
+del _build_decimal_text_formatter
 
 
 _CANONICAL_DECIMAL_TEXT_FORMATTER = _decimal_text
@@ -1296,8 +1326,11 @@ class PaperExecutionLedger:
                 worst_case_exposure=exposure,
                 completed=True,
             )
-        known_exposure = _CANONICAL_DECIMAL_TYPE("0")
-        worst_case = _CANONICAL_DECIMAL_TYPE("0")
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+            raise PaperExecutionIntegrityError("decimal parser authority changed")
+        known_exposure = decimal_parser("0", "known_exposure", allow_zero=True)
+        worst_case = decimal_parser("0", "worst_case_exposure", allow_zero=True)
         for attempt in attempts:
             if attempt.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
                 assert attempt.execution_stake is not None
@@ -1382,6 +1415,9 @@ def _synthetic_attempt(
             "synthetic PAPER exposure model supports BACK only; non-BACK must use "
             "explicit empirical/configured execution evidence"
         )
+    decimal_parser = _CANONICAL_DECIMAL_PARSER
+    if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+        raise PaperExecutionStateError("decimal parser authority changed")
     start = _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at")
     delay_span = config.max_delay_ms - config.min_delay_ms
     delay_ms = config.min_delay_ms
@@ -1438,16 +1474,28 @@ def _synthetic_attempt(
                     config.max_slippage_bps + 1,
                 )
             )
-            odds_margin = action.requested_odds - _CANONICAL_DECIMAL_TYPE("1")
-            execution_odds = _CANONICAL_DECIMAL_TYPE("1") + (
-                odds_margin * (_CANONICAL_DECIMAL_TYPE(10_000 - slippage_bps) / _CANONICAL_DECIMAL_TYPE(10_000))
+            one = decimal_parser(1, "decimal_one")
+            ten_thousand = decimal_parser(10_000, "basis_point_denominator")
+            odds_margin = action.requested_odds - one
+            execution_odds = one + (
+                odds_margin
+                * (
+                    decimal_parser(
+                        10_000 - slippage_bps,
+                        "slippage_basis_points",
+                    )
+                    / ten_thousand
+                )
             )
             execution_stake = action.requested_stake
             if outcome is _OUTCOME_PARTIAL:
                 execution_stake = (
                     action.requested_stake
-                    * _CANONICAL_DECIMAL_TYPE(config.partial_fill_bps)
-                    / _CANONICAL_DECIMAL_TYPE(10_000)
+                    * decimal_parser(
+                        config.partial_fill_bps,
+                        "partial_fill_basis_points",
+                    )
+                    / ten_thousand
                 )
 
     return PaperLegAttempt(
@@ -1684,8 +1732,15 @@ def execute_paper_plan(
         assert result is not None
         return result
 
-    known_exposure = _CANONICAL_DECIMAL_TYPE("0")
-    worst_case_exposure = _CANONICAL_DECIMAL_TYPE("0")
+    decimal_parser = _CANONICAL_DECIMAL_PARSER
+    if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+        raise PaperExecutionStateError("decimal parser authority changed")
+    known_exposure = decimal_parser("0", "known_exposure", allow_zero=True)
+    worst_case_exposure = decimal_parser(
+        "0",
+        "worst_case_exposure",
+        allow_zero=True,
+    )
     for prior in attempts:
         assert prior.outcome is _OUTCOME_ACCEPTED
         assert prior.execution_stake is not None

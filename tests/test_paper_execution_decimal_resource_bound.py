@@ -360,6 +360,115 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
 
             self.assertEqual(len(events), 1)
 
+    def test_decimal_helpers_ignore_rebound_canonical_decimal_bindings(self) -> None:
+        names = (
+            "_CANONICAL_DECIMAL_TYPE",
+            "_CANONICAL_INVALID_OPERATION",
+            "_CANONICAL_DECIMAL_INPUT_TEXT_LIMIT",
+            "_CANONICAL_DECIMAL_INPUT_INT_MAX_BITS",
+            "_CANONICAL_DECIMAL_FORMATTER",
+        )
+        sentinel = object()
+        previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+        calls: list[str] = []
+
+        def forged(*args, **kwargs):
+            calls.append("forged")
+            raise AssertionError("rebound canonical Decimal authority executed")
+
+        try:
+            legacy._CANONICAL_DECIMAL_TYPE = forged
+            legacy._CANONICAL_INVALID_OPERATION = RuntimeError
+            legacy._CANONICAL_DECIMAL_INPUT_TEXT_LIMIT = 0
+            legacy._CANONICAL_DECIMAL_INPUT_INT_MAX_BITS = 0
+            legacy._CANONICAL_DECIMAL_FORMATTER = forged
+
+            self.assertEqual(legacy._decimal("2.50", "value"), Decimal("2.50"))
+            self.assertEqual(legacy._decimal(10, "value"), Decimal("10"))
+            legacy._preflight_decimal_text_fields(Decimal("2.50"))
+            self.assertEqual(legacy._decimal_text(Decimal("12.3400")), "12.3400")
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal input text exceeds resource limit",
+            ):
+                legacy._decimal("1" * 8193, "value")
+        finally:
+            for name, value in previous.items():
+                if value is sentinel:
+                    legacy.__dict__.pop(name, None)
+                else:
+                    legacy.__dict__[name] = value
+
+        self.assertEqual(calls, [])
+
+    def test_synthetic_execution_ignores_rebound_canonical_decimal_type(self) -> None:
+        current_action = ExecutionAction(
+            action_id="resource-action",
+            bookmaker_id="paper-venue",
+            account_id="paper-account",
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            side="BACK",
+            requested_odds="2.50",
+            requested_stake="10.00",
+            quote_id="quote-1",
+            quote_observed_at="2026-10-05T00:00:00+00:00",
+            expires_at="2026-10-05T00:01:00+00:00",
+        )
+        current_plan = ExecutionPlan(
+            plan_id="plan-decimal-type-authority",
+            bookmaker_profile_version="paper-profile-v1",
+            decision_id="decision-1",
+            approval_id="paper-only",
+            created_at="2026-10-05T00:00:00+00:00",
+            actions=(current_action,),
+        )
+        model = PaperExecutionModelConfig(
+            model_id="paper-reality",
+            model_version="2",
+            evidence_grade=EvidenceGrade.SYNTHETIC,
+            evidence_source="test-seeded-model",
+            seed="fixed-seed",
+            max_quote_age_ms=5_000,
+            min_delay_ms=100,
+            max_delay_ms=250,
+            rejected_bps=0,
+            partial_bps=10_000,
+            unknown_bps=0,
+            partial_fill_bps=5_000,
+            max_slippage_bps=100,
+        )
+
+        sentinel = object()
+        previous = legacy.__dict__.get("_CANONICAL_DECIMAL_TYPE", sentinel)
+        calls: list[object] = []
+
+        def forged_decimal(value: object):
+            calls.append(value)
+            raise AssertionError("rebound canonical Decimal type executed")
+
+        legacy._CANONICAL_DECIMAL_TYPE = forged_decimal
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                result = execute_paper_plan(
+                    plan=current_plan,
+                    trigger_id="trigger-decimal-type-authority",
+                    config=model,
+                    ledger=PaperExecutionLedger(Path(tmp) / "paper.jsonl"),
+                    started_at="2026-10-05T00:00:00.100000+00:00",
+                )
+        finally:
+            if previous is sentinel:
+                legacy.__dict__.pop("_CANONICAL_DECIMAL_TYPE", None)
+            else:
+                legacy._CANONICAL_DECIMAL_TYPE = previous
+
+        self.assertEqual(calls, [])
+        self.assertTrue(result.completed)
+        self.assertEqual(result.worst_case_exposure, Decimal("5.00"))
+
+
     def test_synthetic_execution_ignores_rebound_deterministic_helper(self) -> None:
         current_action = ExecutionAction(
             action_id="resource-action",

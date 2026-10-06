@@ -299,6 +299,27 @@ _CONTINUOUS_SESSION_ERROR_FIELDS: Final = frozenset(
         "last_error_code",
     }
 )
+_CONTINUOUS_SESSION_FIELDS: Final = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "session_id",
+        "source_id",
+        "state",
+        "started_at",
+        "cycles_completed",
+        "last_success_at",
+        "last_error_code",
+        "last_full_refresh_at",
+        "settlement_evidence",
+        "source_gap_state",
+        "source_sync_state",
+        "source_state_delta_id",
+        "source_unresolved_gap_delta_ids",
+        "source_projection_stream_epoch",
+        "source_state_projection_backlog",
+    }
+)
 
 
 class _ContinuousSessionState:
@@ -309,6 +330,7 @@ class _ContinuousSessionState:
     _MAX_ERROR_CHECKPOINT_BYTES = _CONTINUOUS_SESSION_ERROR_MAX_BYTES
     _MAX_ERROR_CODE_CHARS = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS
     _ERROR_FIELDS = _CONTINUOUS_SESSION_ERROR_FIELDS
+    _FIELDS = _CONTINUOUS_SESSION_FIELDS
     _FIELDS = {
         "schema",
         "schema_version",
@@ -365,8 +387,8 @@ class _ContinuousSessionState:
             atomic_write_json(
                 self.path,
                 {
-                    "schema": self._SCHEMA,
-                    "schema_version": self._VERSION,
+                    "schema": _CONTINUOUS_SESSION_SCHEMA,
+                    "schema_version": _CONTINUOUS_SESSION_VERSION,
                     "session_id": resolved_id,
                     "source_id": self.source_id,
                     "state": SessionState.RUNNING.value,
@@ -620,9 +642,9 @@ class _ContinuousSessionState:
             ) from exc
         if (
             type(raw) is not dict
-            or set(raw) != self._FIELDS
-            or raw["schema"] != self._SCHEMA
-            or raw["schema_version"] != self._VERSION
+            or set(raw) != _CONTINUOUS_SESSION_FIELDS
+            or raw["schema"] != _CONTINUOUS_SESSION_SCHEMA
+            or raw["schema_version"] != _CONTINUOUS_SESSION_VERSION
             or raw["source_id"] != self.source_id
         ):
             raise ContinuousSessionError("continuous session state schema/identity mismatch")

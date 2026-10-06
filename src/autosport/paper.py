@@ -3291,7 +3291,7 @@ class PaperBook:
             if ticket_id in seen_ticket_ids:
                 raise ValueError("PaperBook snapshot contains duplicate ticket_id")
             seen_ticket_ids.add(ticket_id)
-            if schema_version in {3, 4, 5, 6, 7}:
+            if schema_version in {3, 4, 5, 6, 7, 8}:
                 provider_source_ids_raw = cls._required_snapshot_field(
                     item, "provider_source_ids", f"ticket {ticket_id}"
                 )
@@ -3307,7 +3307,7 @@ class PaperBook:
                         ),
                         ticket_id,
                     )
-                    if schema_version in {4, 5, 6, 7}
+                    if schema_version in {4, 5, 6, 7, 8}
                     else ()
                 )
                 bankroll_id = cls._required_snapshot_field(
@@ -3340,7 +3340,7 @@ class PaperBook:
                     cls._required_snapshot_field(
                         item, "settled_at", f"ticket {ticket_id}"
                     )
-                    if schema_version in {5, 6, 7}
+                    if schema_version in {5, 6, 7, 8}
                     else None
                 ),
                 status=cls._parse_snapshot_status(

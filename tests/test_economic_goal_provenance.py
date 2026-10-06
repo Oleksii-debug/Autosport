@@ -280,3 +280,20 @@ def test_provenance_operations_ignore_rebound_internal_authorities(monkeypatch) 
     evidence = provenance_for(goal)
     assert evidence == expected
     verify_provenance(goal, evidence)
+
+
+def test_provenance_validation_ignores_rebound_schema_bounds_and_error(monkeypatch) -> None:
+    monkeypatch.setattr(economic_goal_provenance_module, "PROVENANCE_SCHEMA", "forged")
+    monkeypatch.setattr(economic_goal_provenance_module, "PROVENANCE_SCHEMA_VERSION", 999)
+    monkeypatch.setattr(economic_goal_provenance_module, "_MAX_PROVENANCE_IDENTITY_CHARS", 10000)
+    monkeypatch.setattr(economic_goal_provenance_module, "EconomicGoalProvenanceError", RuntimeError)
+
+    with pytest.raises(EconomicGoalProvenanceError, match="identity size limit"):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="g" * 513,
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
+        )

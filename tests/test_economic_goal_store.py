@@ -1330,3 +1330,16 @@ def test_payload_encoder_serializes_isolated_snapshot_after_source_mutation() ->
     assert body["max_stake_fraction"] == "0.02"
     assert body["blocked_sports"] == ["football"]
     assert goal.max_stake_fraction == Decimal("0.99")
+
+
+def test_payload_snapshot_ignores_rebound_contract_constructor(monkeypatch) -> None:
+    goal = _goal()
+    expected = economic_goal_to_payload(goal)
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound EconomicGoalContract constructor executed")
+
+    monkeypatch.setattr(EconomicGoalContract, "__init__", forged)
+    monkeypatch.setattr(EconomicGoalContract, "__post_init__", forged)
+
+    assert economic_goal_to_payload(goal) == expected

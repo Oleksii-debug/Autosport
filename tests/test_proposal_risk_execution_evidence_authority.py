@@ -10,9 +10,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 import autosport.proposal_risk_execution_evidence_authority as evidence_authority
-from autosport.domain import MarketEvent, TicketLeg
+from autosport.domain import MarketEvent, MarketType, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
+from autosport.market_outcomes import (
+    OutcomeAuthorityStatus,
+    assess_betfair_historical_market_definition_authority,
+)
+from autosport.proposal_target_terminal_population_authority import (
+    ProductProposalTargetTerminalPopulation,
+    issue_product_proposal_target_terminal_population,
+)
 from autosport.paper import PaperBook
 from autosport.proposal_risk_target_authority import issue_product_proposal_risk_target
 from autosport.proposal_risk_evaluation_precommit_authority import (
@@ -56,6 +64,7 @@ def _canonical_precommit(
     root = Path(temp.name).resolve()
     workspace = root / "workspace"
     workspace.mkdir()
+    setattr(test, "_proposal_risk_workspace", workspace)
     authority_root = root / "machine-authority"
     env = patch.dict(
         os.environ,
@@ -98,7 +107,7 @@ def _canonical_precommit(
             market_id=f"market-{suffix}",
             selection_id=f"selection-{suffix}",
             locked_odds=Decimal("2"),
-            sport="soccer",
+            sport="table_tennis",
         )
         quote = MarketEvent(
             event_id=leg.event_id,
@@ -106,12 +115,13 @@ def _canonical_precommit(
             selection_id=leg.selection_id,
             decimal_odds=Decimal("2"),
             observed_ts=quote_ts,
-            source_id=f"provider-{suffix}",
+            source_id="betfair_exchange_historical",
             sequence=1,
+            market_type=MarketType.WINNER,
             source_ts=quote_ts,
             ingest_ts=quote_ts,
             metadata={},
-            sport="soccer",
+            sport="table_tennis",
         )
         contexts.append(
             ProposedTicketRiskContext(
@@ -122,11 +132,41 @@ def _canonical_precommit(
                 proposal_ts=decision_ts,
             )
         )
+    setattr(test, "_proposal_risk_contexts", tuple(contexts))
     target = issue_product_proposal_risk_target(
         workspace,
         signal_strengths=(Decimal("1"), Decimal("0.8")),
         contexts=tuple(contexts),
     )
+    terminal_authorities = []
+    for suffix in ("a", "b"):
+        assessment = assess_betfair_historical_market_definition_authority(
+            market_id=f"market-{suffix}",
+            market_definition={
+                "eventId": f"event-{suffix}",
+                "eventTypeId": "2593174",
+                "marketType": "MATCH_ODDS",
+                "status": "OPEN",
+                "runners": [
+                    {"id": f"other-{suffix}"},
+                    {"id": f"selection-{suffix}"},
+                ],
+            },
+            provider_publish_at="2026-09-18T13:19:57+00:00",
+            observed_at="2026-09-18T13:19:58+00:00",
+        )
+        test.assertEqual(
+            assessment.status,
+            OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
+        )
+        test.assertIsNotNone(assessment.authority)
+        terminal_authorities.append(assessment.authority)
+    terminal_population = issue_product_proposal_target_terminal_population(
+        workspace,
+        target_sha256=target.target_sha256,
+        authorities=tuple(terminal_authorities),
+    )
+    setattr(test, "_proposal_terminal_population", terminal_population)
 
     protocol_id = "proposal-risk-execution-fixed-n-v1"
     dataset_id = "proposal-risk-execution-dataset-v1"
@@ -629,6 +669,740 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
                 evaluated_at="2026-10-04T10:02:00+00:00",
             )
 
+
+
+import autosport.proposal_risk_scenario_population_authority as scenario_population_authority
+from autosport.monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+from autosport.proposal_risk_scenario_population_authority import (
+    CounterfactualScenarioMemberBinding,
+    ProductProposalRiskScenarioPopulation,
+    ProductProposalRiskScenarioPopulationError,
+    issue_product_proposal_risk_scenario_population,
+    resolve_product_proposal_risk_scenario_population,
+)
+
+
+class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.precommit = _canonical_precommit(self)
+        self.workspace = getattr(self, "_proposal_risk_workspace")
+        self.terminal_population = getattr(self, "_proposal_terminal_population")
+        self.assertIs(
+            type(self.terminal_population),
+            ProductProposalTargetTerminalPopulation,
+        )
+
+    def _members(
+        self,
+        *,
+        scenario_a: str = "scenario-a",
+        scenario_b: str = "scenario-b",
+        mapping_a: str = "mapping-a",
+        mapping_b: str = "mapping-b",
+    ) -> tuple[CounterfactualScenarioMemberBinding, ...]:
+        return (
+            CounterfactualScenarioMemberBinding(
+                member_id=self.precommit.planned_member_ids[0],
+                scenario_id=scenario_a,
+                mapping_sha256=_sha(mapping_a),
+            ),
+            CounterfactualScenarioMemberBinding(
+                member_id=self.precommit.planned_member_ids[1],
+                scenario_id=scenario_b,
+                mapping_sha256=_sha(mapping_b),
+            ),
+        )
+
+    def _issue(
+        self,
+        members: tuple[CounterfactualScenarioMemberBinding, ...] | None = None,
+    ) -> ProductProposalRiskScenarioPopulation:
+        return issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self.terminal_population,
+            members or self._members(),
+        )
+
+    def _resolve(self) -> ProductProposalRiskScenarioPopulation:
+        return resolve_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self.terminal_population,
+        )
+
+    def test_exact_population_is_durable_provider_bound_and_non_authorizing(self) -> None:
+        issued = self._issue()
+
+        self.assertTrue(issued.population_identity_proven)
+        self.assertTrue(issued.fixed_n_member_mapping_complete)
+        self.assertTrue(issued.provider_terminal_population_proven)
+        self.assertEqual(issued.planned_member_ids, self.precommit.planned_member_ids)
+        self.assertEqual(issued.member_scenario_ids, ("scenario-a", "scenario-b"))
+        self.assertEqual(issued.evaluated_stakes, self.precommit.evaluated_stakes)
+        self.assertEqual(
+            issued.terminal_population_sha256,
+            self.terminal_population.population_sha256,
+        )
+        self.assertEqual(
+            issued.terminal_market_group_sha256s,
+            self.terminal_population.market_group_sha256s,
+        )
+        self.assertEqual(
+            issued.terminal_market_count,
+            self.terminal_population.terminal_market_count,
+        )
+        self.assertEqual(
+            issued.terminal_state_count,
+            self.terminal_population.terminal_state_count,
+        )
+        self.assertIs(
+            issued.terminal_space_exact,
+            self.terminal_population.terminal_space_exact,
+        )
+        self.assertGreater(issued.bound_at, self.precommit.target_decision_ts)
+        last_record = json.loads(
+            (self.workspace / "decisions.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+        )["record"]
+        self.assertEqual(last_record["recorded_at"], issued.bound_at)
+        self.assertTrue(last_record["payload"]["provider_terminal_population_proven"])
+        self.assertEqual(
+            last_record["payload"]["terminal_population_sha256"],
+            self.terminal_population.population_sha256,
+        )
+        self.assertFalse(issued.product_scenario_source_provenance_proven)
+        self.assertFalse(issued.terminal_mapping_proven)
+        self.assertFalse(issued.scenario_execution_proven)
+        self.assertFalse(issued.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(issued.risk_upper_bound_for_target)
+        self.assertFalse(issued.grants_risk_approval_authority)
+        self.assertFalse(issued.grants_ticket_authority)
+        self.assertFalse(issued.grants_broker_execution_authority)
+        self.assertFalse(issued.grants_real_money_authority)
+        self.assertFalse(issued.grants_state_mutation_authority)
+
+        resolved = self._resolve()
+        self.assertEqual(resolved, issued)
+
+    def test_direct_or_forged_result_cannot_mint_authority(self) -> None:
+        with self.assertRaises(TypeError):
+            ProductProposalRiskScenarioPopulation()
+
+        forged = object.__new__(ProductProposalRiskScenarioPopulation)
+        self.assertFalse(forged.population_identity_proven)
+        self.assertFalse(forged.fixed_n_member_mapping_complete)
+        self.assertFalse(forged.provider_terminal_population_proven)
+        self.assertFalse(forged.product_scenario_source_provenance_proven)
+        self.assertFalse(forged.terminal_mapping_proven)
+        self.assertFalse(forged.scenario_execution_proven)
+        self.assertFalse(forged.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(forged.risk_upper_bound_for_target)
+        self.assertFalse(forged.grants_risk_approval_authority)
+        self.assertFalse(forged.grants_ticket_authority)
+        self.assertFalse(forged.grants_broker_execution_authority)
+        self.assertFalse(forged.grants_real_money_authority)
+        self.assertFalse(forged.grants_state_mutation_authority)
+
+    def test_exact_reissue_is_idempotent(self) -> None:
+        first = self._issue()
+        second = self._issue()
+        self.assertEqual(second, first)
+
+    def test_post_hoc_population_substitution_is_rejected(self) -> None:
+        self._issue()
+        with self.assertRaisesRegex(
+            ProductProposalRiskScenarioPopulationError,
+            "different scenario population",
+        ):
+            self._issue(
+                self._members(
+                    scenario_a="replacement-scenario-a",
+                    mapping_a="replacement-mapping-a",
+                )
+            )
+
+    def test_fixed_n_order_and_cardinality_are_exact(self) -> None:
+        members = self._members()
+        for bad in ((members[0],), (members[1], members[0])):
+            with self.subTest(member_ids=tuple(item.member_id for item in bad)):
+                with self.assertRaises(ProductProposalRiskScenarioPopulationError):
+                    self._issue(bad)
+
+    def test_terminal_population_is_required_and_part_of_durable_identity(self) -> None:
+        with self.assertRaisesRegex(
+            ProductProposalRiskScenarioPopulationError,
+            "terminal_population must be exact",
+        ):
+            issue_product_proposal_risk_scenario_population(
+                self.workspace,
+                self.precommit,
+                object(),  # type: ignore[arg-type]
+                self._members(),
+            )
+
+        object.__setattr__(
+            self.terminal_population,
+            "population_sha256",
+            "f" * 64,
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskScenarioPopulationError,
+            "provider terminal population ledger identity changed",
+        ):
+            self._issue()
+
+    def test_caller_cannot_backdate_population_timestamp(self) -> None:
+        with self.assertRaises(TypeError):
+            issue_product_proposal_risk_scenario_population(
+                self.workspace,
+                self.precommit,
+                self.terminal_population,
+                self._members(),
+                bound_at="2026-09-18T13:19:59+00:00",
+            )
+
+    def test_iid_with_replacement_scenario_multiplicity_is_preserved(self) -> None:
+        members = self._members(
+            scenario_a="same-scenario",
+            scenario_b="same-scenario",
+            mapping_a="same-mapping",
+            mapping_b="same-mapping",
+        )
+        issued = self._issue(members)
+        self.assertEqual(
+            issued.member_scenario_ids,
+            ("same-scenario", "same-scenario"),
+        )
+        self.assertEqual(
+            issued.member_mapping_sha256s,
+            (_sha("same-mapping"), _sha("same-mapping")),
+        )
+        self.assertFalse(issued.terminal_mapping_proven)
+
+    def test_superseded_target_invalidates_population(self) -> None:
+        issued = self._issue()
+        self.assertTrue(issued.population_identity_proven)
+
+        issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("0.9"), Decimal("0.7")),
+            contexts=getattr(self, "_proposal_risk_contexts"),
+        )
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskScenarioPopulationError,
+            "no longer the current target",
+        ):
+            self._resolve()
+        with self.assertRaisesRegex(
+            ProductProposalRiskScenarioPopulationError,
+            "no longer the current target",
+        ):
+            self._issue()
+
+    def test_independent_authority_detects_ledger_rollback(self) -> None:
+        self._issue()
+        ledger_path = self.workspace / "decisions.jsonl"
+        original = ledger_path.read_bytes()
+        try:
+            lines = original.splitlines(keepends=True)
+            self.assertGreaterEqual(len(lines), 2)
+            ledger_path.write_bytes(b"".join(lines[:-1]))
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "ledger record is missing|missing from the canonical Decision Ledger",
+            ):
+                self._resolve()
+        finally:
+            ledger_path.write_bytes(original)
+
+    def test_missing_parent_precommit_or_target_ledger_root_blocks_issue(self) -> None:
+        ledger_path = self.workspace / "decisions.jsonl"
+        original = ledger_path.read_bytes()
+        targets = (
+            (
+                self.precommit.decision_id,
+                "evaluation precommit is missing|parent ledger roots cannot be re-resolved",
+            ),
+            (
+                "target-v1:" + self.precommit.target_sha256,
+                "risk target is missing|parent ledger roots cannot be re-resolved",
+            ),
+            (
+                self.terminal_population.decision_id,
+                "terminal population is missing|parent ledger roots cannot be re-resolved",
+            ),
+        )
+        for decision_id, message in targets:
+            with self.subTest(decision_id=decision_id):
+                rows = []
+                for raw in original.splitlines():
+                    envelope = json.loads(raw.decode("utf-8"))
+                    if envelope["record"]["decision_id"] != decision_id:
+                        rows.append(raw)
+                self.assertLess(len(rows), len(original.splitlines()))
+                try:
+                    ledger_path.write_bytes(b"\n".join(rows) + b"\n")
+                    with self.assertRaisesRegex(
+                        ProductProposalRiskScenarioPopulationError,
+                        message,
+                    ):
+                        self._issue()
+                finally:
+                    ledger_path.write_bytes(original)
+
+    def test_commit_crash_prefix_recovers_without_population_switch(self) -> None:
+        original_commit = MonotonicWorkspaceAuthority.commit
+        with patch.object(
+            MonotonicWorkspaceAuthority,
+            "commit",
+            side_effect=MonotonicWorkspaceAuthorityError("injected commit crash"),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "COMMIT failed",
+            ):
+                self._issue()
+
+        resolved = self._resolve()
+        self.assertTrue(resolved.population_identity_proven)
+        self.assertTrue(resolved.provider_terminal_population_proven)
+        self.assertEqual(resolved.member_scenario_ids, ("scenario-a", "scenario-b"))
+        self.assertEqual(
+            resolved.terminal_population_sha256,
+            self.terminal_population.population_sha256,
+        )
+        self.assertIs(
+            MonotonicWorkspaceAuthority.commit,
+            original_commit,
+        )
+
+    def test_module_authority_alias_rebind_is_rejected_before_write(self) -> None:
+        original = scenario_population_authority._LEDGER_APPEND
+        try:
+            scenario_population_authority._LEDGER_APPEND = lambda *args, **kwargs: None
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "authority dispatch changed",
+            ):
+                self._issue()
+        finally:
+            scenario_population_authority._LEDGER_APPEND = original
+
+
+    def test_result_type_rebind_is_rejected_before_write(self) -> None:
+        before = (self.workspace / "decisions.jsonl").read_bytes()
+        original = scenario_population_authority.ProductProposalRiskScenarioPopulation
+        try:
+            scenario_population_authority.ProductProposalRiskScenarioPopulation = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            scenario_population_authority.ProductProposalRiskScenarioPopulation = original
+        self.assertEqual((self.workspace / "decisions.jsonl").read_bytes(), before)
+
+    def test_result_hard_false_getter_code_mutation_is_rejected(self) -> None:
+        descriptor = ProductProposalRiskScenarioPopulation.__dict__[
+            "scenario_execution_proven"
+        ]
+        getter = descriptor.fget
+        self.assertIsNotNone(getter)
+        original_code = getter.__code__
+
+        def forged_scenario_execution_proven(self) -> bool:
+            return True
+
+        try:
+            getter.__code__ = forged_scenario_execution_proven.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            getter.__code__ = original_code
+
+    def test_internal_semantic_helper_rebind_is_rejected_on_resolve(self) -> None:
+        issued = self._issue()
+        self.assertTrue(issued.population_identity_proven)
+        original = scenario_population_authority._population_material
+        try:
+            scenario_population_authority._population_material = (
+                lambda *args, **kwargs: {"forged": True}
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._resolve()
+        finally:
+            scenario_population_authority._population_material = original
+
+    def test_json_dumps_in_place_code_mutation_is_rejected_before_write(self) -> None:
+        before = (self.workspace / "decisions.jsonl").read_bytes()
+        original_code = scenario_population_authority.json.dumps.__code__
+
+        def forged_dumps(
+            obj,
+            *,
+            skipkeys=False,
+            ensure_ascii=True,
+            check_circular=True,
+            allow_nan=True,
+            cls=None,
+            indent=None,
+            separators=None,
+            default=None,
+            sort_keys=False,
+            **kw,
+        ):
+            return "{}"
+
+        try:
+            scenario_population_authority.json.dumps.__code__ = forged_dumps.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            scenario_population_authority.json.dumps.__code__ = original_code
+        self.assertEqual((self.workspace / "decisions.jsonl").read_bytes(), before)
+
+
+    def test_member_binding_type_rebind_is_rejected_before_write(self) -> None:
+        before = (self.workspace / "decisions.jsonl").read_bytes()
+        original = scenario_population_authority.CounterfactualScenarioMemberBinding
+        try:
+            scenario_population_authority.CounterfactualScenarioMemberBinding = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            scenario_population_authority.CounterfactualScenarioMemberBinding = original
+        self.assertEqual((self.workspace / "decisions.jsonl").read_bytes(), before)
+
+    def test_member_binding_is_revalidated_after_construction(self) -> None:
+        members = list(self._members())
+        object.__setattr__(members[0], "mapping_sha256", "not-a-sha256")
+        with self.assertRaisesRegex(
+            ProductProposalRiskScenarioPopulationError,
+            "mapping_sha256 must be lowercase SHA-256 hex",
+        ):
+            self._issue(tuple(members))
+
+    def test_protocol_constant_rebind_is_rejected_before_write(self) -> None:
+        before = (self.workspace / "decisions.jsonl").read_bytes()
+        original = scenario_population_authority._BINDING_SCOPE
+        try:
+            scenario_population_authority._BINDING_SCOPE = "FORGED_SCOPE"
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            scenario_population_authority._BINDING_SCOPE = original
+        self.assertEqual((self.workspace / "decisions.jsonl").read_bytes(), before)
+
+    def test_monotonic_authority_internal_code_mutation_is_rejected(self) -> None:
+        method = MonotonicWorkspaceAuthority._load_history
+        original_code = method.__code__
+
+        def forged_load_history(self, *args, **kwargs):
+            return None
+
+        try:
+            method.__code__ = forged_load_history.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            method.__code__ = original_code
+
+    def test_decision_ledger_internal_code_mutation_is_rejected(self) -> None:
+        ledger_type = scenario_population_authority.JsonlDecisionLedger
+        method = ledger_type._verify_bytes
+        original_code = method.__code__
+
+        def forged_verify_bytes(self, *args, **kwargs):
+            return ()
+
+        try:
+            method.__code__ = forged_verify_bytes.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            method.__code__ = original_code
+
+
+    def test_result_capability_getter_defaults_rebind_is_rejected(self) -> None:
+        getter = ProductProposalRiskScenarioPopulation.__dict__[
+            "population_identity_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        original_defaults = getter.__defaults__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            getter.__defaults__ = (forged_proof,)
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            getter.__defaults__ = original_defaults
+
+    def test_result_capability_proof_code_mutation_is_rejected(self) -> None:
+        getter = ProductProposalRiskScenarioPopulation.__dict__[
+            "population_identity_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        proof = getter.__defaults__[0]
+        original_code = proof.__code__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            proof.__code__ = forged_proof.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            proof.__code__ = original_code
+
+    def test_precommit_parent_capability_proof_code_mutation_is_rejected(self) -> None:
+        getter = ProductProposalRiskEvaluationPrecommit.__dict__[
+            "binding_identity_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        proof = getter.__defaults__[0]
+        original_code = proof.__code__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            proof.__code__ = forged_proof.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            proof.__code__ = original_code
+
+    def test_terminal_parent_capability_proof_code_mutation_is_rejected(self) -> None:
+        getter = ProductProposalTargetTerminalPopulation.__dict__[
+            "population_identity_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        proof = getter.__defaults__[0]
+        original_code = proof.__code__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            proof.__code__ = forged_proof.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            proof.__code__ = original_code
+
+
+    def test_dispatch_guard_code_mutation_is_rejected(self) -> None:
+        guard = scenario_population_authority._REQUIRE_DISPATCH_ORIGINAL
+        original_code = guard.__code__
+
+        def forged_guard(*args, **kwargs):
+            return None
+
+        try:
+            guard.__code__ = forged_guard.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch guard root changed",
+            ):
+                self._issue()
+        finally:
+            guard.__code__ = original_code
+
+    def test_dispatch_guard_defaults_rebind_is_rejected(self) -> None:
+        guard = scenario_population_authority._REQUIRE_DISPATCH_ORIGINAL
+        original_defaults = guard.__defaults__
+        try:
+            guard.__defaults__ = tuple(list(original_defaults))
+            self.assertIsNot(guard.__defaults__, original_defaults)
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch guard root changed",
+            ):
+                self._issue()
+        finally:
+            guard.__defaults__ = original_defaults
+
+    def test_internal_unbound_resolution_cannot_mint_population_identity(self) -> None:
+        issued = self._issue()
+        self.assertTrue(issued.population_identity_proven)
+        self.assertFalse(hasattr(scenario_population_authority, "_BIND_IDENTITY"))
+        self.assertFalse(hasattr(scenario_population_authority, "_mint"))
+
+        unbound = (
+            scenario_population_authority
+            ._resolve_product_proposal_risk_scenario_population_unbound(
+                self.workspace,
+                self.precommit,
+                self.terminal_population,
+            )
+        )
+        self.assertFalse(unbound.population_identity_proven)
+        self.assertFalse(unbound.fixed_n_member_mapping_complete)
+        self.assertFalse(unbound.provider_terminal_population_proven)
+        self.assertFalse(unbound.terminal_mapping_proven)
+        self.assertFalse(unbound.scenario_execution_proven)
+        self.assertFalse(unbound.grants_ticket_authority)
+        self.assertFalse(unbound.grants_real_money_authority)
+
+    def test_public_issue_resolver_rebind_is_rejected_by_durable_core(self) -> None:
+        original = (
+            scenario_population_authority
+            .issue_product_proposal_risk_scenario_population
+        )
+        try:
+            scenario_population_authority.issue_product_proposal_risk_scenario_population = (
+                lambda *args, **kwargs: None
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                scenario_population_authority._issue_product_proposal_risk_scenario_population_unbound(
+                    self.workspace,
+                    self.precommit,
+                    self.terminal_population,
+                    self._members(),
+                )
+        finally:
+            scenario_population_authority.issue_product_proposal_risk_scenario_population = (
+                original
+            )
+
+    def test_public_issue_closure_binder_mutation_is_rejected(self) -> None:
+        issue = (
+            scenario_population_authority
+            .issue_product_proposal_risk_scenario_population
+        )
+        closure = issue.__closure__
+        self.assertIsNotNone(closure)
+        binder_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "bind"
+        ]
+        self.assertEqual(len(binder_cells), 1)
+        cell = binder_cells[0]
+        original = cell.cell_contents
+
+        def forged_bind(_instance):
+            return None
+
+        try:
+            cell.cell_contents = forged_bind
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "public issue closure changed",
+            ):
+                self._issue()
+        finally:
+            cell.cell_contents = original
+
+    def test_public_issue_ignores_module_global_core_rebind(self) -> None:
+        original = (
+            scenario_population_authority
+            ._issue_product_proposal_risk_scenario_population_unbound
+        )
+        try:
+            scenario_population_authority._issue_product_proposal_risk_scenario_population_unbound = (
+                lambda *args, **kwargs: object()
+            )
+            issued = self._issue()
+            self.assertTrue(issued.population_identity_proven)
+            self.assertTrue(issued.fixed_n_member_mapping_complete)
+        finally:
+            scenario_population_authority._issue_product_proposal_risk_scenario_population_unbound = (
+                original
+            )
+
+    def test_public_issue_rejects_captured_core_code_mutation(self) -> None:
+        issue = (
+            scenario_population_authority
+            .issue_product_proposal_risk_scenario_population
+        )
+        closure = issue.__closure__
+        self.assertIsNotNone(closure)
+        core_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", "").startswith(
+                "_issue_product_proposal_risk_scenario_population_unbound"
+            )
+        ]
+        self.assertEqual(len(core_cells), 1)
+        core = core_cells[0].cell_contents
+        original_code = core.__code__
+
+        def forged_core(*_args, **_kwargs):
+            return object.__new__(ProductProposalRiskScenarioPopulation)
+
+        try:
+            core.__code__ = forged_core.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "public issue closure changed",
+            ):
+                self._issue()
+        finally:
+            core.__code__ = original_code
+
+    def test_text_kwdefault_mutation_is_rejected(self) -> None:
+        helper = scenario_population_authority._text
+        kwdefaults = helper.__kwdefaults__
+        original = kwdefaults["max_length"]
+        try:
+            kwdefaults["max_length"] = 4096
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            kwdefaults["max_length"] = original
 
 if __name__ == "__main__":
     unittest.main()

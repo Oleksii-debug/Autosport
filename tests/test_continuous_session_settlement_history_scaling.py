@@ -2977,6 +2977,32 @@ def test_settlement_resolution_collection_rejects_conflicting_outcomes_across_ev
         raise AssertionError("order-dependent settlement outcome conflict was accepted")
 
 
+def test_settlement_resolution_collection_keeps_corroborating_evidence_ids() -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    coordinator = _resolution_coordinator(
+        (record, record),
+        (
+            _resolution(
+                evidence_id="evidence-1",
+                outcome="win",
+                digest_char="e",
+            ),
+            _resolution(
+                evidence_id="evidence-2",
+                outcome="win",
+                digest_char="f",
+            ),
+        ),
+    )
+
+    collected = coordinator._settlement_resolutions(as_of=_AT)
+
+    assert tuple(item.evidence_id for item in collected) == (
+        "evidence-1",
+        "evidence-2",
+    )
+
+
 def test_settlement_resolution_collection_rejects_derived_resolution_type() -> None:
     class DerivedResolution(continuous_session.SettlementResolution):
         pass

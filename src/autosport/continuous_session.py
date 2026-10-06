@@ -2555,6 +2555,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "dependency index routed an unregistered input"
                 )
+            if not batch.full_refresh_required:
+                routed_ids = set(routed)
+                expected_routed = tuple(
+                    input_id
+                    for input_id in indexed_input_ids
+                    if input_id in routed_ids
+                )
+                if routed != expected_routed:
+                    raise ContinuousSessionError(
+                        "dependency index affected input routing is reordered"
+                    )
             if (
                 batch.full_refresh_required
                 and routed != indexed_input_ids

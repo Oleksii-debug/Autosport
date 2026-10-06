@@ -1,0 +1,413 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+
+from .market_mirror import MarketMirror
+from .market_mirror_runtime import (
+    BoundedMirrorInvalidationBuffer,
+    FocusedMirrorDependency,
+    FocusedMirrorDependencyIndex,
+)
+
+
+class LiveMarketActionabilityError(ValueError):
+    """Raised when registered live-input actionability evidence is malformed."""
+
+
+class LiveInputCurrentViewOutcome(str, Enum):
+    CURRENT_VIEW_ELIGIBLE = "current_view_eligible"
+    WAIT = "wait"
+
+
+class LiveInputWaitReason(str, Enum):
+    NO_COMPONENTS = "no_components"
+    NON_OPEN_STATUS = "non_open_status"
+    INVALID_CAUSAL_TIMESTAMP = "invalid_causal_timestamp"
+    FUTURE_CAUSALITY = "future_causality"
+    STALE = "stale"
+    PRODUCT_ORIGIN_UNPROVEN = "product_origin_unproven"
+
+
+class LiveInputRecheckTrigger(str, Enum):
+    """Evidence transition that may justify re-evaluating one WAIT result.
+
+    A trigger is not proof that the successor state is actionable. It identifies the
+    canonical evidence change that must occur before re-evaluation is useful; no timer
+    or sleep duration can itself satisfy the live-state gate.
+    """
+
+    MATCHING_COMPONENT_CHANGE = "matching_component_change"
+    MARKET_STATUS_CHANGE = "market_status_change"
+    VALID_CAUSAL_OBSERVATION = "valid_causal_observation"
+    CAUSALLY_ADMISSIBLE_OBSERVATION = "causally_admissible_observation"
+    FRESH_OBSERVATION = "fresh_observation"
+    PRODUCT_ORIGIN_BINDING = "product_origin_binding"
+
+
+_RECHECK_TRIGGER_BY_REASON = {
+    LiveInputWaitReason.NO_COMPONENTS: LiveInputRecheckTrigger.MATCHING_COMPONENT_CHANGE,
+    LiveInputWaitReason.NON_OPEN_STATUS: LiveInputRecheckTrigger.MARKET_STATUS_CHANGE,
+    LiveInputWaitReason.INVALID_CAUSAL_TIMESTAMP: LiveInputRecheckTrigger.VALID_CAUSAL_OBSERVATION,
+    LiveInputWaitReason.FUTURE_CAUSALITY: LiveInputRecheckTrigger.CAUSALLY_ADMISSIBLE_OBSERVATION,
+    LiveInputWaitReason.STALE: LiveInputRecheckTrigger.FRESH_OBSERVATION,
+    LiveInputWaitReason.PRODUCT_ORIGIN_UNPROVEN: LiveInputRecheckTrigger.PRODUCT_ORIGIN_BINDING,
+}
+
+
+def _canonical_json_sha256(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _timedelta_microseconds(value: timedelta) -> int:
+    return (
+        (value.days * 86_400 + value.seconds) * 1_000_000
+        + value.microseconds
+    )
+
+
+def _canonical_input_id(value: object) -> str:
+    if type(value) is not str or not value or value.strip() != value:
+        raise LiveMarketActionabilityError(
+            "input_id must be a non-empty trimmed string"
+        )
+    if "\x00" in value:
+        raise LiveMarketActionabilityError("input_id must not contain NUL")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise LiveMarketActionabilityError(
+            "input_id must be valid UTF-8 text"
+        ) from exc
+    return value
+
+
+def _selector_evidence(value: object, *, label: str) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if type(value) is not frozenset or any(
+        type(item) is not str or not item for item in value
+    ):
+        raise LiveMarketActionabilityError(
+            f"registered dependency {label} selector is not canonical"
+        )
+    return tuple(sorted(value))
+
+
+def _canonical_as_of(value: object) -> datetime:
+    # This is an authority boundary: datetime subclasses can override timezone
+    # conversion/offset dispatch. Accept the exact stdlib scalar only.
+    if type(value) is not datetime:
+        raise TypeError("as_of must be an exact datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise LiveMarketActionabilityError("as_of must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _canonical_max_age(value: object) -> timedelta:
+    # Do not let caller-defined timedelta comparison dispatch influence freshness.
+    if type(value) is not timedelta:
+        raise TypeError("max_age must be an exact timedelta")
+    if value < timedelta(0):
+        raise LiveMarketActionabilityError("max_age must be non-negative")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class LiveInputDependencyEvidence:
+    """Immutable selector contract that defines the registered input evidence scope."""
+
+    source_ids: tuple[str, ...] | None
+    sports: tuple[str, ...] | None
+    event_ids: tuple[str, ...] | None
+    market_ids: tuple[str, ...] | None
+    selection_ids: tuple[str, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class LiveMarketComponentEvidence:
+    source_id: str
+    quote_key: str
+    event_sha256: str
+    sequence: int
+    status: str
+    freshness_ts: str | None
+    age_microseconds: int | None
+    wait_reasons: tuple[LiveInputWaitReason, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredLiveInputCurrentView:
+    """Diagnostic current-view evidence for one already-registered live input.
+
+    Standalone evaluation never proves product/live acquisition origin and therefore
+    never issues positive actionability. It deliberately does not prove stream continuity,
+    provider gap recovery, depth/liquidity, account capability, portfolio/risk,
+    execution, settlement, profitability, readiness, or real-money permission.
+    """
+
+    input_id: str
+    as_of: str
+    max_age_microseconds: int
+    mirror_revision: int
+    outcome: LiveInputCurrentViewOutcome
+    wait_reasons: tuple[LiveInputWaitReason, ...]
+    recheck_triggers: tuple[LiveInputRecheckTrigger, ...]
+    dependency: LiveInputDependencyEvidence
+    components: tuple[LiveMarketComponentEvidence, ...]
+    evidence_sha256: str
+
+    @property
+    def is_product_issued(self) -> bool:
+        # This standalone diagnostic evaluator has no product-owned mirror-origin
+        # composition. Positive issuance remains intentionally unavailable.
+        return False
+
+    @property
+    def current_view_eligible(self) -> bool:
+        # Diagnostic structural freshness is not actionability authority. A future
+        # product composition may consume the same evidence only after binding the
+        # exact builder-owned live mirror provenance.
+        return False
+
+    @property
+    def product_origin_proven(self) -> bool:
+        return False
+
+    @property
+    def continuity_proven(self) -> bool:
+        return False
+
+    @property
+    def depth_liquidity_proven(self) -> bool:
+        return False
+
+    @property
+    def provider_capability_proven(self) -> bool:
+        return False
+
+    @property
+    def risk_authorized(self) -> bool:
+        return False
+
+    @property
+    def execution_authorized(self) -> bool:
+        return False
+
+    @property
+    def settlement_proven(self) -> bool:
+        return False
+
+    @property
+    def real_money_authorized(self) -> bool:
+        return False
+
+
+def evaluate_registered_input_current_view(
+    *,
+    updates: BoundedMirrorInvalidationBuffer,
+    dependencies: FocusedMirrorDependencyIndex,
+    input_id: str,
+    as_of: datetime,
+    max_age: timedelta,
+) -> RegisteredLiveInputCurrentView:
+    """Derive structural current-view diagnostics without minting actionability.
+
+    The function consumes one coherent MarketMirror + registered dependency index,
+    but those exact Python objects may be caller-constructed. Until a canonical
+    product-runtime composition binds their live acquisition origin, an otherwise
+    fresh/open view remains explicit WAIT/PRODUCT_ORIGIN_UNPROVEN. This creates no
+    provider state, second market store, financial authority, or execution authority.
+    """
+
+    # Subclasses are caller-controlled executable dispatch. This diagnostic boundary
+    # reads private dependency/index seams, so only the exact canonical runtime types
+    # are admissible; otherwise an override could rewrite selectors or evidence.
+    if type(updates) is not BoundedMirrorInvalidationBuffer:
+        raise TypeError("updates must be exact BoundedMirrorInvalidationBuffer")
+    if type(dependencies) is not FocusedMirrorDependencyIndex:
+        raise TypeError("dependencies must be exact FocusedMirrorDependencyIndex")
+    mirror = updates.mirror
+    if type(mirror) is not MarketMirror:
+        raise TypeError("updates mirror must be exact MarketMirror")
+    if dependencies._mirror is not mirror:
+        raise LiveMarketActionabilityError(
+            "dependencies and updates must share the same canonical MarketMirror"
+        )
+
+    normalized_input_id = _canonical_input_id(input_id)
+    boundary = _canonical_as_of(as_of)
+    age_limit = _canonical_max_age(max_age)
+
+    try:
+        dependency = dependencies._dependency(normalized_input_id)
+    except KeyError as exc:
+        raise LiveMarketActionabilityError(
+            f"unknown registered live input {normalized_input_id!r}"
+        ) from exc
+    if type(dependency) is not FocusedMirrorDependency:
+        raise LiveMarketActionabilityError(
+            "registered live input dependency is not canonical"
+        )
+    if dependency.input_id != normalized_input_id:
+        raise LiveMarketActionabilityError(
+            "registered live input dependency identity is inconsistent"
+        )
+
+    dependency_evidence = LiveInputDependencyEvidence(
+        source_ids=_selector_evidence(dependency.source_ids, label="source_ids"),
+        sports=_selector_evidence(dependency.sports, label="sports"),
+        event_ids=_selector_evidence(dependency.event_ids, label="event_ids"),
+        market_ids=_selector_evidence(dependency.market_ids, label="market_ids"),
+        selection_ids=_selector_evidence(
+            dependency.selection_ids,
+            label="selection_ids",
+        ),
+    )
+    selectors = {
+        "source_ids": dependency_evidence.source_ids,
+        "sports": dependency_evidence.sports,
+        "event_ids": dependency_evidence.event_ids,
+        "market_ids": dependency_evidence.market_ids,
+        "selection_ids": dependency_evidence.selection_ids,
+    }
+    raw_snapshot = updates.mirror.view(**selectors)
+
+    component_evidence: list[LiveMarketComponentEvidence] = []
+    aggregate_reasons: set[LiveInputWaitReason] = set()
+
+    if not raw_snapshot.events:
+        aggregate_reasons.add(LiveInputWaitReason.NO_COMPONENTS)
+
+    for event in raw_snapshot.events:
+        reasons: set[LiveInputWaitReason] = set()
+        if event.status not in MarketMirror._DECISION_ELIGIBLE_STATUSES:
+            reasons.add(LiveInputWaitReason.NON_OPEN_STATUS)
+
+        observed = MarketMirror._utc_timestamp(event.observed_ts)
+        ingested = MarketMirror._utc_timestamp(event.ingest_ts)
+        freshness = MarketMirror._utc_timestamp(
+            event.source_ts or event.observed_ts
+        )
+
+        if observed is None or ingested is None or freshness is None:
+            reasons.add(LiveInputWaitReason.INVALID_CAUSAL_TIMESTAMP)
+            freshness_text = None
+            age_microseconds = None
+        else:
+            freshness_text = freshness.isoformat()
+            if observed > boundary or ingested > boundary or freshness > boundary:
+                reasons.add(LiveInputWaitReason.FUTURE_CAUSALITY)
+                age_microseconds = None
+            else:
+                age = boundary - freshness
+                age_microseconds = _timedelta_microseconds(age)
+                if age > age_limit:
+                    reasons.add(LiveInputWaitReason.STALE)
+
+        event_sha256 = _canonical_json_sha256(event.to_dict())
+        ordered_reasons = tuple(sorted(reasons, key=lambda item: item.value))
+        aggregate_reasons.update(ordered_reasons)
+        component_evidence.append(
+            LiveMarketComponentEvidence(
+                source_id=event.source_id,
+                quote_key=event.quote_key,
+                event_sha256=event_sha256,
+                sequence=event.sequence,
+                status=event.status,
+                freshness_ts=freshness_text,
+                age_microseconds=age_microseconds,
+                wait_reasons=ordered_reasons,
+            )
+        )
+
+    components = tuple(
+        sorted(
+            component_evidence,
+            key=lambda item: (item.source_id, item.quote_key),
+        )
+    )
+    # Exact type/coherence only proves a structurally readable mirror, not that
+    # its bytes came from the builder-owned live acquisition path. Until that
+    # composition exists, otherwise-eligible caller mirrors remain explicit WAIT.
+    if components and not aggregate_reasons:
+        aggregate_reasons.add(LiveInputWaitReason.PRODUCT_ORIGIN_UNPROVEN)
+
+    wait_reasons = tuple(sorted(aggregate_reasons, key=lambda item: item.value))
+    recheck_triggers = tuple(
+        sorted(
+            {_RECHECK_TRIGGER_BY_REASON[reason] for reason in wait_reasons},
+            key=lambda item: item.value,
+        )
+    )
+    outcome = LiveInputCurrentViewOutcome.WAIT
+    as_of_text = boundary.isoformat()
+    max_age_microseconds = _timedelta_microseconds(age_limit)
+
+    payload = {
+        "schema": "autosport.registered_live_input_current_view",
+        "schema_version": 1,
+        "input_id": normalized_input_id,
+        "as_of": as_of_text,
+        "max_age_microseconds": max_age_microseconds,
+        "mirror_revision": raw_snapshot.revision,
+        "outcome": outcome.value,
+        "wait_reasons": [reason.value for reason in wait_reasons],
+        "recheck_triggers": [trigger.value for trigger in recheck_triggers],
+        "dependency": {
+            "source_ids": dependency_evidence.source_ids,
+            "sports": dependency_evidence.sports,
+            "event_ids": dependency_evidence.event_ids,
+            "market_ids": dependency_evidence.market_ids,
+            "selection_ids": dependency_evidence.selection_ids,
+        },
+        "components": [
+            {
+                "source_id": item.source_id,
+                "quote_key": item.quote_key,
+                "event_sha256": item.event_sha256,
+                "sequence": item.sequence,
+                "status": item.status,
+                "freshness_ts": item.freshness_ts,
+                "age_microseconds": item.age_microseconds,
+                "wait_reasons": [
+                    reason.value for reason in item.wait_reasons
+                ],
+            }
+            for item in components
+        ],
+        "stronger_authority": {
+            "product_origin_proven": False,
+            "continuity_proven": False,
+            "depth_liquidity_proven": False,
+            "provider_capability_proven": False,
+            "risk_authorized": False,
+            "execution_authorized": False,
+            "settlement_proven": False,
+            "real_money_authorized": False,
+        },
+    }
+    evidence_sha256 = _canonical_json_sha256(payload)
+    result = RegisteredLiveInputCurrentView(
+        input_id=normalized_input_id,
+        as_of=as_of_text,
+        max_age_microseconds=max_age_microseconds,
+        mirror_revision=raw_snapshot.revision,
+        outcome=outcome,
+        wait_reasons=wait_reasons,
+        recheck_triggers=recheck_triggers,
+        dependency=dependency_evidence,
+        components=components,
+        evidence_sha256=evidence_sha256,
+    )
+    return result

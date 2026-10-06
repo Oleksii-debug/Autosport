@@ -641,7 +641,7 @@ def test_checkpoint_authority_ignores_rebound_module_constants(monkeypatch) -> N
         error_path = root / "continuous_session.json.operational_error.json"
         payload = json.loads(error_path.read_text(encoding="utf-8"))
         assert payload["schema"] == "autosport.continuous_session.operational_error"
-        assert payload["schema_version"] == 2
+        assert payload["schema_version"] == 3
 
         payload["schema"] = "attacker.error"
         payload["schema_version"] = 999
@@ -664,7 +664,7 @@ def test_checkpoint_authority_ignores_rebound_module_constants(monkeypatch) -> N
         )
         fresh_payload = json.loads(fresh_path.read_text(encoding="utf-8"))
         assert fresh_payload["schema"] == "autosport.continuous_session"
-        assert fresh_payload["schema_version"] == 2
+        assert fresh_payload["schema_version"] == 3
         assert fresh.snapshot().session_id == "fresh-session"
 
 
@@ -791,7 +791,7 @@ def test_sidecar_serializer_and_publisher_ignore_runtime_rebinding(monkeypatch) 
         error_path = root / "continuous_session.json.operational_error.json"
         payload = json.loads(error_path.read_text(encoding="utf-8"))
         assert payload["schema"] == "autosport.continuous_session.operational_error"
-        assert payload["schema_version"] == 2
+        assert payload["schema_version"] == 3
         assert payload["last_error_code"] == "CANONICAL_FAILURE"
 
 
@@ -1453,3 +1453,104 @@ def test_operational_checkpoint_stat_and_seek_authority_rebinding_fails_closed(
             assert "filesystem authority" in str(exc)
         else:
             raise AssertionError("runtime-rebound os.SEEK_SET was accepted")
+
+
+def test_legacy_v2_session_checkpoint_promotes_generation_on_first_write() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state_path = root / "continuous_session.json"
+        legacy = _checkpoint_payload(_SMALL_HISTORY)
+        assert legacy["schema_version"] == 2
+        assert "generation" not in legacy
+        state_path.write_text(
+            json.dumps(legacy, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        state = continuous_session._ContinuousSessionState(
+            state_path,
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        assert state.snapshot().cycles_completed == _SMALL_HISTORY
+
+        state.set_state(continuous_session.SessionState.PAUSED)
+
+        promoted = json.loads(state_path.read_text(encoding="utf-8"))
+        assert promoted["schema_version"] == 3
+        assert promoted["generation"] == 1
+        assert promoted["state"] == "PAUSED"
+
+
+def test_state_cycle_cleanup_crashes_cannot_resurrect_stale_failure() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="ORIGINAL_FAILURE")
+        error_path = root / "continuous_session.json.operational_error.json"
+        stale_error = error_path.read_bytes()
+
+        def crash_on_cleanup(_code: str | None) -> None:
+            raise RuntimeError("simulated crash before sidecar cleanup")
+
+        with patch.object(state, "_write_error_checkpoint", crash_on_cleanup):
+            try:
+                state.set_state(continuous_session.SessionState.PAUSED)
+            except RuntimeError as exc:
+                assert "simulated crash" in str(exc)
+            else:
+                raise AssertionError("first cleanup crash was not simulated")
+
+        paused = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        assert paused.snapshot().state is continuous_session.SessionState.PAUSED
+        assert paused.snapshot().last_error_code is None
+        assert error_path.read_bytes() == stale_error
+
+        with patch.object(paused, "_write_error_checkpoint", crash_on_cleanup):
+            try:
+                paused.set_state(continuous_session.SessionState.RUNNING)
+            except RuntimeError as exc:
+                assert "simulated crash" in str(exc)
+            else:
+                raise AssertionError("second cleanup crash was not simulated")
+
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        snapshot = reopened.snapshot()
+        assert snapshot.state is continuous_session.SessionState.RUNNING
+        assert snapshot.last_error_code is None
+
+        canonical = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        stale = json.loads(error_path.read_text(encoding="utf-8"))
+        assert canonical["generation"] == 2
+        assert stale["observed_generation"] == 0
+
+
+def test_operational_checkpoint_generation_marker_rejects_boolean() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+        error_path = root / "continuous_session.json.operational_error.json"
+        payload = json.loads(error_path.read_text(encoding="utf-8"))
+        payload["observed_generation"] = True
+        error_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "observed_generation" in str(exc)
+        else:
+            raise AssertionError("boolean observed_generation was accepted")

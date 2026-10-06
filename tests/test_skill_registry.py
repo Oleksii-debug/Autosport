@@ -800,7 +800,15 @@ def test_handler_spool_cleanup_failure_does_not_mask_process_stop_truth(
 
         assert result is None
         assert error == expected_error
-        assert cleanup_attempts == [spool_path]
+        if stop_mode == "stop_failed":
+            # A possibly-live child still owns the original private spool path;
+            # unlinking it could let the child recreate a less-private file.
+            assert cleanup_attempts == []
+            assert spool_path.exists()
+        else:
+            # The child is stopped; only its handle failed to close, so spool
+            # cleanup is safe to attempt and must not mask stronger truth.
+            assert cleanup_attempts == [spool_path]
         assert process.closed is False
     finally:
         spool_path.unlink(missing_ok=True)

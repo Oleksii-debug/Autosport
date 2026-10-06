@@ -546,14 +546,17 @@ def _execute_handler_spooled_bounded(
         result: SkillExecutionResult | None,
         error: str | None,
     ) -> tuple[SkillExecutionResult | None, str | None]:
+        # STOP_FAILED means the child may still be running. Do not unlink its
+        # private mkstemp path while it can still publish: on platforms where
+        # unlink succeeds, the live child could recreate the pathname later and
+        # lose the original private inode/permission boundary. Process-stop
+        # recovery truth is authoritative until the child is actually stopped.
+        if error is not None and error.endswith("_STOP_FAILED"):
+            return None, error
         if not _remove_handler_result_spool(spool_path):
-            # A surviving child or unclosed process handle is stronger recovery
-            # truth than a secondary temp-spool cleanup failure. Preserve the
-            # same stop/handle precedence already used by the pipe transport.
-            if error is not None and (
-                error.endswith("_STOP_FAILED")
-                or error.endswith("_HANDLE_CLOSE_FAILED")
-            ):
+            # A stopped child whose process handle cannot close still has
+            # stronger recovery truth than a secondary spool cleanup failure.
+            if error is not None and error.endswith("_HANDLE_CLOSE_FAILED"):
                 return None, error
             return None, "HANDLER_RESULT_SPOOL_CLEANUP_FAILED"
         return result, error

@@ -701,6 +701,7 @@ def _install_transport_result_authority() -> None:
     response_outcomes = frozenset(
         {exact_response_outcome, incomplete_response_outcome}
     )
+    all_attempt_outcomes = frozenset(MarketBookAttemptOutcome)
     batch_transport_error_type = MarketBookBatchTransportError
     validate_history = MarketBookAttemptHistory.__post_init__
     admission_error_type = MarketBookBatchAdmissionError
@@ -921,7 +922,7 @@ def _install_transport_result_authority() -> None:
             raise batch_transport_error_type(
                 "attempt execution history is not canonical"
             ) from exc
-        if self.outcome not in frozenset(MarketBookAttemptOutcome):
+        if self.outcome not in all_attempt_outcomes:
             raise TypeError("outcome must be MarketBookAttemptOutcome")
         if not self.history.records:
             raise batch_transport_error_type(

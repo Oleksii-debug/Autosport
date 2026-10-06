@@ -931,3 +931,45 @@ def test_builder_and_manifest_validation_use_original_fact_type_after_module_reb
     assert manifest.supports(ProviderManifestCapability.LIVE_QUOTES) is True
     assert manifest.supports(ProviderManifestCapability.STREAM) is False
 
+def test_manifest_rejects_integration_type_substitution_via_module_global(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+
+    class FakeIntegration:
+        __post_init__ = BookmakerIntegrationEvidence.__post_init__
+        verify_profile = BookmakerIntegrationEvidence.verify_profile
+        to_canonical_dict = BookmakerIntegrationEvidence.to_canonical_dict
+        evidence_id = BookmakerIntegrationEvidence.evidence_id
+
+    forged = FakeIntegration()
+    forged.venue_id = profile.venue_id
+    forged.adapter_id = profile.adapter_id
+    forged.adapter_version = profile.adapter_version
+    forged.profile_id = profile.profile_id
+    forged.integration_kind = BookmakerIntegrationKind.OFFICIAL_API
+    forged.observed_at = _T1
+    forged.source_ref = "forged-integration"
+    forged.source_payload_sha256 = _HASH_B
+    forged.schema_version = 1
+
+    monkeypatch.setattr(
+        provider_manifest_module,
+        "BookmakerIntegrationEvidence",
+        FakeIntegration,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="integration must be an exact BookmakerIntegrationEvidence",
+    ):
+        build_provider_capability_manifest(
+            profile,
+            forged,
+            manifest_ref="provider-capability-manifest",
+            manifest_version=28,
+            observed_at=_T2,
+            source_ref="product-provider-capability-projection",
+            source_payload_sha256=_HASH_C,
+        )
+

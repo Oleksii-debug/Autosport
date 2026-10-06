@@ -700,3 +700,42 @@ def test_rate_restart_detaches_imported_window_authority() -> None:
     assert live.markets[0].accepted_at_utc_us == (
         int(T0.timestamp() * 1_000_000),
     )
+
+
+def test_rate_gate_instance_storage_authority_ignores_rebound_special_methods(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    value = gate_type()
+
+    def hostile_getattribute(self, name: str):
+        if name.startswith("_"):
+            raise AssertionError(f"rebound __getattribute__ reached authority field {name}")
+        return object.__getattribute__(self, name)
+
+    def hostile_setattr(self, name: str, new_value: object) -> None:
+        if name.startswith("_"):
+            raise AssertionError(f"rebound __setattr__ reached authority field {name}")
+        object.__setattr__(self, name, new_value)
+
+    monkeypatch.setattr(gate_type, "__getattribute__", hostile_getattribute)
+    monkeypatch.setattr(gate_type, "__setattr__", hostile_setattr)
+
+    for index in range(5):
+        decision = value.reserve(
+            ["1.234"],
+            scheduled_at=T0 + timedelta(microseconds=index),
+        )
+        assert decision.allowed is True
+
+    denied = value.reserve(
+        ["1.234"],
+        scheduled_at=T0 + timedelta(microseconds=5),
+    )
+    assert denied.allowed is False
+    snapshot = value.snapshot()
+    assert len(snapshot.markets) == 1
+    assert len(snapshot.markets[0].accepted_at_utc_us) == 5
+
+    restored = gate_type(snapshot)
+    assert restored.snapshot() == snapshot

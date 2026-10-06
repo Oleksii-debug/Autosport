@@ -197,6 +197,8 @@ def _install_rate_gate_authority() -> None:
     policy_version = BETFAIR_MARKETBOOK_RATE_POLICY_VERSION
     max_calls = _MAX_CALLS_PER_WINDOW
     window_us = _WINDOW_MICROSECONDS
+    object_getattribute = object.__getattribute__
+    object_setattr = object.__setattr__
 
     def validate_market_id(value: object) -> str:
         if type(value) is not str:
@@ -366,10 +368,10 @@ def _install_rate_gate_authority() -> None:
         self: BetfairMarketBookPerMarketRateGate,
         state: MarketBookRateGateState | None = None,
     ) -> None:
-        self._lock = lock_type()
-        self._accepted = {}
-        self._last_scheduled_at_utc_us = None
-        self._next_reservation_generation = 1
+        object_setattr(self, "_lock", lock_type())
+        object_setattr(self, "_accepted", {})
+        object_setattr(self, "_last_scheduled_at_utc_us", None)
+        object_setattr(self, "_next_reservation_generation", 1)
         if state is not None:
             validate_state(state)
             detached_markets = tuple(
@@ -383,32 +385,44 @@ def _install_rate_gate_authority() -> None:
                 state.last_scheduled_at_utc_us,
                 detached_markets,
             )
-            self._last_scheduled_at_utc_us = (
-                detached_state.last_scheduled_at_utc_us
+            object_setattr(
+                self,
+                "_last_scheduled_at_utc_us",
+                detached_state.last_scheduled_at_utc_us,
             )
-            self._accepted = {
-                market.market_id: [
-                    (timestamp, 0) for timestamp in market.accepted_at_utc_us
-                ]
-                for market in detached_state.markets
-            }
+            object_setattr(
+                self,
+                "_accepted",
+                {
+                    market.market_id: [
+                        (timestamp, 0) for timestamp in market.accepted_at_utc_us
+                    ]
+                    for market in detached_state.markets
+                },
+            )
 
     def snapshot(
         self: BetfairMarketBookPerMarketRateGate,
     ) -> MarketBookRateGateState:
-        with self._lock:
+        lock = object_getattribute(self, "_lock")
+        with lock:
+            accepted_by_market = object_getattribute(self, "_accepted")
+            last_scheduled_at_utc_us = object_getattribute(
+                self,
+                "_last_scheduled_at_utc_us",
+            )
             markets = tuple(
                 make_window(
                     market_id,
                     tuple(
                         timestamp
-                        for timestamp, _generation in self._accepted[market_id]
+                        for timestamp, _generation in accepted_by_market[market_id]
                     ),
                 )
-                for market_id in sorted(self._accepted)
-                if self._accepted[market_id]
+                for market_id in sorted(accepted_by_market)
+                if accepted_by_market[market_id]
             )
-            return make_state(self._last_scheduled_at_utc_us, markets)
+            return make_state(last_scheduled_at_utc_us, markets)
 
     def reserve(
         self: BetfairMarketBookPerMarketRateGate,
@@ -418,18 +432,24 @@ def _install_rate_gate_authority() -> None:
     ) -> MarketBookRateDecision:
         normalized_ids = normalize_market_ids(market_ids)
         scheduled_us = utc_microseconds(scheduled_at)
+        lock = object_getattribute(self, "_lock")
         reservation_generation: int | None = None
         try:
-            with self._lock:
+            with lock:
+                last_scheduled_at_utc_us = object_getattribute(
+                    self,
+                    "_last_scheduled_at_utc_us",
+                )
                 if (
-                    self._last_scheduled_at_utc_us is not None
-                    and scheduled_us < self._last_scheduled_at_utc_us
+                    last_scheduled_at_utc_us is not None
+                    and scheduled_us < last_scheduled_at_utc_us
                 ):
                     raise ValueError("scheduled_at must not move backwards")
 
+                accepted_by_market = object_getattribute(self, "_accepted")
                 cutoff = scheduled_us - window_us
                 working: dict[str, list[tuple[int, int]]] = {}
-                for market_id, accepted in self._accepted.items():
+                for market_id, accepted in accepted_by_market.items():
                     retained = [entry for entry in accepted if entry[0] > cutoff]
                     if retained:
                         working[market_id] = retained
@@ -442,8 +462,8 @@ def _install_rate_gate_authority() -> None:
                         blocked.append(market_id)
                         next_eligible.append(accepted[0][0] + window_us)
 
-                self._accepted = working
-                self._last_scheduled_at_utc_us = scheduled_us
+                object_setattr(self, "_accepted", working)
+                object_setattr(self, "_last_scheduled_at_utc_us", scheduled_us)
 
                 if blocked:
                     return make_decision(
@@ -454,24 +474,32 @@ def _install_rate_gate_authority() -> None:
                         next_eligible_at_utc_us=max(next_eligible),
                     )
 
-                reservation_generation = self._next_reservation_generation
-                self._next_reservation_generation += 1
+                reservation_generation = object_getattribute(
+                    self,
+                    "_next_reservation_generation",
+                )
+                object_setattr(
+                    self,
+                    "_next_reservation_generation",
+                    reservation_generation + 1,
+                )
                 decision = make_decision(
                     market_ids=normalized_ids,
                     scheduled_at_utc_us=scheduled_us,
                     allowed=True,
                 )
                 for market_id in normalized_ids:
-                    self._accepted.setdefault(market_id, []).append(
+                    working.setdefault(market_id, []).append(
                         (scheduled_us, reservation_generation)
                     )
                 return decision
         except BaseException as primary:
             if reservation_generation is not None:
                 try:
-                    with self._lock:
+                    with lock:
+                        accepted_by_market = object_getattribute(self, "_accepted")
                         for market_id in normalized_ids:
-                            accepted = self._accepted.get(market_id)
+                            accepted = accepted_by_market.get(market_id)
                             if not accepted:
                                 continue
                             retained = [
@@ -480,9 +508,9 @@ def _install_rate_gate_authority() -> None:
                                 if entry[1] != reservation_generation
                             ]
                             if retained:
-                                self._accepted[market_id] = retained
+                                accepted_by_market[market_id] = retained
                             else:
-                                self._accepted.pop(market_id, None)
+                                accepted_by_market.pop(market_id, None)
                 except BaseException as cleanup_exc:
                     if (
                         not isinstance(cleanup_exc, Exception)

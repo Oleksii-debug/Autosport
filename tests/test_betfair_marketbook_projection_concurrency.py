@@ -870,3 +870,42 @@ def test_projection_restart_detaches_imported_lease_authority() -> None:
         observed_at=T0 + timedelta(seconds=1),
     )
     assert restored.snapshot().active == ()
+
+
+def test_projection_gate_instance_storage_authority_ignores_rebound_special_methods(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    value = gate_type()
+
+    def hostile_getattribute(self, name: str):
+        if name.startswith("_"):
+            raise AssertionError(f"rebound __getattribute__ reached authority field {name}")
+        return object.__getattribute__(self, name)
+
+    def hostile_setattr(self, name: str, new_value: object) -> None:
+        if name.startswith("_"):
+            raise AssertionError(f"rebound __setattr__ reached authority field {name}")
+        object.__setattr__(self, name, new_value)
+
+    monkeypatch.setattr(gate_type, "__getattribute__", hostile_getattribute)
+    monkeypatch.setattr(gate_type, "__setattr__", hostile_setattr)
+
+    first = value.begin(
+        "r0",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    assert first.allowed is True
+    assert first.lease_generation is not None
+    snapshot = value.snapshot()
+    assert [lease.request_id for lease in snapshot.active] == ["r0"]
+
+    restored = gate_type(state=snapshot)
+    restored.complete(
+        "r0",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(seconds=1),
+    )
+    assert restored.snapshot().active == ()

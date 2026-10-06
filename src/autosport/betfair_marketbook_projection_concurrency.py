@@ -171,6 +171,8 @@ def _install_projection_gate_authority() -> None:
     epoch = datetime_type(1970, 1, 1, tzinfo=utc_timezone)
     policy_version = BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION
     max_unresolved = _MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
+    object_getattribute = object.__getattribute__
+    object_setattr = object.__setattr__
 
     def validate_request_id(value: object) -> str:
         if type(value) is not str:
@@ -337,10 +339,10 @@ def _install_projection_gate_authority() -> None:
         *,
         state: MarketBookProjectionConcurrencyState | None = None,
     ) -> None:
-        self._lock = lock_type()
-        self._active = {}
-        self._last_observed_at_utc_us = None
-        self._next_lease_generation = 1
+        object_setattr(self, "_lock", lock_type())
+        object_setattr(self, "_active", {})
+        object_setattr(self, "_last_observed_at_utc_us", None)
+        object_setattr(self, "_next_lease_generation", 1)
         if state is not None:
             validate_state(state)
             detached_active = tuple(
@@ -356,32 +358,43 @@ def _install_projection_gate_authority() -> None:
                 detached_active,
                 state.next_lease_generation,
             )
-            self._last_observed_at_utc_us = (
-                detached_state.last_observed_at_utc_us
+            object_setattr(
+                self,
+                "_last_observed_at_utc_us",
+                detached_state.last_observed_at_utc_us,
             )
-            self._active = {
-                lease.request_id: lease for lease in detached_state.active
-            }
-            self._next_lease_generation = (
-                detached_state.next_lease_generation
+            object_setattr(
+                self,
+                "_active",
+                {
+                    lease.request_id: lease
+                    for lease in detached_state.active
+                },
+            )
+            object_setattr(
+                self,
+                "_next_lease_generation",
+                detached_state.next_lease_generation,
             )
 
     def snapshot(
         self: BetfairMarketBookProjectionConcurrencyGate,
     ) -> MarketBookProjectionConcurrencyState:
-        with self._lock:
+        lock = object_getattribute(self, "_lock")
+        with lock:
+            active_by_request = object_getattribute(self, "_active")
             active = tuple(
                 make_lease(
-                    self._active[request_id].request_id,
-                    self._active[request_id].acquired_at_utc_us,
-                    self._active[request_id].generation,
+                    active_by_request[request_id].request_id,
+                    active_by_request[request_id].acquired_at_utc_us,
+                    active_by_request[request_id].generation,
                 )
-                for request_id in sorted(self._active)
+                for request_id in sorted(active_by_request)
             )
             return make_state(
-                self._last_observed_at_utc_us,
+                object_getattribute(self, "_last_observed_at_utc_us"),
                 active,
-                self._next_lease_generation,
+                object_getattribute(self, "_next_lease_generation"),
             )
 
     def begin(
@@ -399,16 +412,22 @@ def _install_projection_gate_authority() -> None:
             raise TypeError("has_match_projection must be bool")
         observed_us = utc_microseconds(observed_at, name="observed_at")
         projection_bearing = has_order_projection or has_match_projection
+        lock = object_getattribute(self, "_lock")
 
         generation: int | None = None
         try:
-            with self._lock:
+            with lock:
+                active_by_request = object_getattribute(self, "_active")
+                last_observed_at_utc_us = object_getattribute(
+                    self,
+                    "_last_observed_at_utc_us",
+                )
                 if (
-                    self._last_observed_at_utc_us is not None
-                    and observed_us < self._last_observed_at_utc_us
+                    last_observed_at_utc_us is not None
+                    and observed_us < last_observed_at_utc_us
                 ):
                     raise ValueError("observed_at must not move backwards")
-                if request in self._active:
+                if request in active_by_request:
                     raise ValueError("request_id is already active")
 
                 if not projection_bearing:
@@ -417,43 +436,44 @@ def _install_projection_gate_authority() -> None:
                         observed_at_utc_us=observed_us,
                         projection_bearing=False,
                         allowed=True,
-                        active_projection_requests=len(self._active),
+                        active_projection_requests=len(active_by_request),
                     )
-                    self._last_observed_at_utc_us = observed_us
+                    object_setattr(self, "_last_observed_at_utc_us", observed_us)
                     return decision
 
-                if len(self._active) >= max_unresolved:
+                if len(active_by_request) >= max_unresolved:
                     decision = make_decision(
                         request_id=request,
                         observed_at_utc_us=observed_us,
                         projection_bearing=True,
                         allowed=False,
-                        active_projection_requests=len(self._active),
+                        active_projection_requests=len(active_by_request),
                     )
-                    self._last_observed_at_utc_us = observed_us
+                    object_setattr(self, "_last_observed_at_utc_us", observed_us)
                     return decision
 
-                generation = self._next_lease_generation
-                self._next_lease_generation = generation + 1
+                generation = object_getattribute(self, "_next_lease_generation")
+                object_setattr(self, "_next_lease_generation", generation + 1)
                 lease = make_lease(request, observed_us, generation)
                 decision = make_decision(
                     request_id=request,
                     observed_at_utc_us=observed_us,
                     projection_bearing=True,
                     allowed=True,
-                    active_projection_requests=len(self._active) + 1,
+                    active_projection_requests=len(active_by_request) + 1,
                     lease_generation=generation,
                 )
-                self._active[request] = lease
-                self._last_observed_at_utc_us = observed_us
+                active_by_request[request] = lease
+                object_setattr(self, "_last_observed_at_utc_us", observed_us)
                 return decision
         except BaseException as primary:
             if generation is not None:
                 try:
-                    with self._lock:
-                        lease = self._active.get(request)
+                    with lock:
+                        active_by_request = object_getattribute(self, "_active")
+                        lease = active_by_request.get(request)
                         if lease is not None and lease.generation == generation:
-                            del self._active[request]
+                            del active_by_request[request]
                 except BaseException as cleanup_exc:
                     if (
                         not isinstance(cleanup_exc, Exception)
@@ -481,14 +501,20 @@ def _install_projection_gate_authority() -> None:
                 "lease_generation must be a positive non-boolean int"
             )
         observed_us = utc_microseconds(observed_at, name="observed_at")
+        lock = object_getattribute(self, "_lock")
 
-        with self._lock:
+        with lock:
+            last_observed_at_utc_us = object_getattribute(
+                self,
+                "_last_observed_at_utc_us",
+            )
             if (
-                self._last_observed_at_utc_us is not None
-                and observed_us < self._last_observed_at_utc_us
+                last_observed_at_utc_us is not None
+                and observed_us < last_observed_at_utc_us
             ):
                 raise ValueError("observed_at must not move backwards")
-            lease = self._active.get(request)
+            active_by_request = object_getattribute(self, "_active")
+            lease = active_by_request.get(request)
             if lease is None:
                 raise ValueError(
                     "request_id is not an active projection-bearing request"
@@ -497,8 +523,8 @@ def _install_projection_gate_authority() -> None:
                 raise ValueError(
                     "lease_generation does not match active request"
                 )
-            self._last_observed_at_utc_us = observed_us
-            del self._active[request]
+            object_setattr(self, "_last_observed_at_utc_us", observed_us)
+            del active_by_request[request]
 
     def policy_version_property(
         self: BetfairMarketBookProjectionConcurrencyGate,

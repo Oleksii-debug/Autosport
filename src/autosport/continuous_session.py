@@ -1694,11 +1694,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             # compatibility, but it must not be able to rewrite the identity or
             # settlement reference that product state made authoritative before
             # the callback.
+            record_phase = record.phase
             record_identity = record.identity
             record_settlement_ref = record.settlement_ref
             resolution = self.outcome_authority.resolve(record, as_of=as_of)
             if (
-                record.identity != record_identity
+                record.phase is not record_phase
+                or record.identity != record_identity
                 or record.settlement_ref != record_settlement_ref
             ):
                 raise ContinuousSessionError(

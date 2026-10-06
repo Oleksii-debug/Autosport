@@ -18,11 +18,76 @@ from decimal import (
 from pathlib import Path
 
 from .domain import MarketEvent, MarketType, PaperTicket, TicketLeg, TicketStatus
+from .exchange_exposure import locked_capital_for_exchange_side
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 _CANONICAL_ECONOMIC_GOAL_TYPE = EconomicGoalContract
 _CANONICAL_ECONOMIC_GOAL_VALIDATOR = EconomicGoalContract.__post_init__
 from .paper import PaperBook
+
+
+def _make_locked_capital_authority():
+    calculator = locked_capital_for_exchange_side
+    calculator_code = calculator.__code__
+
+    def require_calculator() -> None:
+        if calculator.__code__ is not calculator_code:
+            raise ValueError("risk locked-capital exposure authority changed")
+
+    def calculate(ticket: PaperTicket) -> Decimal:
+        require_calculator()
+        if type(ticket) is not PaperTicket or type(ticket.legs) is not tuple:
+            raise ValueError("risk ticket must be canonical")
+        if any(leg.exchange_side == "lay" for leg in ticket.legs):
+            if len(ticket.legs) != 1 or type(ticket.legs[0]) is not TicketLeg:
+                raise ValueError(
+                    "risk LAY exposure requires exactly one canonical single-leg ticket"
+                )
+            return calculator(
+                stake=ticket.stake,
+                odds=ticket.legs[0].locked_odds,
+                exchange_side="LAY",
+            )
+        return ticket.stake
+
+    def calculate_proposal(
+        stake: Decimal,
+        legs: tuple[TicketLeg, ...],
+    ) -> Decimal:
+        require_calculator()
+        if type(stake) is not Decimal or type(legs) is not tuple or not legs:
+            raise ValueError("risk proposal exposure must use canonical stake and legs")
+        if stake.is_zero():
+            return Decimal("0")
+        for leg in legs:
+            if (
+                type(leg) is not TicketLeg
+                or type(leg.locked_odds) is not Decimal
+                or not leg.locked_odds.is_finite()
+                or leg.locked_odds <= Decimal("1")
+                or leg.exchange_side not in {None, "back", "lay"}
+            ):
+                raise ValueError("risk proposal exposure leg is not canonical")
+        if any(leg.exchange_side == "lay" for leg in legs):
+            if len(legs) != 1:
+                raise ValueError(
+                    "risk LAY exposure requires exactly one canonical single-leg proposal"
+                )
+            return calculator(
+                stake=stake,
+                odds=legs[0].locked_odds,
+                exchange_side="LAY",
+            )
+        return stake
+
+    return calculate, calculate_proposal
+
+
+(
+    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET,
+    _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL,
+) = _make_locked_capital_authority()
+del _make_locked_capital_authority
 
 # Capture the source-defined MarketEvent serialization entrypoints once. Risk
 # validation must not dispatch through later mutable class attributes on an

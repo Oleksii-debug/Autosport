@@ -1001,3 +1001,58 @@ def test_contract_class_guard_ignores_rebound_getattr(monkeypatch) -> None:
             lambda *_args, **_kwargs: None,
         )
     assert executed is False
+
+def test_contract_validation_ignores_rebound_primitive_builtins(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    def forged(name: str):
+        def operation(*_args, **_kwargs):
+            calls.append(name)
+            raise AssertionError(f"rebound {name} executed")
+        return operation
+
+    for name in ("type", "len", "set", "dict", "zip"):
+        monkeypatch.setattr(
+            economic_goal_module,
+            name,
+            forged(name),
+            raising=False,
+        )
+
+    goal = _goal()
+    candidate = replace(
+        goal,
+        revision=2,
+        max_stake_fraction=Decimal("0.01"),
+        blocked_sports=frozenset({"greyhound", "football"}),
+    )
+
+    goal.validate_automatic_successor(candidate)
+    validate_automatic_transition(goal, candidate)
+    assert calls == []
+
+
+def test_contract_exact_decimal_rejects_type_rebinding_laundering(
+    monkeypatch,
+) -> None:
+    class DecimalSubclass(Decimal):
+        pass
+
+    canonical_type = type
+
+    def forged_type(value):
+        if canonical_type(value) is DecimalSubclass:
+            return Decimal
+        return canonical_type(value)
+
+    monkeypatch.setattr(
+        economic_goal_module,
+        "type",
+        forged_type,
+        raising=False,
+    )
+
+    with pytest.raises(EconomicGoalContractError, match="exact Decimal"):
+        _goal(max_stake_fraction=DecimalSubclass("0.02"))

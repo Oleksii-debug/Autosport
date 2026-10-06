@@ -2510,6 +2510,63 @@ def test_source_projection_allows_equal_position_explicit_revision() -> None:
         snapshot = state.snapshot()
         assert snapshot.source_state_delta_id == "revision-delta"
 
+
+def test_source_projection_rejects_equal_position_revision_of_non_predecessor() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        before = state.path.read_bytes()
+
+        try:
+            state.record_source_projection(
+                deltas=(
+                    _projection_delta(1, delta_id="base-delta", position=5),
+                    _projection_delta(
+                        2,
+                        delta_id="revision-delta",
+                        position=5,
+                        revision_of="other-delta",
+                        revision_number=1,
+                    ),
+                ),
+                backlog=False,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "must target the previous delta" in str(exc)
+        else:
+            raise AssertionError("non-predecessor equal-position revision was accepted")
+
+        assert state.path.read_bytes() == before
+
+
+def test_source_projection_rejects_equal_position_revision_number_jump() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        before = state.path.read_bytes()
+
+        try:
+            state.record_source_projection(
+                deltas=(
+                    _projection_delta(1, delta_id="base-delta", position=5),
+                    _projection_delta(
+                        2,
+                        delta_id="revision-delta",
+                        position=5,
+                        revision_of="base-delta",
+                        revision_number=2,
+                    ),
+                ),
+                backlog=False,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "advance exactly one step" in str(exc)
+        else:
+            raise AssertionError("equal-position revision number jump was accepted")
+
+        assert state.path.read_bytes() == before
+
+
 def test_record_failure_does_not_enter_full_history_reader() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

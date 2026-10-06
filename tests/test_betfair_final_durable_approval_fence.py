@@ -11,6 +11,10 @@ import tempfile
 
 import pytest
 
+from supervised_clock_test_support import install_trusted_clock, set_trusted_times
+
+install_trusted_clock()
+
 import autosport.betfair_supervised_execution as betfair_execution
 from autosport.betfair_execution_confirmation import (
     CONFIRMATION_FILENAME,
@@ -47,12 +51,9 @@ from test_betfair_supervised_execution import (
 
 
 def _crash_during_provider_send_worker(workspace: str) -> None:
-    import autosport.supervised_execution as supervised_execution
-
-    supervised_execution._trusted_now = lambda: RESERVED_AT
+    install_trusted_clock()
+    set_trusted_times(RESERVED_AT, SUBMITTED_AT)
     profile, bound, approval, ledger, action, goal_store = _prepared(workspace)
-    trusted_times = iter((RESERVED_AT, SUBMITTED_AT))
-    supervised_execution._trusted_now = lambda: next(trusted_times, SUBMITTED_AT)
 
     def crash_after_submitted(_request):
         os._exit(91)
@@ -105,28 +106,13 @@ def _crash_during_provider_send_worker(workspace: str) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _fixed_final_fence_clock(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "autosport.supervised_execution._trusted_now",
-        lambda: RESERVED_AT,
-    )
+def _fixed_final_fence_clock() -> None:
+    set_trusted_times(RESERVED_AT)
 
 
 def _set_trusted_clock_sequence(monkeypatch, *values: str) -> None:
-    assert values
-    sequence = iter(values)
-    final = values[-1]
-
-    def trusted_now() -> str:
-        try:
-            return next(sequence)
-        except StopIteration:
-            return final
-
-    monkeypatch.setattr(
-        "autosport.supervised_execution._trusted_now",
-        trusted_now,
-    )
+    del monkeypatch
+    set_trusted_times(*values)
 
 
 def _assert_reserved_without_submission(

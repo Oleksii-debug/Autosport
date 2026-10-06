@@ -116,6 +116,27 @@ def test_store_public_authority_operations_reject_class_rebinding() -> None:
             raise AssertionError(f"{name} class binding was mutable")
 
 
+def test_store_public_authority_operations_reject_direct_type_mutation() -> None:
+    replacements = (
+        ("__init__", lambda self, _workspace: None),
+        ("load", lambda self: None),
+        ("initialize_owner", lambda self, _contract: None),
+        ("persist_automatic_successor", lambda self, _contract: None),
+        ("_authority_operations_sealed", False),
+    )
+    for name, replacement in replacements:
+        with pytest.raises(
+            TypeError,
+            match="economic goal store authority operation binding is immutable",
+        ):
+            type.__setattr__(EconomicGoalStore, name, replacement)
+        with pytest.raises(
+            TypeError,
+            match="economic goal store authority operation binding is immutable",
+        ):
+            type.__delattr__(EconomicGoalStore, name)
+
+
 def test_payload_roundtrip_is_versioned_exact_and_canonical() -> None:
     goal = _goal()
 

@@ -98,10 +98,10 @@ _TICKET_LEG_POST_INIT_CODE = getattr(
     "__code__",
     None,
 )
-_TICKET_LEG_QUOTE_KEY = TicketLeg.__dict__["quote_key"]
-_TICKET_LEG_QUOTE_KEY_GETTER = _TICKET_LEG_QUOTE_KEY.fget
-_TICKET_LEG_QUOTE_KEY_GETTER_CODE = getattr(
-    _TICKET_LEG_QUOTE_KEY_GETTER,
+_TICKET_LEG_SETTLEMENT_KEY = TicketLeg.__dict__["settlement_key"]
+_TICKET_LEG_SETTLEMENT_KEY_GETTER = _TICKET_LEG_SETTLEMENT_KEY.fget
+_TICKET_LEG_SETTLEMENT_KEY_GETTER_CODE = getattr(
+    _TICKET_LEG_SETTLEMENT_KEY_GETTER,
     "__code__",
     None,
 )
@@ -737,11 +737,6 @@ def _candidate_tickets(
                 raise ProductProposalRiskTerminalPayoffEvaluationError(
                     "proposal target TicketLeg schema changed"
                 )
-            if leg_raw["exchange_side"] is not None:
-                raise ProductProposalRiskTerminalPayoffEvaluationError(
-                    "terminal payoff does not support exchange-side settlement "
-                    "semantics"
-                )
             try:
                 leg = _TICKET_LEG_TYPE(
                     event_id=_text(
@@ -785,11 +780,11 @@ def _candidate_tickets(
             legs.append(leg)
 
         quote_keys = tuple(
-            _TICKET_LEG_QUOTE_KEY_GETTER(leg) for leg in legs
+            _TICKET_LEG_SETTLEMENT_KEY_GETTER(leg) for leg in legs
         )
         if len(quote_keys) != len(set(quote_keys)):
             raise ProductProposalRiskTerminalPayoffEvaluationError(
-                "proposal target candidate contains duplicate quote_key legs"
+                "proposal target candidate contains duplicate settlement-key legs"
             )
         stake = _decimal(
             target.evaluated_stakes[index],
@@ -888,12 +883,12 @@ def _settlement_map_for_candidate(
             raise ProductProposalRiskTerminalPayoffEvaluationError(
                 "mapped terminal state does not settle the target selection"
             )
-        quote_key = _TICKET_LEG_QUOTE_KEY_GETTER(leg)
+        quote_key = _TICKET_LEG_SETTLEMENT_KEY_GETTER(leg)
         result_text = result.value
         prior = settlement_by_quote.get(quote_key)
         if prior is not None and prior != result_text:
             raise ProductProposalRiskTerminalPayoffEvaluationError(
-                "one target quote_key has conflicting terminal settlements"
+                "one target settlement key has conflicting terminal settlements"
             )
         settlement_by_quote[quote_key] = result_text
     return settlement_by_quote
@@ -1588,10 +1583,10 @@ def _require_dispatch() -> None:
         or TicketLeg.__post_init__ is not _TICKET_LEG_POST_INIT
         or getattr(_TICKET_LEG_POST_INIT, "__code__", None)
         is not _TICKET_LEG_POST_INIT_CODE
-        or TicketLeg.__dict__.get("quote_key")
-        is not _TICKET_LEG_QUOTE_KEY
-        or getattr(_TICKET_LEG_QUOTE_KEY.fget, "__code__", None)
-        is not _TICKET_LEG_QUOTE_KEY_GETTER_CODE
+        or TicketLeg.__dict__.get("settlement_key")
+        is not _TICKET_LEG_SETTLEMENT_KEY
+        or getattr(_TICKET_LEG_SETTLEMENT_KEY.fget, "__code__", None)
+        is not _TICKET_LEG_SETTLEMENT_KEY_GETTER_CODE
         or PaperTicket.__init__ is not _PAPER_TICKET_INIT
         or getattr(_PAPER_TICKET_INIT, "__code__", None)
         is not _PAPER_TICKET_INIT_CODE

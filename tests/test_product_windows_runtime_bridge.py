@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -207,6 +208,10 @@ def test_product_session_restore_uses_frozen_start_configuration(
         return SimpleNamespace(workspace=target)
 
     monkeypatch.setattr(ProductWindowsAutosportApp, "_open_session", open_session)
+    monkeypatch.setattr(
+        "autosport.product_windows_gui.workspace_for_strategy",
+        lambda root, strategy_id, research_plan: target,
+    )
 
     assert app._restore_base_session_after_product() is True
     assert calls == [("captured-strategy", captured_plan)]

@@ -88,11 +88,12 @@ def _validate_provenance_bound(
     _max_identity_chars=_MAX_PROVENANCE_IDENTITY_CHARS,
     _error_type=EconomicGoalProvenanceError,
     _provenance_type=EconomicGoalProvenance,
+    _snapshot=_canonical_provenance_snapshot,
 ) -> None:
     """Validate provenance through captured slot descriptors."""
     if type(self) is not _provenance_type:
         raise _error_type("provenance must use the exact evidence type")
-    schema, schema_version, goal_id, revision, bankroll_id, contract_sha256 = _canonical_provenance_snapshot(self)
+    schema, schema_version, goal_id, revision, bankroll_id, contract_sha256 = _snapshot(self)
     if type(schema) is not str or schema != _schema:
         raise _error_type("unsupported provenance schema")
     if type(schema_version) is not int or schema_version != _schema_version:
@@ -122,13 +123,15 @@ def _validate_provenance_bound(
 def _decision_identity_bound(
     self: EconomicGoalProvenance,
     _validator=_validate_provenance_bound,
+    _snapshot=_canonical_provenance_snapshot,
+    _error_type=EconomicGoalProvenanceError,
 ) -> str:
     _validator(self)
-    before = _canonical_provenance_snapshot(self)
+    before = _snapshot(self)
     _validator(self)
-    after = _canonical_provenance_snapshot(self)
+    after = _snapshot(self)
     if before != after:
-        raise EconomicGoalProvenanceError(
+        raise _error_type(
             "economic-goal provenance changed during identity derivation"
         )
     _, _, goal_id, revision, _, contract_sha256 = after
@@ -185,20 +188,21 @@ def _provenance_for_bound(
     _schema=PROVENANCE_SCHEMA,
     _schema_version=PROVENANCE_SCHEMA_VERSION,
     _goal_error=EconomicGoalContractError,
+    _contract_snapshot=_canonical_contract_snapshot,
 ) -> EconomicGoalProvenance:
     """Derive immutable provenance identity without introducing another authority."""
 
     if type(contract) is not _goal_type:
         raise _goal_error("provenance requires an EconomicGoalContract")
     _goal_validator(contract)
-    before = _canonical_contract_snapshot(contract)
+    before = _contract_snapshot(contract)
     _goal_validator(contract)
-    after = _canonical_contract_snapshot(contract)
+    after = _contract_snapshot(contract)
     if before != after:
         raise _goal_error("economic goal changed during provenance derivation")
     values = dict(zip(_PROVENANCE_CONTRACT_FIELD_NAMES, after))
     contract_sha256 = _contract_sha256(contract)
-    final_snapshot = _canonical_contract_snapshot(contract)
+    final_snapshot = _contract_snapshot(contract)
     if after != final_snapshot:
         raise _goal_error("economic goal changed during provenance derivation")
     provenance = _provenance_type(
@@ -223,6 +227,8 @@ def _verify_provenance_bound(
     _contract_sha256=_contract_sha256_bound,
     _goal_error=EconomicGoalContractError,
     _provenance_error=EconomicGoalProvenanceError,
+    _contract_snapshot=_canonical_contract_snapshot,
+    _provenance_snapshot=_canonical_provenance_snapshot,
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
@@ -232,14 +238,14 @@ def _verify_provenance_bound(
         raise _provenance_error("provenance must be EconomicGoalProvenance")
 
     _goal_validator(contract)
-    contract_before = _canonical_contract_snapshot(contract)
+    contract_before = _contract_snapshot(contract)
     _provenance_validator(provenance)
-    provenance_before = _canonical_provenance_snapshot(provenance)
+    provenance_before = _provenance_snapshot(provenance)
 
     _goal_validator(contract)
-    contract_after = _canonical_contract_snapshot(contract)
+    contract_after = _contract_snapshot(contract)
     _provenance_validator(provenance)
-    provenance_after = _canonical_provenance_snapshot(provenance)
+    provenance_after = _provenance_snapshot(provenance)
 
     if contract_before != contract_after:
         raise _goal_error("economic goal changed during provenance verification")
@@ -259,7 +265,7 @@ def _verify_provenance_bound(
     if proven_bankroll_id != bankroll_id:
         raise _provenance_error("provenance bankroll_id mismatch")
     actual = _contract_sha256(contract)
-    final_contract_snapshot = _canonical_contract_snapshot(contract)
+    final_contract_snapshot = _contract_snapshot(contract)
     if contract_after != final_contract_snapshot:
         raise _goal_error("economic goal changed during provenance verification")
     if proven_contract_sha256 != actual:

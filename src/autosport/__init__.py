@@ -183,6 +183,12 @@ from . import _monotonic_root_selection_os_resolver_guard as _monotonic_root_sel
 # MonotonicWorkspaceAuthority construction over the exact canonical selector entrypoints.
 from . import _monotonic_root_selection_dispatch_guard as _monotonic_root_selection_dispatch_guard  # noqa: F401,E402
 
+# A supported START is not caller-visible until the exact durable activation bytes
+# have been re-read against the already-committed monotonic witness. Compose this only
+# after the root-selection guard freezes MonotonicWorkspaceAuthority construction so
+# activation freezes the final product-owned constructor identity, not its precursor.
+from . import _product_decision_activation_commit_return_guard as _product_decision_activation_commit_return_guard  # noqa: F401,E402
+
 # Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
 # exponent forms and oversized text before Decimal fixed-point materialization so
 # tiny hostile inputs cannot amplify into attacker-sized evidence strings.

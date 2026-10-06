@@ -444,6 +444,10 @@ def _validate_market_binding(
         forecast = forecasts[leg.quote_key]
         if forecast.market_snapshot_hash != snapshot_hash:
             raise ValueError(f"ForecastRecord snapshot hash does not match replay state: {leg.quote_key}")
+        if forecast.market_semantics_id != event.market_semantics_id:
+            raise ValueError(
+                f"ForecastRecord market semantics do not match replay state: {leg.quote_key}"
+            )
 
 
 def _validate_scenario_future_identity(
@@ -718,6 +722,7 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
         ),
         provenance=dict(raw.get("provenance", {})),
         forecast_id=str(raw["forecast_id"]),
+        market_semantics_id=raw.get("market_semantics_id"),
     )
 
 

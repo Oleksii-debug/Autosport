@@ -808,6 +808,10 @@ def _build_canonical_place_action_dispatch():
     canonical_execution_report_type = BetfairPlaceExecutionReport
 
     canonical_profile_require = canonical_profile_type.__dict__.get("require")
+    canonical_profile_state_of = canonical_profile_type.__dict__.get("state_of")
+    canonical_profile_to_canonical_dict = canonical_profile_type.__dict__.get(
+        "to_canonical_dict"
+    )
     canonical_profile_id_descriptor = canonical_profile_type.__dict__.get("profile_id")
     canonical_profile_id_getter = getattr(
         canonical_profile_id_descriptor,
@@ -815,6 +819,8 @@ def _build_canonical_place_action_dispatch():
         None,
     )
     canonical_action_to_dict = canonical_action_type.__dict__.get("to_dict")
+    canonical_constraint_to_dict = canonical_constraint_type.__dict__.get("to_dict")
+    canonical_next_request_id = client_type.__dict__.get("_next_request_id")
     canonical_plan_to_dict = canonical_plan_type.__dict__.get("to_dict")
     canonical_plan_fingerprint_descriptor = canonical_plan_type.__dict__.get(
         "fingerprint"
@@ -858,6 +864,8 @@ def _build_canonical_place_action_dispatch():
         None,
     )
     canonical_trusted_now = _supervised_execution_runtime._trusted_now
+    canonical_bound_binding_sha256 = _supervised_execution_runtime._bound_binding_sha256
+    canonical_supervised_digest = _supervised_execution_runtime._digest
     canonical_workspace_lock_enter = canonical_workspace_lock_type.__dict__.get(
         "__enter__"
     )
@@ -869,6 +877,16 @@ def _build_canonical_place_action_dispatch():
         "__code__",
         None,
     )
+    canonical_profile_state_of_code = getattr(
+        canonical_profile_state_of,
+        "__code__",
+        None,
+    )
+    canonical_profile_to_canonical_dict_code = getattr(
+        canonical_profile_to_canonical_dict,
+        "__code__",
+        None,
+    )
     canonical_profile_id_getter_code = getattr(
         canonical_profile_id_getter,
         "__code__",
@@ -876,6 +894,16 @@ def _build_canonical_place_action_dispatch():
     )
     canonical_action_to_dict_code = getattr(
         canonical_action_to_dict,
+        "__code__",
+        None,
+    )
+    canonical_constraint_to_dict_code = getattr(
+        canonical_constraint_to_dict,
+        "__code__",
+        None,
+    )
+    canonical_next_request_id_code = getattr(
+        canonical_next_request_id,
         "__code__",
         None,
     )
@@ -924,6 +952,16 @@ def _build_canonical_place_action_dispatch():
         "__code__",
         None,
     )
+    canonical_bound_binding_sha256_code = getattr(
+        canonical_bound_binding_sha256,
+        "__code__",
+        None,
+    )
+    canonical_supervised_digest_code = getattr(
+        canonical_supervised_digest,
+        "__code__",
+        None,
+    )
     canonical_workspace_lock_enter_code = getattr(
         canonical_workspace_lock_enter,
         "__code__",
@@ -952,6 +990,8 @@ def _build_canonical_place_action_dispatch():
         "_append",
         "_mutate",
         "verified_execution_view",
+        "supervised_approval_is_active",
+        "begin_attempt",
         "bind_provider_order_reference",
         "provider_order_reference",
         "bind_provider_evidence",
@@ -971,10 +1011,18 @@ def _build_canonical_place_action_dispatch():
     if (
         not callable(canonical_profile_require)
         or canonical_profile_require_code is None
+        or not callable(canonical_profile_state_of)
+        or canonical_profile_state_of_code is None
+        or not callable(canonical_profile_to_canonical_dict)
+        or canonical_profile_to_canonical_dict_code is None
         or not callable(canonical_profile_id_getter)
         or canonical_profile_id_getter_code is None
         or not callable(canonical_action_to_dict)
         or canonical_action_to_dict_code is None
+        or not callable(canonical_constraint_to_dict)
+        or canonical_constraint_to_dict_code is None
+        or not callable(canonical_next_request_id)
+        or canonical_next_request_id_code is None
         or not callable(canonical_plan_to_dict)
         or canonical_plan_to_dict_code is None
         or not callable(canonical_plan_fingerprint_getter)
@@ -993,6 +1041,10 @@ def _build_canonical_place_action_dispatch():
         or canonical_evidence_id_getter_code is None
         or not callable(canonical_trusted_now)
         or canonical_trusted_now_code is None
+        or not callable(canonical_bound_binding_sha256)
+        or canonical_bound_binding_sha256_code is None
+        or not callable(canonical_supervised_digest)
+        or canonical_supervised_digest_code is None
         or not callable(canonical_workspace_lock_enter)
         or canonical_workspace_lock_enter_code is None
         or not callable(canonical_workspace_lock_exit)
@@ -1225,6 +1277,14 @@ def _build_canonical_place_action_dispatch():
             is canonical_profile_require
             and getattr(canonical_profile_require, "__code__", None)
             is canonical_profile_require_code
+            and canonical_profile_type.__dict__.get("state_of")
+            is canonical_profile_state_of
+            and getattr(canonical_profile_state_of, "__code__", None)
+            is canonical_profile_state_of_code
+            and canonical_profile_type.__dict__.get("to_canonical_dict")
+            is canonical_profile_to_canonical_dict
+            and getattr(canonical_profile_to_canonical_dict, "__code__", None)
+            is canonical_profile_to_canonical_dict_code
             and canonical_profile_type.__dict__.get("profile_id")
             is canonical_profile_id_descriptor
             and getattr(canonical_profile_id_descriptor, "fget", None)
@@ -1235,6 +1295,14 @@ def _build_canonical_place_action_dispatch():
             is canonical_action_to_dict
             and getattr(canonical_action_to_dict, "__code__", None)
             is canonical_action_to_dict_code
+            and canonical_constraint_type.__dict__.get("to_dict")
+            is canonical_constraint_to_dict
+            and getattr(canonical_constraint_to_dict, "__code__", None)
+            is canonical_constraint_to_dict_code
+            and client_type.__dict__.get("_next_request_id")
+            is canonical_next_request_id
+            and getattr(canonical_next_request_id, "__code__", None)
+            is canonical_next_request_id_code
             and canonical_plan_type.__dict__.get("to_dict")
             is canonical_plan_to_dict
             and getattr(canonical_plan_to_dict, "__code__", None)
@@ -1278,6 +1346,13 @@ def _build_canonical_place_action_dispatch():
             and _supervised_execution_runtime._trusted_now is canonical_trusted_now
             and getattr(canonical_trusted_now, "__code__", None)
             is canonical_trusted_now_code
+            and _supervised_execution_runtime._bound_binding_sha256
+            is canonical_bound_binding_sha256
+            and getattr(canonical_bound_binding_sha256, "__code__", None)
+            is canonical_bound_binding_sha256_code
+            and _supervised_execution_runtime._digest is canonical_supervised_digest
+            and getattr(canonical_supervised_digest, "__code__", None)
+            is canonical_supervised_digest_code
             and canonical_workspace_lock_type.__dict__.get("__enter__")
             is canonical_workspace_lock_enter
             and getattr(canonical_workspace_lock_enter, "__code__", None)
@@ -1518,6 +1593,7 @@ def _build_canonical_place_action_dispatch():
         if (
             type(namespace) is not dict
             or "place_action" in namespace
+            or "_next_request_id" in namespace
             or binding_field not in namespace
         ):
             raise BetfairSupervisedExecutionError(

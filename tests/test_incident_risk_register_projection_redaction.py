@@ -62,5 +62,46 @@ class IncidentRiskProjectionIdentifierRedactionTests(unittest.TestCase):
         self.assertNotIn("another-secret", repr(projection))
 
 
+    def test_operator_projection_redacts_uri_userinfo_credentials(self) -> None:
+        occurrence = "postgresql://risk_user:super-secret-password@db.example/risk"
+        evidence = tuple(sorted((
+            occurrence,
+            "https://api-user:another-secret@provider.example/incident/42",
+        )))
+        components = ("risk_store",)
+        entry = IncidentRiskEntry(
+            entry_id=derive_occurrence_entry_id(
+                kind=RegisterEntryKind.INCIDENT,
+                affected_components=components,
+                occurrence_evidence_refs=(occurrence,),
+            ),
+            revision=1,
+            kind=RegisterEntryKind.INCIDENT,
+            severity=RiskSeverity.HIGH,
+            status=RiskStatus.OPEN,
+            evidence_state=RiskEvidenceState.PARTIAL,
+            opened_at="2026-10-06T05:00:00+00:00",
+            updated_at="2026-10-06T05:01:00+00:00",
+            title="Risk store connectivity",
+            summary="Operator-visible incident.",
+            affected_components=components,
+            occurrence_evidence_refs=(occurrence,),
+            evidence_refs=evidence,
+            requires_operator_action=True,
+        )
+
+        projection = operator_projection(entry)
+
+        self.assertEqual(entry.occurrence_evidence_refs, (occurrence,))
+        self.assertEqual(entry.evidence_refs, evidence)
+        self.assertEqual(projection.fingerprint_sha256, entry.fingerprint_sha256)
+        self.assertNotIn("risk_user", repr(projection))
+        self.assertNotIn("super-secret-password", repr(projection))
+        self.assertNotIn("api-user", repr(projection))
+        self.assertNotIn("another-secret", repr(projection))
+        self.assertIn("db.example/risk", repr(projection))
+        self.assertIn("provider.example/incident/42", repr(projection))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -191,3 +191,7 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# ProphetX session-pool state authority must remain bound to the exact scope and
+# derived durable paths captured at lifecycle construction.
+from . import _prophetx_session_scope_authority_guard as _prophetx_session_scope_authority_guard  # noqa: F401,E402

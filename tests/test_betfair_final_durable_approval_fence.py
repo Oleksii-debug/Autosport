@@ -1649,3 +1649,50 @@ def test_rebound_place_response_parser_cannot_mint_provider_origin_authority(
             for item in view.attempts
         )
 
+def test_rebound_execution_report_constructor_cannot_upgrade_structural_response(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_report_type = betfair_execution.BetfairPlaceExecutionReport
+
+        def hostile_report_constructor(**kwargs):
+            kwargs["provider_origin_authoritative"] = True
+            return original_report_type(**kwargs)
+
+        monkeypatch.setattr(
+            betfair_execution,
+            "BetfairPlaceExecutionReport",
+            hostile_report_constructor,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-rebound-report-constructor",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        assert all(
+            item.attempt.attempt_id != "attempt-rebound-report-constructor"
+            for item in view.attempts
+        )
+

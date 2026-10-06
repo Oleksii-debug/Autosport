@@ -2951,6 +2951,32 @@ def test_settlement_resolution_collection_rejects_conflicting_duplicate_evidence
         raise AssertionError("conflicting duplicate settlement evidence was accepted")
 
 
+def test_settlement_resolution_collection_rejects_conflicting_outcomes_across_evidence_ids() -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    coordinator = _resolution_coordinator(
+        (record, record),
+        (
+            _resolution(
+                evidence_id="evidence-1",
+                outcome="win",
+                digest_char="e",
+            ),
+            _resolution(
+                evidence_id="evidence-2",
+                outcome="loss",
+                digest_char="f",
+            ),
+        ),
+    )
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "conflicting settlement outcomes" in str(exc)
+    else:
+        raise AssertionError("order-dependent settlement outcome conflict was accepted")
+
+
 def test_settlement_resolution_collection_rejects_derived_resolution_type() -> None:
     class DerivedResolution(continuous_session.SettlementResolution):
         pass
@@ -3111,6 +3137,27 @@ def test_settlement_consumer_rejects_conflicting_duplicate_evidence_before_io() 
         assert "conflicting duplicate evidence_id" in str(exc)
     else:
         raise AssertionError("conflicting duplicate evidence reached settlement consumer")
+
+
+def test_settlement_consumer_rejects_conflicting_outcomes_across_evidence_ids() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    first = _resolution(
+        evidence_id="evidence-1",
+        outcome="win",
+        digest_char="a",
+    )
+    conflicting = _resolution(
+        evidence_id="evidence-2",
+        outcome="loss",
+        digest_char="b",
+    )
+
+    try:
+        coordinator._settle(resolutions=(first, conflicting))
+    except continuous_session.ContinuousSessionError as exc:
+        assert "conflicting settlement outcomes" in str(exc)
+    else:
+        raise AssertionError("conflicting settlement outcomes reached book I/O")
 
 
 def test_settlement_consumer_requires_exact_resolution_tuple() -> None:

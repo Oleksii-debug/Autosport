@@ -376,6 +376,7 @@ def test_save_rejects_rebound_snapshot_path_method_before_parent_creation(
 ) -> None:
     book = PaperBook("100")
     path_type = type(paper_module.Path("."))
+    original = getattr(path_type, attribute_name)
     attacker_calls = 0
 
     def hostile(*_args, **_kwargs):
@@ -386,8 +387,11 @@ def test_save_rejects_rebound_snapshot_path_method_before_parent_creation(
     monkeypatch.setattr(path_type, attribute_name, hostile)
     destination = tmp_path / f"nested-{attribute_name}" / "paper.json"
 
-    with pytest.raises(ValueError, match=message):
-        book.save(destination)
+    try:
+        with pytest.raises(ValueError, match=message):
+            book.save(destination)
+    finally:
+        monkeypatch.setattr(path_type, attribute_name, original)
 
     assert attacker_calls == 0
     assert not destination.exists()

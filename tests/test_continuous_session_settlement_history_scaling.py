@@ -1667,6 +1667,50 @@ def test_record_failure_rejects_runtime_session_lock_rebinding(monkeypatch) -> N
             raise AssertionError("runtime-rebound failure lock was accepted")
 
 
+def test_stale_failure_writer_cannot_clobber_newer_failure_sidecar() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        stale = _state_with_history(root, _SMALL_HISTORY)
+        current = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        current.record_success(
+            at="2026-10-06T04:53:00+00:00",
+            full_refresh=False,
+            settlement_evidence=(),
+        )
+        current.record_failure(code="NEWER_FAILURE")
+
+        try:
+            stale.record_failure(code="STALE_FAILURE")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "cannot overwrite newer operational error checkpoint" in str(exc)
+        else:
+            raise AssertionError("stale failure writer clobbered a newer checkpoint")
+
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        assert reopened.snapshot().last_error_code == "NEWER_FAILURE"
+
+        sidecar = json.loads(
+            (
+                root / "continuous_session.json.operational_error.json"
+            ).read_text(encoding="utf-8")
+        )
+        canonical = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        assert sidecar["observed_generation"] == canonical["generation"]
+
+
 def test_stale_instance_failure_cannot_overwrite_newer_canonical_generation() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

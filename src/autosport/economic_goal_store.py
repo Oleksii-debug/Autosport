@@ -15,7 +15,7 @@ import weakref
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from types import MethodType
+from types import MappingProxyType, MethodType
 from typing import Final
 
 from .economic_goal import (
@@ -239,7 +239,35 @@ _CANONICAL_OS_CLOSE: Final = os.close
 _CANONICAL_STAT_ISREG: Final = stat.S_ISREG
 _CANONICAL_JSON_DUMPS: Final = json.dumps
 
-_STORE_BINDINGS_BY_ID: Final = {}
+def _make_store_binding_registry(
+    _mapping_proxy=MappingProxyType,
+):
+    bindings: dict[int, tuple[object, Path, Path, object, object]] = {}
+    public_view = _mapping_proxy(bindings)
+
+    def register(
+        store_id: int,
+        entry: tuple[object, Path, Path, object, object],
+    ) -> None:
+        bindings[store_id] = entry
+
+    def release(store_id: int, store_ref: object) -> None:
+        entry = bindings.get(store_id)
+        if entry is not None and entry[0] is store_ref:
+            bindings.pop(store_id, None)
+
+    def lookup(store_id: int):
+        return bindings.get(store_id)
+
+    return public_view, register, release, lookup
+
+
+(
+    _STORE_BINDINGS_BY_ID,
+    _CANONICAL_STORE_BINDING_REGISTER,
+    _CANONICAL_STORE_BINDING_RELEASE,
+    _CANONICAL_STORE_BINDING_LOOKUP,
+) = _make_store_binding_registry()
 _CANONICAL_OBJECT_GETATTRIBUTE: Final = object.__getattribute__
 _CANONICAL_OBJECT_SETATTR: Final = object.__setattr__
 _CANONICAL_METHOD_TYPE: Final = MethodType
@@ -290,11 +318,11 @@ def _workspace_lock_scope(
 
 def _resolve_store_binding(
     store: object,
-    _bindings=_STORE_BINDINGS_BY_ID,
+    _binding_lookup=_CANONICAL_STORE_BINDING_LOOKUP,
     _error_type=EconomicGoalContractError,
     _object_getattribute=_CANONICAL_OBJECT_GETATTRIBUTE,
 ):
-    entry = _bindings.get(id(store))
+    entry = _binding_lookup(id(store))
     if entry is None or entry[0]() is not store:
         raise _error_type("economic goal store binding is unavailable")
     workspace, path, path_exists, path_open = entry[1:]
@@ -857,7 +885,8 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
         _path_resolve=_CANONICAL_PATH_RESOLVE,
         _path_join=_CANONICAL_PATH_JOIN,
         _path_lstat=_CANONICAL_PATH_LSTAT,
-        _bindings=_STORE_BINDINGS_BY_ID,
+        _binding_register=_CANONICAL_STORE_BINDING_REGISTER,
+        _binding_release=_CANONICAL_STORE_BINDING_RELEASE,
         _weakref_ref=weakref.ref,
         _file_name=_CANONICAL_STORE_FILE_NAME,
         _object_getattribute=_CANONICAL_OBJECT_GETATTRIBUTE,
@@ -885,9 +914,7 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
         store_id = id(self)
 
         def release_binding(store_ref) -> None:
-            entry = _bindings.get(store_id)
-            if entry is not None and entry[0] is store_ref:
-                _bindings.pop(store_id, None)
+            _binding_release(store_id, store_ref)
 
         store_ref = _weakref_ref(self, release_binding)
         path_open = path.open
@@ -907,12 +934,15 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
                 ) from exc
             return True
 
-        _bindings[store_id] = (
-            store_ref,
-            workspace_path,
-            path,
-            path_exists,
-            path_open,
+        _binding_register(
+            store_id,
+            (
+                store_ref,
+                workspace_path,
+                path,
+                path_exists,
+                path_open,
+            ),
         )
 
     def load(
@@ -1151,6 +1181,13 @@ EconomicGoalStore.persist_automatic_successor = _make_store_operation_descriptor
     _bind_store_contract_write(_BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR)
 )
 EconomicGoalStore._authority_operations_sealed = True
+
+# Constructor/resolver defaults already hold the only mutation-capable registry
+# functions. Remove their module-level handles so ordinary module access exposes
+# only the read-only compatibility view.
+del _CANONICAL_STORE_BINDING_REGISTER
+del _CANONICAL_STORE_BINDING_RELEASE
+del _CANONICAL_STORE_BINDING_LOOKUP
 
 # A custom metaclass __setattr__/__delattr__ is bypassable by explicitly calling
 # type.__setattr__/type.__delattr__ on the class. Install data descriptors on the

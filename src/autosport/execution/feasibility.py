@@ -488,6 +488,7 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     _execution_plan_fingerprint,
     _assert_market_book_authority,
     _market_book_acquisition_started_at,
+    _provider_limit_type,
     _verify_bound_binding,
     _bound_action_for,
     _bound_profile_for,
@@ -691,7 +692,7 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
             "profile_sha256": binding.profile_sha256,
         }
     )
-    limits = ProviderLimitAuthority(
+    limits = _provider_limit_type(
         provider_id=action.bookmaker_id,
         account_id=action.account_id,
         market_id=action.market_id,
@@ -730,6 +731,17 @@ def _install_execution_feasibility_result_authority():
     execution_plan_fingerprint_code = execution_plan_fingerprint.__code__
     profile_binding_type = ProfileBinding
     constraint_type = ExecutionLegConstraint
+    provider_limit_type = ProviderLimitAuthority
+    provider_limit_init = provider_limit_type.__init__
+    provider_limit_init_code = provider_limit_init.__code__
+    provider_limit_post_init = provider_limit_type.__post_init__
+    provider_limit_post_init_code = provider_limit_post_init.__code__
+    result_type = ExecutionFeasibilitySnapshot
+    result_init = result_type.__init__
+    result_init_code = result_init.__code__
+    feasibility_state_type = FeasibilityState
+    source_mode_type = SourceMode
+    projection_kind_type = ProjectionKind
     assert_market_book_authority = assert_market_book_depth_authoritative
     assert_market_book_authority_code = assert_market_book_authority.__code__
     market_book_acquisition_started = market_book_depth_acquisition_started_at
@@ -759,6 +771,27 @@ def _install_execution_feasibility_result_authority():
         ):
             raise RuntimeError(
                 "canonical execution feasibility assessor changed"
+            )
+        if (
+            ProviderLimitAuthority is not provider_limit_type
+            or provider_limit_type.__init__ is not provider_limit_init
+            or provider_limit_init.__code__ is not provider_limit_init_code
+            or provider_limit_type.__post_init__ is not provider_limit_post_init
+            or provider_limit_post_init.__code__ is not provider_limit_post_init_code
+        ):
+            raise RuntimeError(
+                "canonical provider-limit fail-closed authority changed"
+            )
+        if (
+            ExecutionFeasibilitySnapshot is not result_type
+            or result_type.__init__ is not result_init
+            or result_init.__code__ is not result_init_code
+            or FeasibilityState is not feasibility_state_type
+            or SourceMode is not source_mode_type
+            or ProjectionKind is not projection_kind_type
+        ):
+            raise RuntimeError(
+                "canonical execution feasibility result structure changed"
             )
         if (
             assert_market_book_depth_authoritative is not assert_market_book_authority
@@ -818,12 +851,13 @@ def _install_execution_feasibility_result_authority():
             _execution_plan_fingerprint=execution_plan_fingerprint,
             _assert_market_book_authority=assert_market_book_authority,
             _market_book_acquisition_started_at=market_book_acquisition_started,
+            _provider_limit_type=provider_limit_type,
             _verify_bound_binding=verify_bound_binding,
             _bound_action_for=bound_action_for,
             _bound_profile_for=bound_profile_for,
             _verified_execution_view=verified_execution_view,
         )
-        if type(result) is not ExecutionFeasibilitySnapshot:
+        if type(result) is not result_type:
             raise TypeError("authoritative feasibility resolver returned invalid result type")
         result_id = id(result)
         result_fingerprint = fingerprint(result)
@@ -838,7 +872,7 @@ def _install_execution_feasibility_result_authority():
         return result
 
     def is_authoritative(result: ExecutionFeasibilitySnapshot) -> bool:
-        if type(result) is not ExecutionFeasibilitySnapshot:
+        if type(result) is not result_type:
             return False
         current = issued.get(id(result))
         if current is None or current[0]() is not result:

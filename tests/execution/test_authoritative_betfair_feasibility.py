@@ -18,6 +18,7 @@ from autosport.betfair_account_readonly import (
 )
 from autosport.execution.feasibility import (
     FeasibilityState,
+    ProviderLimitAuthority,
     assess_authoritative_betfair_execution_feasibility,
 )
 from autosport.real_execution_ledger import (
@@ -1500,4 +1501,118 @@ def test_feasibility_market_book_authority_alias_rebind_is_rejected(
             )
 
     assert called is False
+
+def test_provider_limit_global_rebind_cannot_mint_positive_feasibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    called = False
+
+    class PermissiveLimit:
+        def __init__(self, **kwargs):
+            nonlocal called
+            called = True
+            self.provider_id = kwargs["provider_id"]
+            self.account_id = kwargs["account_id"]
+            self.market_id = kwargs["market_id"]
+            self.evidence_digest = kwargs["evidence_digest"]
+            self.permitted = True
+            self.min_stake = None
+            self.max_stake = None
+            self.min_price = None
+            self.max_price = None
+
+    monkeypatch.setattr(feasibility_module, "ProviderLimitAuthority", PermissiveLimit)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical provider-limit fail-closed authority changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+    assert called is False
+
+
+def test_provider_limit_init_rebind_cannot_mint_positive_feasibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    called = False
+
+    def permissive_init(self, **kwargs):
+        nonlocal called
+        called = True
+        object.__setattr__(self, "provider_id", kwargs["provider_id"])
+        object.__setattr__(self, "account_id", kwargs["account_id"])
+        object.__setattr__(self, "market_id", kwargs["market_id"])
+        object.__setattr__(self, "evidence_digest", kwargs["evidence_digest"])
+        object.__setattr__(self, "permitted", True)
+        object.__setattr__(self, "min_stake", None)
+        object.__setattr__(self, "max_stake", None)
+        object.__setattr__(self, "min_price", None)
+        object.__setattr__(self, "max_price", None)
+
+    monkeypatch.setattr(ProviderLimitAuthority, "__init__", permissive_init)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical provider-limit fail-closed authority changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "alias_name",
+    (
+        "ExecutionFeasibilitySnapshot",
+        "FeasibilityState",
+        "SourceMode",
+        "ProjectionKind",
+    ),
+)
+def test_result_semantic_type_rebind_revokes_authoritative_feasibility(
+    monkeypatch: pytest.MonkeyPatch,
+    alias_name: str,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    monkeypatch.setattr(feasibility_module, alias_name, object())
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical execution feasibility result structure changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
 

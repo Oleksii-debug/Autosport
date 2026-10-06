@@ -5049,6 +5049,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             invalidation_structure_was_rebound = (
                 restore_invalidation_buffer_structure_authority()
             )
+            restore_economic_context()
             if lifecycle_type_was_changed:
                 try:
                     exc.add_note(
@@ -5236,6 +5237,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     invalidation_structure_was_rebound = (
                         restore_invalidation_buffer_structure_authority()
                     )
+                    restore_economic_context()
                     if invalidation_structure_was_rebound:
                         try:
                             exc.add_note(
@@ -5725,6 +5727,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 invalidation_structure_was_rebound = (
                     restore_invalidation_buffer_structure_authority()
                 )
+                restore_economic_context()
                 if lifecycle_type_was_changed:
                     try:
                         exc.add_note(

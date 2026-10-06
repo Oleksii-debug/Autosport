@@ -3376,6 +3376,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         ),
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
+        _dependency_index_type: type[FocusedMirrorDependencyIndex] = (
+            FocusedMirrorDependencyIndex
+        ),
+        _dependency_reader: Callable[
+            [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
+        ] = FocusedMirrorDependencyIndex._dependency,
+        _dependency_reader_code: object = FocusedMirrorDependencyIndex._dependency.__code__,
+        _matching_keys_reader: Callable[..., tuple[object, ...]] = (
+            FocusedMirrorDependencyIndex.matching_keys
+        ),
+        _matching_keys_reader_code: object = FocusedMirrorDependencyIndex.matching_keys.__code__,
     ) -> ContinuousTickResult:
         state = self._state
         if (
@@ -3421,6 +3432,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             or _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
+            or FocusedMirrorDependencyIndex is not _dependency_index_type
+            or _dependency_index_type._dependency is not _dependency_reader
+            or getattr(_dependency_reader, "__code__", None)
+            is not _dependency_reader_code
+            or _dependency_index_type.matching_keys is not _matching_keys_reader
+            or getattr(_matching_keys_reader, "__code__", None)
+            is not _matching_keys_reader_code
         ):
             raise ContinuousSessionError(
                 "canonical coordinator running-fence authority changed"
@@ -3574,6 +3592,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "continuous session state authority changed during tick"
                 )
 
+        def restore_dependency_index_identity() -> bool:
+            if self.dependency_index is dependency_index:
+                return False
+            self.dependency_index = dependency_index
+            return True
+
+        def require_dependency_index_identity() -> None:
+            if restore_dependency_index_identity():
+                raise ContinuousSessionError(
+                    "continuous-session dependency index authority changed during tick"
+                )
+
         def require_economic_context() -> None:
             if (
                 self.workspace != workspace
@@ -3616,6 +3646,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "collector returned invalid continuous-session cycle metadata"
                 )
             require_state_identity()
+            require_dependency_index_identity()
         except Exception as exc:
             state_was_rebound = restore_state_identity()
             if state_was_rebound:
@@ -3672,6 +3703,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         "invalidation buffer backlog state is invalid"
                     )
                 require_state_identity()
+                require_dependency_index_identity()
                 failure = _record_failure_method(
                     state,
                     code="ProviderUnavailableError",
@@ -3733,11 +3765,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     else (source_snapshot.source_sync_state,)
                 )
                 require_state_identity()
+                require_dependency_index_identity()
                 delivered = desktop_drain(
                     as_of=now,
                     view=causal_view,
                 )
                 require_state_identity()
+                require_dependency_index_identity()
                 if (
                     type(delivered) is not tuple
                     or any(
@@ -3761,6 +3795,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     max_items=max_invalidation_items,
                 )
                 require_state_identity()
+                require_dependency_index_identity()
 
                 lifecycle_index_before = dependency_index.input_ids
                 if (
@@ -3778,6 +3813,32 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         "dependency index input identity state is invalid"
                     )
                 expected_lifecycle_index_ids = list(lifecycle_index_before)
+                lifecycle_expected_dependencies: dict[
+                    str, FocusedMirrorDependency
+                ] | None = None
+                lifecycle_expected_matching_keys: dict[
+                    str, tuple[object, ...]
+                ] | None = None
+                lifecycle_dependency_mirror: object | None = None
+                lifecycle_dependency_storage: object | None = None
+                lifecycle_matched_keys_storage: object | None = None
+                lifecycle_dependency_lock: object | None = None
+                if isinstance(dependency_index, _dependency_index_type):
+                    lifecycle_expected_dependencies = {
+                        input_id: _dependency_reader(dependency_index, input_id)
+                        for input_id in lifecycle_index_before
+                    }
+                    lifecycle_expected_matching_keys = {
+                        input_id: _matching_keys_reader(
+                            dependency_index,
+                            input_id,
+                        )
+                        for input_id in lifecycle_index_before
+                    }
+                    lifecycle_dependency_mirror = dependency_index._mirror
+                    lifecycle_dependency_storage = dependency_index._dependencies
+                    lifecycle_matched_keys_storage = dependency_index._matched_keys
+                    lifecycle_dependency_lock = dependency_index._lock
                 registration_callback_ids: list[str] = []
                 newly_registered: list[str] = []
                 retired: list[str] = []
@@ -3799,6 +3860,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                             )
                         newly_registered.append(input_id)
                         expected_lifecycle_index_ids.append(input_id)
+                        if lifecycle_expected_dependencies is not None:
+                            lifecycle_expected_dependencies[input_id] = (
+                                _dependency_reader(dependency_index, input_id)
+                            )
+                            lifecycle_expected_matching_keys[input_id] = (
+                                _matching_keys_reader(
+                                    dependency_index,
+                                    input_id,
+                                )
+                            )
 
                 def retire(input_id: str) -> None:
                     if _retire_input_method(
@@ -3814,6 +3885,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                             )
                         retired.append(input_id)
                         expected_lifecycle_index_ids.remove(input_id)
+                        if lifecycle_expected_dependencies is not None:
+                            lifecycle_expected_dependencies.pop(input_id, None)
+                            lifecycle_expected_matching_keys.pop(input_id, None)
 
                 registered = lifecycle_register_eligible(
                     market_store,
@@ -3823,6 +3897,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     retire_input=retire,
                 )
                 require_state_identity()
+                require_dependency_index_identity()
                 if (
                     type(registered) is not tuple
                     or any(
@@ -3857,6 +3932,57 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     raise ContinuousSessionError(
                         "lifecycle changed dependency index outside coordinator callbacks"
                     )
+                if lifecycle_expected_dependencies is not None:
+                    if (
+                        FocusedMirrorDependencyIndex is not _dependency_index_type
+                        or _dependency_index_type._dependency is not _dependency_reader
+                        or getattr(_dependency_reader, "__code__", None)
+                        is not _dependency_reader_code
+                        or _dependency_index_type.matching_keys
+                        is not _matching_keys_reader
+                        or getattr(_matching_keys_reader, "__code__", None)
+                        is not _matching_keys_reader_code
+                        or dependency_index._mirror is not lifecycle_dependency_mirror
+                        or dependency_index._dependencies
+                        is not lifecycle_dependency_storage
+                        or dependency_index._matched_keys
+                        is not lifecycle_matched_keys_storage
+                        or dependency_index._lock is not lifecycle_dependency_lock
+                    ):
+                        raise ContinuousSessionError(
+                            "lifecycle changed dependency routing authority outside "
+                            "coordinator callbacks"
+                        )
+                    current_dependencies = tuple(
+                        _dependency_reader(dependency_index, input_id)
+                        for input_id in indexed_input_ids
+                    )
+                    expected_dependencies = tuple(
+                        lifecycle_expected_dependencies[input_id]
+                        for input_id in indexed_input_ids
+                    )
+                    current_matching_keys = tuple(
+                        (
+                            input_id,
+                            _matching_keys_reader(dependency_index, input_id),
+                        )
+                        for input_id in indexed_input_ids
+                    )
+                    expected_matching_keys = tuple(
+                        (
+                            input_id,
+                            lifecycle_expected_matching_keys[input_id],
+                        )
+                        for input_id in indexed_input_ids
+                    )
+                    if (
+                        current_dependencies != expected_dependencies
+                        or current_matching_keys != expected_matching_keys
+                    ):
+                        raise ContinuousSessionError(
+                            "lifecycle changed dependency routing authority outside "
+                            "coordinator callbacks"
+                        )
                 for input_id in registered:
                     if input_id not in indexed_input_ids:
                         raise ContinuousSessionError(
@@ -3878,6 +4004,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     resolve_outcome=outcome_resolver,
                 )
                 require_state_identity()
+                require_dependency_index_identity()
                 _validate_settlement_evidence_method(
                     state,
                     settlement_evidence=resolutions,
@@ -3892,6 +4019,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         at=now,
                     )
                     require_state_identity()
+                    require_dependency_index_identity()
                     require_economic_context()
                 settled, evidence_ids = self._settle(
                     resolutions=resolutions,
@@ -3900,6 +4028,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     initial_bankroll=initial_bankroll,
                 )
                 require_state_identity()
+                require_dependency_index_identity()
                 require_economic_context()
                 if reconcile_after_settlement is not None:
                     reconcile_after_settlement(
@@ -3911,6 +4040,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         at=now,
                     )
                     require_state_identity()
+                    require_dependency_index_identity()
                     require_economic_context()
 
                 cycle_index = _record_success_method(
@@ -3923,9 +4053,19 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             except (SessionPausedError, SessionStoppedError):
                 raise
             except Exception as exc:
-                # Keep the coordinator pinned to the canonical state object even
-                # when a downstream callback tries to replace it before failing.
+                # Keep the coordinator pinned to the canonical state and dependency
+                # routing objects even when a downstream callback replaces either
+                # authority before failing.
                 state_was_rebound = restore_state_identity()
+                dependency_index_was_rebound = restore_dependency_index_identity()
+                if dependency_index_was_rebound:
+                    try:
+                        exc.add_note(
+                            "continuous-session dependency index authority was rebound "
+                            "during tick effects and was restored"
+                        )
+                    except BaseException:
+                        pass
                 if state_was_rebound:
                     try:
                         exc.add_note(

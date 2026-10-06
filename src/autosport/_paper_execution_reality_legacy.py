@@ -63,6 +63,16 @@ class RecoveryDecision(str, Enum):
 _CANONICAL_EVIDENCE_GRADE_TYPE = EvidenceGrade
 _CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE = PaperAttemptOutcome
 _CANONICAL_RECOVERY_DECISION_TYPE = RecoveryDecision
+_EVIDENCE_CONFIGURED = EvidenceGrade.CONFIGURED
+_EVIDENCE_EMPIRICAL = EvidenceGrade.EMPIRICAL
+_EVIDENCE_SYNTHETIC = EvidenceGrade.SYNTHETIC
+_OUTCOME_ACCEPTED = PaperAttemptOutcome.ACCEPTED
+_OUTCOME_PARTIAL = PaperAttemptOutcome.PARTIAL
+_OUTCOME_REJECTED = PaperAttemptOutcome.REJECTED
+_OUTCOME_UNKNOWN = PaperAttemptOutcome.UNKNOWN
+_RECOVERY_NONE = RecoveryDecision.NONE
+_RECOVERY_NO_EXPOSURE = RecoveryDecision.NO_EXPOSURE
+_RECOVERY_HEDGE_REVIEW_REQUIRED = RecoveryDecision.HEDGE_REVIEW_REQUIRED
 
 
 def _text(value: object, name: str) -> str:
@@ -239,7 +249,7 @@ class PaperExecutionModelConfig:
         _text(self.model_version, "model_version")
         _text(self.evidence_source, "evidence_source")
         _text(self.seed, "seed")
-        if not isinstance(self.evidence_grade, EvidenceGrade):
+        if type(self.evidence_grade) is not _CANONICAL_EVIDENCE_GRADE_TYPE:
             raise ValueError("evidence_grade must be EvidenceGrade")
         for name in (
             "max_quote_age_ms",
@@ -325,13 +335,13 @@ class PaperExecutionEvidenceRecord:
         ):
             _text(getattr(self, name), name)
         _timestamp(self.observed_at, "observed_at")
-        if not isinstance(self.outcome, PaperAttemptOutcome):
+        if type(self.outcome) is not _CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE:
             raise ValueError("outcome must be PaperAttemptOutcome")
-        if self.evidence_grade not in {EvidenceGrade.CONFIGURED, EvidenceGrade.EMPIRICAL}:
+        if self.evidence_grade not in {_EVIDENCE_CONFIGURED, _EVIDENCE_EMPIRICAL}:
             raise ValueError("registered execution evidence must be CONFIGURED or EMPIRICAL")
         if type(self.suspended) is not bool:
             raise ValueError("suspended must be bool")
-        if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if self.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             if self.accepted_odds is None or self.accepted_stake is None:
                 raise ValueError("accepted/partial evidence requires odds and stake")
             odds = decimal_parser(self.accepted_odds, "accepted_odds")
@@ -470,9 +480,9 @@ class ObservedPaperExecution:
             raise ValueError("decimal parser authority changed")
         _text(self.action_id, "action_id")
         _timestamp(self.observed_at, "observed_at")
-        if not isinstance(self.outcome, PaperAttemptOutcome):
+        if type(self.outcome) is not _CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE:
             raise ValueError("outcome must be PaperAttemptOutcome")
-        if self.evidence_grade not in {EvidenceGrade.CONFIGURED, EvidenceGrade.EMPIRICAL}:
+        if self.evidence_grade not in {_EVIDENCE_CONFIGURED, _EVIDENCE_EMPIRICAL}:
             raise ValueError("observed execution evidence must be CONFIGURED or EMPIRICAL")
         _text(self.evidence_source, "evidence_source")
         _text(self.evidence_id, "evidence_id")
@@ -482,7 +492,7 @@ class ObservedPaperExecution:
         _text(self.reason, "reason")
         if type(self.suspended) is not bool:
             raise ValueError("suspended must be bool")
-        if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if self.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             if self.accepted_odds is None or self.accepted_stake is None:
                 raise ValueError("accepted/partial observation requires odds and stake")
             odds = decimal_parser(self.accepted_odds, "accepted_odds")
@@ -566,13 +576,13 @@ class PaperLegAttempt:
             raise ValueError("delay_ms must be non-negative int")
         if type(self.quote_age_ms) is not int or self.quote_age_ms < 0:
             raise ValueError("quote_age_ms must be non-negative int")
-        if not isinstance(self.outcome, PaperAttemptOutcome):
+        if type(self.outcome) is not _CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE:
             raise ValueError("outcome must be PaperAttemptOutcome")
         if type(self.suspended) is not bool:
             raise ValueError("suspended must be bool")
-        if not isinstance(self.evidence_grade, EvidenceGrade):
+        if type(self.evidence_grade) is not _CANONICAL_EVIDENCE_GRADE_TYPE:
             raise ValueError("evidence_grade must be EvidenceGrade")
-        if self.evidence_grade is EvidenceGrade.SYNTHETIC:
+        if self.evidence_grade is _EVIDENCE_SYNTHETIC:
             if self.evidence_id is not None or self.evidence_sha256 is not None:
                 raise ValueError("synthetic attempt cannot claim registered evidence identity")
         else:
@@ -580,7 +590,7 @@ class PaperLegAttempt:
             digest = _text(self.evidence_sha256, "evidence_sha256")
             if len(digest) != 64:
                 raise ValueError("evidence_sha256 must be SHA-256 hex")
-        if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if self.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             if self.execution_odds is None or self.execution_stake is None:
                 raise ValueError("accepted/partial attempt requires execution odds and stake")
             execution_odds = decimal_parser(self.execution_odds, "execution_odds")
@@ -589,9 +599,9 @@ class PaperLegAttempt:
             execution_stake = decimal_parser(self.execution_stake, "execution_stake")
             if execution_stake > self.requested_stake:
                 raise ValueError("execution_stake cannot exceed requested_stake")
-            if self.outcome is PaperAttemptOutcome.ACCEPTED and execution_stake != self.requested_stake:
+            if self.outcome is _OUTCOME_ACCEPTED and execution_stake != self.requested_stake:
                 raise ValueError("ACCEPTED attempt must fill the requested stake")
-            if self.outcome is PaperAttemptOutcome.PARTIAL and execution_stake >= self.requested_stake:
+            if self.outcome is _OUTCOME_PARTIAL and execution_stake >= self.requested_stake:
                 raise ValueError("PARTIAL attempt must fill less than requested stake")
             object.__setattr__(self, "execution_odds", execution_odds)
             object.__setattr__(self, "execution_stake", execution_stake)
@@ -734,7 +744,7 @@ class PaperExecutionRun:
             raise ValueError("run attempts must have unique action ids")
         if any(type(value) is not str or not value for value in self.pending_action_ids):
             raise ValueError("pending_action_ids must contain non-empty strings")
-        if not isinstance(self.recovery_decision, RecoveryDecision):
+        if type(self.recovery_decision) is not _CANONICAL_RECOVERY_DECISION_TYPE:
             raise ValueError("recovery_decision must be RecoveryDecision")
         object.__setattr__(
             self,
@@ -750,7 +760,7 @@ class PaperExecutionRun:
             self.completed
             and not self.pending_action_ids
             and bool(self.attempts)
-            and all(item.outcome is PaperAttemptOutcome.ACCEPTED for item in self.attempts)
+            and all(item.outcome is _OUTCOME_ACCEPTED for item in self.attempts)
         )
 
 
@@ -1172,11 +1182,11 @@ class PaperExecutionLedger:
         known_exposure = _CANONICAL_DECIMAL_TYPE("0")
         worst_case = _CANONICAL_DECIMAL_TYPE("0")
         for attempt in attempts:
-            if attempt.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+            if attempt.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
                 assert attempt.execution_stake is not None
                 known_exposure += attempt.execution_stake
                 worst_case = max(worst_case, known_exposure)
-            elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
+            elif attempt.outcome is _OUTCOME_UNKNOWN:
                 worst_case = max(worst_case, known_exposure + attempt.requested_stake)
         return PaperExecutionRun(
             run_id=run_id,
@@ -1188,9 +1198,9 @@ class PaperExecutionLedger:
             attempts=attempts,
             pending_action_ids=tuple(action.action_id for action in plan.actions[len(attempts):]),
             recovery_decision=(
-                RecoveryDecision.HEDGE_REVIEW_REQUIRED
+                _RECOVERY_HEDGE_REVIEW_REQUIRED
                 if worst_case > 0
-                else RecoveryDecision.NONE
+                else _RECOVERY_NONE
             ),
             worst_case_exposure=worst_case,
             completed=False,
@@ -1271,13 +1281,13 @@ def _synthetic_attempt(
     execution_stake: Decimal | None = None
 
     if suspended:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "configured/synthetic suspension at execution time"
     elif execution_time >= expires:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "decision quote expired before PAPER-equivalent execution"
     elif quote_age_ms > config.max_quote_age_ms:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "decision quote exceeded configured PAPER freshness bound"
     else:
         bucket = _deterministic_int(
@@ -1286,19 +1296,19 @@ def _synthetic_attempt(
             10_000,
         )
         if bucket < config.unknown_bps:
-            outcome = PaperAttemptOutcome.UNKNOWN
+            outcome = _OUTCOME_UNKNOWN
             reason = "deterministic execution model produced UNKNOWN"
         elif bucket < config.unknown_bps + config.rejected_bps:
-            outcome = PaperAttemptOutcome.REJECTED
+            outcome = _OUTCOME_REJECTED
             reason = "deterministic execution model produced REJECTED"
         elif bucket < config.unknown_bps + config.rejected_bps + config.partial_bps:
-            outcome = PaperAttemptOutcome.PARTIAL
+            outcome = _OUTCOME_PARTIAL
             reason = "deterministic execution model produced PARTIAL"
         else:
-            outcome = PaperAttemptOutcome.ACCEPTED
+            outcome = _OUTCOME_ACCEPTED
             reason = "deterministic execution model produced ACCEPTED"
 
-        if outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             slippage_bps = (
                 0
                 if config.max_slippage_bps == 0
@@ -1313,7 +1323,7 @@ def _synthetic_attempt(
                 odds_margin * (_CANONICAL_DECIMAL_TYPE(10_000 - slippage_bps) / _CANONICAL_DECIMAL_TYPE(10_000))
             )
             execution_stake = action.requested_stake
-            if outcome is PaperAttemptOutcome.PARTIAL:
+            if outcome is _OUTCOME_PARTIAL:
                 execution_stake = (
                     action.requested_stake
                     * _CANONICAL_DECIMAL_TYPE(config.partial_fill_bps)
@@ -1343,7 +1353,7 @@ def _synthetic_attempt(
         execution_odds=execution_odds,
         execution_stake=execution_stake,
         suspended=suspended,
-        evidence_grade=EvidenceGrade.SYNTHETIC,
+        evidence_grade=_EVIDENCE_SYNTHETIC,
         evidence_source=config.evidence_source,
         evidence_id=None,
         evidence_sha256=None,
@@ -1409,19 +1419,19 @@ def _observed_attempt(
     if quote_age_ms > config.max_quote_age_ms:
         raise PaperExecutionStateError("observed execution violates configured quote freshness")
     if observation.suspended and observation.outcome in {
-        PaperAttemptOutcome.ACCEPTED,
-        PaperAttemptOutcome.PARTIAL,
+        _OUTCOME_ACCEPTED,
+        _OUTCOME_PARTIAL,
     }:
         raise PaperExecutionStateError("suspended observation cannot claim a fill")
     if observation.accepted_stake is not None and observation.accepted_stake > action.requested_stake:
         raise PaperExecutionStateError("observed accepted stake exceeds requested stake")
     if (
-        observation.outcome is PaperAttemptOutcome.ACCEPTED
+        observation.outcome is _OUTCOME_ACCEPTED
         and observation.accepted_stake != action.requested_stake
     ):
         raise PaperExecutionStateError("ACCEPTED observation must fill requested stake")
     if (
-        observation.outcome is PaperAttemptOutcome.PARTIAL
+        observation.outcome is _OUTCOME_PARTIAL
         and observation.accepted_stake is not None
         and observation.accepted_stake >= action.requested_stake
     ):
@@ -1526,13 +1536,13 @@ def execute_paper_plan(
         return existing
 
     attempts = list(existing.attempts)
-    if attempts and attempts[-1].outcome is not PaperAttemptOutcome.ACCEPTED:
+    if attempts and attempts[-1].outcome is not _OUTCOME_ACCEPTED:
         next_index = len(attempts)
         pending = tuple(action.action_id for action in plan.actions[next_index:])
         recovery = (
-            RecoveryDecision.HEDGE_REVIEW_REQUIRED
+            _RECOVERY_HEDGE_REVIEW_REQUIRED
             if existing.worst_case_exposure > 0
-            else RecoveryDecision.NO_EXPOSURE
+            else _RECOVERY_NO_EXPOSURE
         )
         ledger.complete_run(
             run_id=run_id,
@@ -1554,7 +1564,7 @@ def execute_paper_plan(
     known_exposure = _CANONICAL_DECIMAL_TYPE("0")
     worst_case_exposure = _CANONICAL_DECIMAL_TYPE("0")
     for prior in attempts:
-        assert prior.outcome is PaperAttemptOutcome.ACCEPTED
+        assert prior.outcome is _OUTCOME_ACCEPTED
         assert prior.execution_stake is not None
         known_exposure += prior.execution_stake
         worst_case_exposure = max(worst_case_exposure, known_exposure)
@@ -1590,25 +1600,25 @@ def execute_paper_plan(
         ledger.record_attempt(attempt)
         attempts.append(attempt)
 
-        if attempt.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if attempt.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             assert attempt.execution_stake is not None
             known_exposure += attempt.execution_stake
             worst_case_exposure = max(worst_case_exposure, known_exposure)
-        elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
+        elif attempt.outcome is _OUTCOME_UNKNOWN:
             worst_case_exposure = max(
                 worst_case_exposure,
                 known_exposure + attempt.requested_stake,
             )
 
-        if attempt.outcome is not PaperAttemptOutcome.ACCEPTED:
+        if attempt.outcome is not _OUTCOME_ACCEPTED:
             pending = tuple(
                 pending_action.action_id
                 for pending_action in plan.actions[sequence + 1 :]
             )
             recovery = (
-                RecoveryDecision.HEDGE_REVIEW_REQUIRED
+                _RECOVERY_HEDGE_REVIEW_REQUIRED
                 if worst_case_exposure > 0
-                else RecoveryDecision.NO_EXPOSURE
+                else _RECOVERY_NO_EXPOSURE
             )
             ledger.complete_run(
                 run_id=run_id,
@@ -1630,7 +1640,7 @@ def execute_paper_plan(
     ledger.complete_run(
         run_id=run_id,
         pending_action_ids=(),
-        recovery_decision=RecoveryDecision.NONE,
+        recovery_decision=_RECOVERY_NONE,
         worst_case_exposure=worst_case_exposure,
     )
     result = ledger.load_run(

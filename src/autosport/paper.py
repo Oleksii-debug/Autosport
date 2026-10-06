@@ -1212,10 +1212,6 @@ class PaperBook:
                 raise ValueError(
                     "PaperBook ticket exchange_side must be canonical 'back' or 'lay'"
                 )
-            if exchange_side == "lay":
-                raise ValueError(
-                    "PaperBook LAY economic materialization is not supported"
-                )
         if leg.market_semantics_id is not None:
             try:
                 _CANONICAL_SEMANTIC_IDENTITY(

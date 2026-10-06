@@ -183,3 +183,40 @@ def test_authority_dispatch_rebinding_cannot_mint_capability_truth() -> None:
         ProviderManifestState.NOT_PROVEN
     )
 
+def test_profile_state_method_rebinding_cannot_mint_canonical_capability_truth() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+
+    original_state_of = BookmakerCapabilityProfile.state_of
+    try:
+        BookmakerCapabilityProfile.state_of = (
+            lambda self, capability: BookmakerCapabilityState.SUPPORTED
+        )
+        manifest = build_provider_capability_manifest(
+            profile,
+            integration,
+            manifest_ref="provider-capability-manifest",
+            manifest_version=10,
+            observed_at=_T2,
+            source_ref="product-provider-capability-projection",
+            source_payload_sha256=_HASH_C,
+        )
+    finally:
+        BookmakerCapabilityProfile.state_of = original_state_of
+
+    assert manifest.state_of(ProviderManifestCapability.LIVE_QUOTES) is (
+        ProviderManifestState.PROVEN
+    )
+    assert manifest.state_of(ProviderManifestCapability.PREMATCH_QUOTES) is (
+        ProviderManifestState.NOT_PROVEN
+    )
+    assert manifest.state_of(ProviderManifestCapability.STREAM) is (
+        ProviderManifestState.NOT_PROVEN
+    )
+

@@ -8,7 +8,7 @@ authority.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -365,6 +365,10 @@ def _read_market_book_batch(
     request_budget: Callable[[object], object],
     post_readonly: Callable[..., _transport._MarketBookRpcResponse],
     receipt_from_response: Callable[..., MarketBookBatchReceipt],
+    validate_receipt_from_response: Callable[
+        [MarketBookBatchReceipt, MarketBookReadBatch, list[object]],
+        None,
+    ],
     result_factory: Callable[..., MarketBookBatchTransportResult],
     post_dispatch_failure_type: type[MarketBookPostDispatchFailure],
     protocol_error_type: type[BaseException],
@@ -417,8 +421,10 @@ def _read_market_book_batch(
                 "MarketBook plan changed during provider dispatch"
             )
 
+        response_rows = list(response.rows)
         try:
-            receipt = receipt_from_response(batch, list(response.rows))
+            receipt = receipt_from_response(batch, response_rows)
+            validate_receipt_from_response(receipt, batch, response_rows)
         except completeness_error_type as exc:
             raise protocol_error_type(
                 "MarketBook response cannot produce canonical structural receipt"
@@ -990,6 +996,125 @@ def _install_transport_result_authority() -> None:
                 )
         return decision.allowed
 
+    mapping_type = Mapping
+
+    def validate_response_receipt(
+        receipt: MarketBookBatchReceipt,
+        batch: MarketBookReadBatch,
+        response_rows: list[object],
+    ) -> None:
+        if type(receipt) is not receipt_type:
+            raise completeness_error_type(
+                "response receipt must be an exact MarketBookBatchReceipt"
+            )
+        if type(response_rows) is not list:
+            raise completeness_error_type(
+                "MarketBook response rows must be an exact list"
+            )
+        observed_ids: list[str] = []
+        for entry in response_rows:
+            if not isinstance(entry, mapping_type):
+                raise completeness_error_type(
+                    "each MarketBook response entry must be an object"
+                )
+            market_id = entry.get("marketId")
+            if (
+                not isinstance(market_id, str)
+                or not market_id
+                or market_id != market_id.strip()
+            ):
+                raise completeness_error_type(
+                    "marketId must be a non-empty canonical string"
+                )
+            observed_ids.append(market_id)
+        if len(observed_ids) != len(set(observed_ids)):
+            raise completeness_error_type(
+                "MarketBook response contains duplicate marketId values"
+            )
+
+        expected = tuple(sorted(batch.market_ids))
+        observed = tuple(sorted(observed_ids))
+        expected_set = set(expected)
+        observed_set = set(observed)
+        missing = tuple(sorted(expected_set - observed_set))
+        unexpected = tuple(sorted(observed_set - expected_set))
+        expected_status = (
+            exact_receipt_status
+            if not missing and not unexpected
+            else incomplete_receipt_status
+        )
+
+        for value, name in (
+            (receipt.expected_market_ids, "expected_market_ids"),
+            (receipt.observed_market_ids, "observed_market_ids"),
+            (receipt.missing_market_ids, "missing_market_ids"),
+            (receipt.unexpected_market_ids, "unexpected_market_ids"),
+        ):
+            if type(value) is not tuple:
+                raise completeness_error_type(
+                    f"response receipt {name} must be an exact tuple"
+                )
+        if (
+            receipt.batch_id != batch.batch_id
+            or receipt.expected_market_ids != expected
+            or receipt.observed_market_ids != observed
+            or receipt.missing_market_ids != missing
+            or receipt.unexpected_market_ids != unexpected
+            or receipt.status is not expected_status
+            or receipt.failure_kind is not None
+            or receipt.failure_code is not None
+        ):
+            raise completeness_error_type(
+                "response receipt contradicts canonical provider rows or batch"
+            )
+
+        try:
+            response_encoded = json_dumps(
+                response_rows,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise completeness_error_type(
+                "MarketBook response rows are not canonical JSON data"
+            ) from exc
+        payload_sha256 = hash_factory(response_encoded).hexdigest()
+        if receipt.payload_sha256 != payload_sha256:
+            raise completeness_error_type(
+                "response receipt payload hash does not match provider rows"
+            )
+
+        core_payload = {
+            "batch_id": batch.batch_id,
+            "expected_market_ids": list(expected),
+            "observed_market_ids": list(observed),
+            "missing_market_ids": list(missing),
+            "unexpected_market_ids": list(unexpected),
+            "status": expected_status.value,
+            "failure_kind": None,
+            "failure_code": None,
+            "payload_sha256": payload_sha256,
+        }
+        try:
+            receipt_encoded = json_dumps(
+                core_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise completeness_error_type(
+                "MarketBook receipt identity payload is not canonical JSON data"
+            ) from exc
+        expected_receipt_id = hash_factory(receipt_encoded).hexdigest()
+        if receipt.receipt_id != expected_receipt_id:
+            raise completeness_error_type(
+                "response receipt identity does not match canonical recomputation"
+            )
+
     def read_market_book_batch(
         client: _base.BetfairReadOnlyClient,
         plan: MarketBookReadPlan,
@@ -1131,6 +1256,7 @@ def _install_transport_result_authority() -> None:
                 request_budget=market_book_request_budget,
                 post_readonly=post_market_book_readonly,
                 receipt_from_response=receipt_from_response,
+                validate_receipt_from_response=validate_response_receipt,
                 result_factory=result_factory,
                 post_dispatch_failure_type=post_dispatch_failure_type,
                 protocol_error_type=protocol_error_type,

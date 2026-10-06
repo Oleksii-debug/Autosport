@@ -1921,3 +1921,37 @@ def test_repeated_stop_same_reason_is_generation_neutral() -> None:
         )
         assert after["generation"] == before["generation"]
         assert after["last_error_code"] == "OPERATOR_STOP"
+
+
+def test_resume_clears_predecessor_stop_reason_immediately() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.set_state(
+            continuous_session.SessionState.STOPPED,
+            reason="OPERATOR_STOP",
+        )
+        stopped = state.snapshot()
+        assert stopped.state is continuous_session.SessionState.STOPPED
+        assert stopped.last_error_code == "OPERATOR_STOP"
+
+        state.set_state(continuous_session.SessionState.RUNNING)
+        resumed = state.snapshot()
+        assert resumed.state is continuous_session.SessionState.RUNNING
+        assert resumed.last_error_code is None
+
+
+def test_resume_from_paused_reason_clears_predecessor_reason() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.set_state(
+            continuous_session.SessionState.PAUSED,
+            reason="OPERATOR_PAUSE",
+        )
+        assert state.snapshot().last_error_code == "OPERATOR_PAUSE"
+
+        state.set_state(continuous_session.SessionState.RUNNING)
+        resumed = state.snapshot()
+        assert resumed.state is continuous_session.SessionState.RUNNING
+        assert resumed.last_error_code is None

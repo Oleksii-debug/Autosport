@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -202,6 +203,41 @@ def test_runtime_start_rereads_persisted_source_and_uses_closed_registry_factory
             "poll_seconds": 30.0,
         }
     ]
+
+
+def test_profiled_runtime_binds_exact_strategy_workspace_without_env_retarget(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    strategy_workspace = (tmp_path / "strategy-workspace").resolve(strict=False)
+    environment_workspace = (tmp_path / "global-workspace").resolve(strict=False)
+    monkeypatch.setenv("AUTOSPORT_PARLAY_API_KEY", "test-only-api-key")
+    monkeypatch.setenv("AUTOSPORT_PRODUCT_WORKSPACE", str(environment_workspace))
+    monkeypatch.setenv(
+        "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF",
+        "terms:parlayapi:v1",
+    )
+    monkeypatch.setenv(
+        "AUTOSPORT_PARLAY_RETENTION_REF",
+        "retention:parlayapi:v1",
+    )
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str((tmp_path / "monotonic-authority").resolve(strict=False)),
+    )
+
+    runtime = product_gui_worker_module._PROFILED_RUNTIME_BUILDER(
+        strategy_workspace,
+        _FACTORY_SPEC,
+        "10000",
+        expected_source_id="parlayapi:table_tennis",
+    )
+    try:
+        assert runtime.workspace == strategy_workspace
+        assert runtime.collector.source.workspace == strategy_workspace
+        assert os.environ["AUTOSPORT_PRODUCT_WORKSPACE"] == str(environment_workspace)
+    finally:
+        runtime.close()
 
 
 def test_runtime_builder_rejects_provider_identity_mismatch_before_composition(

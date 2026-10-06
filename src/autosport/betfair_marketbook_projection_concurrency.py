@@ -523,16 +523,28 @@ def _install_projection_gate_authority() -> None:
         self._next_lease_generation = 1
         if state is not None:
             validate_state(state)
-            self._last_observed_at_utc_us = state.last_observed_at_utc_us
-            self._active = {
-                lease.request_id: make_lease(
+            detached_active = tuple(
+                make_lease(
                     lease.request_id,
                     lease.acquired_at_utc_us,
                     lease.generation,
                 )
                 for lease in state.active
+            )
+            detached_state = make_state(
+                state.last_observed_at_utc_us,
+                detached_active,
+                state.next_lease_generation,
+            )
+            self._last_observed_at_utc_us = (
+                detached_state.last_observed_at_utc_us
+            )
+            self._active = {
+                lease.request_id: lease for lease in detached_state.active
             }
-            self._next_lease_generation = state.next_lease_generation
+            self._next_lease_generation = (
+                detached_state.next_lease_generation
+            )
 
     def snapshot(
         self: BetfairMarketBookProjectionConcurrencyGate,

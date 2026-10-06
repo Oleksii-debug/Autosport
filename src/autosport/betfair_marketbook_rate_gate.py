@@ -518,12 +518,25 @@ def _install_rate_gate_authority() -> None:
         self._next_reservation_generation = 1
         if state is not None:
             validate_state(state)
-            self._last_scheduled_at_utc_us = state.last_scheduled_at_utc_us
+            detached_markets = tuple(
+                make_window(
+                    market.market_id,
+                    tuple(market.accepted_at_utc_us),
+                )
+                for market in state.markets
+            )
+            detached_state = make_state(
+                state.last_scheduled_at_utc_us,
+                detached_markets,
+            )
+            self._last_scheduled_at_utc_us = (
+                detached_state.last_scheduled_at_utc_us
+            )
             self._accepted = {
                 market.market_id: [
                     (timestamp, 0) for timestamp in market.accepted_at_utc_us
                 ]
-                for market in state.markets
+                for market in detached_state.markets
             }
 
     def snapshot(

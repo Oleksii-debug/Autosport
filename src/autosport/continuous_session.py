@@ -3407,17 +3407,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         "dependency index input identity state is invalid"
                     )
                 expected_lifecycle_index_ids = list(lifecycle_index_before)
+                registration_callback_ids: list[str] = []
                 newly_registered: list[str] = []
                 retired: list[str] = []
 
                 def register(input_id: str, **selectors: object) -> None:
-                    if _register_input_method(
+                    registered_now = _register_input_method(
                         self,
                         input_id,
                         dependency_index=dependency_index,
                         register_input=dependency_register,
                         **selectors,
-                    ):
+                    )
+                    registration_callback_ids.append(input_id)
+                    if registered_now:
                         if input_id in expected_lifecycle_index_ids:
                             raise ContinuousSessionError(
                                 "lifecycle changed dependency index outside "
@@ -3461,6 +3464,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 ):
                     raise ContinuousSessionError(
                         "lifecycle returned invalid registered input ids"
+                    )
+                if registered != tuple(registration_callback_ids):
+                    raise ContinuousSessionError(
+                        "lifecycle registration receipt conflicts with coordinator callbacks"
                     )
                 # The lifecycle is canonical about eligibility; the index is canonical
                 # about dependency routing. Keep both outputs for auditability, but never

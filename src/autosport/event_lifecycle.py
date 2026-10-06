@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .domain import _canonical_sport_value, _encoded_sport_identity
-from .integrity import atomic_write_json
+from .integrity import atomic_write_json, durable_path_lock
 from .json_integrity import strict_json_loads
 from .providers import _scoped_identity
 from .storage import SQLiteMarketStore
@@ -377,11 +377,12 @@ class ContinuousEventLifecycle:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            atomic_write_json(self.path, self._empty())
-        else:
-            self._migrate_legacy_state()
-        self._read()
+        with durable_path_lock(self.path):
+            if not self.path.exists():
+                atomic_write_json(self.path, self._empty())
+            else:
+                self._migrate_legacy_state()
+            self._read()
 
     @classmethod
     def _empty(cls) -> dict[str, object]:
@@ -599,67 +600,68 @@ class ContinuousEventLifecycle:
         )
 
     def apply_page(self, page: CatalogPage, *, discovered_at: str) -> tuple[str, ...]:
-        page.validate()
-        now = _instant(discovered_at, "discovered_at")
-        for event in page.events:
-            if _instant(event.available_at, "available_at") > now:
-                raise CatalogLifecycleError(
-                    "catalog evidence cannot be available after discovery cutoff"
-                )
-
-        raw = self._read()
-        sources = raw["sources"]
-        events = raw["events"]
-        previous_raw = sources.get(page.source_id)
-        previous = None if previous_raw is None else CatalogCheckpoint(**previous_raw)
-        if previous is not None:
-            if page.stream_epoch == previous.stream_epoch:
-                if page.position == previous.position:
-                    if (
-                        page.cursor == previous.cursor
-                        and page.digest == previous.page_sha256
-                    ):
-                        return ()
-                    raise CatalogCursorError(
-                        "equal catalog position conflicts with durable page evidence"
+        with durable_path_lock(self.path):
+            page.validate()
+            now = _instant(discovered_at, "discovered_at")
+            for event in page.events:
+                if _instant(event.available_at, "available_at") > now:
+                    raise CatalogLifecycleError(
+                        "catalog evidence cannot be available after discovery cutoff"
                     )
-                if page.position != previous.position + 1:
-                    raise CatalogCursorError("catalog cursor gap or regression detected")
-            elif not page.epoch_changed:
-                raise CatalogCursorError(
-                    "catalog stream epoch changed without explicit epoch_changed evidence"
+
+            raw = self._read()
+            sources = raw["sources"]
+            events = raw["events"]
+            previous_raw = sources.get(page.source_id)
+            previous = None if previous_raw is None else CatalogCheckpoint(**previous_raw)
+            if previous is not None:
+                if page.stream_epoch == previous.stream_epoch:
+                    if page.position == previous.position:
+                        if (
+                            page.cursor == previous.cursor
+                            and page.digest == previous.page_sha256
+                        ):
+                            return ()
+                        raise CatalogCursorError(
+                            "equal catalog position conflicts with durable page evidence"
+                        )
+                    if page.position != previous.position + 1:
+                        raise CatalogCursorError("catalog cursor gap or regression detected")
+                elif not page.epoch_changed:
+                    raise CatalogCursorError(
+                        "catalog stream epoch changed without explicit epoch_changed evidence"
+                    )
+            elif page.epoch_changed:
+                raise CatalogCursorError("first catalog page cannot claim an epoch change")
+
+            changed: list[str] = []
+            for event in page.events:
+                previous_event_raw = events.get(event.identity)
+                previous_event = (
+                    None
+                    if previous_event_raw is None
+                    else EventLifecycleRecord.from_dict(previous_event_raw)
                 )
-        elif page.epoch_changed:
-            raise CatalogCursorError("first catalog page cannot claim an epoch change")
+                candidate = self._event_record(
+                    event,
+                    discovered_at=discovered_at,
+                    previous=previous_event,
+                )
+                if previous_event != candidate:
+                    events[event.identity] = candidate.to_dict()
+                    changed.append(event.identity)
 
-        changed: list[str] = []
-        for event in page.events:
-            previous_event_raw = events.get(event.identity)
-            previous_event = (
-                None
-                if previous_event_raw is None
-                else EventLifecycleRecord.from_dict(previous_event_raw)
+            sources[page.source_id] = asdict(
+                CatalogCheckpoint(
+                    source_id=page.source_id,
+                    stream_epoch=page.stream_epoch,
+                    cursor=page.cursor,
+                    position=page.position,
+                    page_sha256=page.digest,
+                )
             )
-            candidate = self._event_record(
-                event,
-                discovered_at=discovered_at,
-                previous=previous_event,
-            )
-            if previous_event != candidate:
-                events[event.identity] = candidate.to_dict()
-                changed.append(event.identity)
-
-        sources[page.source_id] = asdict(
-            CatalogCheckpoint(
-                source_id=page.source_id,
-                stream_epoch=page.stream_epoch,
-                cursor=page.cursor,
-                position=page.position,
-                page_sha256=page.digest,
-            )
-        )
-        atomic_write_json(self.path, raw)
-        return tuple(changed)
+            atomic_write_json(self.path, raw)
+            return tuple(changed)
 
     def refresh_once(
         self,

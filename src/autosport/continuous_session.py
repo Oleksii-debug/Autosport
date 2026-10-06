@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import stat
@@ -1192,6 +1193,29 @@ class _ContinuousSessionState:
                 self._checkpoint_token = _checkpoint_identity_token(self)
             return SessionState(self._state)
 
+    @contextmanager
+    def running_fence(
+        self,
+        *,
+        _durable_path_lock: Callable[..., Any] = durable_path_lock,
+        _durable_path_lock_code: object = durable_path_lock.__code__,
+    ):
+        if (
+            durable_path_lock is not _durable_path_lock
+            or getattr(_durable_path_lock, "__code__", None)
+            is not _durable_path_lock_code
+        ):
+            raise ContinuousSessionError(
+                "canonical running-fence authority changed"
+            )
+        with _durable_path_lock(self.path):
+            state = self.bounded_state()
+            if state is SessionState.PAUSED:
+                raise SessionPausedError("continuous session is durably PAUSED")
+            if state is SessionState.STOPPED:
+                raise SessionStoppedError("continuous session is durably STOPPED")
+            yield
+
     @property
     def session_id(self) -> str:
         # Session identity is fixed by the serialized bootstrap transaction and
@@ -2231,13 +2255,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         try:
             cycle = self.collector.run_cycle()
             if cycle.provider_unavailable:
+                with self._state.running_fence():
                 # A provider-unavailable collector cycle commits no source deltas,
                 # so there is no new source projection to publish. Avoid the full
                 # continuous-session snapshot path here: retained settlement history
                 # must not amplify an operational provider failure into O(history).
-                failure = self._state.record_failure(
-                    code="ProviderUnavailableError"
-                )
+                    failure = self._state.record_failure(
+                        code="ProviderUnavailableError"
+                    )
                 return ContinuousTickResult(
                     session_id=failure.session_id,
                     cycle_index=failure.cycles_completed,
@@ -2270,8 +2295,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     last_success_at=failure.last_success_at,
                 )
 
-            source_snapshot = self._refresh_source_state_projection()
-            source_gap_states = (
+            with self._state.running_fence():
+                source_snapshot = self._refresh_source_state_projection()
+                source_gap_states = (
                 ()
                 if source_snapshot.source_gap_state is None
                 else (source_snapshot.source_gap_state,)
@@ -2344,11 +2370,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     at=now,
                 )
 
-            cycle_index = self._state.record_success(
-                at=now,
-                full_refresh=full_refresh,
-                settlement_evidence=resolutions,
-            )
+                cycle_index = self._state.record_success(
+                    at=now,
+                    full_refresh=full_refresh,
+                    settlement_evidence=resolutions,
+                )
             return ContinuousTickResult(
                 session_id=self.session_id,
                 cycle_index=cycle_index,
@@ -2367,8 +2393,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 settlement_evidence_ids=evidence_ids,
                 last_success_at=self._state.snapshot().last_success_at or now,
             )
+        except (SessionPausedError, SessionStoppedError):
+            raise
         except Exception as exc:
-            self._state.record_failure(code=type(exc).__name__)
+            try:
+                with self._state.running_fence():
+                    self._state.record_failure(code=type(exc).__name__)
+            except (SessionPausedError, SessionStoppedError):
+                # Preserve the original failure if an operator pause/stop became
+                # authoritative while provider observation or error handling was
+                # in flight. The operator reason remains canonical.
+                pass
             raise
 
 # Seal the consumer entry after class creation. The metaclass data descriptor also

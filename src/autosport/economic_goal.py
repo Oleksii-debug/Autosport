@@ -454,6 +454,9 @@ def _validate_automatic_transition_bound(
     Both arguments must already be valid typed contracts.  The successor must be
     the immediately next revision of the same goal/bankroll/currency/objective.
     Equality of authority limits is accepted; this validator establishes
+    *non-expansion*, not that every revision necessarily tightens a limit.
+    """
+
     if (
         type(previous) is not _contract_type
         or type(candidate) is not _contract_type

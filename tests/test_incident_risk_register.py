@@ -130,6 +130,19 @@ class IncidentRiskRegisterTests(unittest.TestCase):
                 ):
                     IncidentRiskEntry.from_dict(wrong_severity_case)
 
+    def test_deserialization_rejects_subclass_before_constructor_dispatch(self) -> None:
+        payload = self._entry().to_dict()
+
+        class HostileEntry(IncidentRiskEntry):
+            def __new__(cls, *args, **kwargs):
+                raise AssertionError("hostile subclass constructor executed")
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "deserialization requires exact IncidentRiskEntry",
+        ):
+            HostileEntry.from_dict(payload)
+
     def test_canonical_text_timestamp_and_tuple_rules_fail_closed(self) -> None:
         with self.assertRaisesRegex(IncidentRiskRegisterError, "canonical trimmed text"):
             self._entry(title=" leading")

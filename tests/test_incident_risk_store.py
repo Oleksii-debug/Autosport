@@ -617,6 +617,22 @@ class IncidentRiskStoreTests(unittest.TestCase):
         ):
             self.store.load()
 
+    def test_append_refuses_payload_over_read_limit_before_publication(self) -> None:
+        import autosport.incident_risk_store as incident_risk_store
+
+        with mock.patch.object(
+            incident_risk_store,
+            "_MAX_STORE_BYTES",
+            128,
+        ):
+            with self.assertRaisesRegex(
+                IncidentRiskStoreError,
+                "exceeds resource limit",
+            ):
+                self.store.append(self._entry())
+
+        self.assertFalse(self.store.path.exists())
+
     def test_oversized_store_is_rejected_before_reading(self) -> None:
         import autosport.incident_risk_store as incident_risk_store
 

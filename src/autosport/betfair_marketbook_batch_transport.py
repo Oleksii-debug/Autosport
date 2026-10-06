@@ -373,19 +373,20 @@ def _read_market_book_batch(
     post_dispatch_failure_type: type[MarketBookPostDispatchFailure],
     protocol_error_type: type[BaseException],
     completeness_error_type: type[MarketBookCompletenessError],
+    batch_transport_error_type: type[MarketBookBatchTransportError],
 ) -> MarketBookBatchTransportResult:
     batch = canonical_batch(plan, batch_id)
     params = params_for_batch(plan, batch)
     plan_id = plan.plan_id
     request_contract_id = plan.request_contract_id
     if canonical_batch(plan, batch_id) != batch:
-        raise MarketBookBatchTransportError(
+        raise batch_transport_error_type(
             "MarketBook plan changed before provider dispatch"
         )
 
     wire_budget = request_budget(params)
     if wire_budget.evidence_id != batch.budget_evidence_id:
-        raise MarketBookBatchTransportError(
+        raise batch_transport_error_type(
             "wire-derived request budget does not match the canonical planned batch"
         )
 
@@ -486,6 +487,7 @@ def append_market_book_transport_attempt(
     incomplete_status: BatchReceiptStatus = BatchReceiptStatus.INCOMPLETE_RESPONSE,
     exact_outcome: MarketBookAttemptOutcome = MarketBookAttemptOutcome.EXACT_RESPONSE,
     incomplete_outcome: MarketBookAttemptOutcome = MarketBookAttemptOutcome.INCOMPLETE_RESPONSE,
+    batch_transport_error_type: type[MarketBookBatchTransportError] = MarketBookBatchTransportError,
 ) -> MarketBookAttemptHistory:
     """Append one issued transport result to canonical retry/gap history."""
 
@@ -498,11 +500,11 @@ def append_market_book_transport_attempt(
     # assert_issued implementation could mutate an already-proved result between
     # the registry check and structural history construction.
     if history.plan.plan_id != result.plan_id:
-        raise MarketBookBatchTransportError(
+        raise batch_transport_error_type(
             "transport result is bound to another or mutated MarketBook plan"
         )
     if history.plan.request_contract_id != result.request_contract_id:
-        raise MarketBookBatchTransportError(
+        raise batch_transport_error_type(
             "transport result is bound to another MarketBook request contract"
         )
 
@@ -515,7 +517,7 @@ def append_market_book_transport_attempt(
         outcome = incomplete_outcome
         exact_receipt = None
     else:
-        raise MarketBookBatchTransportError(
+        raise batch_transport_error_type(
             "transport result receipt has unsupported dispatch outcome"
         )
 
@@ -554,9 +556,10 @@ def _append_nonresponse_attempt(
             MarketBookAttemptOutcome.PARSE_FAILURE,
         }
     ),
+    batch_transport_error_type: type[MarketBookBatchTransportError] = MarketBookBatchTransportError,
 ) -> MarketBookAttemptHistory:
     if outcome not in allowed_outcomes:
-        raise MarketBookBatchTransportError(
+        raise batch_transport_error_type(
             "nonresponse attempt outcome is not supported by this coordinator"
         )
     canonical_batch(history.plan, batch_id)
@@ -1261,6 +1264,7 @@ def _install_transport_result_authority() -> None:
                 post_dispatch_failure_type=post_dispatch_failure_type,
                 protocol_error_type=protocol_error_type,
                 completeness_error_type=completeness_error_type,
+                batch_transport_error_type=batch_transport_error_type,
             )
         except BaseException as exc:
             # Parent process-control interruption must not strand a locally
@@ -1568,18 +1572,35 @@ def _execute_market_book_batch_attempt(
         )
         return make_execution(updated, outcome, None)
 
-    updated = append_response(
-        frozen_history,
-        result,
-        attempt_id=attempt,
-        required=required,
-    )
-    outcome = (
-        exact_response_outcome
-        if result.receipt.status is exact_response_status
-        else incomplete_response_outcome
-    )
-    return make_execution(updated, outcome, result)
+    try:
+        updated = append_response(
+            frozen_history,
+            result,
+            attempt_id=attempt,
+            required=required,
+        )
+        outcome = (
+            exact_response_outcome
+            if result.receipt.status is exact_response_status
+            else incomplete_response_outcome
+        )
+        return make_execution(updated, outcome, result)
+    except BaseException as exc:
+        if not isinstance(exc, Exception):
+            raise
+        # Provider I/O already completed and returned an issued result. If local
+        # response-history/execution finalization cannot complete canonically,
+        # preserve the attempt interval as a transport/finalization gap rather
+        # than leaking an unclassified ordinary exception.
+        outcome = transport_failure_outcome
+        updated = append_nonresponse(
+            frozen_history,
+            batch_id=batch_id,
+            attempt_id=attempt,
+            required=required,
+            outcome=outcome,
+        )
+        return make_execution(updated, outcome, None)
 
 
 def _install_attempt_executor() -> None:

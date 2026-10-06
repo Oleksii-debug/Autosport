@@ -3521,3 +3521,106 @@ def test_attempt_executor_rejects_rebound_receipt_market_parser(monkeypatch):
     assert execution.result is None
     assert execution.history.records[-1].outcome is MarketBookAttemptOutcome.PARSE_FAILURE
     assert len(transport.calls) == 1
+
+def test_core_records_post_response_history_finalization_gap():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    appended_nonresponse = []
+
+    def failing_append_response(*args, **kwargs):
+        raise RuntimeError("response history finalization failed")
+
+    def append_nonresponse(current, **kwargs):
+        appended_nonresponse.append(kwargs)
+        return current
+
+    def make_execution(current, outcome, result):
+        return current, outcome, result
+
+    _, outcome, result = _batch_transport_module._execute_market_book_batch_attempt(
+        object(),
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="post-response-finalization-gap",
+        required=True,
+        request_id="post-response-finalization-gap",
+        scheduled_at=NOW,
+        rate_gate=object(),
+        concurrency_gate=object(),
+        read_batch=lambda *args, **kwargs: object(),
+        append_response=failing_append_response,
+        append_nonresponse=append_nonresponse,
+        freeze_plan=lambda current: current,
+        freeze_history=lambda current_plan, current_history: current_history,
+        token=lambda value, field: value,
+        canonical_batch=lambda current_plan, current_batch_id: batch,
+        admission_error_type=MarketBookBatchAdmissionError,
+        post_dispatch_failure_type=_batch_transport_module.MarketBookPostDispatchFailure,
+        transport_error_type=_batch_transport_module._transport.BetfairMarketBookTransportError,
+        provider_error_type=_batch_transport_module._transport.BetfairMarketBookProviderError,
+        protocol_error_type=_batch_transport_module._transport.BetfairMarketBookProtocolError,
+        transport_failure_outcome=MarketBookAttemptOutcome.TRANSPORT_FAILURE,
+        provider_failure_outcome=MarketBookAttemptOutcome.PROVIDER_FAILURE,
+        parse_failure_outcome=MarketBookAttemptOutcome.PARSE_FAILURE,
+        exact_response_outcome=MarketBookAttemptOutcome.EXACT_RESPONSE,
+        incomplete_response_outcome=MarketBookAttemptOutcome.INCOMPLETE_RESPONSE,
+        exact_response_status=BatchReceiptStatus.EXACT_RESPONSE,
+        history_type=MarketBookAttemptHistory,
+        batch_transport_error_type=MarketBookBatchTransportError,
+        make_execution=make_execution,
+    )
+
+    assert outcome is MarketBookAttemptOutcome.TRANSPORT_FAILURE
+    assert result is None
+    assert appended_nonresponse == [
+        {
+            "batch_id": batch.batch_id,
+            "attempt_id": "post-response-finalization-gap",
+            "required": True,
+            "outcome": MarketBookAttemptOutcome.TRANSPORT_FAILURE,
+        }
+    ]
+
+
+def test_response_append_uses_canonical_error_after_module_rebind(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    other_plan = _plan(market_ids=("1.002",))
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    history = MarketBookAttemptHistory(other_plan, ())
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookBatchTransportError",
+        RuntimeError,
+    )
+
+    with pytest.raises(MarketBookBatchTransportError):
+        append_market_book_transport_attempt(
+            history,
+            issued,
+            attempt_id="sealed-append-error-type",
+            required=True,
+        )
+
+
+def test_nonresponse_append_uses_canonical_error_after_module_rebind(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    history = MarketBookAttemptHistory(plan, ())
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookBatchTransportError",
+        RuntimeError,
+    )
+
+    with pytest.raises(MarketBookBatchTransportError):
+        _batch_transport_module._append_nonresponse_attempt(
+            history,
+            batch_id=plan.batches[0].batch_id,
+            attempt_id="sealed-nonresponse-error-type",
+            required=True,
+            outcome=MarketBookAttemptOutcome.EXACT_RESPONSE,
+        )

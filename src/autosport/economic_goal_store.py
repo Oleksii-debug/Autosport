@@ -14,6 +14,7 @@ import stat
 import weakref
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
+from enum import Enum, IntEnum
 from pathlib import Path
 from types import MethodType
 from typing import Final
@@ -171,6 +172,8 @@ _CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
 _CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
 _CANONICAL_OBJECTIVE_TYPE: Final = EconomicObjective
 _CANONICAL_AUTOMATION_TYPE: Final = AutomationLevel
+_CANONICAL_ENUM_VALUE_GETTER: Final = Enum.value.fget
+_CANONICAL_INT_ENUM_VALUE_GETTER: Final = IntEnum.value.fget
 _CANONICAL_TRANSITION_VALIDATOR: Final = validate_automatic_transition
 _CANONICAL_STRICT_JSON_LOADS: Final = strict_json_loads
 _CANONICAL_ATOMIC_WRITE_JSON: Final = atomic_write_json
@@ -265,6 +268,8 @@ def economic_goal_to_payload(
     _json_dumps=_CANONICAL_JSON_DUMPS,
     _max_json_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
     _max_json_bytes=_MAX_ECONOMIC_GOAL_JSON_BYTES,
+    _objective_value_getter=_CANONICAL_ENUM_VALUE_GETTER,
+    _automation_value_getter=_CANONICAL_INT_ENUM_VALUE_GETTER,
 ) -> dict[str, object]:
     """Return the canonical schema-v1 JSON payload for ``contract``."""
 
@@ -279,7 +284,7 @@ def economic_goal_to_payload(
         "revision": contract.revision,
         "bankroll_id": contract.bankroll_id,
         "currency": contract.currency,
-        "objective": contract.objective.value,
+        "objective": _objective_value_getter(contract.objective),
         "max_stake_fraction": str(contract.max_stake_fraction),
         "max_stake_amount": (
             None if contract.max_stake_amount is None else str(contract.max_stake_amount)
@@ -309,7 +314,7 @@ def economic_goal_to_payload(
         "minimum_data_quality": str(contract.minimum_data_quality),
         "max_concurrent_positions": contract.max_concurrent_positions,
         "max_parlay_legs": contract.max_parlay_legs,
-        "automation_level": int(contract.automation_level),
+        "automation_level": _automation_value_getter(contract.automation_level),
         "emergency_stop": contract.emergency_stop,
         "blocked_sports": sorted(contract.blocked_sports),
         "blocked_providers": sorted(contract.blocked_providers),

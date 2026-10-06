@@ -718,15 +718,21 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         self,
         _validator=__post_init__,
         _validator_code: object = __post_init__.__code__,
+        _state_reader=state_of,
+        _state_reader_code: object = state_of.__code__,
     ) -> dict[str, object]:
         if (
             type(self).__post_init__ is not _validator
             or getattr(_validator, "__code__", None) is not _validator_code
+            or type(self).state_of is not _state_reader
+            or getattr(_state_reader, "__code__", None) is not _state_reader_code
         ):
             raise ProviderCapabilityManifestError(
                 "canonical manifest validator changed"
             )
         _validator(self)
+        for capability in ProviderManifestCapability:
+            _state_reader(self, capability)
         return {
             "facts": [fact.to_canonical_dict() for fact in self.facts],
             "integration_evidence_id": self.integration.evidence_id,

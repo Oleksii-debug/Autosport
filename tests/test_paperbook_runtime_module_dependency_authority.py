@@ -6,6 +6,53 @@ import autosport.paper as paper_module
 from autosport.paper import PaperBook
 
 
+def test_runtime_helper_registry_ignores_rebound_type_builtin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile_type(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound type builtin executed")
+
+    monkeypatch.setattr(paper_module, "type", hostile_type, raising=False)
+
+    paper_module._require_paperbook_runtime_helper_authority(book)
+
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize("dependency_name", ("type", "ValueError"))
+def test_committed_stake_rejects_rebound_builtin_runtime_dependency_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    dependency_name: str,
+) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile_dependency(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound runtime builtin executed")
+
+    monkeypatch.setattr(
+        paper_module,
+        dependency_name,
+        hostile_dependency,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"runtime module dependency changed: {dependency_name}",
+    ):
+        _ = book.committed_stake
+
+    assert attacker_calls == 0
+
+
 def test_committed_stake_rejects_rebound_runtime_module_dependency_before_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

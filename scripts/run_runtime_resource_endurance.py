@@ -48,6 +48,7 @@ _REQUIRED_RESOURCE_CLASSES = (
 _OBSERVED_RESOURCE_CLASSES = (
     "owned_threads",
     "workspace_handles",
+    "internal_queues",
 )
 
 
@@ -105,6 +106,9 @@ def _expected_worker_failure() -> object:
 
 
 def _finish_worker(worker: object, worker_name: str) -> None:
+    messages = getattr(worker, "_messages", None)
+    if messages is None or not callable(getattr(messages, "qsize", None)):
+        raise RuntimeError(f"{worker_name} does not expose its owned terminal queue")
     started = getattr(worker, "start")(_expected_worker_failure)
     if not started:
         raise RuntimeError(f"{worker_name} did not acquire an idle single-flight slot")
@@ -119,6 +123,8 @@ def _finish_worker(worker: object, worker_name: str) -> None:
         raise RuntimeError(f"{worker_name} did not publish the expected terminal failure")
     if bool(getattr(worker, "busy")):
         raise RuntimeError(f"{worker_name} remained busy after terminal message consumption")
+    if messages.qsize() != 0:
+        raise RuntimeError(f"{worker_name} retained terminal queue items after quiescence")
 
 
 def _exercise_workers() -> None:
@@ -411,6 +417,7 @@ def main(argv: list[str] | None = None) -> int:
         "observed_resource_classes": list(_OBSERVED_RESOURCE_CLASSES),
         "missing_resource_classes": list(missing_resource_classes),
         "resource_coverage_complete": not missing_resource_classes,
+        "internal_queue_owners_checked_per_cycle": 3,
         "workspace_move_round_trip_passes": move_round_trip_passes,
         "workspace_move_delete_passes": move_delete_passes,
         "windows_workspace_handle_semantics": windows_probe_status,

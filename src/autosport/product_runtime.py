@@ -18,7 +18,11 @@ from .causal_collector import (
     DesktopDeltaCheckpointStore,
     DesktopDeltaConsumer,
 )
-from .collector_service import CollectorServiceSource, HeadlessCollectorService
+from .collector_service import (
+    CollectorServiceConfig,
+    CollectorServiceSource,
+    HeadlessCollectorService,
+)
 from .continuous_session import (
     ContinuousSessionCoordinator,
     ContinuousSessionStatus,
@@ -830,6 +834,7 @@ def build_autonomous_product_runtime(
     source: ProductCollectorSource,
     clock: Callable[[], str] | None = None,
     sleep: Callable[[float], None] | None = None,
+    collector_config: CollectorServiceConfig | None = None,
     initial_bankroll: str = "10000",
     outcome_authority: SettlementOutcomeAuthority | None = None,
     settlement_learning_handoff: SettlementLearningHandoff | None = None,
@@ -849,6 +854,8 @@ def build_autonomous_product_runtime(
         raise ProductCompositionError("source.source_id must be a non-empty trimmed string")
     if not callable(getattr(source, "resolve_event", None)):
         raise ProductCompositionError("source.resolve_event must be callable")
+    if collector_config is not None and type(collector_config) is not CollectorServiceConfig:
+        raise TypeError("collector_config must be CollectorServiceConfig or None")
 
     try:
         normalized_bankroll = str(initial_bankroll)
@@ -912,6 +919,7 @@ def build_autonomous_product_runtime(
             run_id=f"product:{source_id}",
             clock=resolved_clock,
             sleep=sleep,
+            config=collector_config,
         )
         desktop = DesktopDeltaConsumer(
             collector_store,

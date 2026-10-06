@@ -684,10 +684,41 @@ _ECONOMIC_GOAL_STORE_AUTHORITY_NAMES: Final = frozenset(
 )
 
 
+def _make_class_operation_seal(name: str):
+    """Block class-level replacement through both normal and type.__setattr__."""
+
+    def _get(instance, owner=None):
+        if instance is None:
+            return None
+        value = instance.__dict__[name]
+        return value.__get__(None, instance)
+
+    def _set(_instance, _value) -> None:
+        raise TypeError("economic goal store authority operation binding is immutable")
+
+    def _delete(_instance) -> None:
+        raise TypeError("economic goal store authority operation binding is immutable")
+
+    class _ClassOperationSeal:
+        __slots__ = ()
+
+        __get__ = staticmethod(_get)
+        __set__ = staticmethod(_set)
+        __delete__ = staticmethod(_delete)
+
+    return _ClassOperationSeal()
+
+
 class _EconomicGoalStoreMeta(type):
     """Seal public store authority entrypoints against class-level rebinding."""
 
     _AUTHORITY_NAMES: Final = _ECONOMIC_GOAL_STORE_AUTHORITY_NAMES
+
+    load = _make_class_operation_seal("load")
+    initialize_owner = _make_class_operation_seal("initialize_owner")
+    persist_automatic_successor = _make_class_operation_seal(
+        "persist_automatic_successor"
+    )
 
     def __setattr__(
         cls,
@@ -697,7 +728,7 @@ class _EconomicGoalStoreMeta(type):
     ) -> None:
         if (
             cls.__dict__.get("_authority_operations_sealed", False)
-            and name in _authority_names
+            and name in {"__init__", "_authority_operations_sealed"}
         ):
             raise TypeError("economic goal store authority operation binding is immutable")
         super().__setattr__(name, value)
@@ -709,7 +740,7 @@ class _EconomicGoalStoreMeta(type):
     ) -> None:
         if (
             cls.__dict__.get("_authority_operations_sealed", False)
-            and name in _authority_names
+            and name in {"__init__", "_authority_operations_sealed"}
         ):
             raise TypeError("economic goal store authority operation binding is immutable")
         super().__delattr__(name)
@@ -953,3 +984,20 @@ EconomicGoalStore.persist_automatic_successor = _make_store_operation_descriptor
     _bind_store_contract_write(_BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR)
 )
 EconomicGoalStore._authority_operations_sealed = True
+
+
+def _bind_store_constructor(canonical_store_type, canonical_init):
+    def bound(cls, workspace):
+        if cls is not canonical_store_type:
+            raise TypeError("EconomicGoalStore authority requires the exact store type")
+        instance = object.__new__(canonical_store_type)
+        canonical_init(instance, workspace)
+        return instance
+
+    return bound
+
+
+_EconomicGoalStoreMeta.__call__ = _bind_store_constructor(
+    EconomicGoalStore,
+    _BOUND_STORE_INIT,
+)

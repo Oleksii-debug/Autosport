@@ -49,6 +49,7 @@ _OBSERVED_RESOURCE_CLASSES = (
     "owned_threads",
     "workspace_handles",
     "internal_queues",
+    "temporary_artifacts",
 )
 
 
@@ -182,6 +183,17 @@ def _seeded_leak_detector_check() -> tuple[bool, int]:
     return detected, detected_count
 
 
+def _runtime_temp_artifacts(root: Path) -> tuple[str, ...]:
+    if not root.exists():
+        return ()
+    residuals = []
+    for path in root.rglob("*"):
+        name = path.name.casefold()
+        if name.endswith((".tmp", ".partial", ".staging")):
+            residuals.append(path.relative_to(root).as_posix())
+    return tuple(sorted(residuals))
+
+
 def _run_runtime_cycle(
     workspace: Path,
     *,
@@ -279,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     shared_reopens = 0
     move_round_trip_passes = 0
     move_delete_passes = 0
+    temporary_artifact_checks = 0
     source = _IdleProductSource()
     clock = _DeterministicClock()
 
@@ -331,6 +344,14 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 failures.append(
                     f"disposable workspace move/delete failed:{move_delete.error_type}"
+                )
+
+            residual_temp_artifacts = _runtime_temp_artifacts(root)
+            temporary_artifact_checks += 1
+            if residual_temp_artifacts:
+                failures.append(
+                    "temporary runtime artifacts remained after quiescence:"
+                    + ",".join(residual_temp_artifacts)
                 )
 
             current = capture_owned_thread_snapshot()
@@ -418,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
         "missing_resource_classes": list(missing_resource_classes),
         "resource_coverage_complete": not missing_resource_classes,
         "internal_queue_owners_checked_per_cycle": 3,
+        "temporary_artifact_checks": temporary_artifact_checks,
         "workspace_move_round_trip_passes": move_round_trip_passes,
         "workspace_move_delete_passes": move_delete_passes,
         "windows_workspace_handle_semantics": windows_probe_status,

@@ -394,8 +394,6 @@ def _skill_handler_spooled_process(
                 },
             }
         encoded = _canonicalize(record)
-        if len(encoded.encode("utf-8")) > _HANDLER_RESULT_SPOOL_MAX_BYTES:
-            encoded = _canonicalize({"kind": "RESULT_TOO_LARGE"})
     except BaseException as exc:
         try:
             encoded = _canonicalize(
@@ -403,6 +401,12 @@ def _skill_handler_spooled_process(
             )
         except BaseException:
             return
+
+    try:
+        if len(encoded.encode("utf-8")) > _HANDLER_RESULT_SPOOL_MAX_BYTES:
+            encoded = _canonicalize({"kind": "RESULT_TOO_LARGE"})
+    except BaseException:
+        return
 
     try:
         _path_type(result_path).write_text(encoded, encoding="utf-8")

@@ -579,6 +579,60 @@ def test_handler_oversized_result_is_bounded_before_spool_publication(
     assert spool_path.stat().st_size <= max_bytes
 
 
+def test_handler_oversized_error_record_is_bounded_before_spool_publication(
+    tmp_path, monkeypatch
+):
+    spool_path = tmp_path / "handler-error.json"
+    max_bytes = 256
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_HANDLER_RESULT_SPOOL_MAX_BYTES",
+        max_bytes,
+    )
+
+    real_write_text = skill_registry_module.Path.write_text
+    published_sizes = []
+
+    def bounded_write_text(self, data, *args, **kwargs):
+        encoded_size = len(data.encode("utf-8"))
+        published_sizes.append(encoded_size)
+        assert encoded_size <= max_bytes
+        return real_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(
+        skill_registry_module.Path,
+        "write_text",
+        bounded_write_text,
+    )
+
+    def failing_handler(_payload):
+        raise RuntimeError("simulated handler failure")
+
+    def oversized_error_canonicalizer(record):
+        if record.get("kind") == "ERROR":
+            return "x" * 4096
+        return json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+    skill_registry_module._skill_handler_spooled_process(
+        failing_handler,
+        {},
+        str(spool_path),
+        _canonicalize=oversized_error_canonicalizer,
+    )
+
+    result, error = skill_registry_module._decode_handler_result_spool(spool_path)
+    assert result is None
+    assert error == "HANDLER_RESULT_TOO_LARGE"
+    assert published_sizes
+    assert spool_path.stat().st_size <= max_bytes
+
+
 def test_handler_partial_result_spool_write_remains_timeout_bounded():
     started = time.monotonic()
     result, error = SkillRegistry._execute_handler_bounded(

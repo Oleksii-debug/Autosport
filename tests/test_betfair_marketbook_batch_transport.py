@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
@@ -221,6 +221,50 @@ def test_plan_use_time_mutation_invalidates_old_batch_before_transport():
     assert transport.calls == []
 
 
+def test_plan_mutation_during_physical_post_cannot_mint_bound_result():
+    plan = _plan(
+        price_data=("EX_BEST_OFFERS",),
+        best_prices_depth=1,
+    )
+    batch = plan.batches[0]
+
+    class MutatingPlanTransport:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, url, *, headers, body, timeout_seconds):
+            self.calls += 1
+            object.__setattr__(plan, "best_prices_depth", 2)
+            return _payload(batch.market_ids)
+
+    transport = MutatingPlanTransport()
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: NOW,
+    )
+    rate_gate, concurrency_gate = _gates()
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="plan changed during provider dispatch",
+    ):
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="plan-race",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert transport.calls == 1
+    assert concurrency_gate.snapshot().active == ()
+    rate_state = rate_gate.snapshot()
+    assert len(rate_state.markets) == len(batch.market_ids)
+
+
 def test_large_plan_uses_budget_partition_and_dispatches_only_named_batch():
     market_ids = tuple(f"1.{index:03d}" for index in range(41))
     plan = _plan(market_ids=market_ids, price_data=("EX_BEST_OFFERS",))
@@ -383,8 +427,12 @@ def test_rate_denial_releases_projection_lease_without_transport():
     client, transport = _client(_payload(batch.market_ids))
     rate_gate = BetfairMarketBookPerMarketRateGate()
     concurrency_gate = BetfairMarketBookProjectionConcurrencyGate()
+    admission_now = datetime.now(timezone.utc)
     for _ in range(5):
-        assert rate_gate.reserve(("1.001",), scheduled_at=NOW).allowed is True
+        assert rate_gate.reserve(
+            ("1.001",),
+            scheduled_at=admission_now,
+        ).allowed is True
 
     with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
         read_market_book_batch(
@@ -399,6 +447,33 @@ def test_rate_denial_releases_projection_lease_without_transport():
 
     assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
     assert concurrency_gate.snapshot().active == ()
+    assert transport.calls == []
+
+
+def test_historical_scheduled_at_cannot_bypass_physical_rate_window():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    admission_now = datetime.now(timezone.utc)
+    for _ in range(5):
+        assert rate_gate.reserve(
+            ("1.001",),
+            scheduled_at=admission_now,
+        ).allowed is True
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="stale-schedule",
+            scheduled_at=admission_now - timedelta(days=30),
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
     assert transport.calls == []
 
 
@@ -429,8 +504,12 @@ def test_attempt_executor_records_rate_denial_as_required_gap():
     batch = plan.batches[0]
     client, transport = _client(_payload(batch.market_ids))
     rate_gate, concurrency_gate = _gates()
+    admission_now = datetime.now(timezone.utc)
     for _ in range(5):
-        assert rate_gate.reserve(("1.001",), scheduled_at=NOW).allowed is True
+        assert rate_gate.reserve(
+            ("1.001",),
+            scheduled_at=admission_now,
+        ).allowed is True
 
     execution = execute_market_book_batch_attempt(
         client,
@@ -487,6 +566,51 @@ def test_attempt_executor_records_transport_failure_and_releases_projection_leas
     state = rate_gate.snapshot()
     assert state.markets[0].market_id == "1.001"
     assert len(state.markets[0].accepted_at_utc_us) == 1
+
+
+def test_transport_failure_is_not_masked_by_projection_cleanup_failure():
+    plan = _plan(
+        market_ids=("1.001",),
+        order_projection="EXECUTABLE",
+    )
+    history = MarketBookAttemptHistory(plan, ())
+    batch = plan.batches[0]
+    rate_gate, concurrency_gate = _gates()
+
+    class CompletingThenFailingTransport:
+        def post(self, url, *, headers, body, timeout_seconds):
+            active = concurrency_gate.snapshot().active
+            assert len(active) == 1
+            lease = active[0]
+            concurrency_gate.complete(
+                lease.request_id,
+                lease_generation=lease.generation,
+                observed_at=datetime.now(timezone.utc),
+            )
+            raise BetfairReadOnlyError("network failed after external lease cleanup")
+
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=CompletingThenFailingTransport(),
+        clock=lambda: NOW,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="attempt-cleanup-race",
+        required=True,
+        request_id="cleanup-race",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.TRANSPORT_FAILURE
+    assert execution.result is None
+    assert execution.history.required_gap_attempt_ids == ("attempt-cleanup-race",)
+    assert concurrency_gate.snapshot().active == ()
 
 
 def test_attempt_executor_records_provider_and_protocol_failures():

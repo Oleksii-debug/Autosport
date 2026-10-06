@@ -1128,6 +1128,18 @@ class PaperSessionTurnoverResolver(metaclass=_PaperSessionTurnoverResolverMeta):
                 admission_ts,
                 "ticket.product_day_admission_ts",
             )
+            if (
+                admission_time == start
+                and current_session.predecessor_session_id is not None
+            ):
+                # The durable PAPER admission witness predates economic-session
+                # composition and therefore carries no session identity. At an
+                # exact successor boundary, timestamp equality alone cannot prove
+                # whether the admission serialized before or after the session
+                # transition. Never mint reset headroom from that ambiguity.
+                raise PaperSessionTurnoverEvidenceIncompleteError(
+                    "boundary-equal PAPER admission lacks exact economic-session membership"
+                )
             if admission_time < start:
                 continue
             stakes.append(ticket.stake)

@@ -3929,6 +3929,16 @@ class PersistentLiveDecisionLoop:
                         raise DecisionLedgerIntegrityError(
                             "durable live decision provider-health evidence is invalid"
                         ) from exc
+                if canonical_actionability_wait is not None:
+                    try:
+                        self._require_actionability_wait_health_boundaries(
+                            canonical_actionability_wait,
+                            existing_health_boundaries,
+                        )
+                    except (LiveDecisionProgressError, TypeError, ValueError) as exc:
+                        raise DecisionLedgerIntegrityError(
+                            "durable actionability WAIT provider-health horizon changed"
+                        ) from exc
                 if existing_health_boundaries != durable_progress.health_boundaries:
                     durable_progress = _Progress(
                         loop_id=durable_progress.loop_id,

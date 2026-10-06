@@ -8043,6 +8043,19 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 canonical_provider_wait,
                 (),
             )
+        wrong_boundary = ProviderHealthReplayBoundary(
+            "provider-a",
+            self.START.isoformat(),
+            1,
+        )
+        with self.assertRaisesRegex(
+            LiveDecisionProgressError,
+            "outside the exact decision health boundaries",
+        ):
+            PersistentLiveDecisionLoop._require_actionability_wait_health_boundaries(
+                canonical_provider_wait,
+                (wrong_boundary,),
+            )
 
     def test_wait_reason_transition_at_same_cut_gets_new_decision_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

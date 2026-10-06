@@ -1033,3 +1033,67 @@ def test_gate_rebinding_after_reservation_is_caught_before_final_gate_call(
         assert attempt.state is AttemptState.RESERVED
         assert attempt.submitted_at is None
         assert attempt.provider_evidence is None
+
+
+def test_temporary_default_gate_global_rebinding_is_rejected_before_constructor(
+    monkeypatch,
+) -> None:
+    constructor_calls: list[str] = []
+
+    class ForgedGate:
+        def __init__(self) -> None:
+            constructor_calls.append("forged")
+
+    monkeypatch.setattr(
+        betfair_execution,
+        "BetfairSupervisedExecutionGate",
+        ForgedGate,
+    )
+    credentials = betfair_execution.BetfairSessionCredentials(
+        "app-key",
+        "session-token",
+    )
+
+    with pytest.raises(
+        BetfairSupervisedExecutionError,
+        match="constructor authority changed",
+    ):
+        betfair_execution.BetfairSupervisedPlaceOrdersClient(credentials)
+
+    assert constructor_calls == []
+
+
+def test_explicit_forged_gate_cannot_be_canonicalized_by_client_binding() -> None:
+    class ForgedGate:
+        enabled = True
+
+        def require(self, **kwargs) -> None:
+            del kwargs
+            raise AssertionError("forged gate must never execute")
+
+    credentials = betfair_execution.BetfairSessionCredentials(
+        "app-key",
+        "session-token",
+    )
+
+    with pytest.raises(
+        BetfairSupervisedExecutionError,
+        match="gate must be exact canonical gate",
+    ):
+        betfair_execution.BetfairSupervisedPlaceOrdersClient(
+            credentials,
+            gate=ForgedGate(),  # type: ignore[arg-type]
+        )
+
+
+def test_credentials_subclass_cannot_be_canonicalized_by_client_binding() -> None:
+    class ForgedCredentials(betfair_execution.BetfairSessionCredentials):
+        pass
+
+    credentials = ForgedCredentials("app-key", "session-token")
+
+    with pytest.raises(
+        BetfairSupervisedExecutionError,
+        match="credentials must be exact canonical credentials",
+    ):
+        betfair_execution.BetfairSupervisedPlaceOrdersClient(credentials)

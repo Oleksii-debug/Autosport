@@ -468,6 +468,31 @@ def test_store_ignores_rebound_lock_lifecycle(monkeypatch, tmp_path) -> None:
     assert store.load() == _goal()
 
 
+def test_lock_scope_ignores_rebound_canonical_dispatch_aliases(
+    monkeypatch, tmp_path
+) -> None:
+    store = EconomicGoalStore(tmp_path)
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound canonical lock dispatch authority executed")
+
+    for name in (
+        "_CANONICAL_WORKSPACE_LOCK_TYPE",
+        "_CANONICAL_WORKSPACE_LOCK_NEW",
+        "_CANONICAL_WORKSPACE_LOCK_INIT",
+        "_CANONICAL_WORKSPACE_LOCK_ACQUIRE",
+        "_CANONICAL_WORKSPACE_LOCK_RELEASE",
+        "_CANONICAL_WORKSPACE_LOCK_ENTER",
+        "_CANONICAL_WORKSPACE_LOCK_EXIT",
+        "_CANONICAL_OBJECT_SETATTR",
+        "_CANONICAL_METHOD_TYPE",
+    ):
+        monkeypatch.setattr(economic_goal_store_module, name, forged)
+
+    store.initialize_owner(_goal())
+    assert store.load() == _goal()
+
+
 def test_store_ignores_rebound_lock_scope_helper(monkeypatch, tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
     store.initialize_owner(_goal())

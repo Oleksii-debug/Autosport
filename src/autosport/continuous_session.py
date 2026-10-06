@@ -2113,9 +2113,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _replace: Callable[..., ContinuousSessionStatus] = replace,
         _replace_code: object = replace.__code__,
     ) -> ContinuousSessionStatus:
-        state = self._state if state is None else state
         if (
-            type(state).snapshot is not _snapshot_method
+            type(self._state).snapshot is not _snapshot_method
             or getattr(_snapshot_method, "__code__", None)
             is not _snapshot_method_code
             or type(self.collector).status is not _collector_status_method
@@ -2127,7 +2126,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "canonical coordinator status authority changed"
             )
-        snapshot = _snapshot_method(state)
+        snapshot = _snapshot_method(self._state)
         source_status = _collector_status_method(self.collector)
         if type(source_status) is not dict:
             raise ContinuousSessionError(
@@ -2431,8 +2430,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             _ContinuousSessionState.record_source_projection.__code__
         ),
     ) -> ContinuousSessionStatus:
+        state = self._state if state is None else state
         if (
-            type(self._state).snapshot is not _snapshot_method
+            type(state).snapshot is not _snapshot_method
             or getattr(_snapshot_method, "__code__", None)
             is not _snapshot_method_code
             or type(state).record_source_projection

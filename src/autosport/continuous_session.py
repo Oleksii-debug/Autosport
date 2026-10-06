@@ -454,6 +454,11 @@ class _ContinuousSessionState:
         )
         if self._error_checkpoint_present():
             error_checkpoint = self._read_error_checkpoint()
+            if error_checkpoint["observed_generation"] > self._generation:
+                raise ContinuousSessionError(
+                    "operational error checkpoint generation is ahead of "
+                    "canonical session bootstrap state"
+                )
             if error_checkpoint["observed_generation"] == self._generation and (
                 error_checkpoint["observed_cycles_completed"] != self._cycles_completed
                 or error_checkpoint["observed_last_success_at"] != self._last_success_at
@@ -1036,6 +1041,11 @@ class _ContinuousSessionState:
             raw = self._read()
             if _error_checkpoint_present(self):
                 error_checkpoint = _read_error_checkpoint(self)
+                if error_checkpoint["observed_generation"] > raw["generation"]:
+                    raise ContinuousSessionError(
+                        "operational error checkpoint generation is ahead of "
+                        "canonical session state"
+                    )
                 same_generation = (
                     error_checkpoint["observed_generation"] == raw["generation"]
                 )

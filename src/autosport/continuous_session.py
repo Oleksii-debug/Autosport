@@ -283,9 +283,10 @@ def _sha256(value: object, field: str) -> str:
 
 
 _CONTINUOUS_SESSION_SCHEMA: Final = "autosport.continuous_session"
-_CONTINUOUS_SESSION_VERSION: Final = 2
+_CONTINUOUS_SESSION_VERSION: Final = 3
+_CONTINUOUS_SESSION_LEGACY_VERSION: Final = 2
 _CONTINUOUS_SESSION_ERROR_SCHEMA: Final = "autosport.continuous_session.operational_error"
-_CONTINUOUS_SESSION_ERROR_VERSION: Final = 2
+_CONTINUOUS_SESSION_ERROR_VERSION: Final = 3
 _CONTINUOUS_SESSION_ERROR_MAX_BYTES: Final = 16 * 1024
 _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS: Final = 512
 _CONTINUOUS_SESSION_ERROR_FIELDS: Final = frozenset(
@@ -294,6 +295,7 @@ _CONTINUOUS_SESSION_ERROR_FIELDS: Final = frozenset(
         "schema_version",
         "session_id",
         "source_id",
+        "observed_generation",
         "observed_cycles_completed",
         "observed_last_success_at",
         "observed_state",
@@ -308,6 +310,7 @@ _CONTINUOUS_SESSION_FIELDS: Final = frozenset(
         "source_id",
         "state",
         "started_at",
+        "generation",
         "cycles_completed",
         "last_success_at",
         "last_error_code",
@@ -320,6 +323,9 @@ _CONTINUOUS_SESSION_FIELDS: Final = frozenset(
         "source_projection_stream_epoch",
         "source_state_projection_backlog",
     }
+)
+_CONTINUOUS_SESSION_LEGACY_FIELDS: Final = frozenset(
+    _CONTINUOUS_SESSION_FIELDS - {"generation"}
 )
 
 
@@ -383,6 +389,7 @@ class _ContinuousSessionState:
                     "source_id": self.source_id,
                     "state": SessionState.RUNNING.value,
                     "started_at": started_at,
+                    "generation": 0,
                     "cycles_completed": 0,
                     "last_success_at": None,
                     "last_error_code": None,
@@ -399,6 +406,7 @@ class _ContinuousSessionState:
             raw = self._read()
 
         self._session_id = raw["session_id"]
+        self._generation = raw["generation"]
         self._cycles_completed = raw["cycles_completed"]
         self._last_success_at = raw["last_success_at"]
         self._state = raw["state"]
@@ -624,6 +632,15 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "continuous session operational error checkpoint mismatch"
             )
+        observed_generation = raw["observed_generation"]
+        if (
+            isinstance(observed_generation, bool)
+            or not isinstance(observed_generation, int)
+            or observed_generation < 0
+        ):
+            raise ContinuousSessionError(
+                "operational error observed_generation must be non-negative"
+            )
         observed_cycles = raw["observed_cycles_completed"]
         if (
             isinstance(observed_cycles, bool)
@@ -699,6 +716,7 @@ class _ContinuousSessionState:
             "schema_version": _version,
             "session_id": self._session_id,
             "source_id": self.source_id,
+            "observed_generation": self._generation,
             "observed_cycles_completed": self._cycles_completed,
             "observed_last_success_at": self._last_success_at,
             "observed_state": self._state,
@@ -760,6 +778,8 @@ class _ContinuousSessionState:
         self,
         *,
         _fields: frozenset[str] = _CONTINUOUS_SESSION_FIELDS,
+        _legacy_fields: frozenset[str] = _CONTINUOUS_SESSION_LEGACY_FIELDS,
+        _legacy_version: int = _CONTINUOUS_SESSION_LEGACY_VERSION,
         _strict_json_loads: Callable[..., Any] = strict_json_loads,
         _strict_json_loads_code: object = strict_json_loads.__code__,
         _path_read_text: Callable[..., str] = Path.read_text,
@@ -790,18 +810,36 @@ class _ContinuousSessionState:
             ) from exc
         if (
             type(raw) is not dict
-            or set(raw) != _fields
-            or raw["schema"] != _schema
-            or raw["schema_version"] != _version
-            or raw["source_id"] != self.source_id
+            or raw.get("schema") != _schema
+            or raw.get("source_id") != self.source_id
         ):
             raise ContinuousSessionError("continuous session state schema/identity mismatch")
+        field_set = set(raw)
+        schema_version = raw.get("schema_version")
+        current_shape = (
+            field_set == _fields
+            and type(schema_version) is int
+            and schema_version == _version
+        )
+        legacy_shape = (
+            field_set == _legacy_fields
+            and type(schema_version) is int
+            and schema_version == _legacy_version
+        )
+        if not current_shape and not legacy_shape:
+            raise ContinuousSessionError("continuous session state schema/identity mismatch")
+        if legacy_shape:
+            raw["schema_version"] = _version
+            raw["generation"] = 0
         _text(raw["session_id"], "session_id")
         _instant(raw["started_at"], "started_at")
         try:
             state = SessionState(raw["state"])
         except ValueError as exc:
             raise ContinuousSessionError("unsupported continuous session state") from exc
+        generation = raw["generation"]
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+            raise ContinuousSessionError("generation must be a non-negative integer")
         cycles = raw["cycles_completed"]
         if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 0:
             raise ContinuousSessionError("cycles_completed must be a non-negative integer")
@@ -888,7 +926,8 @@ class _ContinuousSessionState:
         if _error_checkpoint_present(self):
             error_checkpoint = _read_error_checkpoint(self)
             marker_matches = (
-                error_checkpoint["observed_cycles_completed"] == raw["cycles_completed"]
+                error_checkpoint["observed_generation"] == raw["generation"]
+                and error_checkpoint["observed_cycles_completed"] == raw["cycles_completed"]
                 and error_checkpoint["observed_last_success_at"] == raw["last_success_at"]
                 and error_checkpoint["observed_state"] == raw["state"]
             )
@@ -938,8 +977,14 @@ class _ContinuousSessionState:
             )
         raw = self._read()
         mutate(raw)
+        raw["generation"] = int(raw["generation"]) + 1
         _atomic_write_json(self.path, raw)
-        return self._read()
+        updated = self._read()
+        self._generation = updated["generation"]
+        self._cycles_completed = updated["cycles_completed"]
+        self._last_success_at = updated["last_success_at"]
+        self._state = updated["state"]
+        return updated
 
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:
         if not isinstance(state, SessionState):

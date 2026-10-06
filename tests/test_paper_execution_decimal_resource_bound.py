@@ -318,6 +318,15 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
             ):
                 ledger.events()
 
+    def test_pathological_json_nesting_is_normalized_to_integrity_error(self) -> None:
+        raw = '{"value":' + ("[" * 2_000) + "0" + ("]" * 2_000) + "}"
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "invalid test JSON",
+        ):
+            legacy._parse_json_object(raw, what="test")
+
     def test_oversized_event_line_fails_before_json_parse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger_path = Path(tmp) / "paper-execution.jsonl"

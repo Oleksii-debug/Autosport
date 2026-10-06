@@ -5,6 +5,8 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.economic_goal as economic_goal_module
+
 from autosport.economic_goal import (
     AutomationLevel,
     EconomicGoalContract,
@@ -310,3 +312,19 @@ def test_automatic_transition_rejects_contract_subclasses() -> None:
 
     with pytest.raises(EconomicGoalContractError, match="requires EconomicGoalContract"):
         validate_automatic_transition(previous, subclass)
+
+
+def test_contract_successor_ignores_rebound_public_transition_validator(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+
+    def forged_validator(*args, **kwargs):
+        raise AssertionError("rebound public validator executed")
+
+    monkeypatch.setattr(
+        economic_goal_module,
+        "validate_automatic_transition",
+        forged_validator,
+    )
+
+    previous.validate_automatic_successor(candidate)

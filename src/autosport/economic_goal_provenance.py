@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from .economic_goal import EconomicGoalContract, EconomicGoalContractError
-from .economic_goal_store import economic_goal_to_payload
+from .economic_goal_store import economic_goal_from_payload, economic_goal_to_payload
 
 
 PROVENANCE_SCHEMA: Final = "autosport.economic_goal_provenance"
@@ -122,6 +122,8 @@ def _provenance_for_bound(
     contract: EconomicGoalContract,
     _goal_type=_CANONICAL_GOAL_TYPE,
     _goal_validator=_CANONICAL_GOAL_VALIDATOR,
+    _payload_encoder=economic_goal_to_payload,
+    _payload_decoder=economic_goal_from_payload,
     _provenance_type=_CANONICAL_PROVENANCE_TYPE,
     _provenance_validator=_CANONICAL_PROVENANCE_VALIDATOR,
     _contract_sha256=_contract_sha256_bound,
@@ -134,13 +136,15 @@ def _provenance_for_bound(
     if type(contract) is not _goal_type:
         raise _goal_error("provenance requires an EconomicGoalContract")
     _goal_validator(contract)
+    payload = _payload_encoder(contract)
+    snapshot = _payload_decoder(payload)
     provenance = _provenance_type(
         schema=_schema,
         schema_version=_schema_version,
-        goal_id=contract.goal_id,
-        revision=contract.revision,
-        bankroll_id=contract.bankroll_id,
-        contract_sha256=_contract_sha256(contract),
+        goal_id=snapshot.goal_id,
+        revision=snapshot.revision,
+        bankroll_id=snapshot.bankroll_id,
+        contract_sha256=_contract_sha256(snapshot),
     )
     _provenance_validator(provenance)
     return provenance
@@ -152,6 +156,8 @@ def _verify_provenance_bound(
     _goal_type=_CANONICAL_GOAL_TYPE,
     _provenance_type=_CANONICAL_PROVENANCE_TYPE,
     _goal_validator=_CANONICAL_GOAL_VALIDATOR,
+    _payload_encoder=economic_goal_to_payload,
+    _payload_decoder=economic_goal_from_payload,
     _provenance_validator=_CANONICAL_PROVENANCE_VALIDATOR,
     _contract_sha256=_contract_sha256_bound,
     _goal_error=EconomicGoalContractError,
@@ -164,15 +170,25 @@ def _verify_provenance_bound(
     if type(provenance) is not _provenance_type:
         raise _provenance_error("provenance must be EconomicGoalProvenance")
     _goal_validator(contract)
+    contract_snapshot = _payload_decoder(_payload_encoder(contract))
     _provenance_validator(provenance)
-    if provenance.goal_id != contract.goal_id:
+    evidence = _provenance_type(
+        schema=provenance.schema,
+        schema_version=provenance.schema_version,
+        goal_id=provenance.goal_id,
+        revision=provenance.revision,
+        bankroll_id=provenance.bankroll_id,
+        contract_sha256=provenance.contract_sha256,
+    )
+    _provenance_validator(evidence)
+    if evidence.goal_id != contract_snapshot.goal_id:
         raise _provenance_error("provenance goal_id mismatch")
-    if provenance.revision != contract.revision:
+    if evidence.revision != contract_snapshot.revision:
         raise _provenance_error("provenance revision mismatch")
-    if provenance.bankroll_id != contract.bankroll_id:
+    if evidence.bankroll_id != contract_snapshot.bankroll_id:
         raise _provenance_error("provenance bankroll_id mismatch")
-    actual = _contract_sha256(contract)
-    if provenance.contract_sha256 != actual:
+    actual = _contract_sha256(contract_snapshot)
+    if evidence.contract_sha256 != actual:
         raise _provenance_error("provenance contract_sha256 mismatch")
 
 

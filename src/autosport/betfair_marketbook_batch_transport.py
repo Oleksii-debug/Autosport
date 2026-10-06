@@ -93,9 +93,14 @@ def _dispatch_instant(value: object) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("scheduled_at must be timezone-aware")
     normalized = value.astimezone(timezone.utc)
-    if normalized > datetime.now(timezone.utc):
+    dispatch_now = datetime.now(timezone.utc)
+    if normalized > dispatch_now:
         raise ValueError("scheduled_at must not be in the future")
-    return value
+    # Provider pressure is enforced against the physical immediate-dispatch
+    # instant, never against caller-authored historical schedule time.  Using
+    # stale scheduled_at values here would let a caller manufacture elapsed
+    # rate-window time while sending requests back-to-back.
+    return dispatch_now
 
 
 def _release_projection_lease(
@@ -110,6 +115,25 @@ def _release_projection_lease(
         lease_generation=lease_generation,
         observed_at=datetime.now(timezone.utc),
     )
+
+
+def _release_projection_lease_after_failure(
+    gate: BetfairMarketBookProjectionConcurrencyGate,
+    request_id: str,
+    lease_generation: int | None,
+    primary: Exception,
+) -> None:
+    """Best-effort cleanup without masking the primary dispatch failure."""
+
+    try:
+        _release_projection_lease(gate, request_id, lease_generation)
+    except Exception as cleanup_exc:
+        add_note = getattr(primary, "add_note", None)
+        if callable(add_note):
+            add_note(
+                "projection-lease cleanup also failed: "
+                f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+            )
 
 
 def _canonical_batch(
@@ -284,6 +308,12 @@ def _read_market_book_batch(
 ) -> MarketBookBatchTransportResult:
     batch = _canonical_batch(plan, batch_id)
     params = _params_for_batch(plan, batch)
+    plan_id = plan.plan_id
+    request_contract_id = plan.request_contract_id
+    if _canonical_batch(plan, batch_id) != batch:
+        raise MarketBookBatchTransportError(
+            "MarketBook plan changed before provider dispatch"
+        )
 
     wire_budget = _transport._market_book_request_budget(params)
     if wire_budget.evidence_id != batch.budget_evidence_id:
@@ -302,6 +332,23 @@ def _read_market_book_batch(
         )
 
     try:
+        current_batch = _canonical_batch(plan, batch_id)
+        current_plan_id = plan.plan_id
+        current_request_contract_id = plan.request_contract_id
+    except Exception as exc:
+        raise MarketBookBatchTransportError(
+            "MarketBook plan changed during provider dispatch"
+        ) from exc
+    if (
+        current_batch != batch
+        or current_plan_id != plan_id
+        or current_request_contract_id != request_contract_id
+    ):
+        raise MarketBookBatchTransportError(
+            "MarketBook plan changed during provider dispatch"
+        )
+
+    try:
         receipt = MarketBookBatchReceipt.from_response(batch, list(response.rows))
     except MarketBookCompletenessError as exc:
         raise _transport.BetfairMarketBookProtocolError(
@@ -309,8 +356,8 @@ def _read_market_book_batch(
         ) from exc
 
     return MarketBookBatchTransportResult(
-        plan_id=plan.plan_id,
-        request_contract_id=plan.request_contract_id,
+        plan_id=plan_id,
+        request_contract_id=request_contract_id,
         batch_id=batch.batch_id,
         request_budget_evidence_id=response.request_budget.evidence_id,
         request_payload_sha256=response.request_payload_sha256,
@@ -476,11 +523,12 @@ def _install_transport_result_authority() -> None:
                 batch.market_ids,
                 scheduled_at=instant,
             )
-        except Exception:
-            _release_projection_lease(
+        except Exception as exc:
+            _release_projection_lease_after_failure(
                 concurrency_gate,
                 request,
                 lease_generation,
+                exc,
             )
             raise
         if rate_decision.allowed is not True:
@@ -496,7 +544,15 @@ def _install_transport_result_authority() -> None:
 
         try:
             result = _read_market_book_batch(client, plan, batch_id=batch_id)
-        finally:
+        except Exception as exc:
+            _release_projection_lease_after_failure(
+                concurrency_gate,
+                request,
+                lease_generation,
+                exc,
+            )
+            raise
+        else:
             _release_projection_lease(
                 concurrency_gate,
                 request,

@@ -696,23 +696,48 @@ def _make_paperbook_visible_state_authority():
 def _serialized_paperbook_operation(method):
     require_lock = _require_paperbook_operation_lock
     require_lock_code = require_lock.__code__
+    require_lock_closure = require_lock.__closure__
+    require_lock_closure_values = (
+        None
+        if require_lock_closure is None
+        else tuple(cell.cell_contents for cell in require_lock_closure)
+    )
     method_code = method.__code__
+
+    def require_lock_authority() -> None:
+        if (
+            require_lock.__code__ is not require_lock_code
+            or require_lock.__closure__ is not require_lock_closure
+        ):
+            raise ValueError("PaperBook operation lock authority changed")
+        if require_lock_closure_values is not None:
+            if (
+                require_lock.__closure__ is None
+                or len(require_lock.__closure__) != len(require_lock_closure_values)
+                or any(
+                    cell.cell_contents is not expected
+                    for cell, expected in zip(
+                        require_lock.__closure__,
+                        require_lock_closure_values,
+                    )
+                )
+            ):
+                raise ValueError("PaperBook operation lock authority closure changed")
 
     @wraps(method)
     def serialized(self, *args, **kwargs):
         if method.__code__ is not method_code:
             raise ValueError("PaperBook operation callable authority changed")
-        if require_lock.__code__ is not require_lock_code:
-            raise ValueError("PaperBook operation lock authority changed")
+        require_lock_authority()
         lock = require_lock(self)
-        if require_lock.__code__ is not require_lock_code:
-            raise ValueError("PaperBook operation lock authority changed")
+        require_lock_authority()
         if method.__code__ is not method_code:
             raise ValueError("PaperBook operation callable authority changed")
         with lock:
             result = method(self, *args, **kwargs)
         if method.__code__ is not method_code:
             raise ValueError("PaperBook operation callable authority changed")
+        require_lock_authority()
         return result
 
     # functools.wraps publishes the guarded callable through __wrapped__, which

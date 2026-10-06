@@ -2231,39 +2231,79 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         if state is SessionState.STOPPED:
             raise SessionStoppedError("continuous session is durably STOPPED")
 
-    def _register_input(self, input_id: str, **selectors: object) -> None:
-        if input_id in self.dependency_index.input_ids:
+    def _register_input(
+        self,
+        input_id: str,
+        *,
+        dependency_index: FocusedMirrorDependencyIndex | None = None,
+        **selectors: object,
+    ) -> None:
+        dependency_index = (
+            self.dependency_index if dependency_index is None else dependency_index
+        )
+        if input_id in dependency_index.input_ids:
             return
-        self.dependency_index.register(input_id, **selectors)
+        dependency_index.register(input_id, **selectors)
 
-    def _retire_input(self, input_id: str) -> None:
-        self.dependency_index.unregister(input_id)
+    def _retire_input(
+        self,
+        input_id: str,
+        *,
+        dependency_index: FocusedMirrorDependencyIndex | None = None,
+    ) -> None:
+        dependency_index = (
+            self.dependency_index if dependency_index is None else dependency_index
+        )
+        dependency_index.unregister(input_id)
 
-    def _drain_invalidations(self) -> tuple[
+    def _drain_invalidations(
+        self,
+        *,
+        invalidation_buffer: BoundedMirrorInvalidationBuffer | None = None,
+        dependency_index: FocusedMirrorDependencyIndex | None = None,
+        max_batches: int | None = None,
+        max_items: int | None = None,
+    ) -> tuple[
         tuple[str, ...],
         bool,
         bool,
     ]:
+        invalidation_buffer = (
+            self.invalidation_buffer
+            if invalidation_buffer is None
+            else invalidation_buffer
+        )
+        dependency_index = (
+            self.dependency_index if dependency_index is None else dependency_index
+        )
+        max_batches = (
+            self.max_invalidation_batches_per_tick
+            if max_batches is None
+            else max_batches
+        )
+        max_items = (
+            self.max_invalidation_items_per_batch
+            if max_items is None
+            else max_items
+        )
         affected: list[str] = []
         full_refresh_required = False
         backlog = False
 
-        for _ in range(self.max_invalidation_batches_per_tick):
-            batch = self.invalidation_buffer.drain(
-                max_items=self.max_invalidation_items_per_batch
-            )
+        for _ in range(max_batches):
+            batch = invalidation_buffer.drain(max_items=max_items)
             if not isinstance(batch, MirrorInvalidationBatch):
                 raise ContinuousSessionError(
                     "invalidation buffer returned an invalid batch"
                 )
-            routed = self.dependency_index.affected_inputs(batch)
+            routed = dependency_index.affected_inputs(batch)
             affected.extend(routed)
             full_refresh_required = full_refresh_required or batch.full_refresh_required
             if not batch.has_more:
                 break
         else:
-            backlog = self.invalidation_buffer.pending_count > 0 or (
-                self.invalidation_buffer.full_refresh_required
+            backlog = invalidation_buffer.pending_count > 0 or (
+                invalidation_buffer.full_refresh_required
             )
         return tuple(dict.fromkeys(affected)), full_refresh_required, backlog
 
@@ -2770,6 +2810,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         lifecycle = self.lifecycle
         market_store = self.market_store
         desktop_consumer = self.desktop_consumer
+        invalidation_buffer = self.invalidation_buffer
+        dependency_index = self.dependency_index
+        max_invalidation_batches = self.max_invalidation_batches_per_tick
+        max_invalidation_items = self.max_invalidation_items_per_batch
         causal_view = self.causal_view
         required_history = self.required_history
         outcome_authority = self.outcome_authority
@@ -2841,11 +2885,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 registered_input_ids=(),
                 retired_input_ids=(),
                 full_refresh_required=bool(
-                    self.invalidation_buffer.full_refresh_required
+                    invalidation_buffer.full_refresh_required
                 ),
                 invalidation_backlog=(
-                    self.invalidation_buffer.pending_count > 0
-                    or self.invalidation_buffer.full_refresh_required
+                    invalidation_buffer.pending_count > 0
+                    or invalidation_buffer.full_refresh_required
                 ),
                 settled_ticket_ids=(),
                 settlement_evidence_ids=(),
@@ -2877,20 +2921,35 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     as_of=now,
                     view=causal_view,
                 )
-                affected, full_refresh, backlog = _drain_invalidations_method(self)
+                affected, full_refresh, backlog = _drain_invalidations_method(
+                    self,
+                    invalidation_buffer=invalidation_buffer,
+                    dependency_index=dependency_index,
+                    max_batches=max_invalidation_batches,
+                    max_items=max_invalidation_items,
+                )
 
                 newly_registered: list[str] = []
                 retired: list[str] = []
 
                 def register(input_id: str, **selectors: object) -> None:
-                    before = input_id in self.dependency_index.input_ids
-                    _register_input_method(self, input_id, **selectors)
+                    before = input_id in dependency_index.input_ids
+                    _register_input_method(
+                        self,
+                        input_id,
+                        dependency_index=dependency_index,
+                        **selectors,
+                    )
                     if not before:
                         newly_registered.append(input_id)
 
                 def retire(input_id: str) -> None:
-                    before = input_id in self.dependency_index.input_ids
-                    _retire_input_method(self, input_id)
+                    before = input_id in dependency_index.input_ids
+                    _retire_input_method(
+                        self,
+                        input_id,
+                        dependency_index=dependency_index,
+                    )
                     if before:
                         retired.append(input_id)
 

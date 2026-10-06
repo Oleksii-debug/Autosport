@@ -1105,9 +1105,11 @@ class ParlayApiProductSource:
                 except (TypeError, ValueError) as exc:
                     raise ProductSourceStateError("pending collector delta is invalid") from exc
                 if (
-                    delta.source_id != self.source_id
+                    event.source_id != self.source_id
+                    or delta.source_id != self.source_id
                     or delta.stream_epoch != self.stream_epoch
                     or delta.source_cursor != pending["catalog_cursor"]
+                    or delta.source_observed_at != event.observed_ts
                     or delta.event_dedupe_key != event.dedupe_key
                     or delta.event_id != event.event_id
                     or delta.canonical_event_digest != item["canonical_digest"]

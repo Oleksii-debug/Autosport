@@ -1179,6 +1179,67 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             ):
                 source._validate_pending(pending)
 
+    def test_assigned_pending_delta_rejects_foreign_event_source_even_when_rebound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            source.fetch_catalog_page(None)
+            source.fetch_deltas(None, (), 10)
+            state = source._read_state()
+            pending = state["pending"]
+            assert isinstance(pending, dict)
+            item = pending["items"][0]
+            item["event"]["source_id"] = "source-y"
+            event = MarketEvent.from_dict(item["event"])
+            item["dedupe_key"] = event.dedupe_key
+            item["canonical_digest"] = canonical_event_digest(event)
+            item["delta"]["event_dedupe_key"] = event.dedupe_key
+            item["delta"]["canonical_event_digest"] = item["canonical_digest"]
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "pending delta is not bound to source evidence",
+            ):
+                source._validate_pending(pending)
+
+    def test_assigned_pending_delta_rejects_observation_time_relabel(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            source.fetch_catalog_page(None)
+            source.fetch_deltas(None, (), 10)
+            state = source._read_state()
+            pending = state["pending"]
+            assert isinstance(pending, dict)
+            item = pending["items"][0]
+            original_delta_observed_at = item["delta"]["source_observed_at"]
+            item["event"]["observed_ts"] = "2026-09-20T17:33:00+00:00"
+            event = MarketEvent.from_dict(item["event"])
+            item["canonical_digest"] = canonical_event_digest(event)
+            item["delta"]["canonical_event_digest"] = item["canonical_digest"]
+            self.assertNotEqual(
+                original_delta_observed_at,
+                event.observed_ts,
+            )
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "pending delta is not bound to source evidence",
+            ):
+                source._validate_pending(pending)
+
     def test_catalog_checkpoint_must_match_exact_cursor_and_page_digest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = ParlayApiProductSource(

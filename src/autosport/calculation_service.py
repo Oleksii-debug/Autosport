@@ -271,6 +271,8 @@ def _snapshot_quote_at_cutoff(
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event quote fields are not canonical") from exc
 
+    if ingest < observed:
+        raise ValueError("selected quote ingest_ts is before observed_ts")
     if observed > cutoff_value:
         raise ValueError("selected quote observed_ts is after the calculation causal cutoff")
     if source is not None and source > cutoff_value:

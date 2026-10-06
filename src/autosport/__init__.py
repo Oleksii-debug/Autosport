@@ -199,3 +199,8 @@ from . import _strategy_model_factory_publish_receipt_guard as _strategy_model_f
 # The owning receipt protocol above remains canonical; this final composition seal
 # makes its low-level append non-caller-capable and freezes post-import dispatch.
 from . import _strategy_model_factory_publish_receipt_dispatch_guard as _strategy_model_factory_publish_receipt_dispatch_guard  # noqa: F401,E402
+
+# Registered-strategy model reconstruction is product-owned scientific authority.
+# Seal its positive runtime type/post-init dispatch before package callers can retain
+# a resolver reference that would otherwise follow a later module-global class rebind.
+from . import _registered_strategy_model_runtime_issuance_guard as _registered_strategy_model_runtime_issuance_guard  # noqa: F401,E402

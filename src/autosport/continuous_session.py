@@ -2286,17 +2286,38 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if max_items is None
             else max_items
         )
+        if (
+            type(max_batches) is not int
+            or max_batches <= 0
+            or type(max_items) is not int
+            or max_items <= 0
+        ):
+            raise ContinuousSessionError(
+                "continuous-session invalidation bounds are invalid"
+            )
         affected: list[str] = []
         full_refresh_required = False
         backlog = False
 
         for _ in range(max_batches):
             batch = invalidation_buffer.drain(max_items=max_items)
-            if not isinstance(batch, MirrorInvalidationBatch):
+            if type(batch) is not MirrorInvalidationBatch:
                 raise ContinuousSessionError(
                     "invalidation buffer returned an invalid batch"
                 )
             routed = dependency_index.affected_inputs(batch)
+            if (
+                type(routed) is not tuple
+                or any(
+                    type(input_id) is not str
+                    or not input_id
+                    or input_id.strip() != input_id
+                    for input_id in routed
+                )
+            ):
+                raise ContinuousSessionError(
+                    "dependency index returned invalid affected inputs"
+                )
             affected.extend(routed)
             full_refresh_required = full_refresh_required or batch.full_refresh_required
             if not batch.has_more:
@@ -2957,6 +2978,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     as_of=now,
                     view=causal_view,
                 )
+                if (
+                    type(delivered) is not tuple
+                    or any(
+                        type(delta_id) is not str
+                        or not delta_id
+                        or delta_id.strip() != delta_id
+                        for delta_id in delivered
+                    )
+                ):
+                    raise ContinuousSessionError(
+                        "desktop consumer returned invalid delivered delta ids"
+                    )
                 affected, full_refresh, backlog = _drain_invalidations_method(
                     self,
                     invalidation_buffer=invalidation_buffer,
@@ -2996,9 +3029,26 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     register_input=register,
                     retire_input=retire,
                 )
+                if (
+                    type(registered) is not tuple
+                    or any(
+                        type(input_id) is not str
+                        or not input_id
+                        or input_id.strip() != input_id
+                        for input_id in registered
+                    )
+                ):
+                    raise ContinuousSessionError(
+                        "lifecycle returned invalid registered input ids"
+                    )
                 # The lifecycle is canonical about eligibility; the index is canonical
-                # about dependency routing. Keep both outputs for auditability.
+                # about dependency routing. Keep both outputs for auditability, but never
+                # report a lifecycle registration that is absent from the routing index.
                 for input_id in registered:
+                    if input_id not in dependency_index.input_ids:
+                        raise ContinuousSessionError(
+                            "lifecycle reported an input absent from dependency index"
+                        )
                     if input_id not in newly_registered:
                         newly_registered.append(input_id)
 

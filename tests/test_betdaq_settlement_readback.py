@@ -2242,3 +2242,70 @@ def test_order_dto_rejects_terminal_status_authority_replacement(monkeypatch):
         match="terminal order status authority was replaced",
     ):
         replace(value, order_status_code=99, final_settlement_proven=True)
+
+def test_economic_read_rejects_response_parser_replacement_before_dispatch(
+    monkeypatch,
+):
+    client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    hostile_calls = []
+
+    def hostile(payload, method):
+        hostile_calls.append((payload, method))
+        raise AssertionError("hostile economic response parser executed")
+
+    monkeypatch.setattr(
+        settlement_module,
+        "_parse_economic_soap_result",
+        hostile,
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ economic response parser was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert hostile_calls == []
+    assert opener.calls == []
+
+
+def test_economic_read_rejects_response_parser_replacement_during_dispatch(
+    monkeypatch,
+):
+    payload = postings_by_id(posting(9001))
+    account = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "secret-pass", "secret-app"),
+        clock=clock_one,
+    )
+    hostile_calls = []
+
+    def hostile(payload, method):
+        hostile_calls.append((payload, method))
+        raise AssertionError("hostile economic response parser executed")
+
+    class RotatingParserUrlopen:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, request, *, timeout):
+            self.calls.append((request, timeout))
+            monkeypatch.setattr(
+                settlement_module,
+                "_parse_economic_soap_result",
+                hostile,
+            )
+            return _FakeHttpResponse(payload)
+
+    opener = RotatingParserUrlopen()
+    _install_https_test_dispatch(monkeypatch, opener)
+    client = BetdaqEconomicReadbackClient(account)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ economic response parser was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert len(opener.calls) == 1
+    assert hostile_calls == []
+

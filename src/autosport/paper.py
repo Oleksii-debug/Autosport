@@ -1548,7 +1548,8 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
     named_temporary_file = tempfile_module.NamedTemporaryFile
     named_temporary_file_code = named_temporary_file.__code__
     path_factory = Path
-    path_unlink = path_factory.unlink
+    path_type = type(path_factory("."))
+    path_unlink = path_type.unlink
     path_unlink_code = path_unlink.__code__
     os_module = os
     fsync_file = os_module.fsync
@@ -1564,7 +1565,7 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
             raise ValueError("PaperBook temporary-file callable authority changed")
         if publish_globals.get("Path") is not path_factory:
             raise ValueError("PaperBook snapshot Path authority changed")
-        if path_factory.unlink is not path_unlink:
+        if path_type.unlink is not path_unlink:
             raise ValueError("PaperBook snapshot unlink authority changed")
         if path_unlink.__code__ is not path_unlink_code:
             raise ValueError("PaperBook snapshot unlink callable authority changed")
@@ -1583,9 +1584,9 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
             raise ValueError("PaperBook JSON serializer authority changed")
 
     def unlink(path: object) -> None:
-        if type(path) is not path_factory:
+        if type(path) is not path_type:
             raise ValueError("PaperBook temporary snapshot path type changed")
-        if path_factory.unlink is not path_unlink:
+        if path_type.unlink is not path_unlink:
             raise ValueError("PaperBook snapshot unlink authority changed")
         if path_unlink.__code__ is not path_unlink_code:
             raise ValueError("PaperBook snapshot unlink callable authority changed")

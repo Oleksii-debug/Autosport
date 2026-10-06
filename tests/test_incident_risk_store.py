@@ -696,6 +696,45 @@ class IncidentRiskStoreTests(unittest.TestCase):
 
         self.assertFalse(self.store.path.exists())
 
+    def test_persistence_rejects_recognized_credentials_before_store_creation(self) -> None:
+        unsafe_cases = (
+            {
+                "title": "Provider Authorization: Bearer SECRET_VALUE_123456",
+            },
+            {
+                "summary": "Provider failed with api_key=secret-value-123456",
+            },
+            {
+                "residual_risk": "credential ghp_abcdefghijklmnopqrstuvwxyz1234567890 leaked",
+            },
+            {
+                "occurrence_evidence_refs": (
+                    "https://user:password@example.invalid/evidence/001",
+                ),
+                "evidence_refs": (
+                    "https://user:password@example.invalid/evidence/001",
+                ),
+            },
+        )
+        for overrides in unsafe_cases:
+            with self.subTest(overrides=overrides):
+                entry = self._entry(**overrides)
+                with self.assertRaisesRegex(
+                    IncidentRiskStoreError,
+                    "credential-bearing",
+                ):
+                    self.store.append(entry)
+                self.assertFalse(self.store.path.exists())
+
+    def test_persistence_does_not_reject_safe_token_bucket_prose(self) -> None:
+        entry = self._entry(
+            summary="Provider token bucket exhausted; canonical evidence is referenced separately.",
+        )
+
+        snapshot = self.store.append(entry)
+
+        self.assertEqual(snapshot.current_entries, (entry,))
+
     def test_duplicate_append_rejects_tamper_before_fingerprint_dispatch(self) -> None:
         first = self._entry()
         self.store.append(first)

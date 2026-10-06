@@ -23,6 +23,7 @@ from typing import Final
 from .incident_risk_register import (
     IncidentRiskEntry,
     IncidentRiskRegisterError,
+    validate_persistence_safe,
     validate_successor,
 )
 from .integrity import atomic_write_json, durable_path_lock
@@ -740,9 +741,10 @@ class IncidentRiskStore:
             )
         try:
             entry.__post_init__()
+            validate_persistence_safe(entry)
         except (IncidentRiskRegisterError, TypeError, ValueError) as exc:
             raise IncidentRiskStoreError(
-                "persistence rejects an invalid IncidentRiskEntry snapshot"
+                "persistence rejects an invalid or credential-bearing IncidentRiskEntry snapshot"
             ) from exc
 
         with durable_path_lock(self.path):

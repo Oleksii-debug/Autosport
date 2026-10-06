@@ -200,6 +200,15 @@ _OPERATOR_SECRET_PATTERNS: Final = (
     re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
 )
 
+# Persistence is intentionally stricter than ordinary canonical-text validation,
+# but avoids treating harmless prose such as "token bucket" as a credential.
+# Operator projection remains broader defense-in-depth for transient/untrusted values.
+_PERSISTENCE_SECRET_PATTERNS: Final = (
+    _OPERATOR_SECRET_PATTERNS[0],
+    re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{4,}"),
+    *_OPERATOR_SECRET_PATTERNS[2:],
+)
+
 
 def _operator_safe_text(name: str, value: object, *, allow_empty: bool = False) -> str:
     """Remove recognized credential-bearing material at the operator boundary.
@@ -220,6 +229,46 @@ def _operator_safe_tuple(name: str, values: tuple[str, ...]) -> tuple[str, ...]:
         _operator_safe_text(f"{name} member", value)
         for value in values
     )
+
+
+def validate_persistence_safe(entry: "IncidentRiskEntry") -> None:
+    """Reject recognized credentials before durable register publication."""
+
+    if type(entry) is not IncidentRiskEntry:
+        raise TypeError(
+            "persistence safety validation requires an exact IncidentRiskEntry"
+        )
+    entry.__post_init__()
+    persisted_values = (
+        ("title", entry.title),
+        ("summary", entry.summary),
+        ("mitigation", entry.mitigation),
+        ("residual_risk", entry.residual_risk),
+        *(
+            ("affected_components member", value)
+            for value in entry.affected_components
+        ),
+        *(
+            ("occurrence_evidence_refs member", value)
+            for value in entry.occurrence_evidence_refs
+        ),
+        *(
+            ("evidence_refs member", value)
+            for value in entry.evidence_refs
+        ),
+        *(
+            ("model_version_ids member", value)
+            for value in entry.model_version_ids
+        ),
+    )
+    for name, value in persisted_values:
+        if not value:
+            continue
+        if any(pattern.search(value) for pattern in _PERSISTENCE_SECRET_PATTERNS):
+            raise IncidentRiskRegisterError(
+                f"{name} contains recognized credential-bearing material; "
+                "persist a safe reference instead"
+            )
 
 
 def _enum_value(enum_type, name: str, value: object):

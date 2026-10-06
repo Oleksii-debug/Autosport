@@ -3464,6 +3464,65 @@ def test_settlement_resolution_collection_rejects_unproven_legacy_discovery() ->
     assert coordinator._settlement_resolutions(as_of=_AT) == ()
 
 
+
+def test_settlement_resolution_collection_waits_for_settlement_discovery_itself() -> None:
+    record = _ResolutionRecord(
+        "provider-a:event-1",
+        "settlement-1",
+        completion_discovered_at=_AT,
+        settlement_discovered_at="2026-09-22T06:21:00+00:00",
+    )
+
+    class ForbiddenAuthority:
+        def resolve(self, _record: object, *, as_of: str):
+            raise AssertionError(
+                "outcome authority ran before settlement_ref discovery cutoff"
+            )
+
+    coordinator = object.__new__(
+        continuous_session.ContinuousSessionCoordinator
+    )
+    coordinator.lifecycle = _ResolutionLifecycle((record,))
+    coordinator.outcome_authority = ForbiddenAuthority()
+
+    assert coordinator._settlement_resolutions(as_of=_AT) == ()
+
+
+def test_settlement_resolution_collection_rejects_invalid_discovery_timestamp() -> None:
+    record = _ResolutionRecord(
+        "provider-a:event-1",
+        "settlement-1",
+        settlement_discovered_at="not-a-timestamp",
+    )
+    coordinator = _resolution_coordinator((record,), (_resolution(),))
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "lifecycle settlement discovery timestamp is invalid" in str(exc)
+    else:
+        raise AssertionError("invalid lifecycle settlement discovery timestamp was accepted")
+
+
+def test_settlement_resolution_collection_rejects_runtime_cutoff_validator_rebinding(
+    monkeypatch,
+) -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    coordinator = _resolution_coordinator((record,), (_resolution(),))
+
+    def attacker_instant(_value: object, _field: str) -> object:
+        raise AssertionError("runtime-rebound settlement cutoff validator executed")
+
+    monkeypatch.setattr(continuous_session, "_instant", attacker_instant)
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "canonical settlement resolution validator authority changed" in str(exc)
+    else:
+        raise AssertionError("runtime-rebound settlement cutoff validator was accepted")
+
+
 def test_settlement_resolution_collection_deduplicates_identical_evidence() -> None:
     record = _ResolutionRecord("provider-a:event-1", "settlement-1")
     resolution = _resolution()

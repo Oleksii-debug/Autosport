@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -79,7 +80,7 @@ def _base_coordinator(root: Path) -> continuous_session.ContinuousSessionCoordin
     coordinator._state = _state(root)
     coordinator.clock = lambda: _AT
     coordinator.causal_view = continuous_session.CausalView.AS_KNOWN_AT_DECISION
-    coordinator.required_history = None
+    coordinator.required_history = timedelta(0)
     coordinator.market_store = object()
     coordinator.paper_book_path = root / "paper_book.json"
     coordinator.initial_bankroll = "100"
@@ -510,6 +511,10 @@ def test_tick_rejects_invalid_collector_cycle_metadata(
         setattr(cycle, field_name, invalid_value)
 
         class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = _DeltaStore()
+
             def run_cycle(self):
                 return cycle
 
@@ -1351,6 +1356,600 @@ def test_tick_rejects_duplicate_lifecycle_registration_ids() -> None:
         with pytest.raises(
             continuous_session.ContinuousSessionError,
             match="lifecycle returned invalid registered input ids",
+        ):
+            coordinator.tick()
+
+def test_tick_reads_provider_unavailable_once_from_cycle_snapshot() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Cycle:
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+            def __init__(self) -> None:
+                self.provider_reads = 0
+
+            @property
+            def provider_unavailable(self):
+                self.provider_reads += 1
+                return self.provider_reads > 1
+
+        cycle = Cycle()
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = _DeltaStore()
+
+            def run_cycle(self):
+                return cycle
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        result = coordinator.tick()
+
+        assert result.source_provider_unavailable is False
+        assert cycle.provider_reads == 1
+
+
+def test_tick_allows_missing_lifecycle_records_without_outcome_authority() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        result = coordinator.tick()
+
+        assert result.cycle_index == 1
+        assert result.settlement_evidence_ids == ()
+
+
+def test_tick_rejects_missing_lifecycle_records_with_outcome_authority_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Collector(_Collector):
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran before settlement preflight")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class Authority:
+            def resolve(self, *_args, **_kwargs):
+                return None
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.outcome_authority = Authority()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="lifecycle settlement records authority is unavailable",
+        ):
+            coordinator.tick()
+
+
+@pytest.mark.parametrize("max_items", (0, True, -1))
+def test_tick_rejects_invalid_projection_bound_before_provider_io(
+    max_items: object,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": max_items})()
+            delta_store = _DeltaStore()
+
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran before projection preflight")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="collector projection configuration is invalid",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_noncallable_projection_reader_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Store:
+            deltas_after_commit = None
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = Store()
+
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran before projection preflight")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="collector projection authority is unavailable",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_noncallable_lifecycle_registration_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Collector(_Collector):
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran before lifecycle preflight")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            register_eligible = None
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="lifecycle registration authority is unavailable",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_noncallable_desktop_drain_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Collector(_Collector):
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran before desktop preflight")
+
+        class Desktop:
+            drain = None
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="desktop delivery authority is unavailable",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_noncallable_invalidation_drain_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Collector(_Collector):
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran before invalidation preflight")
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+            drain = None
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.invalidation_buffer = Buffer()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous-session invalidation routing authority is unavailable",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_noncallable_affected_inputs_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Collector(_Collector):
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran before invalidation preflight")
+
+        class Index:
+            input_ids = ()
+            affected_inputs = None
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = Index()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous-session invalidation routing authority is unavailable",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_invalid_invalidation_bounds_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Collector(_Collector):
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran before invalidation-bound preflight")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.max_invalidation_batches_per_tick = 0
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous-session invalidation bounds are invalid",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_invalid_causal_view_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Collector(_Collector):
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran before causal-view preflight")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.causal_view = "as_known_at_decision"
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous-session causal view is invalid",
+        ):
+            coordinator.tick()
+
+
+@pytest.mark.parametrize(
+    "required_history",
+    (None, timedelta(seconds=-1)),
+)
+def test_tick_rejects_invalid_required_history_before_provider_io(
+    required_history: object,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Collector(_Collector):
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran before history preflight")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.required_history = required_history
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous-session required history is invalid",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_noncallable_clock_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Collector(_Collector):
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran before clock preflight")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.clock = None
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous-session clock authority is unavailable",
+        ):
+            coordinator.tick()
+
+
+@pytest.mark.parametrize(
+    ("changed_keys", "full_refresh_required", "has_more"),
+    (
+        ([], False, False),
+        ((("provider-a", "quote-1"),), 1, False),
+        ((("provider-a", "quote-1"),), False, 0),
+        ((("provider-a",),), False, False),
+        (((" provider-a", "quote-1"),), False, False),
+        ((("provider-a", "quote-1"),), True, False),
+        ((), True, True),
+    ),
+)
+def test_tick_rejects_noncanonical_invalidation_batch_fields(
+    changed_keys: object,
+    full_refresh_required: object,
+    has_more: object,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=changed_keys,
+                    full_refresh_required=full_refresh_required,
+                    has_more=has_more,
+                )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.invalidation_buffer = Buffer()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="invalidation buffer returned an invalid batch",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_duplicate_affected_input_ids() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class Index:
+            input_ids = ()
+
+            def affected_inputs(self, _batch):
+                return ("input-1", "input-1")
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = Index()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency index returned invalid affected inputs",
+        ):
+            coordinator.tick()
+
+
+@pytest.mark.parametrize(
+    ("pending_count", "pending_full_refresh"),
+    (
+        (True, False),
+        (-1, False),
+        (1, 1),
+    ),
+)
+def test_tick_rejects_noncanonical_invalidation_backlog_state(
+    pending_count: object,
+    pending_full_refresh: object,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Buffer:
+            full_refresh_required = pending_full_refresh
+
+            @property
+            def pending_count(self):
+                return pending_count
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=True,
+                )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.invalidation_buffer = Buffer()
+        coordinator.max_invalidation_batches_per_tick = 1
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="invalidation buffer backlog state is invalid",
+        ):
+            coordinator.tick()
+
+
+def test_provider_unavailable_tick_rejects_noncanonical_invalidation_backlog_state() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Cycle:
+            source_id = "provider-a"
+            provider_unavailable = True
+            committed_delta_ids = ()
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = _DeltaStore()
+
+            def run_cycle(self):
+                return Cycle()
+
+        class Buffer:
+            pending_count = True
+            full_refresh_required = False
+
+            def drain(self, **_kwargs):
+                raise AssertionError("provider-unavailable tick must not drain invalidations")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("provider-unavailable tick must not deliver desktop deltas")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("provider-unavailable tick must not register lifecycle inputs")
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.invalidation_buffer = Buffer()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="invalidation buffer backlog state is invalid",
         ):
             coordinator.tick()
 

@@ -1305,6 +1305,10 @@ class _ContinuousSessionState:
             ["_ContinuousSessionState"], dict[str, Any]
         ] = _read_error_checkpoint,
         _read_error_checkpoint_code: object = _read_error_checkpoint.__code__,
+        _update_method: Callable[..., dict[str, Any]] = _update,
+        _update_method_code: object = _update.__code__,
+        _text_validator: Callable[[object, str], str] = _text,
+        _text_validator_code: object = _text.__code__,
     ) -> None:
         if not isinstance(state, SessionState):
             raise TypeError("state must be SessionState")
@@ -1315,13 +1319,19 @@ class _ContinuousSessionState:
             or type(self)._read_error_checkpoint is not _read_error_checkpoint
             or getattr(_read_error_checkpoint, "__code__", None)
             is not _read_error_checkpoint_code
+            or type(self)._update is not _update_method
+            or getattr(_update_method, "__code__", None) is not _update_method_code
+            or _text is not _text_validator
+            or getattr(_text_validator, "__code__", None) is not _text_validator_code
         ):
             raise ContinuousSessionError(
                 "canonical state-transition error authority changed"
             )
 
         def mutate(raw: dict[str, Any]) -> bool:
-            normalized_reason = None if reason is None else _text(reason, "reason")
+            normalized_reason = (
+                None if reason is None else _text_validator(reason, "reason")
+            )
             if normalized_reason is not None:
                 desired_error = normalized_reason
             elif state is SessionState.RUNNING:
@@ -1390,7 +1400,8 @@ class _ContinuousSessionState:
             # O(history) canonical-session read.
             self._write_error_checkpoint(None)
 
-        self._update(
+        _update_method(
+            self,
             mutate,
             advance_generation=True,
             finalize_under_lock=finalize,

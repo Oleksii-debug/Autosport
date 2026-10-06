@@ -2264,8 +2264,33 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         return tuple(dict.fromkeys(affected)), full_refresh_required, backlog
 
-    def _refresh_source_state_projection(self) -> ContinuousSessionStatus:
-        snapshot = self._state.snapshot()
+    def _refresh_source_state_projection(
+        self,
+        *,
+        _snapshot_method: Callable[
+            ["_ContinuousSessionState"], ContinuousSessionStatus
+        ] = _ContinuousSessionState.snapshot,
+        _snapshot_method_code: object = _ContinuousSessionState.snapshot.__code__,
+        _record_source_projection_method: Callable[..., None] = (
+            _ContinuousSessionState.record_source_projection
+        ),
+        _record_source_projection_method_code: object = (
+            _ContinuousSessionState.record_source_projection.__code__
+        ),
+    ) -> ContinuousSessionStatus:
+        if (
+            type(self._state).snapshot is not _snapshot_method
+            or getattr(_snapshot_method, "__code__", None)
+            is not _snapshot_method_code
+            or type(self._state).record_source_projection
+            is not _record_source_projection_method
+            or getattr(_record_source_projection_method, "__code__", None)
+            is not _record_source_projection_method_code
+        ):
+            raise ContinuousSessionError(
+                "canonical source-projection coordinator authority changed"
+            )
+        snapshot = _snapshot_method(self._state)
         deltas = self.collector.delta_store.deltas_after_commit(
             source_id=self.collector.source_id,
             after_delta_id=snapshot.source_state_delta_id,
@@ -2273,12 +2298,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         )
         backlog = len(deltas) > self.collector.config.max_items
         selected = deltas[: self.collector.config.max_items]
-        self._state.record_source_projection(
+        _record_source_projection_method(
+            self._state,
             deltas=selected,
             backlog=backlog,
             expected_after_delta_id=snapshot.source_state_delta_id,
         )
-        return self._state.snapshot()
+        return _snapshot_method(self._state)
 
     def _settlement_resolutions(
         self,

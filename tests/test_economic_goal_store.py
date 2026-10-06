@@ -517,6 +517,22 @@ def test_codec_ignores_rebound_size_bounds(monkeypatch) -> None:
         economic_goal_from_payload(oversized_member)
 
 
+def test_store_captures_transitive_path_witnesses(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+
+    def forged_open(*args, **kwargs):
+        raise AssertionError("rebound Path.open executed")
+
+    def forged_stat(*args, **kwargs):
+        raise AssertionError("rebound Path.stat executed")
+
+    monkeypatch.setattr(type(store.path), "open", forged_open)
+    monkeypatch.setattr(type(store.path), "stat", forged_stat)
+
+    store.initialize_owner(_goal())
+    assert store.load() == _goal()
+
+
 def test_store_binding_ignores_class_descriptor_rebinding(monkeypatch, tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
     store.initialize_owner(_goal())

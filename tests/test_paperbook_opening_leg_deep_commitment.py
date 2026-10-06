@@ -954,6 +954,43 @@ def test_inexact_settlement_fails_before_economic_mutation() -> None:
         ),
     ),
 )
+@pytest.mark.parametrize(
+    ("authority_name", "args", "message"),
+    (
+        (
+            "_record_ticket_opening_authority",
+            lambda book, ticket: (book, ticket),
+            "requires trusted open_ticket authority",
+        ),
+        (
+            "_advance_paperbook_causal_history_open",
+            lambda book, ticket: (book, ticket.ticket_id),
+            "requires trusted open_ticket authority",
+        ),
+        (
+            "_advance_paperbook_causal_history_settle",
+            lambda book, ticket: (book, ticket.ticket_id, (), (), _TS),
+            "requires trusted settle authority",
+        ),
+    ),
+)
+def test_hidden_paperbook_writers_cannot_be_called_directly(
+    authority_name: str,
+    args,
+    message: str,
+) -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    authority = getattr(paper_module, authority_name)
+    lifecycle_before = tuple(book._lifecycle)
+
+    with pytest.raises(ValueError, match=message):
+        authority(*args(book, ticket))
+
+    assert tuple(book._lifecycle) == lifecycle_before
+    assert book.committed_stake == Decimal("10")
+
+
 def test_live_paperbook_authority_registries_cannot_be_reset(
     registrar_name: str,
     message: str,

@@ -2934,6 +2934,86 @@ def test_source_projection_allows_first_revision_of_expected_predecessor() -> No
         assert state.snapshot().source_state_delta_id == "revision-delta"
 
 
+
+def test_record_failure_returns_bounded_publication_without_full_history_read() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _LARGE_HISTORY)
+
+        def forbidden_reader():
+            raise AssertionError(
+                "failure publication must not re-enter the full settlement-history reader"
+            )
+
+        with patch.object(state, "_read", forbidden_reader):
+            publication = state.record_failure(code="BOUNDED_FAILURE")
+
+        assert publication.session_id == "session-history-scaling"
+        assert publication.state is continuous_session.SessionState.RUNNING
+        assert publication.generation == 0
+        assert publication.cycles_completed == _LARGE_HISTORY
+        assert publication.last_success_at == _AT
+        assert publication.last_error_code == "BOUNDED_FAILURE"
+
+
+def test_session_id_property_is_bounded_for_large_settlement_history() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        state = _state_with_history(Path(directory), _LARGE_HISTORY)
+
+        def forbidden_reader():
+            raise AssertionError(
+                "immutable session identity must not re-read retained settlement history"
+            )
+
+        with patch.object(state, "_read", forbidden_reader):
+            assert state.session_id == "session-history-scaling"
+
+
+def test_provider_unavailable_tick_uses_bounded_failure_publication() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _LARGE_HISTORY)
+
+        class ProviderUnavailableCycle:
+            provider_unavailable = True
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+        class SourceSnapshot:
+            source_gap_state = None
+            source_sync_state = None
+
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+        coordinator.collector = type(
+            "CollectorStub",
+            (),
+            {"run_cycle": lambda _self: ProviderUnavailableCycle()},
+        )()
+        coordinator._require_running = lambda: None
+        coordinator._refresh_source_state_projection = lambda: SourceSnapshot()
+
+        def forbidden_reader():
+            raise AssertionError(
+                "provider-unavailable tick must not read the full settlement history"
+            )
+
+        with patch.object(state, "_read", forbidden_reader):
+            result = coordinator.tick()
+
+        assert result.session_id == "session-history-scaling"
+        assert result.cycle_index == _LARGE_HISTORY
+        assert result.source_id == "provider-a"
+        assert result.source_provider_unavailable is True
+        assert result.last_success_at == _AT
+        error_path = root / "continuous_session.json.operational_error.json"
+        payload = json.loads(error_path.read_text(encoding="utf-8"))
+        assert payload["last_error_code"] == "ProviderUnavailableError"
+
+
 def test_record_failure_does_not_enter_full_history_reader() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

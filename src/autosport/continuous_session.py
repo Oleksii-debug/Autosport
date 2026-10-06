@@ -5273,6 +5273,24 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                             )
                         except BaseException:
                             pass
+                    # Provider unavailability is only the source observation. If
+                    # local backlog/routing validation fails while handling it, the
+                    # durable operational receipt must describe that actual failure,
+                    # including replacing a same-generation ProviderUnavailableError
+                    # already published before a late post-publication check failed.
+                    try:
+                        _record_failure_method(
+                            state,
+                            code=type(exc).__name__,
+                        )
+                    except Exception as publication_error:
+                        try:
+                            exc.add_note(
+                                "continuous session failure publication also failed: "
+                                f"{type(publication_error).__name__}: {publication_error}"
+                            )
+                        except BaseException:
+                            pass
                     raise
             return ContinuousTickResult(
                 session_id=failure.session_id,

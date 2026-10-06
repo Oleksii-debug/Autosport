@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from threading import RLock
 from types import FunctionType
-from typing import Callable, Protocol
+from typing import Callable, Iterator, Protocol
 
 from .causal_collector import (
     CanonicalDesktopApplication,
@@ -696,6 +696,20 @@ class AutonomousProductRuntime:
             raise ProductCompositionError(
                 "cannot recover interrupted product START transition"
             ) from exc
+
+    @contextmanager
+    def decision_commit_fence(self) -> Iterator[None]:
+        """Serialize one already-prepared PAPER commit with every runtime operation."""
+
+        with self._operation_fence:
+            self._require_runtime_authority()
+            current = self._coherent_status()
+            if self._state_value(current) != SessionState.RUNNING.value:
+                raise ProductCompositionError(
+                    "PAPER decision commit requires the canonical product runtime "
+                    "to remain running"
+                )
+            yield
 
     @_serialized_runtime_operation
     def start(self) -> ContinuousSessionStatus:

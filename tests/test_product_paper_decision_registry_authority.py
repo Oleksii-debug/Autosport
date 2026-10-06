@@ -18,7 +18,10 @@ from autosport.product_paper_decision_cycle import (
 class _Runtime:
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
-        self.manifest = SimpleNamespace(initial_bankroll="100")
+        self.manifest = SimpleNamespace(
+            initial_bankroll="100",
+            source_id="provider-a",
+        )
 
 
 class _Authority:
@@ -65,7 +68,7 @@ def _build(
             scientific_registry=registry,
             execution_config=_ExecutionConfig(),
             max_quote_age=timedelta(seconds=5),
-            inputs=(ProductDecisionInput("input-a"),),
+            inputs=(ProductDecisionInput("input-a", source_ids=("provider-a",)),),
         )
 
 
@@ -90,7 +93,7 @@ def test_rejects_isinstance_compatible_registry_subclass(tmp_path: Path) -> None
                 ),
                 execution_config=_ExecutionConfig(),
                 max_quote_age=timedelta(seconds=5),
-                inputs=(ProductDecisionInput("input-a"),),
+                inputs=(ProductDecisionInput("input-a", source_ids=("provider-a",)),),
             )
 
 

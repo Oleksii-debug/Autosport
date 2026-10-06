@@ -1672,3 +1672,138 @@ def test_agent_loop_skill_invocation_binds_exact_loop_snapshot(tmp_path):
     assert run.caller_state_sha256 == before.state_sha256
     assert run.source_sha256 == before.source_sha256
     assert runtime.snapshot().state_sha256 == before.state_sha256
+
+def test_handler_interrupt_cleanup_baseexception_cannot_mask_original(monkeypatch):
+    class InterruptingEndpoint:
+        def close(self):
+            raise SystemExit("cleanup pipe close")
+
+    class InterruptingProcess:
+        def __init__(self):
+            self.alive = True
+            self.join_calls = 0
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_calls += 1
+            if self.join_calls == 1:
+                raise KeyboardInterrupt("original parent interrupt")
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            raise SystemExit("cleanup kill")
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            raise SystemExit("cleanup process close")
+
+    process = InterruptingProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return InterruptingEndpoint(), InterruptingEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="original parent interrupt"):
+        SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert process.alive is False
+    assert process.join_calls >= 2
+
+
+def test_handler_construction_interrupt_cleanup_baseexception_cannot_mask_original(
+    monkeypatch,
+):
+    class InterruptingEndpoint:
+        def close(self):
+            raise SystemExit("cleanup pipe close")
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return InterruptingEndpoint(), InterruptingEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            raise KeyboardInterrupt("original construction interrupt")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="original construction interrupt"):
+        SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+
+def test_handler_result_interrupt_cleanup_baseexception_cannot_mask_original(
+    monkeypatch,
+):
+    class InterruptingReceiver:
+        def poll(self):
+            raise KeyboardInterrupt("original result interrupt")
+
+        def close(self):
+            raise SystemExit("cleanup receiver close")
+
+    class Sender:
+        def close(self):
+            return None
+
+    class InterruptingProcess:
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            raise SystemExit("cleanup process close")
+
+    process = InterruptingProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return InterruptingReceiver(), Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="original result interrupt"):
+        SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+

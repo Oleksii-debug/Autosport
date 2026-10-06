@@ -7,9 +7,11 @@ fences.  It deliberately does not perform HTTP/SOAP, retry, sleep, place/update 
 order, prove Standard-tier entitlement, or grant execution/write authority.
 
 BETDAQ's public rate documentation exposes exact Default per-minute ceilings for a
-bounded set of methods plus a Combined row.  The public meaning of the separate
-"Any"/"Any Other" row is not sufficiently specified to use as a positive admission
-axis, so unknown methods fail closed instead of inheriting that capacity.
+bounded set of methods plus a Combined row.  Provider-owned explanatory material
+labels the generic Default row "Any Other" at 100/min.  For explicitly allowlisted
+provider operations without a stricter named row, this module models that ambiguity
+conservatively as one shared 100/min Default axis.  Arbitrary/unknown methods still
+fail closed instead of inheriting provider capacity.
 """
 
 from collections import deque
@@ -47,6 +49,8 @@ _BLACKLIST_AUTHORITY_DOMAIN: Final = "autosport.betdaq-rate-governor.blacklist.v
 _BLACKLIST_FILE: Final = "betdaq-rate-governor-blacklist.json"
 _MIN_WINDOW_SECONDS: Final = 60.0
 _DEFAULT_COMBINED_PER_MINUTE: Final = 300
+_ANY_OTHER_RATE_POLICY_KEY: Final = "Any Other"
+_DEFAULT_ANY_OTHER_PER_MINUTE: Final = 100
 # BETDAQ ListBlacklistInformation exposes RemainingMS as provider `int` milliseconds.
 # XML/WSDL `int` is the signed 32-bit domain; negative remaining time is invalid here.
 _BETDAQ_PROVIDER_INT_MAX: Final = 2_147_483_647
@@ -61,6 +65,7 @@ _DEFAULT_RATE_POLICY_PER_MINUTE: Final[Mapping[str, int]] = MappingProxyType(
         "GetPrices": 130,
         "ListOrdersChangedSince": 130,
         "ListSelectionTrades": 1,
+        _ANY_OTHER_RATE_POLICY_KEY: _DEFAULT_ANY_OTHER_PER_MINUTE,
     }
 )
 _OPERATION_TO_RATE_POLICY_KEY: Final[Mapping[str, str]] = MappingProxyType(
@@ -72,6 +77,7 @@ _OPERATION_TO_RATE_POLICY_KEY: Final[Mapping[str, str]] = MappingProxyType(
         "GetEventSubTreeWithSelections": "GetEventSubTreeWithSelections",
         "ListBootstrapOrders": "ListBootstrapOrders",
         "GetPrices": "GetPrices",
+        "GetOddsLadder": _ANY_OTHER_RATE_POLICY_KEY,
         "ListOrdersChangedSince": "ListOrdersChangedSince",
         "ListSelectionTrades": "ListSelectionTrades",
     }
@@ -86,6 +92,7 @@ _PROVIDER_API_NAME_TO_OPERATION_ID: Final[Mapping[str, str]] = MappingProxyType(
         "geteventsubtreewithselections": "GetEventSubTreeWithSelections",
         "listbootstraporders": "ListBootstrapOrders",
         "getprices": "GetPrices",
+        "getoddsladder": "GetOddsLadder",
         "listorderschangedsince": "ListOrdersChangedSince",
         "listselectiontrades": "ListSelectionTrades",
     }
@@ -109,7 +116,11 @@ _POLICY_SOURCE_SHA256: Final = hashlib.sha256(
                 _PROVIDER_API_NAME_TO_OPERATION_ID
             ),
             "combined": _DEFAULT_COMBINED_PER_MINUTE,
-            "any_axis": "UNKNOWN_UNMODELED",
+            "any_axis": {
+                "provider_label": _ANY_OTHER_RATE_POLICY_KEY,
+                "default_per_minute": _DEFAULT_ANY_OTHER_PER_MINUTE,
+                "model": "CONSERVATIVE_SHARED_ALLOWLIST",
+            },
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -387,7 +398,7 @@ class BetdaqRatePolicy:
 
 def default_betdaq_rate_policy(
     *,
-    policy_revision: str = "betdaq-default-documented-v3",
+    policy_revision: str = "betdaq-default-documented-v4",
     safety_reserve_by_method: Mapping[str, int] | None = None,
     combined_safety_reserve: int = 0,
 ) -> BetdaqRatePolicy:
@@ -490,11 +501,22 @@ class BetdaqRateAdmission:
     method_remaining_background: int
     combined_remaining_background: int
     blacklist_status: BetdaqBlacklistStatus
-    any_axis_status: str = field(init=False, default="UNKNOWN_UNMODELED")
+    any_axis_status: str = field(init=False)
     grants_execution_authority: bool = field(init=False, default=False)
     grants_write_permission: bool = field(init=False, default=False)
     grants_freshness: bool = field(init=False, default=False)
     multi_process_safe: bool = field(init=False, default=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "any_axis_status",
+            (
+                "CONSERVATIVE_SHARED_DEFAULT_ANY_OTHER"
+                if self.rate_policy_key == _ANY_OTHER_RATE_POLICY_KEY
+                else "UNKNOWN_UNMODELED"
+            ),
+        )
 
     @property
     def operation_id(self) -> str:
@@ -1047,7 +1069,7 @@ class BetdaqRateGovernor:
 
         with _REGISTRY_LOCK:
             now = _CANONICAL_NOW(self, name)
-            window = runtime.methods[name]
+            window = runtime.methods[method_policy.rate_policy_key]
             _CANONICAL_PRUNE(self, window.admitted_at, now)
             _CANONICAL_PRUNE(self, runtime.combined.admitted_at, now)
             cold_blocked_until = max(
@@ -1442,11 +1464,13 @@ def resolve_betdaq_rate_governor(
             wall_clock=wall_clock,
             blacklist_store=blacklist_store,
             methods={
-                method.method: _Window(
+                rate_policy_key: _Window(
                     admitted_at=deque(),
                     blocked_until=cold_until,
                 )
-                for method in policy.methods
+                for rate_policy_key in sorted(
+                    {method.rate_policy_key for method in policy.methods}
+                )
             },
             combined=_Window(
                 admitted_at=deque(),

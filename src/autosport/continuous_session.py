@@ -1240,7 +1240,12 @@ class _ContinuousSessionState:
                 raise TypeError(
                     "settlement_evidence must contain exact SettlementResolution values"
                 )
-            _validate_resolution(evidence, as_of=timestamp.isoformat())
+            try:
+                _validate_resolution(evidence, as_of=timestamp.isoformat())
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "settlement evidence is invalid for success cutoff"
+                ) from exc
 
         def mutate(raw: dict[str, Any]) -> None:
             started_at = _instant(raw["started_at"], "started_at")

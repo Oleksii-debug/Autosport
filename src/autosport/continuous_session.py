@@ -2354,7 +2354,27 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         for _ in range(max_batches):
             batch = drain_invalidation(max_items=max_items)
-            if type(batch) is not MirrorInvalidationBatch:
+            if (
+                type(batch) is not MirrorInvalidationBatch
+                or type(batch.changed_keys) is not tuple
+                or type(batch.full_refresh_required) is not bool
+                or type(batch.has_more) is not bool
+                or any(
+                    type(key) is not tuple
+                    or len(key) != 2
+                    or any(
+                        type(part) is not str
+                        or not part
+                        or part.strip() != part
+                        for part in key
+                    )
+                    for key in batch.changed_keys
+                )
+                or (
+                    batch.full_refresh_required
+                    and (bool(batch.changed_keys) or batch.has_more)
+                )
+            ):
                 raise ContinuousSessionError(
                     "invalidation buffer returned an invalid batch"
                 )
@@ -2367,6 +2387,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     or input_id.strip() != input_id
                     for input_id in routed
                 )
+                or len(set(routed)) != len(routed)
             ):
                 raise ContinuousSessionError(
                     "dependency index returned invalid affected inputs"
@@ -2376,9 +2397,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if not batch.has_more:
                 break
         else:
-            backlog = invalidation_buffer.pending_count > 0 or (
-                invalidation_buffer.full_refresh_required
-            )
+            pending_count = invalidation_buffer.pending_count
+            pending_full_refresh = invalidation_buffer.full_refresh_required
+            if (
+                type(pending_count) is not int
+                or pending_count < 0
+                or type(pending_full_refresh) is not bool
+            ):
+                raise ContinuousSessionError(
+                    "invalidation buffer backlog state is invalid"
+                )
+            backlog = pending_count > 0 or pending_full_refresh
         return tuple(dict.fromkeys(affected)), full_refresh_required, backlog
 
     def _refresh_source_state_projection(
@@ -2489,8 +2518,6 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "canonical settlement resolution validator authority changed"
             )
         lifecycle = self.lifecycle if lifecycle is None else lifecycle
-        if records_reader is None:
-            records_reader = lifecycle.records
         if resolve_outcome is _outcome_authority_unset:
             if outcome_authority is _outcome_authority_unset:
                 outcome_authority = self.outcome_authority
@@ -2502,6 +2529,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         if not callable(resolve_outcome):
             raise ContinuousSessionError(
                 "settlement outcome authority resolver is not callable"
+            )
+        if records_reader is None:
+            records_reader = getattr(lifecycle, "records", None)
+        if not callable(records_reader):
+            raise ContinuousSessionError(
+                "lifecycle settlement records authority is unavailable"
             )
         records = records_reader()
         if type(records) is not tuple:
@@ -2955,8 +2988,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         collector_delta_reader = collector_delta_store.deltas_after_commit
         collector_max_items = collector.config.max_items
         lifecycle = self.lifecycle
-        lifecycle_register_eligible = lifecycle.register_eligible
-        lifecycle_records = lifecycle.records
+        lifecycle_register_eligible = getattr(lifecycle, "register_eligible", None)
+        lifecycle_records = getattr(lifecycle, "records", None)
         market_store = self.market_store
         desktop_consumer = self.desktop_consumer
         desktop_drain = desktop_consumer.drain
@@ -2970,6 +3003,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         max_invalidation_items = self.max_invalidation_items_per_batch
         causal_view = self.causal_view
         required_history = self.required_history
+        clock = self.clock
         outcome_authority = self.outcome_authority
         outcome_resolver = (
             None
@@ -2979,6 +3013,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         if outcome_resolver is not None and not callable(outcome_resolver):
             raise ContinuousSessionError(
                 "settlement outcome authority resolver is not callable"
+            )
+        if outcome_resolver is not None and not callable(lifecycle_records):
+            raise ContinuousSessionError(
+                "lifecycle settlement records authority is unavailable"
             )
         learning_handoff = self.settlement_learning_handoff
         prepare_settlement = None
@@ -3006,6 +3044,60 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         paper_book_path = self.paper_book_path
         initial_bankroll = self.initial_bankroll
 
+        if not callable(collector_run_cycle):
+            raise ContinuousSessionError(
+                "collector cycle authority is unavailable"
+            )
+        if not callable(collector_delta_reader):
+            raise ContinuousSessionError(
+                "collector projection authority is unavailable"
+            )
+        if (
+            type(collector_max_items) is not int
+            or collector_max_items <= 0
+        ):
+            raise ContinuousSessionError(
+                "collector projection configuration is invalid"
+            )
+        if not callable(lifecycle_register_eligible):
+            raise ContinuousSessionError(
+                "lifecycle registration authority is unavailable"
+            )
+        if not callable(desktop_drain):
+            raise ContinuousSessionError(
+                "desktop delivery authority is unavailable"
+            )
+        if not callable(invalidation_drain) or not callable(
+            dependency_affected_inputs
+        ):
+            raise ContinuousSessionError(
+                "continuous-session invalidation routing authority is unavailable"
+            )
+        if (
+            type(max_invalidation_batches) is not int
+            or max_invalidation_batches <= 0
+            or type(max_invalidation_items) is not int
+            or max_invalidation_items <= 0
+        ):
+            raise ContinuousSessionError(
+                "continuous-session invalidation bounds are invalid"
+            )
+        if type(causal_view) is not CausalView:
+            raise ContinuousSessionError(
+                "continuous-session causal view is invalid"
+            )
+        if (
+            not isinstance(required_history, timedelta)
+            or required_history.total_seconds() < 0
+        ):
+            raise ContinuousSessionError(
+                "continuous-session required history is invalid"
+            )
+        if not callable(clock):
+            raise ContinuousSessionError(
+                "continuous-session clock authority is unavailable"
+            )
+
         def require_economic_context() -> None:
             if (
                 self.workspace != workspace
@@ -3016,7 +3108,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "settlement economic configuration changed during tick"
                 )
 
-        now = self.clock()
+        now = clock()
         _instant_validator(now, "now")
 
         try:
@@ -3072,7 +3164,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     pass
             raise
 
-        if cycle.provider_unavailable:
+        if cycle_provider_unavailable:
             with _running_fence(self._state):
                 if self._state._checkpoint_token != observation_token:
                     raise ContinuousSessionError(

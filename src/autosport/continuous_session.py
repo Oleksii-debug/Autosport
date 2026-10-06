@@ -3179,6 +3179,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     self._state,
                     code="ProviderUnavailableError",
                 )
+                pending_count = invalidation_buffer.pending_count
+                pending_full_refresh = invalidation_buffer.full_refresh_required
+                if (
+                    type(pending_count) is not int
+                    or pending_count < 0
+                    or type(pending_full_refresh) is not bool
+                ):
+                    raise ContinuousSessionError(
+                        "invalidation buffer backlog state is invalid"
+                    )
             return ContinuousTickResult(
                 session_id=failure.session_id,
                 cycle_index=failure.cycles_completed,
@@ -3199,12 +3209,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 affected_input_ids=(),
                 registered_input_ids=(),
                 retired_input_ids=(),
-                full_refresh_required=bool(
-                    invalidation_buffer.full_refresh_required
-                ),
+                full_refresh_required=pending_full_refresh,
                 invalidation_backlog=(
-                    invalidation_buffer.pending_count > 0
-                    or invalidation_buffer.full_refresh_required
+                    pending_count > 0 or pending_full_refresh
                 ),
                 settled_ticket_ids=(),
                 settlement_evidence_ids=(),

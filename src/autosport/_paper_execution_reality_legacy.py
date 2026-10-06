@@ -152,21 +152,21 @@ def _decimal(
         raise ValueError("decimal resource validator authority changed")
     decimal_type = _CANONICAL_DECIMAL_TYPE
     invalid_operation = _CANONICAL_INVALID_OPERATION
-    try:
-        if type(value) is decimal_type:
-            parsed = value
-        elif type(value) is str:
-            if len(value) > _CANONICAL_DECIMAL_INPUT_TEXT_LIMIT:
-                raise ValueError("decimal input text exceeds resource limit")
+    if type(value) is decimal_type:
+        parsed = value
+    elif type(value) is str:
+        if len(value) > _CANONICAL_DECIMAL_INPUT_TEXT_LIMIT:
+            raise ValueError("decimal input text exceeds resource limit")
+        try:
             parsed = decimal_type(value)
-        elif type(value) is int:
-            if value.bit_length() > _CANONICAL_DECIMAL_INPUT_INT_MAX_BITS:
-                raise ValueError("decimal integer input exceeds resource limit")
-            parsed = decimal_type(value)
-        else:
-            raise ValueError(f"{name} must be a Decimal, decimal string, or int")
-    except (invalid_operation, ValueError, TypeError) as exc:
-        raise ValueError(f"{name} must be a finite Decimal") from exc
+        except (invalid_operation, ValueError) as exc:
+            raise ValueError(f"{name} must be a finite Decimal") from exc
+    elif type(value) is int:
+        if value.bit_length() > _CANONICAL_DECIMAL_INPUT_INT_MAX_BITS:
+            raise ValueError("decimal integer input exceeds resource limit")
+        parsed = decimal_type(value)
+    else:
+        raise ValueError(f"{name} must be a Decimal, decimal string, or int")
     if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
         comparator = ">= 0" if allow_zero else "> 0"
         raise ValueError(f"{name} must be finite and {comparator}")

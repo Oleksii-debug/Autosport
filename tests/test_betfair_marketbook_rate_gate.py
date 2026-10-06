@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from threading import Barrier, Thread
 
 import pytest
 
+import autosport.betfair_marketbook_rate_gate as _rate_gate_module
 from autosport.betfair_marketbook_rate_gate import (
     BETFAIR_MARKETBOOK_RATE_POLICY_VERSION,
     BetfairMarketBookPerMarketRateGate,
@@ -459,3 +460,390 @@ def test_rate_decision_rejects_inconsistent_or_widened_authority() -> None:
             allowed=True,
             provider_dispatch_authorized=True,
         )
+
+
+def test_rate_gate_rejects_subclassed_authority_inputs_before_mutation() -> None:
+    class MarketId(str):
+        pass
+
+    class ScheduledInstant(datetime):
+        def astimezone(self, tz=None):
+            raise AssertionError("subclass clock override must not execute")
+
+    value = BetfairMarketBookPerMarketRateGate()
+
+    with pytest.raises(TypeError, match="market_id must be exact str"):
+        value.reserve((MarketId("1.1"),), scheduled_at=T0)
+
+    state = value.snapshot()
+    assert state.markets == ()
+    assert state.last_scheduled_at_utc_us is None
+
+    hostile_time = ScheduledInstant(2026, 9, 22, tzinfo=timezone.utc)
+    with pytest.raises(TypeError, match="scheduled_at must be exact datetime"):
+        value.reserve(("1.1",), scheduled_at=hostile_time)
+
+    state = value.snapshot()
+    assert state.markets == ()
+    assert state.last_scheduled_at_utc_us is None
+
+    class PolicyVersion(str):
+        pass
+
+    with pytest.raises(ValueError, match="unsupported Betfair MarketBook rate policy"):
+        MarketBookRateGateState(
+            PolicyVersion(BETFAIR_MARKETBOOK_RATE_POLICY_VERSION),
+            None,
+            (),
+        )
+
+
+def test_rate_inputs_are_normalized_before_gate_lock() -> None:
+    gate = BetfairMarketBookPerMarketRateGate()
+
+    class LockProbe:
+        def __init__(self) -> None:
+            self.depth = 0
+            self.entries = 0
+
+        def __enter__(self) -> "LockProbe":
+            assert self.depth == 0
+            self.depth = 1
+            self.entries += 1
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            assert self.depth == 1
+            self.depth = 0
+
+    probe = LockProbe()
+    gate._lock = probe  # type: ignore[assignment]
+
+    class MarketIds:
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            assert probe.depth == 0
+            return iter(("1.1",))
+
+    class GuardedTimezone(tzinfo):
+        def utcoffset(self, dt: datetime | None) -> timedelta:
+            assert probe.depth == 0
+            return timedelta(0)
+
+        def dst(self, dt: datetime | None) -> timedelta:
+            assert probe.depth == 0
+            return timedelta(0)
+
+        def tzname(self, dt: datetime | None) -> str:
+            assert probe.depth == 0
+            return "GUARDED"
+
+    decision = gate.reserve(
+        MarketIds(),  # type: ignore[arg-type]
+        scheduled_at=datetime(2026, 9, 22, tzinfo=GuardedTimezone()),
+    )
+
+    assert decision.allowed is True
+    assert decision.market_ids == ("1.1",)
+    assert probe.entries == 1
+    assert probe.depth == 0
+
+
+def test_restart_revalidates_tampered_frozen_rate_state() -> None:
+    gate = BetfairMarketBookPerMarketRateGate()
+    assert gate.reserve(("1.1",), scheduled_at=T0).allowed
+    state = gate.snapshot()
+    window = state.markets[0]
+
+    object.__setattr__(window, "accepted_at_utc_us", ("forged",))
+
+    with pytest.raises(TypeError, match="accepted rate timestamp"):
+        BetfairMarketBookPerMarketRateGate(state=state)
+
+
+def test_restart_revalidates_tampered_rate_policy_identity() -> None:
+    state = BetfairMarketBookPerMarketRateGate().snapshot()
+    object.__setattr__(state, "policy_version", "forged-policy")
+
+    with pytest.raises(ValueError, match="unsupported Betfair MarketBook rate policy"):
+        BetfairMarketBookPerMarketRateGate(state=state)
+
+
+
+def test_rate_gate_runtime_authority_is_closure_bound(monkeypatch) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    state_type = MarketBookRateGateState
+    window_type = MarketBookRateWindowState
+    decision_type = _rate_gate_module.MarketBookRateDecision
+    original_policy = BETFAIR_MARKETBOOK_RATE_POLICY_VERSION
+
+    monkeypatch.setattr(
+        _rate_gate_module,
+        "_validate_market_id",
+        lambda value: "forged-market",
+    )
+    monkeypatch.setattr(
+        _rate_gate_module,
+        "_normalize_market_ids",
+        lambda value: ("forged-market",),
+    )
+    monkeypatch.setattr(_rate_gate_module, "_utc_microseconds", lambda value: 0)
+    monkeypatch.setattr(
+        _rate_gate_module,
+        "_datetime_from_utc_microseconds",
+        lambda value: datetime(1999, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(_rate_gate_module, "_MAX_CALLS_PER_WINDOW", 999)
+    monkeypatch.setattr(_rate_gate_module, "_WINDOW_MICROSECONDS", 1)
+    monkeypatch.setattr(_rate_gate_module, "BETFAIR_MARKETBOOK_RATE_POLICY_VERSION", "forged")
+    monkeypatch.setattr(_rate_gate_module, "MarketBookRateDecision", object)
+    monkeypatch.setattr(_rate_gate_module, "MarketBookRateWindowState", object)
+    monkeypatch.setattr(_rate_gate_module, "MarketBookRateGateState", object)
+    monkeypatch.setattr(
+        decision_type,
+        "__init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable decision constructor must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        decision_type,
+        "__post_init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable decision validator must not run")
+        ),
+    )
+
+    value = gate_type()
+    decisions = [
+        value.reserve(
+            ("1.234",),
+            scheduled_at=T0 + timedelta(milliseconds=100 * index),
+        )
+        for index in range(5)
+    ]
+    denied = value.reserve(
+        ("1.234",),
+        scheduled_at=T0 + timedelta(milliseconds=500),
+    )
+    state = value.snapshot()
+
+    assert all(type(decision) is decision_type and decision.allowed for decision in decisions)
+    assert decisions[0].scheduled_at == T0
+    assert type(denied) is decision_type
+    assert denied.allowed is False
+    assert denied.blocked_market_ids == ("1.234",)
+    assert denied.next_eligible_at == T0 + timedelta(seconds=1)
+    assert type(state) is state_type
+    assert len(state.markets) == 1
+    assert type(state.markets[0]) is window_type
+    assert state.policy_version == original_policy
+    assert value.policy_version == original_policy
+
+
+def test_rate_gate_restart_validation_ignores_rebound_dto_validators(monkeypatch) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    original = gate_type()
+    assert original.reserve(("1.234",), scheduled_at=T0).allowed
+    state = original.snapshot()
+    window = state.markets[0]
+
+    monkeypatch.setattr(
+        MarketBookRateGateState,
+        "__post_init__",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        MarketBookRateWindowState,
+        "__post_init__",
+        lambda self: None,
+    )
+    object.__setattr__(window, "accepted_at_utc_us", ("forged",))
+
+    with pytest.raises(TypeError, match="accepted rate timestamp"):
+        gate_type(state=state)
+
+
+def test_rate_snapshot_is_detached_from_live_window_authority() -> None:
+    value = BetfairMarketBookPerMarketRateGate()
+    for index in range(5):
+        assert value.reserve(
+            ("1.234",),
+            scheduled_at=T0 + timedelta(milliseconds=100 * index),
+        ).allowed
+
+    snapshot = value.snapshot()
+    exposed = snapshot.markets[0]
+    object.__setattr__(exposed, "accepted_at_utc_us", ())
+
+    live = value.snapshot()
+    assert len(live.markets[0].accepted_at_utc_us) == 5
+    denied = value.reserve(
+        ("1.234",),
+        scheduled_at=T0 + timedelta(milliseconds=500),
+    )
+    assert denied.allowed is False
+
+
+def test_rate_restart_detaches_imported_window_authority() -> None:
+    source = BetfairMarketBookPerMarketRateGate()
+    assert source.reserve(("1.234",), scheduled_at=T0).allowed
+    state = source.snapshot()
+
+    restored = BetfairMarketBookPerMarketRateGate(state=state)
+    imported = state.markets[0]
+    object.__setattr__(imported, "market_id", "forged-after-restart")
+    object.__setattr__(imported, "accepted_at_utc_us", ())
+
+    live = restored.snapshot()
+    assert len(live.markets) == 1
+    assert live.markets[0].market_id == "1.234"
+    assert live.markets[0].accepted_at_utc_us == (
+        int(T0.timestamp() * 1_000_000),
+    )
+
+
+def test_rate_gate_instance_storage_authority_ignores_rebound_special_methods(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    value = gate_type()
+
+    def hostile_getattribute(self, name: str):
+        if name.startswith("_"):
+            raise AssertionError(f"rebound __getattribute__ reached authority field {name}")
+        return object.__getattribute__(self, name)
+
+    def hostile_setattr(self, name: str, new_value: object) -> None:
+        if name.startswith("_"):
+            raise AssertionError(f"rebound __setattr__ reached authority field {name}")
+        object.__setattr__(self, name, new_value)
+
+    monkeypatch.setattr(gate_type, "__getattribute__", hostile_getattribute)
+    monkeypatch.setattr(gate_type, "__setattr__", hostile_setattr)
+
+    for index in range(5):
+        decision = value.reserve(
+            ["1.234"],
+            scheduled_at=T0 + timedelta(microseconds=index),
+        )
+        assert decision.allowed is True
+
+    denied = value.reserve(
+        ["1.234"],
+        scheduled_at=T0 + timedelta(microseconds=5),
+    )
+    assert denied.allowed is False
+    snapshot = value.snapshot()
+    assert len(snapshot.markets) == 1
+    assert len(snapshot.markets[0].accepted_at_utc_us) == 5
+
+    restored = gate_type(snapshot)
+    assert restored.snapshot() == snapshot
+
+
+def test_rate_restart_authority_ignores_rebound_state_slot_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    source = gate_type()
+    for index in range(5):
+        assert source.reserve(
+            ["1.234"],
+            scheduled_at=T0 + timedelta(microseconds=index),
+        ).allowed
+    state = source.snapshot()
+
+    monkeypatch.setattr(
+        MarketBookRateGateState,
+        "markets",
+        property(lambda self: ()),
+    )
+
+    restored = gate_type(state)
+    denied = restored.reserve(
+        ["1.234"],
+        scheduled_at=T0 + timedelta(microseconds=5),
+    )
+    assert denied.allowed is False
+
+
+def test_rate_restart_authority_ignores_rebound_window_slot_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    source = gate_type()
+    for index in range(5):
+        assert source.reserve(
+            ["1.234"],
+            scheduled_at=T0 + timedelta(microseconds=index),
+        ).allowed
+    state = source.snapshot()
+    first_timestamp = state.markets[0].accepted_at_utc_us[0]
+
+    monkeypatch.setattr(
+        MarketBookRateWindowState,
+        "accepted_at_utc_us",
+        property(lambda self: (first_timestamp,)),
+    )
+
+    restored = gate_type(state)
+    denied = restored.reserve(
+        ["1.234"],
+        scheduled_at=T0 + timedelta(microseconds=5),
+    )
+    assert denied.allowed is False
+
+
+def test_rate_decision_construction_ignores_rebound_field_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    value = gate_type()
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            _rate_gate_module.MarketBookRateDecision,
+            "allowed",
+            property(lambda self: False),
+        )
+        decision = value.reserve(("1.234",), scheduled_at=T0)
+
+    assert decision.allowed is True
+    assert decision.scheduled_at == T0
+
+
+def test_rate_decision_time_property_ignores_rebound_timestamp_descriptor(
+    monkeypatch,
+) -> None:
+    value = BetfairMarketBookPerMarketRateGate()
+    decision = value.reserve(("1.234",), scheduled_at=T0)
+
+    monkeypatch.setattr(
+        _rate_gate_module.MarketBookRateDecision,
+        "scheduled_at_utc_us",
+        property(lambda self: 0),
+    )
+
+    assert decision.scheduled_at == T0
+
+
+def test_rate_timezone_offset_is_observed_once_before_gate_lock() -> None:
+    class ChangingOffset(tzinfo):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def utcoffset(self, dt):
+            self.calls += 1
+            return timedelta(hours=self.calls)
+
+        def dst(self, dt):
+            return timedelta(0)
+
+    zone = ChangingOffset()
+    local = datetime(2026, 9, 22, 1, 0, 0, tzinfo=zone)
+    value = BetfairMarketBookPerMarketRateGate()
+
+    decision = value.reserve(("1.234",), scheduled_at=local)
+
+    assert zone.calls == 1
+    assert decision.scheduled_at == T0

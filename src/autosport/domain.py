@@ -199,7 +199,17 @@ def _market_settlement_key(
     _semantic_identity=_canonical_semantic_identity,
     _json_dumps=json.dumps,
     _sha256=hashlib.sha256,
+    _utf8_code=_require_utf8_encodable.__code__,
+    _semantic_identity_code=_canonical_semantic_identity.__code__,
+    _json_dumps_code=json.dumps.__code__,
 ) -> str:
+    if (
+        getattr(_utf8, "__code__", None) is not _utf8_code
+        or getattr(_semantic_identity, "__code__", None) is not _semantic_identity_code
+        or getattr(_json_dumps, "__code__", None) is not _json_dumps_code
+        or _sha256 is not hashlib.sha256
+    ):
+        raise ValueError("canonical market settlement identity authority changed")
     if type(quote_key) is not str or not quote_key:
         raise ValueError("settlement quote_key must be non-empty canonical text")
     _utf8(quote_key, "settlement quote_key")

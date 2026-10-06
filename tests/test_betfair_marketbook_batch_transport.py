@@ -25,7 +25,7 @@ from autosport.betfair_marketbook_retry_backoff import (
     MarketBookRetryDisposition,
 )
 from autosport.continuous_observation import ContinuousObservationConfig
-from autosport.ingestion_health import SourceHealthState
+from autosport.ingestion_health import SourceHealthStore
 from autosport.betfair_marketbook_batch_plan import MarketBookReadPlan
 from autosport.betfair_marketbook_attempt_history import (
     MarketBookAttemptHistory,
@@ -3676,18 +3676,16 @@ def test_nonresponse_append_uses_canonical_error_after_module_rebind(monkeypatch
 PROVIDER_SOURCE_ID = "betfair-marketbook"
 
 
-def _provider_health(streak: int = 1) -> SourceHealthState:
-    return SourceHealthState(
-        source_id=PROVIDER_SOURCE_ID,
-        status="failed",
-        poll_count=streak,
-        total_failures=streak,
-        consecutive_failures=streak,
-        last_error_at=NOW.isoformat(),
-        last_error="provider unavailable",
-        last_failure_kind="provider_unavailable",
-        consecutive_failure_kind_count=streak,
-    )
+def _provider_health_store(tmp_path, streak: int = 1) -> SourceHealthStore:
+    store = SourceHealthStore(tmp_path / "source_health.json")
+    for _ in range(streak):
+        store.record_failure(
+            PROVIDER_SOURCE_ID,
+            now=NOW.isoformat(),
+            error=RuntimeError("provider unavailable"),
+            failure_kind="provider_unavailable",
+        )
+    return store
 
 
 def _provider_recovery_config() -> ContinuousObservationConfig:
@@ -3744,7 +3742,7 @@ def test_attempt_execution_preserves_secret_free_provider_error_code():
     assert len(transport.calls) == 1
 
 
-def test_retry_aware_executor_enforces_cooldown_and_preserves_historical_gaps():
+def test_retry_aware_executor_enforces_cooldown_and_preserves_historical_gaps(tmp_path):
     plan = _plan(market_ids=("1.001",))
     batch = plan.batches[0]
     history = MarketBookAttemptHistory(plan, ())
@@ -3803,7 +3801,7 @@ def test_retry_aware_executor_enforces_cooldown_and_preserves_historical_gaps():
     projected = retry_gate.apply_provider_recovery(
         batch.batch_id,
         observed_at=NOW,
-        health=_provider_health(1),
+        health_store=_provider_health_store(tmp_path, 1),
         config=_provider_recovery_config(),
     )
     assert projected.disposition is MarketBookRetryDisposition.BACKOFF

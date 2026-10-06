@@ -1205,6 +1205,16 @@ class _ContinuousSessionState:
                 "canonical failure publication lock authority changed"
             )
         with _durable_path_lock(self.path):
+            # Rebind the failure to the exact current canonical generation while
+            # holding the same lock used by state/success transitions.  A
+            # long-lived coordinator instance may otherwise retain stale cached
+            # markers after another process or instance advances the session,
+            # causing a later real failure to be written but silently ignored.
+            current = self._read()
+            self._generation = current["generation"]
+            self._cycles_completed = current["cycles_completed"]
+            self._last_success_at = current["last_success_at"]
+            self._state = current["state"]
             self._write_error_checkpoint(code)
 
 

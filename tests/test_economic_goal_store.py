@@ -419,6 +419,22 @@ def test_store_rejects_instance_binding_rebind(tmp_path) -> None:
         )
 
 
+def test_store_ignores_rebound_lock_construction(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+
+    def forged_new(*args, **kwargs):
+        raise AssertionError("rebound WorkspaceEconomicLock.__new__ executed")
+
+    def forged_init(*args, **kwargs):
+        raise AssertionError("rebound WorkspaceEconomicLock.__init__ executed")
+
+    monkeypatch.setattr(WorkspaceEconomicLock, "__new__", staticmethod(forged_new))
+    monkeypatch.setattr(WorkspaceEconomicLock, "__init__", forged_init)
+
+    store.initialize_owner(_goal())
+    assert store.load() == _goal()
+
+
 def test_store_ignores_rebound_lock_acquire_release(monkeypatch, tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
 

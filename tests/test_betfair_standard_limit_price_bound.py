@@ -196,6 +196,20 @@ def test_execution_action_serializer_rebinding_fails_before_capture(
         )
 
 
+def test_emitted_evidence_identity_ignores_digest_module_rebinding(monkeypatch) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    _bound, _action, expected = _evidence()
+
+    def hostile_digest(_payload):
+        raise AssertionError("hostile digest executed for emitted evidence")
+
+    monkeypatch.setattr(module, "_digest", hostile_digest)
+
+    assert expected.evidence_id == expected.evidence_id
+    assert expected.to_dict() == expected.to_dict()
+
+
 def test_evidence_issue_uses_sealed_action_serializer_after_projection(monkeypatch) -> None:
     import autosport.betfair_standard_limit_price_bound as module
 

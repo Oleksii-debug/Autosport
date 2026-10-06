@@ -109,6 +109,7 @@ class _Transport:
                 }
             ]
         elif method == "AccountAPING/v1.0/getAccountStatement":
+            assert request["params"]["locale"] == "en"
             result = {
                 "accountStatement": [self.row],
                 "moreAvailable": False,

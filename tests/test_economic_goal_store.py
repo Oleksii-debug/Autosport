@@ -224,6 +224,64 @@ def test_owner_initialization_race_does_not_replace_late_incumbent(tmp_path) -> 
     assert list(tmp_path.glob(f".{store.path.name}.*.owner-init.tmp")) == []
 
 
+def test_owner_atomic_create_cleans_staging_when_link_fails(tmp_path) -> None:
+    path = tmp_path / EconomicGoalStore.FILE_NAME
+    payload = economic_goal_to_payload(_goal())
+
+    def failing_link(_source, _destination):
+        raise OSError("synthetic link failure")
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="cannot atomically create persisted economic goal",
+    ):
+        economic_goal_store_module._atomic_create_owner_json(
+            path,
+            payload,
+            _link=failing_link,
+        )
+
+    assert not path.exists()
+    assert list(tmp_path.glob(f".{path.name}.*.owner-init.tmp")) == []
+
+
+def test_owner_atomic_create_ignores_rebound_exception_globals(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    goal = _goal()
+    store = EconomicGoalStore(tmp_path)
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "FileExistsError",
+        RuntimeError,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "FileNotFoundError",
+        RuntimeError,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "OSError",
+        RuntimeError,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "BaseException",
+        RuntimeError,
+        raising=False,
+    )
+
+    store.initialize_owner(goal)
+
+    assert EconomicGoalStore(tmp_path).load() == goal
+
+
 def test_owner_initialization_atomic_create_leaves_single_link_and_no_staging(
     tmp_path,
 ) -> None:

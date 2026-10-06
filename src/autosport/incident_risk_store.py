@@ -488,6 +488,19 @@ def _payload(snapshot: IncidentRiskStoreSnapshot) -> dict[str, object]:
     }
 
 
+def _serialized_payload_size(snapshot: IncidentRiskStoreSnapshot) -> int:
+    """Return the exact UTF-8 byte size atomic_write_json will publish."""
+    payload = _payload(snapshot)
+    rendered = json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    )
+    return len(rendered.encode("utf-8")) + 1
+
+
 def _decode_snapshot(text: str) -> IncidentRiskStoreSnapshot:
     if type(text) is not str:
         raise IncidentRiskStoreError(
@@ -764,6 +777,10 @@ class IncidentRiskStore:
             intended = _snapshot(
                 tuple(histories), tuple(availability)
             )
+            if _serialized_payload_size(intended) > _MAX_STORE_BYTES:
+                raise IncidentRiskStoreError(
+                    "durable incident/model-risk store exceeds resource limit"
+                )
             tx_id = _authority_tx_id(intended.content_sha256)
             try:
                 self._authority.prepare(

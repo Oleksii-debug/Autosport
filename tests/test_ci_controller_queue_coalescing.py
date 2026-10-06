@@ -4383,14 +4383,15 @@ def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
         if "/actions/workflows/356678400/runs?" in url:
             if "status=queued" in url:
                 page = int(url.rsplit("page=", 1)[1])
-                assert 1 <= page <= 3
+                assert page in {1, 2, 12}
                 first_run_id = (page - 1) * 100 + 1
+                page_head = STALE_HEAD if page == 12 else HEAD
                 payload = {
                     "total_count": 1200,
                     "workflow_runs": [
                         {
                             "id": first_run_id + offset,
-                            "head_sha": STALE_HEAD,
+                            "head_sha": page_head,
                             "name": "CI",
                             "status": "queued",
                             "pull_requests": [{"number": 2039}],
@@ -4417,10 +4418,11 @@ def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
 
         if "/actions/runs/" in url and not url.endswith("/cancel"):
             run_id = int(url.split("/actions/runs/", 1)[1].split("/", 1)[0])
+            reread_head = STALE_HEAD if run_id >= 1101 else HEAD
             return FakeResponse(
                 (
                     '{"id":' + str(run_id) + ',"workflow_id":356678400,'
-                    '"event":"pull_request","head_sha":"' + STALE_HEAD + '",'
+                    '"event":"pull_request","head_sha":"' + reread_head + '",'
                     '"name":"CI","status":"queued",'
                     '"pull_requests":[{"number":2039}]}'
                 ).encode("utf-8")
@@ -4442,10 +4444,23 @@ def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
         url for method, url in requested if method == "POST" and url.endswith("/cancel")
     ]
     # The large queued snapshot is deliberately bounded so transport capacity is
-    # spent on irreversible effects rather than exhaustive observation. With the
-    # canonical 24-request budget this fixture must make five independently
-    # revalidated cancellation effects before exhaustion.
+    # spent on irreversible effects rather than exhaustive observation. The scan
+    # must reach the frozen tail page; otherwise a permanently large queue could
+    # starve old stale runs forever. With the canonical 24-request budget this
+    # fixture must make five independently revalidated tail cancellations.
     assert len(cancel_requests) == 5
+    assert all(
+        int(url.split("/actions/runs/", 1)[1].split("/", 1)[0]) >= 1101
+        for url in cancel_requests
+    )
+    queued_pages = [
+        int(url.rsplit("page=", 1)[1])
+        for method, url in requested
+        if method == "GET"
+        and "/actions/workflows/356678400/runs?" in url
+        and "status=queued" in url
+    ]
+    assert queued_pages == [1, 2, 12]
     assert "request budget exhausted" in captured.err
     assert len(requested) == 24
 

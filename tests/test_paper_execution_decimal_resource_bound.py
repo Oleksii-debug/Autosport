@@ -1544,6 +1544,23 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
             public_paper._synthetic_attempt = original
 
 
+    def test_public_exact_addition_rejects_unbounded_operand_before_alignment(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            public_paper._decimal_add_exact(
+                Decimal("1E+100000000"),
+                Decimal("1"),
+            )
+
+    def test_public_decimal_coefficient_rejects_unbounded_operand(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            public_paper._decimal_coefficient(Decimal("1E-100000000"))
+
     def test_public_exact_addition_rejects_derived_resource_overflow(self) -> None:
         left = Decimal("9" * _MAX_FIXED_POINT_CHARS)
         right = Decimal("1")

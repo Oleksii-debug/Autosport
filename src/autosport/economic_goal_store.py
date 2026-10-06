@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import MethodType
+import sys
 from typing import Final
 
 from .economic_goal import (
@@ -443,6 +444,7 @@ def _read_economic_goal_text(
     verification_descriptor = None
     post_read_descriptor = None
     raw = b""
+    primary_error: BaseException | None = None
     try:
         descriptor = _open_descriptor(path)
         opened_before = _fstat(descriptor)
@@ -491,12 +493,15 @@ def _read_economic_goal_text(
                 "persisted economic goal changed after verified read"
             )
     except _error_type:
+        primary_error = sys.exc_info()[1]
         raise
     except OSError as exc:
-        raise _error_type(
+        primary_error = _error_type(
             f"cannot safely read persisted economic goal: {exc}"
-        ) from exc
+        )
+        raise primary_error from exc
     finally:
+        cleanup_error: OSError | None = None
         for candidate in (
             post_read_descriptor,
             verification_descriptor,
@@ -507,8 +512,13 @@ def _read_economic_goal_text(
                 continue
             try:
                 _close(candidate)
-            except OSError:
-                pass
+            except OSError as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None and primary_error is None:
+            raise _error_type(
+                "cannot close persisted economic goal read descriptor"
+            ) from cleanup_error
 
     if len(raw) > _max_bytes:
         raise _error_type(

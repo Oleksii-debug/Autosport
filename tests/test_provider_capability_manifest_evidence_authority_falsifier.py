@@ -1,5 +1,7 @@
 import pytest
 
+import autosport.provider_capability_manifest as provider_manifest_module
+
 from autosport.bookmaker_capability import (
     BookmakerCapability,
     BookmakerCapabilityFact,
@@ -98,3 +100,44 @@ def test_caller_authored_extension_evidence_cannot_mint_proven_capability_truth(
             source_payload_sha256=_HASH_C,
             extension_facts=(forged_stream_fact,),
         )
+
+def test_canonical_capability_authority_cannot_be_mutated_or_rebound() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+
+    canonical_map = provider_manifest_module._CANONICAL_CAPABILITY_MAP
+    with pytest.raises(TypeError):
+        canonical_map[ProviderManifestCapability.STREAM] = (
+            BookmakerCapability.LIVE_QUOTES_READ
+        )
+
+    original_global = provider_manifest_module._CANONICAL_CAPABILITY_MAP
+    try:
+        provider_manifest_module._CANONICAL_CAPABILITY_MAP = {
+            ProviderManifestCapability.STREAM: BookmakerCapability.LIVE_QUOTES_READ,
+        }
+        manifest = build_provider_capability_manifest(
+            profile,
+            integration,
+            manifest_ref="provider-capability-manifest",
+            manifest_version=8,
+            observed_at=_T2,
+            source_ref="product-provider-capability-projection",
+            source_payload_sha256=_HASH_C,
+        )
+    finally:
+        provider_manifest_module._CANONICAL_CAPABILITY_MAP = original_global
+
+    assert manifest.state_of(ProviderManifestCapability.LIVE_QUOTES) is (
+        ProviderManifestState.PROVEN
+    )
+    assert manifest.state_of(ProviderManifestCapability.STREAM) is (
+        ProviderManifestState.NOT_PROVEN
+    )
+

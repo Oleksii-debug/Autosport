@@ -2,6 +2,14 @@
 
 __version__ = "0.1.0"
 
+# Local-compute tariff authority hardening must be installed during package
+# bootstrap.  Python executes this package initializer before any requested
+# autosport submodule, including the private implementation module.  Importing
+# the canonical shim here therefore guarantees that a first import of
+# autosport._local_compute_tariff_authority_impl cannot expose its pre-seal
+# LocalComputeTariffAuthorityStore methods.
+from . import local_compute_tariff_authority as _local_compute_tariff_authority  # noqa: F401,E402
+
 # Install the PAPER execution durability/freshness guards before the public
 # facade subclasses or calls the legacy compatibility implementation.
 from . import _paper_execution_anti_rollback as _paper_execution_anti_rollback  # noqa: F401,E402

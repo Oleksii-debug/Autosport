@@ -1113,6 +1113,41 @@ def test_sidecar_descriptor_close_failure_is_normalized(monkeypatch) -> None:
             raise AssertionError("descriptor close failure escaped domain normalization")
 
 
+
+def test_sidecar_close_failure_does_not_mask_primary_integrity_error(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        original_close = continuous_session.os.close
+
+        def failing_close(descriptor: int) -> None:
+            original_close(descriptor)
+            raise OSError("simulated close failure")
+
+        def failing_bounded_reader(_descriptor: int, _limit: int) -> bytes:
+            raise continuous_session.ContinuousSessionError(
+                "simulated primary bounded-read integrity failure"
+            )
+
+        monkeypatch.setattr(continuous_session.os, "close", failing_close)
+
+        try:
+            state._read_error_checkpoint_bytes(
+                _os_close=failing_close,
+                _bounded_descriptor_read=failing_bounded_reader,
+                _bounded_descriptor_read_code=failing_bounded_reader.__code__,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "primary bounded-read integrity failure" in str(exc)
+            assert any(
+                "descriptor close also failed" in note
+                for note in (exc.__notes__ or [])
+            )
+        else:
+            raise AssertionError("primary sidecar integrity failure was masked")
+
 def test_settlement_evidence_validator_ignores_runtime_class_rebinding(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

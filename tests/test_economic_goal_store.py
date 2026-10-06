@@ -1401,6 +1401,32 @@ def test_public_goal_codec_authority_rejects_helper_injection() -> None:
         )  # type: ignore[call-arg]
 
 
+def test_store_authority_rejects_in_place_nested_kwdefault_mutation() -> None:
+    def nested_codec(*_args, policy="strict"):
+        return None
+
+    def operation(_value, helper=nested_codec):
+        helper()
+
+    bound = economic_goal_store_module._make_store_callable_authority(
+        operation,
+        "synthetic store authority",
+    )
+    original_kwdefaults = nested_codec.__kwdefaults__
+    assert original_kwdefaults is not None
+    original_policy = original_kwdefaults["policy"]
+
+    nested_codec.__kwdefaults__["policy"] = "forged"
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="synthetic store authority nested keyword defaults authority changed",
+        ):
+            bound(None)
+    finally:
+        nested_codec.__kwdefaults__["policy"] = original_policy
+
+
 def test_store_constructor_rejects_path_authority_injection(tmp_path) -> None:
     with pytest.raises(TypeError):
         EconomicGoalStore(

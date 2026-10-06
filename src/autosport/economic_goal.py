@@ -49,23 +49,28 @@ _MAX_CANONICAL_TEXT_CHARS: Final = 512
 _MAX_RESTRICTION_MEMBERS: Final = 1024
 
 
-def _canonical_text(name: str, value: object) -> str:
+def _canonical_text(
+    name: str,
+    value: object,
+    _max_chars=_MAX_CANONICAL_TEXT_CHARS,
+    _error_type=EconomicGoalContractError,
+) -> str:
     if type(value) is not str:
-        raise EconomicGoalContractError(f"{name} must be a string")
+        raise _error_type(f"{name} must be a string")
     if not value or value != value.strip():
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"{name} must be a non-empty canonical string"
         )
-    if len(value) > _MAX_CANONICAL_TEXT_CHARS:
-        raise EconomicGoalContractError(
+    if len(value) > _max_chars:
+        raise _error_type(
             f"{name} exceeds the canonical text size limit"
         )
     if "\x00" in value:
-        raise EconomicGoalContractError(f"{name} must not contain NUL")
+        raise _error_type(f"{name} must not contain NUL")
     try:
         value.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
-        raise EconomicGoalContractError(f"{name} must be valid UTF-8 text") from exc
+        raise _error_type(f"{name} must be valid UTF-8 text") from exc
     return value
 
 
@@ -77,24 +82,41 @@ def _decimal(name: str, value: object) -> Decimal:
     return value
 
 
-def _fraction(name: str, value: object) -> Decimal:
-    result = _decimal(name, value)
-    if result < _ZERO or result > _ONE:
-        raise EconomicGoalContractError(f"{name} must be between 0 and 1 inclusive")
+def _fraction(
+    name: str,
+    value: object,
+    _decimal_validator=_decimal,
+    _zero=_ZERO,
+    _one=_ONE,
+    _error_type=EconomicGoalContractError,
+) -> Decimal:
+    result = _decimal_validator(name, value)
+    if result < _zero or result > _one:
+        raise _error_type(f"{name} must be between 0 and 1 inclusive")
     return result
 
 
-def _nonnegative_decimal(name: str, value: object) -> Decimal:
-    result = _decimal(name, value)
-    if result < _ZERO:
-        raise EconomicGoalContractError(f"{name} must be non-negative")
+def _nonnegative_decimal(
+    name: str,
+    value: object,
+    _decimal_validator=_decimal,
+    _zero=_ZERO,
+    _error_type=EconomicGoalContractError,
+) -> Decimal:
+    result = _decimal_validator(name, value)
+    if result < _zero:
+        raise _error_type(f"{name} must be non-negative")
     return result
 
 
-def _optional_nonnegative_decimal(name: str, value: object) -> Decimal | None:
+def _optional_nonnegative_decimal(
+    name: str,
+    value: object,
+    _validator=_nonnegative_decimal,
+) -> Decimal | None:
     if value is None:
         return None
-    return _nonnegative_decimal(name, value)
+    return _validator(name, value)
 
 
 def _nonnegative_int(name: str, value: object) -> int:
@@ -112,20 +134,26 @@ def _positive_int(name: str, value: object) -> int:
     return result
 
 
-def _canonical_restrictions(name: str, value: object) -> frozenset[str]:
+def _canonical_restrictions(
+    name: str,
+    value: object,
+    _max_members=_MAX_RESTRICTION_MEMBERS,
+    _text_validator=_canonical_text,
+    _error_type=EconomicGoalContractError,
+) -> frozenset[str]:
     if type(value) is not frozenset:
-        raise EconomicGoalContractError(f"{name} must be a frozenset of strings")
-    if len(value) > _MAX_RESTRICTION_MEMBERS:
-        raise EconomicGoalContractError(
+        raise _error_type(f"{name} must be a frozenset of strings")
+    if len(value) > _max_members:
+        raise _error_type(
             f"{name} exceeds the canonical restriction-count limit"
         )
     normalized: set[str] = set()
     for item in value:
-        normalized.add(_canonical_text(f"{name} member", item))
+        normalized.add(_text_validator(f"{name} member", item))
     if len(normalized) != len(value):
         # Defensive only; frozenset already removes exact duplicates.  Keep the
         # invariant explicit if its input contract ever changes.
-        raise EconomicGoalContractError(f"{name} must contain unique members")
+        raise _error_type(f"{name} must contain unique members")
     return value
 
 

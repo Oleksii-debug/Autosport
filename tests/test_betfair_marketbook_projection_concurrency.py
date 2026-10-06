@@ -631,3 +631,28 @@ def test_instance_shadowed_clock_helper_cannot_bypass_monotonic_fence() -> None:
         )
     assert release_gate.snapshot() == before_release
 
+
+def test_process_control_during_active_insert_burns_lease_generation() -> None:
+    value = gate()
+    interrupt = KeyboardInterrupt("active insert interrupted")
+
+    class InterruptingActive(dict[str, MarketBookProjectionLease]):
+        def __setitem__(self, key: str, lease: MarketBookProjectionLease) -> None:
+            super().__setitem__(key, lease)
+            raise interrupt
+
+    value._active = InterruptingActive()
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        begin_projected(value, "interrupted")
+
+    assert exc_info.value is interrupt
+    state = value.snapshot()
+    assert state.active == ()
+    assert state.next_lease_generation == 2
+    assert state.last_observed_at_utc_us is None
+
+    successor = begin_projected(value, "successor")
+    assert successor.allowed is True
+    assert successor.lease_generation == 2
+

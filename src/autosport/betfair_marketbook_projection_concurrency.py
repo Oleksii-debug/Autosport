@@ -261,6 +261,10 @@ class BetfairMarketBookProjectionConcurrencyGate:
                     return decision
 
                 generation = self._next_lease_generation
+                # Consume generation authority before any lease object can become
+                # visible. Process control during construction/insertion may burn
+                # a generation, but a successor must never reuse one.
+                self._next_lease_generation = generation + 1
                 lease = MarketBookProjectionLease(
                     request_id=request_id,
                     acquired_at_utc_us=observed_us,
@@ -275,7 +279,6 @@ class BetfairMarketBookProjectionConcurrencyGate:
                     lease_generation=generation,
                 )
                 self._active[request_id] = lease
-                self._next_lease_generation = generation + 1
                 self._last_observed_at_utc_us = observed_us
                 return decision
         except BaseException as primary:

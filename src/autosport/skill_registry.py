@@ -236,6 +236,17 @@ def _skill_handler_process(handler: SkillHandler, payload: dict[str, Any], sende
         sender.close()
 
 
+def _close_pipe_endpoints(*endpoints: Any) -> bool:
+    """Best-effort close every parent-side pipe endpoint without short-circuiting."""
+    closed = True
+    for endpoint in endpoints:
+        try:
+            endpoint.close()
+        except Exception:
+            closed = False
+    return closed
+
+
 def _close_process_handle(process: Any) -> bool:
     """Best-effort close of a confirmed-stopped process handle.
 
@@ -493,13 +504,20 @@ class SkillRegistry:
     def _execute_handler_bounded(h:SkillHandler,payload:dict[str,Any],timeout_seconds:int)->tuple[SkillExecutionResult|None,str|None]:
         context=multiprocessing.get_context("spawn")
         receiver,sender=context.Pipe(duplex=False)
-        process=context.Process(target=_skill_handler_process,args=(h,payload,sender),daemon=True)
+        try:
+            process=context.Process(target=_skill_handler_process,args=(h,payload,sender),daemon=True)
+        except Exception as exc:
+            if not _close_pipe_endpoints(receiver,sender):
+                return None,"HANDLER_PROCESS_CONSTRUCTION_PIPE_CLOSE_FAILED"
+            return None,"HANDLER_PROCESS_CONSTRUCTION_"+exc.__class__.__name__.upper()
         try:
             process.start()
         except Exception as exc:
-            receiver.close(); sender.close()
+            pipe_close_ok = _close_pipe_endpoints(receiver,sender)
             if not _close_process_handle(process):
                 return None,"HANDLER_START_HANDLE_CLOSE_FAILED"
+            if not pipe_close_ok:
+                return None,"HANDLER_START_PIPE_CLOSE_FAILED"
             return None,"HANDLER_START_"+exc.__class__.__name__.upper()
         try:
             sender.close()

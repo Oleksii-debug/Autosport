@@ -837,6 +837,101 @@ def test_handler_result_pipe_failure_becomes_terminal_truth(monkeypatch, failure
     assert process.closed is True
 
 
+def test_handler_process_construction_failure_closes_both_pipe_endpoints(monkeypatch):
+    class FakeEndpoint:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FakeEndpoint()
+    sender = FakeEndpoint()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, sender
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            raise RuntimeError("simulated process construction failure")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CONSTRUCTION_RUNTIMEERROR"
+    assert receiver.closed is True
+    assert sender.closed is True
+
+
+def test_handler_spawn_failure_attempts_all_cleanup_even_when_pipe_close_fails(monkeypatch):
+    class FailingReceiver:
+        def __init__(self):
+            self.close_attempted = False
+
+        def close(self):
+            self.close_attempted = True
+            raise RuntimeError("simulated receiver close failure")
+
+    class Sender:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FailingReceiver()
+    sender = Sender()
+
+    class FakeProcess:
+        def __init__(self):
+            self.closed = False
+
+        def start(self):
+            raise RuntimeError("simulated spawn failure")
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, sender
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_START_PIPE_CLOSE_FAILED"
+    assert receiver.close_attempted is True
+    assert sender.closed is True
+    assert process.closed is True
+
+
 @pytest.mark.parametrize(
     ("close_fails", "expected_error"),
     (

@@ -1091,10 +1091,13 @@ class WorkflowScopedGitHubApi(GitHubApi):
         # cannot make the scan look complete and hide later active runs.
         seen_run_ids: set[int] = set()
         page = 1
-        # Freeze a bounded moving-snapshot horizon from the first provider count.
-        # One grace page preserves useful overlap recovery without letting sustained
-        # queue growth make this trusted controller chase new work until job timeout.
-        scan_page_limit: int | None = None
+        # Freeze a bounded moving-snapshot page plan from the first provider count.
+        # Small snapshots retain one moving-snapshot grace page. Large snapshots
+        # sample the two newest pages plus the oldest observed page so repeated
+        # sweeps cannot permanently starve stale tail runs while still preserving
+        # transport budget for exact revalidation and cancellation effects.
+        scan_pages: tuple[int, ...] | None = None
+        scan_page_index = 0
         while True:
             query = _encode_query(
                 {
@@ -1131,18 +1134,22 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
             total_count = payload["total_count"]
-            if scan_page_limit is None:
+            if scan_pages is None:
                 initial_pages = max(
                     1,
                     (total_count + _runs_per_page - 1) // _runs_per_page,
                 )
                 # Under severe queue pressure, exhaustive pagination can consume the
                 # bounded transport budget before any stale run reaches the separately
-                # revalidated cancellation boundary. Missing later pages can only defer
-                # cleanup; they grant no cancellation authority. Preserve two provider
-                # pages plus one moving-snapshot grace page, leaving budget for exact
-                # run-identity/live-PR rereads and cancellation effects.
-                scan_page_limit = min(initial_pages + 1, 3)
+                # revalidated cancellation boundary. Missing pages can only defer
+                # cleanup; they grant no cancellation authority. For one/two-page
+                # snapshots retain one overlap-recovery grace page. For larger
+                # snapshots inspect pages 1 and 2 plus the frozen oldest page so
+                # repeated sweeps make bounded progress at both ends of the queue.
+                if initial_pages <= 2:
+                    scan_pages = tuple(range(1, initial_pages + 2))
+                else:
+                    scan_pages = (1, 2, initial_pages)
             unique_before_page = len(seen_run_ids)
             if len(page_runs) > _runs_per_page:
                 raise CancellationError("invalid workflow-runs page size")
@@ -1213,13 +1220,14 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 or len(page_runs) < _runs_per_page
                 or len(seen_run_ids) == unique_before_page
                 or len(seen_run_ids) >= total_count
-                or (
-                    scan_page_limit is not None
-                    and page >= scan_page_limit
-                )
             ):
                 break
-            page += 1
+            if scan_pages is None:
+                raise CancellationError("active workflow snapshot page plan unavailable")
+            scan_page_index += 1
+            if scan_page_index >= len(scan_pages):
+                break
+            page = scan_pages[scan_page_index]
         return tuple(runs)
 
     def _build_active_runs(

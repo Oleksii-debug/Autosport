@@ -2289,6 +2289,7 @@ class PersistentLiveDecisionLoop:
                 market_state_sha256=progress.market_state_sha256,
                 gate=progress.gate,
                 decision_context_sha256=progress.decision_context_sha256,
+                actionability_wait_evidence=actionability_wait_evidence,
             )[1]
             latest_live = self._verified_latest_ledger_record(
                 replay_run_id=f"live:{self.loop_id}",
@@ -3143,11 +3144,26 @@ class PersistentLiveDecisionLoop:
         market_state_sha256: str,
         gate: str,
         decision_context_sha256: str,
+        actionability_wait_evidence: tuple[dict[str, object], ...] | None = None,
     ) -> tuple[str, str]:
+        wait_evidence_sha256 = None
+        if gate == _GATE_ACTIONABILITY_WAIT:
+            if not actionability_wait_evidence:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT identity requires durable evidence"
+                )
+            wait_evidence_sha256 = _canonical_json_sha256(
+                actionability_wait_evidence
+            )
+        elif actionability_wait_evidence is not None:
+            raise LiveDecisionProgressError(
+                "actionability WAIT identity evidence is forbidden for other gates"
+            )
+
         provenance = self.intent_provenance
         context_payload = {
             "schema": "autosport.live_decision_context",
-            "schema_version": 3,
+            "schema_version": 4 if wait_evidence_sha256 is not None else 3,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -3158,6 +3174,10 @@ class PersistentLiveDecisionLoop:
             "intent_provenance_sha256": provenance.provenance_sha256,
             "plan_sha256": plan.plan_sha256,
         }
+        if wait_evidence_sha256 is not None:
+            context_payload["actionability_wait_evidence_sha256"] = (
+                wait_evidence_sha256
+            )
         context_hash = _canonical_json_sha256(context_payload)
         return context_hash, f"live-{context_hash}"
 
@@ -3465,6 +3485,7 @@ class PersistentLiveDecisionLoop:
             market_state_sha256=market_state_sha256,
             gate=gate,
             decision_context_sha256=decision_context_sha256,
+            actionability_wait_evidence=canonical_actionability_wait,
         )
         prepared_execution: PreparedPaperExecution | None = None
         expected_execution_payload = None
@@ -3503,7 +3524,7 @@ class PersistentLiveDecisionLoop:
         record_payload = {
             "schema": "autosport.persistent_live_decision",
             "schema_version": (
-                4 if canonical_actionability_wait is not None else 3
+                5 if canonical_actionability_wait is not None else 3
             ),
             "loop_id": self.loop_id,
             "mode": self.mode.value,
@@ -3749,6 +3770,13 @@ class PersistentLiveDecisionLoop:
                 if existing.payload.get("paper_execution") != expected_execution_payload:
                     raise DecisionLedgerIntegrityError(
                         "durable live decision execution-adoption evidence changed"
+                    )
+                if canonical_actionability_wait is not None and (
+                    existing.payload.get("actionability_wait_evidence")
+                    != [dict(item) for item in canonical_actionability_wait]
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "durable actionability WAIT evidence changed"
                     )
                 existing_health_raw = existing.payload.get("health_boundaries")
                 if existing_health_raw is None:
@@ -5484,11 +5512,11 @@ class PersistentLiveDecisionLoop:
             committed_market_history=committed_market_history,
         )
         payload_version = existing.payload.get("schema_version")
-        if payload_version not in {1, 2, 3, 4}:
+        if payload_version not in {1, 2, 3, 4, 5}:
             raise DecisionLedgerIntegrityError(
                 "committed live decision has unsupported schema_version"
             )
-        if payload_version in {2, 3, 4}:
+        if payload_version in {2, 3, 4, 5}:
             expected_payload_keys = {
                 "schema",
                 "schema_version",
@@ -5505,9 +5533,9 @@ class PersistentLiveDecisionLoop:
                 "plan",
                 MATERIAL_ACTION_ID_PAYLOAD_KEY,
             }
-            if payload_version in {3, 4}:
+            if payload_version in {3, 4, 5}:
                 expected_payload_keys.add("health_boundaries")
-            if payload_version == 4:
+            if payload_version in {4, 5}:
                 expected_payload_keys.add("actionability_wait_evidence")
             if any(stake > 0 for stake in durable_plan.stakes):
                 expected_payload_keys.add("paper_execution")
@@ -5518,7 +5546,11 @@ class PersistentLiveDecisionLoop:
 
         context_payload = {
             "schema": "autosport.live_decision_context",
-            "schema_version": 3 if payload_version == 4 else payload_version,
+            "schema_version": (
+                4
+                if payload_version == 5
+                else 3 if payload_version == 4 else payload_version
+            ),
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": progress.gate,
@@ -5526,7 +5558,7 @@ class PersistentLiveDecisionLoop:
             "decision_context_sha256": progress.decision_context_sha256,
             "plan_sha256": progress.plan_sha256,
         }
-        if payload_version in {2, 3, 4}:
+        if payload_version in {2, 3, 4, 5}:
             _, committed_decision_time = _canonical_timestamp(
                 "committed decision_ts",
                 progress.decision_ts,
@@ -5557,7 +5589,7 @@ class PersistentLiveDecisionLoop:
                     "intent_provenance_sha256": provenance.provenance_sha256,
                 }
             )
-            if payload_version in {3, 4}:
+            if payload_version in {3, 4, 5}:
                 expected_health_boundaries = (
                     None
                     if progress.health_boundaries is None
@@ -5575,10 +5607,10 @@ class PersistentLiveDecisionLoop:
                         "with durable progress"
                     )
 
-        if payload_version == 4:
+        if payload_version in {4, 5}:
             if progress.gate != _GATE_ACTIONABILITY_WAIT:
                 raise DecisionLedgerIntegrityError(
-                    "schema v4 live decision must be an actionability WAIT"
+                    "schema v4/v5 live decision must be an actionability WAIT"
                 )
             if durable_plan.intent_ids or any(stake > 0 for stake in durable_plan.stakes):
                 raise DecisionLedgerIntegrityError(
@@ -5596,6 +5628,10 @@ class PersistentLiveDecisionLoop:
             if any(item["input_id"] not in registered for item in wait_evidence):
                 raise DecisionLedgerIntegrityError(
                     "actionability WAIT evidence references an unregistered input"
+                )
+            if payload_version == 5:
+                context_payload["actionability_wait_evidence_sha256"] = (
+                    _canonical_json_sha256(wait_evidence)
                 )
 
         expected_context_hash = _canonical_json_sha256(context_payload)

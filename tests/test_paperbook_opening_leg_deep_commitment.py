@@ -1801,6 +1801,45 @@ def test_snapshot_authority_transitions_cannot_be_called_directly(
     assert book.committed_stake == Decimal("0")
 
 
+@pytest.mark.parametrize(
+    ("method", "inner_name", "message"),
+    (
+        (
+            PaperBook._from_raw_snapshot.__func__,
+            "revoke",
+            "snapshot revoke wrapper requires trusted decoder",
+        ),
+        (
+            PaperBook.load.__func__,
+            "install",
+            "snapshot install wrapper requires trusted load",
+        ),
+    ),
+)
+def test_snapshot_transition_inner_wrapper_cannot_be_called_from_closure(
+    method,
+    inner_name: str,
+    message: str,
+) -> None:
+    inner = next(
+        cell.cell_contents
+        for cell in method.__closure__ or ()
+        if callable(cell.cell_contents)
+        and getattr(cell.cell_contents, "__name__", None) == inner_name
+        and "_seal_paperbook_snapshot_" in getattr(
+            cell.cell_contents,
+            "__qualname__",
+            "",
+        )
+    )
+    book = PaperBook("100")
+
+    with pytest.raises(ValueError, match=message):
+        inner(book)
+
+    assert book.committed_stake == Decimal("0")
+
+
 def test_canonical_file_load_reinstalls_revoked_snapshot_authority(tmp_path) -> None:
     path = tmp_path / "trusted-load.json"
     source = PaperBook("100")

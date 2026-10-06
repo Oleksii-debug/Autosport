@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+import autosport.betfair_marketbook_retry_backoff as _retry_backoff_module
 from autosport.betfair_marketbook_attempt_history import MarketBookAttemptOutcome
 from autosport.betfair_marketbook_batch_plan import MarketBookReadPlan
 from autosport.betfair_marketbook_retry_backoff import (
@@ -523,4 +524,70 @@ def test_serialized_projection_cannot_claim_provider_or_execution_authority():
 def test_policy_version_declares_projection_not_second_provider_authority():
     assert MARKETBOOK_RETRY_BACKOFF_POLICY_VERSION == (
         "betfair.list-market-book.retry-backoff-projection.v2"
+    )
+
+
+def test_provider_recovery_rejects_health_predating_current_marketbook_failure():
+    plan = _plan()
+    batch = plan.batches[0]
+    gate = _gate(plan)
+    failure_at = NOW + timedelta(seconds=10)
+    gate.record_outcome(
+        batch.batch_id,
+        observed_at=failure_at,
+        outcome=MarketBookAttemptOutcome.PROVIDER_FAILURE,
+        provider_error_code="SERVICE_BUSY",
+    )
+
+    with pytest.raises(
+        MarketBookRetryBackoffError,
+        match="predates current MarketBook failure",
+    ):
+        gate.apply_provider_recovery(
+            batch.batch_id,
+            observed_at=failure_at,
+            health=_health(1, last_error_at=NOW),
+            config=_config(),
+        )
+
+
+def test_provider_recovery_seals_canonical_health_validator_and_backoff_helper(
+    monkeypatch,
+):
+    plan = _plan()
+    batch = plan.batches[0]
+    gate = _gate(plan)
+    gate.record_outcome(
+        batch.batch_id,
+        observed_at=NOW,
+        outcome=MarketBookAttemptOutcome.PROVIDER_FAILURE,
+        provider_error_code="TIMEOUT_ERROR",
+    )
+    health = _health(1)
+    config = _config(interval_seconds=1.0, max_backoff_seconds=8.0)
+
+    monkeypatch.setattr(
+        SourceHealthState,
+        "validate",
+        lambda self: (_ for _ in ()).throw(
+            AssertionError("rebound health validator must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        _retry_backoff_module,
+        "_provider_backoff_seconds",
+        lambda *args, **kwargs: 999999.0,
+    )
+
+    decision = gate.apply_provider_recovery(
+        batch.batch_id,
+        observed_at=NOW,
+        health=health,
+        config=config,
+    )
+
+    assert decision.disposition is MarketBookRetryDisposition.BACKOFF
+    assert (
+        decision.next_eligible_at_utc_us - decision.observed_at_utc_us
+        == 1_000_000
     )

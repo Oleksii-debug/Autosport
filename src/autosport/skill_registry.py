@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import multiprocessing
 import time
 from dataclasses import dataclass
@@ -618,7 +619,10 @@ class SkillRegistry:
         def _clock_now_or_cleanup() -> tuple[float | None, str | None]:
             """Read the handler deadline clock without orphaning a started child."""
             try:
-                return time.monotonic(), None
+                clock_now = time.monotonic()
+                if type(clock_now) is not float or not math.isfinite(clock_now):
+                    raise RuntimeError("monotonic clock returned invalid value")
+                return clock_now, None
             except Exception:
                 stop_error = _stop_process_bounded(process)
                 pipe_close_ok = _close_pipe_endpoints(receiver)
@@ -637,7 +641,22 @@ class SkillRegistry:
                 raise
 
         result_message = None
-        poll_result = getattr(receiver, "poll", None)
+        try:
+            poll_result = getattr(receiver, "poll", None)
+        except Exception:
+            stop_error = _stop_process_bounded(process)
+            pipe_close_ok = _close_pipe_endpoints(receiver)
+            if stop_error == "HANDLE_CLOSE_FAILED":
+                return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+            if stop_error == "STOP_FAILED":
+                return None,"HANDLER_PROCESS_STOP_FAILED"
+            if not pipe_close_ok:
+                return None,"HANDLER_PROCESS_PIPE_CLOSE_FAILED"
+            return None,"HANDLER_RESULT_UNAVAILABLE"
+        except BaseException:
+            _stop_process_bounded(process, suppress_base_exceptions=True)
+            _close_pipe_endpoints(receiver, suppress_base_exceptions=True)
+            raise
         deadline = None
         if callable(poll_result):
             clock_now, clock_error = _clock_now_or_cleanup()

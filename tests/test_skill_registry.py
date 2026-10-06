@@ -2211,3 +2211,219 @@ def test_handler_clock_interrupt_cleanup_cannot_mask_original(monkeypatch):
 
     with pytest.raises(KeyboardInterrupt, match="original clock interrupt"):
         SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+
+@pytest.mark.parametrize("clock_value", [float("nan"), float("inf"), float("-inf")])
+def test_handler_invalid_deadline_clock_value_reaps_child(monkeypatch, clock_value):
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        def poll(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(
+        skill_registry_module.time, "monotonic", lambda: clock_value
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True
+
+
+def test_handler_hostile_clock_subclass_is_rejected_before_arithmetic(monkeypatch):
+    class HostileFloat(float):
+        def __add__(self, other):
+            raise AssertionError("hostile clock arithmetic executed")
+
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        def poll(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(
+        skill_registry_module.time, "monotonic", lambda: HostileFloat(100.0)
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True
+
+
+def test_handler_poll_method_lookup_failure_reaps_child(monkeypatch):
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        @property
+        def poll(self):
+            raise RuntimeError("simulated poll lookup failure")
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_RESULT_UNAVAILABLE"
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True

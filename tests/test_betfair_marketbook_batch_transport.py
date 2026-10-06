@@ -678,6 +678,43 @@ def test_attempt_executor_records_rate_clock_regression_without_transport():
     assert transport.calls == []
 
 
+def test_rate_gate_process_control_releases_projection_lease():
+    plan = _plan(
+        market_ids=("1.001",),
+        order_projection="EXECUTABLE",
+    )
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    interrupt = KeyboardInterrupt("rate admission stop")
+
+    class InterruptingLock:
+        def __enter__(self):
+            raise interrupt
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    rate_gate._lock = InterruptingLock()
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="rate-process-control",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value is interrupt
+    assert transport.calls == []
+    assert concurrency_gate.snapshot().active == ()
+    assert rate_gate._accepted == {}
+    assert rate_gate._last_scheduled_at_utc_us is None
+
+
 def test_rate_denial_releases_projection_lease_without_transport():
     plan = _plan(
         market_ids=("1.001",),

@@ -609,7 +609,16 @@ def _install_transport_result_authority() -> None:
                 batch.market_ids,
                 scheduled_at=instant,
             )
-        except Exception as exc:
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                _release_projection_lease_after_failure(
+                    client,
+                    concurrency_gate,
+                    request,
+                    lease_generation,
+                    exc,
+                )
+                raise
             denial = MarketBookBatchAdmissionError(
                 MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
                 "MarketBook per-market rate gate could not establish local admission",

@@ -127,10 +127,42 @@ _MASK_ORIGIN_FOR_LEGACY_LOAD: ContextVar[bool] = ContextVar(
     default=False,
 )
 
-_ORIGINAL_LEDGER_RESERVE = PaperExecutionLedger.reserve_run
-_ORIGINAL_LEDGER_LOAD = PaperExecutionLedger.load_run
-_ORIGINAL_LEDGER_EVENTS = PaperExecutionLedger.events
-_ORIGINAL_RUNTIME_EXECUTE = PaperExecutionAdoptionRuntime.execute
+_ORIGINAL_AUTHORITY_SENTINEL = (
+    "_autosport_decision_origin_pristine_authority_seal_v1"
+)
+_existing_class_authority = PaperExecutionLedger.__dict__.get(
+    _ORIGINAL_AUTHORITY_SENTINEL
+)
+_existing_module_authority = globals().get("_ORIGINAL_LEDGER_AUTHORITY_SEAL")
+if _existing_class_authority is None and _existing_module_authority is None:
+    _ORIGINAL_LEDGER_AUTHORITY_SEAL = (
+        PaperExecutionLedger.reserve_run,
+        PaperExecutionLedger.load_run,
+        PaperExecutionLedger.events,
+        PaperExecutionAdoptionRuntime.execute,
+    )
+    setattr(
+        PaperExecutionLedger,
+        _ORIGINAL_AUTHORITY_SENTINEL,
+        _ORIGINAL_LEDGER_AUTHORITY_SEAL,
+    )
+elif (
+    type(_existing_class_authority) is tuple
+    and len(_existing_class_authority) == 4
+    and _existing_module_authority is _existing_class_authority
+):
+    _ORIGINAL_LEDGER_AUTHORITY_SEAL = _existing_class_authority
+else:
+    raise RuntimeError(
+        "decision-origin pristine authority seal changed across module reload"
+    )
+
+(
+    _ORIGINAL_LEDGER_RESERVE,
+    _ORIGINAL_LEDGER_LOAD,
+    _ORIGINAL_LEDGER_EVENTS,
+    _ORIGINAL_RUNTIME_EXECUTE,
+) = _ORIGINAL_LEDGER_AUTHORITY_SEAL
 
 
 def _raw_events(

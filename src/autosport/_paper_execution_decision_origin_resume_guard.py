@@ -54,6 +54,7 @@ def _build_guard(seal):
     verified_origin = _instance_guard._verified_decision_origin_without_instance_dispatch
     product_origin_runtime = _instance_guard._PRODUCT_ORIGIN_RUNTIME
     material_action_id = PaperValueAgent._material_action_id
+    canonical_suspended_action_ids = _origin._canonical_suspended_action_ids
 
     def stable_raw_events(
         self: PaperExecutionLedger,
@@ -94,7 +95,12 @@ def _build_guard(seal):
         config,
         started_at: str,
         observation_evidence_ids,
+        suspended_action_ids: frozenset[str] = frozenset(),
     ):
+        canonical_suspensions = canonical_suspended_action_ids(
+            suspended_action_ids
+        )
+        suspension_set = frozenset(canonical_suspensions)
         stored = _origin._reservation_origin_from_events(seal[2](self, run_id))
         expected = _origin._DECISION_ORIGIN.get()
         if stored is not None and (
@@ -127,6 +133,7 @@ def _build_guard(seal):
                 config=config,
                 started_at=started_at,
                 observation_evidence_ids=observation_evidence_ids,
+                suspended_action_ids=suspension_set,
             )
         finally:
             _origin._MASK_ORIGIN_FOR_LEGACY_LOAD.reset(token)

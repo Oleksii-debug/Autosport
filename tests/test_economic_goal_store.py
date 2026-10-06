@@ -249,8 +249,10 @@ def test_owner_atomic_create_ignores_rebound_exception_globals(
     monkeypatch,
     tmp_path,
 ) -> None:
-    goal = _goal()
-    store = EconomicGoalStore(tmp_path)
+    path = tmp_path / EconomicGoalStore.FILE_NAME
+    incumbent_bytes = b'{"authority":"incumbent"}\n'
+    path.write_bytes(incumbent_bytes)
+    payload = economic_goal_to_payload(_goal())
 
     monkeypatch.setattr(
         economic_goal_store_module,
@@ -277,9 +279,11 @@ def test_owner_atomic_create_ignores_rebound_exception_globals(
         raising=False,
     )
 
-    store.initialize_owner(goal)
+    with pytest.raises(EconomicGoalContractError, match="already exists"):
+        economic_goal_store_module._atomic_create_owner_json(path, payload)
 
-    assert EconomicGoalStore(tmp_path).load() == goal
+    assert path.read_bytes() == incumbent_bytes
+    assert list(tmp_path.glob(f".{path.name}.*.owner-init.tmp")) == []
 
 
 def test_owner_initialization_atomic_create_leaves_single_link_and_no_staging(

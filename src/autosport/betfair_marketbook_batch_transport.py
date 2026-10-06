@@ -148,6 +148,11 @@ def _release_projection_lease_after_failure(
     try:
         _release_projection_lease(gate, request_id, lease_generation)
     except BaseException as cleanup_exc:
+        # A fresh process-control interruption during cleanup supersedes an
+        # ordinary primary error. If process control is already the primary,
+        # cleanup failure must never replace it.
+        if not isinstance(cleanup_exc, Exception) and isinstance(primary, Exception):
+            raise
         add_note = getattr(primary, "add_note", None)
         if callable(add_note):
             add_note(
@@ -620,10 +625,21 @@ def _install_transport_result_authority() -> None:
                     request,
                     lease_generation,
                 )
-            except Exception as exc:
-                raise MarketBookPostDispatchFailure(
-                    "provider read completed but projection lease cleanup failed"
-                ) from exc
+            except BaseException as exc:
+                if isinstance(exc, Exception):
+                    raise MarketBookPostDispatchFailure(
+                        "provider read completed but projection lease cleanup failed"
+                    ) from exc
+                # Process control may land after the provider response but
+                # before local lease release completes. Retry that local cleanup
+                # once, then preserve the original interruption unchanged.
+                _release_projection_lease_after_failure(
+                    concurrency_gate,
+                    request,
+                    lease_generation,
+                    exc,
+                )
+                raise
         key = id(result)
 
         def forget(_weakref: object, *, result_id: int = key) -> None:

@@ -2282,7 +2282,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "dependency index registration selectors are invalid"
             )
         expected_dependency: FocusedMirrorDependency | None = None
-        if type(dependency_index) is FocusedMirrorDependencyIndex:
+        if isinstance(dependency_index, FocusedMirrorDependencyIndex):
             try:
                 expected_dependency = FocusedMirrorDependency(
                     input_id=input_id,

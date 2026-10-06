@@ -511,6 +511,8 @@ def _install_transport_result_authority() -> None:
         rate_gate: BetfairMarketBookPerMarketRateGate,
         concurrency_gate: BetfairMarketBookProjectionConcurrencyGate,
     ) -> MarketBookBatchTransportResult:
+        if type(client) is not _base.BetfairReadOnlyClient:
+            raise TypeError("client must be an exact BetfairReadOnlyClient")
         if type(rate_gate) is not BetfairMarketBookPerMarketRateGate:
             raise TypeError("rate_gate must be exact BetfairMarketBookPerMarketRateGate")
         if type(concurrency_gate) is not BetfairMarketBookProjectionConcurrencyGate:
@@ -648,6 +650,18 @@ def execute_market_book_batch_attempt(
 
     if type(history) is not MarketBookAttemptHistory:
         raise TypeError("history must be an exact MarketBookAttemptHistory")
+    # Re-run canonical validation before any provider I/O. Frozen dataclasses can
+    # still be adversarially mutated through object.__setattr__, and discovering
+    # that only after dispatch would create an unrecordable duplicate/gap.
+    MarketBookAttemptHistory(history.plan, history.records)
+    attempt = _token(attempt_id, "attempt_id")
+    if type(required) is not bool:
+        raise TypeError("required must be exact bool")
+    if any(record.attempt_id == attempt for record in history.records):
+        raise MarketBookBatchTransportError(
+            "attempt_id is already present in canonical MarketBook history"
+        )
+    _canonical_batch(history.plan, batch_id)
 
     try:
         result = read_market_book_batch(
@@ -664,7 +678,7 @@ def execute_market_book_batch_attempt(
         updated = _append_nonresponse_attempt(
             history,
             batch_id=batch_id,
-            attempt_id=attempt_id,
+            attempt_id=attempt,
             required=required,
             outcome=outcome,
         )
@@ -674,7 +688,7 @@ def execute_market_book_batch_attempt(
         updated = _append_nonresponse_attempt(
             history,
             batch_id=batch_id,
-            attempt_id=attempt_id,
+            attempt_id=attempt,
             required=required,
             outcome=outcome,
         )
@@ -684,7 +698,7 @@ def execute_market_book_batch_attempt(
         updated = _append_nonresponse_attempt(
             history,
             batch_id=batch_id,
-            attempt_id=attempt_id,
+            attempt_id=attempt,
             required=required,
             outcome=outcome,
         )
@@ -694,7 +708,7 @@ def execute_market_book_batch_attempt(
         updated = _append_nonresponse_attempt(
             history,
             batch_id=batch_id,
-            attempt_id=attempt_id,
+            attempt_id=attempt,
             required=required,
             outcome=outcome,
         )

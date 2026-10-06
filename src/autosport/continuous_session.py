@@ -1520,6 +1520,10 @@ class _ContinuousSessionState:
             ["_ContinuousSessionState"], dict[str, Any]
         ] = _read_error_checkpoint,
         _read_error_checkpoint_code: object = _read_error_checkpoint.__code__,
+        _write_error_checkpoint: Callable[
+            ["_ContinuousSessionState", str | None], None
+        ] = _write_error_checkpoint,
+        _write_error_checkpoint_code: object = _write_error_checkpoint.__code__,
     ) -> _ContinuousSessionFailurePublication:
         code = _text(code, "code")
         if (
@@ -1530,9 +1534,12 @@ class _ContinuousSessionState:
             is not _error_checkpoint_present_code
             or getattr(_read_error_checkpoint, "__code__", None)
             is not _read_error_checkpoint_code
+            or type(self)._write_error_checkpoint is not _write_error_checkpoint
+            or getattr(_write_error_checkpoint, "__code__", None)
+            is not _write_error_checkpoint_code
         ):
             raise ContinuousSessionError(
-                "canonical failure publication lock authority changed"
+                "canonical failure publication authority changed"
             )
         with _durable_path_lock(self.path):
             # Keep failure publication bounded by active cached state. A full
@@ -1557,7 +1564,7 @@ class _ContinuousSessionState:
                         "same-generation operational error checkpoint markers "
                         "conflict with cached canonical session state"
                     )
-            self._write_error_checkpoint(code)
+            _write_error_checkpoint(self, code)
             return _ContinuousSessionFailurePublication(
                 session_id=self._session_id,
                 state=SessionState(self._state),

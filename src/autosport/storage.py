@@ -1933,21 +1933,23 @@ class SQLiteMarketStore:
                 prior_rows,
             )
             if prior_rows:
-                latest_prior_instant = max(
-                    _timezone_aware_instant(
-                        prior_as_of,
-                        "as_of",
-                    ).astimezone(timezone.utc)
-                    for _prior_id, prior_as_of, _prior_generation in prior_rows
-                )
                 candidate_instant = _timezone_aware_instant(
                     canonical_as_of,
                     "as_of",
                 ).astimezone(timezone.utc)
-                if candidate_instant < latest_prior_instant:
-                    raise MonotonicAuthorityRollbackError(
-                        "causal replay cutoff PREPARE regresses decision time"
-                    )
+                for _prior_id, prior_as_of, prior_generation in prior_rows:
+                    prior_instant = _timezone_aware_instant(
+                        prior_as_of,
+                        "as_of",
+                    ).astimezone(timezone.utc)
+                    if (
+                        candidate_instant < prior_instant
+                        and max_generation > prior_generation
+                    ):
+                        raise MonotonicAuthorityRollbackError(
+                            "causal replay cutoff PREPARE retroactively "
+                            "advances append generation"
+                        )
             self._require_committed_append_authority_through(
                 append_authority,
                 max_generation,
@@ -2051,9 +2053,11 @@ class SQLiteMarketStore:
             if (
                 previous_cutoff_instant is not None
                 and cutoff_instant < previous_cutoff_instant
+                and max_generation > previous_max_generation
             ):
                 raise MonotonicAuthorityRollbackError(
-                    "causal replay cutoff commit regresses decision time"
+                    "causal replay cutoff commit retroactively advances "
+                    "append generation"
                 )
 
             if max_generation not in append_boundaries:
@@ -2826,27 +2830,6 @@ class SQLiteMarketStore:
                             None,
                         )
                         if current_row is None:
-                            if cutoff_rows:
-                                latest_issued_instant = max(
-                                    _timezone_aware_instant(
-                                        prior_as_of,
-                                        "as_of",
-                                    ).astimezone(timezone.utc)
-                                    for (
-                                        _prior_id,
-                                        prior_as_of,
-                                        _prior_generation,
-                                    ) in cutoff_rows
-                                )
-                                requested_instant = _timezone_aware_instant(
-                                    canonical_as_of,
-                                    "as_of",
-                                ).astimezone(timezone.utc)
-                                if requested_instant < latest_issued_instant:
-                                    raise MonotonicAuthorityRollbackError(
-                                        "causal replay cutoff issuance regresses "
-                                        "decision time"
-                                    )
                             generation_row = self.connection.execute(
                                 """SELECT COALESCE(MAX(append_generation), 0)
                                    FROM market_event_commit_order"""
@@ -2860,6 +2843,28 @@ class SQLiteMarketStore:
                                     "cannot freeze causal replay append generation"
                                 )
                             max_generation = generation_row[0]
+                            if cutoff_rows:
+                                requested_instant = _timezone_aware_instant(
+                                    canonical_as_of,
+                                    "as_of",
+                                ).astimezone(timezone.utc)
+                                for (
+                                    _prior_id,
+                                    prior_as_of,
+                                    prior_generation,
+                                ) in cutoff_rows:
+                                    prior_instant = _timezone_aware_instant(
+                                        prior_as_of,
+                                        "as_of",
+                                    ).astimezone(timezone.utc)
+                                    if (
+                                        requested_instant < prior_instant
+                                        and max_generation > prior_generation
+                                    ):
+                                        raise MonotonicAuthorityRollbackError(
+                                            "causal replay cutoff issuance "
+                                            "retroactively advances append generation"
+                                        )
                             current_row = (canonical_as_of, max_generation)
                             corpus_sha256 = self._frozen_replay_corpus_sha256(
                                 max_generation

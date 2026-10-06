@@ -1916,3 +1916,298 @@ def test_handler_result_interrupt_cleanup_baseexception_cannot_mask_original(
     with pytest.raises(KeyboardInterrupt, match="original result interrupt"):
         SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
 
+
+def test_handler_deadline_clock_failure_reaps_child_and_returns_terminal_truth(
+    monkeypatch,
+):
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        def poll(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            return process
+
+    def fail_clock():
+        raise RuntimeError("simulated monotonic failure")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(skill_registry_module.time, "monotonic", fail_clock)
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+    assert process.killed is True
+    assert process.alive is False
+    assert process.closed is True
+    assert receiver.closed is True
+
+
+def test_handler_poll_loop_clock_failure_reaps_child(monkeypatch):
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        def poll(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    clock_calls = 0
+
+    def fail_second_clock():
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == 1:
+            return 100.0
+        raise RuntimeError("simulated loop clock failure")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(skill_registry_module.time, "monotonic", fail_second_clock)
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+    assert clock_calls == 2
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True
+
+
+def test_handler_result_reap_clock_failure_cannot_claim_success(monkeypatch):
+    expected = SkillExecutionResult(output={"large": "done"})
+
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        def poll(self):
+            return True
+
+        def recv(self):
+            return ("OK", expected)
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    clock_calls = 0
+
+    def fail_second_clock():
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == 1:
+            return 100.0
+        raise RuntimeError("simulated post-result clock failure")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(skill_registry_module.time, "monotonic", fail_second_clock)
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+    assert clock_calls == 2
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True
+
+
+def test_handler_clock_interrupt_cleanup_cannot_mask_original(monkeypatch):
+    class InterruptingReceiver:
+        def poll(self):
+            return False
+
+        def close(self):
+            raise SystemExit("cleanup pipe close")
+
+    class Sender:
+        def close(self):
+            return None
+
+    class InterruptingProcess:
+        def start(self):
+            return None
+
+        def kill(self):
+            raise SystemExit("cleanup kill")
+
+        def terminate(self):
+            raise SystemExit("cleanup terminate")
+
+        def join(self, timeout=None):
+            raise SystemExit("cleanup join")
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            raise SystemExit("cleanup process close")
+
+    process = InterruptingProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return InterruptingReceiver(), Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    def interrupt_clock():
+        raise KeyboardInterrupt("original clock interrupt")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(skill_registry_module.time, "monotonic", interrupt_clock)
+
+    with pytest.raises(KeyboardInterrupt, match="original clock interrupt"):
+        SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)

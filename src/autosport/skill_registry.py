@@ -615,11 +615,37 @@ class SkillRegistry:
         # before reading the pipe deadlocks that valid result until the timeout.
         # Drain a ready result while the child is still alive, then wait for the
         # now-unblocked child to exit inside the original deadline.
+        def _clock_now_or_cleanup() -> tuple[float | None, str | None]:
+            """Read the handler deadline clock without orphaning a started child."""
+            try:
+                return time.monotonic(), None
+            except Exception:
+                stop_error = _stop_process_bounded(process)
+                pipe_close_ok = _close_pipe_endpoints(receiver)
+                if stop_error == "HANDLE_CLOSE_FAILED":
+                    return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+                if stop_error == "STOP_FAILED":
+                    return None,"HANDLER_PROCESS_STOP_FAILED"
+                if not pipe_close_ok:
+                    return None,"HANDLER_PROCESS_PIPE_CLOSE_FAILED"
+                return None,"HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+            except BaseException:
+                _stop_process_bounded(process, suppress_base_exceptions=True)
+                _close_pipe_endpoints(
+                    receiver, suppress_base_exceptions=True
+                )
+                raise
+
         result_message = None
         poll_result = getattr(receiver, "poll", None)
         deadline = None
         if callable(poll_result):
-            deadline = time.monotonic() + timeout_seconds
+            clock_now, clock_error = _clock_now_or_cleanup()
+            if clock_error is not None:
+                return None,clock_error
+            if clock_now is None:
+                return None,"HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+            deadline = clock_now + timeout_seconds
             while True:
                 try:
                     has_result = poll_result()
@@ -679,7 +705,12 @@ class SkillRegistry:
                     raise
                 if not alive:
                     break
-                remaining = deadline - time.monotonic()
+                clock_now, clock_error = _clock_now_or_cleanup()
+                if clock_error is not None:
+                    return None,clock_error
+                if clock_now is None:
+                    return None,"HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+                remaining = deadline - clock_now
                 if remaining <= 0:
                     break
                 try:
@@ -721,7 +752,12 @@ class SkillRegistry:
                 _close_pipe_endpoints(receiver, suppress_base_exceptions=True)
                 raise
             if alive:
-                remaining = max(0.0, deadline - time.monotonic())
+                clock_now, clock_error = _clock_now_or_cleanup()
+                if clock_error is not None:
+                    return None,clock_error
+                if clock_now is None:
+                    return None,"HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+                remaining = max(0.0, deadline - clock_now)
                 if remaining > 0:
                     try:
                         process.join(remaining)

@@ -1300,18 +1300,32 @@ class PaperExecutionLedger:
             raise PaperExecutionIntegrityError("run has multiple completion events")
         if completions:
             payload = completions[0]["payload"]
+            if type(payload) is not dict or set(payload) != {
+                "pending_action_ids",
+                "recovery_decision",
+                "worst_case_exposure",
+            }:
+                raise PaperExecutionIntegrityError("completion payload schema is invalid")
+            pending_raw = payload["pending_action_ids"]
+            exposure_raw = payload["worst_case_exposure"]
+            if (
+                type(pending_raw) is not list
+                or any(type(item) is not str or not item for item in pending_raw)
+                or type(exposure_raw) is not str
+            ):
+                raise PaperExecutionIntegrityError("completion payload schema is invalid")
             decimal_parser = _CANONICAL_DECIMAL_PARSER
             if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
                 raise PaperExecutionIntegrityError("decimal parser authority changed")
             try:
                 recovery = _CANONICAL_RECOVERY_DECISION_TYPE(payload["recovery_decision"])
-                pending = tuple(payload["pending_action_ids"])
+                pending = tuple(pending_raw)
                 exposure = decimal_parser(
-                    payload["worst_case_exposure"],
+                    exposure_raw,
                     "worst_case_exposure",
                     allow_zero=True,
                 )
-            except (KeyError, ValueError, TypeError) as exc:
+            except (ValueError, TypeError) as exc:
                 raise PaperExecutionIntegrityError("invalid completion payload") from exc
             return PaperExecutionRun(
                 run_id=run_id,

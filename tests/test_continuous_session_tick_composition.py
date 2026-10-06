@@ -4419,3 +4419,143 @@ def test_tick_rejects_in_place_dependency_mutation_during_desktop_delivery() -> 
             coordinator.tick()
 
         assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+def test_tick_rejects_collector_in_place_matched_key_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop delivery ran after collector routing mutation")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after collector routing mutation")
+
+        def mutate() -> None:
+            index._matched_keys["input-a"].add(("provider-a", "forged-quote"))
+
+        coordinator.collector = _Collector(callback=mutate)
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency routing authority changed during collector observation",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_desktop_in_place_matched_key_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                index._matched_keys["input-a"].add(("provider-a", "forged-quote"))
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after desktop routing mutation")
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency routing authority changed during desktop delivery",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_settlement_prepare_dependency_routing_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        dependency = index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class Handoff:
+            def prepare_settlement(self, **_kwargs):
+                object.__setattr__(
+                    dependency,
+                    "source_ids",
+                    frozenset({"provider-b"}),
+                )
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return None
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.settlement_learning_handoff = Handoff()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency routing authority changed during settlement preparation",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_settlement_reconcile_matched_key_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class Handoff:
+            def prepare_settlement(self, **_kwargs):
+                return None
+
+            def reconcile_after_settlement(self, **_kwargs):
+                index._matched_keys["input-a"].add(("provider-a", "forged-quote"))
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.settlement_learning_handoff = Handoff()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency routing authority changed during settlement reconciliation",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+

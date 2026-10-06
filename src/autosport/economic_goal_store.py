@@ -744,6 +744,34 @@ class _EconomicGoalStoreMeta(type):
         super().__delattr__(name)
 
 
+def _build_store_class_guard(name: str):
+    """Block direct base-metaclass replacement of sealed store authority names."""
+
+    class _StoreClassGuard:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            binding = instance.__dict__[name]
+            descriptor_get = getattr(binding, "__get__", None)
+            if descriptor_get is None:
+                return binding
+            return descriptor_get(None, instance)
+
+        def __set__(self, _instance, _value) -> None:
+            raise TypeError(
+                "economic goal store authority operation binding is immutable"
+            )
+
+        def __delete__(self, _instance) -> None:
+            raise TypeError(
+                "economic goal store authority operation binding is immutable"
+            )
+
+    return _StoreClassGuard()
+
+
 def _make_store_operation_descriptor(operation):
     """Make a closure-owned public store operation non-shadowable on an instance."""
 
@@ -1070,3 +1098,15 @@ EconomicGoalStore.persist_automatic_successor = _make_store_operation_descriptor
     _bind_store_contract_write(_BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR)
 )
 EconomicGoalStore._authority_operations_sealed = True
+
+# A custom metaclass __setattr__/__delattr__ is bypassable by explicitly calling
+# type.__setattr__/type.__delattr__ on the class. Install data descriptors on the
+# metaclass after the canonical class bindings are final so even those base-type
+# operations must cross the immutable authority guard.
+for _sealed_store_name in _ECONOMIC_GOAL_STORE_AUTHORITY_NAMES:
+    setattr(
+        _EconomicGoalStoreMeta,
+        _sealed_store_name,
+        _build_store_class_guard(_sealed_store_name),
+    )
+del _sealed_store_name

@@ -65,12 +65,17 @@ _MAX_DURABLE_EVENT_LINE_CHARS = _impl._MAX_DURABLE_EVENT_LINE_CHARS
 
 def _build_decimal_coefficient():
     decimal_type = Decimal
+    resource_validator = _impl._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+    resource_validator_code = resource_validator.__code__
 
     def decimal_coefficient(value: Decimal) -> tuple[int, int]:
         if type(value) is not decimal_type:
             raise ValueError("exact Decimal required")
         if not value.is_finite():
             raise ValueError("Decimal must be finite")
+        if getattr(resource_validator, "__code__", None) is not resource_validator_code:
+            raise ValueError("PAPER Decimal resource authority changed")
+        resource_validator(value)
         parts = value.as_tuple()
         coefficient = 0
         for digit in parts.digits:

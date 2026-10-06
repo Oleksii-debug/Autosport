@@ -1488,6 +1488,18 @@ def test_store_public_authority_operations_reject_instance_shadowing(tmp_path) -
     assert callable(store.persist_automatic_successor)
 
 
+def test_store_public_authority_operations_ignore_direct_dict_shadowing(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+
+    store.__dict__["load"] = lambda: None
+    store.__dict__["initialize_owner"] = lambda _contract: None
+    store.__dict__["persist_automatic_successor"] = lambda _contract: None
+
+    assert callable(store.load)
+    assert callable(store.initialize_owner)
+    assert callable(store.persist_automatic_successor)
+
+
 def test_store_public_authority_operations_reject_class_rebinding() -> None:
     for name, replacement in (
         ("__init__", lambda self, _workspace: None),

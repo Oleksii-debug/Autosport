@@ -912,33 +912,44 @@ class _ContinuousSessionState:
             ["_ContinuousSessionState"], dict[str, Any]
         ] = _read_error_checkpoint,
         _read_error_checkpoint_code: object = _read_error_checkpoint.__code__,
+        _durable_path_lock: Callable[..., Any] = durable_path_lock,
+        _durable_path_lock_code: object = durable_path_lock.__code__,
     ) -> ContinuousSessionStatus:
         if (
             getattr(_error_checkpoint_present, "__code__", None)
             is not _error_checkpoint_present_code
             or getattr(_read_error_checkpoint, "__code__", None)
             is not _read_error_checkpoint_code
+            or durable_path_lock is not _durable_path_lock
+            or getattr(_durable_path_lock, "__code__", None)
+            is not _durable_path_lock_code
         ):
             raise ContinuousSessionError(
                 "canonical operational-checkpoint snapshot authority changed"
             )
-        raw = self._read()
-        if _error_checkpoint_present(self):
-            error_checkpoint = _read_error_checkpoint(self)
-            marker_matches = (
-                error_checkpoint["observed_generation"] == raw["generation"]
-                and error_checkpoint["observed_cycles_completed"] == raw["cycles_completed"]
-                and error_checkpoint["observed_last_success_at"] == raw["last_success_at"]
-                and error_checkpoint["observed_state"] == raw["state"]
-            )
-            if marker_matches and error_checkpoint["last_error_code"] is not None:
-                durable_error = raw["last_error_code"]
-                checkpoint_error = error_checkpoint["last_error_code"]
-                if durable_error is not None and durable_error != checkpoint_error:
-                    raise ContinuousSessionError(
-                        "continuous session error authorities conflict"
-                    )
-                raw["last_error_code"] = checkpoint_error
+        # Read the canonical session image and its bounded failure overlay under
+        # the same session lock used by all publishers.  The generation markers
+        # reject stale sidecars, while this lock prevents a snapshot from
+        # returning a main image and sidecar image observed on opposite sides of
+        # a concurrent state/success/failure transaction.
+        with _durable_path_lock(self.path):
+            raw = self._read()
+            if _error_checkpoint_present(self):
+                error_checkpoint = _read_error_checkpoint(self)
+                marker_matches = (
+                    error_checkpoint["observed_generation"] == raw["generation"]
+                    and error_checkpoint["observed_cycles_completed"] == raw["cycles_completed"]
+                    and error_checkpoint["observed_last_success_at"] == raw["last_success_at"]
+                    and error_checkpoint["observed_state"] == raw["state"]
+                )
+                if marker_matches and error_checkpoint["last_error_code"] is not None:
+                    durable_error = raw["last_error_code"]
+                    checkpoint_error = error_checkpoint["last_error_code"]
+                    if durable_error is not None and durable_error != checkpoint_error:
+                        raise ContinuousSessionError(
+                            "continuous session error authorities conflict"
+                        )
+                    raw["last_error_code"] = checkpoint_error
         return ContinuousSessionStatus(
             session_id=raw["session_id"],
             source_id=raw["source_id"],

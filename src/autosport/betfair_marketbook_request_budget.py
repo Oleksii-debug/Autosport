@@ -42,16 +42,22 @@ def _canonical_json(payload: object) -> str:
 
 
 def _canonical_tokens(values: Sequence[str], field: str) -> tuple[str, ...]:
-    if isinstance(values, (str, bytes)):
-        raise MarketBookBudgetError(f"{field} must be a sequence of strings, not one string")
-    if not isinstance(values, Sequence):
-        raise MarketBookBudgetError(f"{field} must be a sequence of strings")
+    # This is a pre-dispatch authority boundary. Do not invoke arbitrary Sequence,
+    # str-subclass iteration/comparison/strip hooks while deciding provider weight.
+    if type(values) not in (list, tuple):
+        raise MarketBookBudgetError(
+            f"{field} must be an exact list or tuple sequence of strings"
+        )
     normalized: list[str] = []
     for value in values:
-        if not isinstance(value, str) or not value:
-            raise MarketBookBudgetError(f"{field} values must be non-empty strings")
+        if type(value) is not str or not value:
+            raise MarketBookBudgetError(
+                f"{field} values must be non-empty exact strings"
+            )
         if value != value.strip():
-            raise MarketBookBudgetError(f"{field} values must not contain surrounding whitespace")
+            raise MarketBookBudgetError(
+                f"{field} values must not contain surrounding whitespace"
+            )
         normalized.append(value)
     if len(normalized) != len(set(normalized)):
         raise MarketBookBudgetError(f"{field} contains duplicates")
@@ -82,8 +88,8 @@ def _validate_request_inputs(
 
     depth = best_prices_depth
     if depth is not None:
-        if isinstance(depth, bool) or not isinstance(depth, int):
-            raise MarketBookBudgetError("best_prices_depth must be an integer")
+        if type(depth) is not int:
+            raise MarketBookBudgetError("best_prices_depth must be an exact integer")
         if not (1 <= depth <= MAX_BEST_PRICES_DEPTH):
             raise MarketBookBudgetError("best_prices_depth must be in 1..10")
         if "EX_BEST_OFFERS" not in canonical_price_data or "EX_ALL_OFFERS" in canonical_price_data:

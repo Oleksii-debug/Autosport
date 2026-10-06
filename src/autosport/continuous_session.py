@@ -1217,6 +1217,15 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "source-state projection delta ids must be unique"
                 )
+            if (
+                previous_delta is None
+                and delta.revision_of is not None
+                and expected_after_delta_id is not _EXPECTED_PROJECTION_UNSET
+                and delta.revision_of != expected_after_delta_id
+            ):
+                raise ContinuousSessionError(
+                    "first source-state projection revision must target the expected predecessor"
+                )
             seen_delta_ids.add(delta.delta_id)
             if previous_epoch == delta.stream_epoch and previous_position is not None:
                 if delta.cursor_position < previous_position:

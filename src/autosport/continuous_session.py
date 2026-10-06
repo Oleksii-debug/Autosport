@@ -1632,15 +1632,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         if self.outcome_authority is None:
             return ()
         resolutions: list[SettlementResolution] = []
+        evidence_by_id: dict[str, SettlementResolution] = {}
         for record in self.lifecycle.records():
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
                 continue
             resolution = self.outcome_authority.resolve(record, as_of=as_of)
             if resolution is None:
                 continue
-            if not isinstance(resolution, SettlementResolution):
+            if type(resolution) is not SettlementResolution:
                 raise ContinuousSessionError(
-                    "outcome authority must return SettlementResolution or None"
+                    "outcome authority must return exact SettlementResolution or None"
                 )
             if resolution.event_identity != record.identity:
                 raise ContinuousSessionError(
@@ -1650,7 +1651,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "settlement evidence reference does not match lifecycle evidence"
                 )
-            resolution.validate(as_of=as_of)
+            try:
+                resolution.validate(as_of=as_of)
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "outcome authority returned invalid settlement resolution"
+                ) from exc
+            existing = evidence_by_id.get(resolution.evidence_id)
+            if existing is not None:
+                if existing != resolution:
+                    raise ContinuousSessionError(
+                        "outcome authority returned conflicting duplicate evidence_id"
+                    )
+                continue
+            evidence_by_id[resolution.evidence_id] = resolution
             resolutions.append(resolution)
         return tuple(resolutions)
 

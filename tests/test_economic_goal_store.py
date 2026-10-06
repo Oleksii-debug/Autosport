@@ -352,3 +352,57 @@ def test_json_decoder_ignores_rebound_parser_and_payload_decoder(monkeypatch) ->
     monkeypatch.setattr(economic_goal_store_module, "economic_goal_from_payload", forged)
 
     assert economic_goal_from_json(text) == _goal()
+
+
+
+def test_store_ignores_rebound_module_authorities(monkeypatch, tmp_path) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.01"),
+        automation_level=AutomationLevel.RECOMMENDATION,
+    )
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound economic-goal store authority executed")
+
+    for name in (
+        "Path",
+        "WorkspaceEconomicLock",
+        "atomic_write_json",
+        "economic_goal_to_payload",
+        "economic_goal_from_json",
+        "validate_automatic_transition",
+        "strict_json_loads",
+        "EconomicGoalContract",
+        "EconomicObjective",
+        "AutomationLevel",
+    ):
+        monkeypatch.setattr(economic_goal_store_module, name, forged)
+
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(previous)
+    assert store.load() == previous
+
+    store.persist_automatic_successor(candidate)
+    assert store.load() == candidate
+
+
+def test_payload_decoder_ignores_rebound_schema_helpers(monkeypatch) -> None:
+    payload = economic_goal_to_payload(_goal())
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound payload helper executed")
+
+    for name in (
+        "_require_exact_keys",
+        "_decimal_text",
+        "_restriction_set",
+        "EconomicGoalContract",
+        "EconomicObjective",
+        "AutomationLevel",
+    ):
+        monkeypatch.setattr(economic_goal_store_module, name, forged)
+
+    assert economic_goal_from_payload(payload) == _goal()

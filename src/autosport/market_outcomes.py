@@ -1,17 +1,122 @@
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import itertools
 import json
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 
+from .betfair_authenticated_stream import (
+    BetfairAuthenticatedMarketDefinitionEvidence,
+)
+from .betfair_stream_codec import BETFAIR_STREAM_SOURCE_ID
 from .domain import MarketType, _canonical_sport_value, _quote_identity
+
+
+_CANONICAL_DATETIME_TYPE = datetime
+_CANONICAL_TIMEZONE_TYPE = timezone
+_CANONICAL_TIMEZONE_UTC = timezone.utc
+_CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE = (
+    BetfairAuthenticatedMarketDefinitionEvidence
+)
+_CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED = (
+    BetfairAuthenticatedMarketDefinitionEvidence.assert_issued
+)
+_CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_CODE = getattr(
+    _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED,
+    "__code__",
+    None,
+)
+_CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_DEFAULTS = (
+    _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED.__defaults__
+)
+_CANONICAL_BETFAIR_STREAM_SOURCE_ID = BETFAIR_STREAM_SOURCE_ID
 
 
 _SHA256_HEX = frozenset("0123456789abcdef")
 _VERIFIED_AUTHORITY_TOKEN = object()
+_VERIFIED_AUTHORITY_ISSUANCE = contextvars.ContextVar(
+    "autosport_market_outcome_authority_issuance",
+    default=False,
+)
+
+
+def _build_issued_authority_registry():
+    """Hide positive authority issuance membership from module-global mutation."""
+
+    issued_objects: weakref.WeakValueDictionary[int, object] = (
+        weakref.WeakValueDictionary()
+    )
+    issued_digests: dict[int, str] = {}
+
+    def register(authority: object, digest: str) -> None:
+        identity = id(authority)
+        issued_objects[identity] = authority
+        issued_digests[identity] = digest
+        weakref.finalize(authority, issued_digests.pop, identity, None)
+
+    def issued_digest(authority: object) -> str | None:
+        identity = id(authority)
+        if issued_objects.get(identity) is not authority:
+            return None
+        return issued_digests.get(identity)
+
+    return register, issued_digest
+
+
+_register_issued_authority, _issued_authority_digest = (
+    _build_issued_authority_registry()
+)
+del _build_issued_authority_registry
+
+_CANONICAL_REGISTER_ISSUED_AUTHORITY = _register_issued_authority
+_CANONICAL_REGISTER_ISSUED_AUTHORITY_CODE = getattr(
+    _CANONICAL_REGISTER_ISSUED_AUTHORITY,
+    "__code__",
+    None,
+)
+_CANONICAL_ISSUED_AUTHORITY_DIGEST = _issued_authority_digest
+_CANONICAL_ISSUED_AUTHORITY_DIGEST_CODE = getattr(
+    _CANONICAL_ISSUED_AUTHORITY_DIGEST,
+    "__code__",
+    None,
+)
+
+
+def _assert_canonical_issued_authority_registry_dispatch() -> None:
+    checks = (
+        (
+            _register_issued_authority,
+            _CANONICAL_REGISTER_ISSUED_AUTHORITY,
+            _CANONICAL_REGISTER_ISSUED_AUTHORITY_CODE,
+        ),
+        (
+            _issued_authority_digest,
+            _CANONICAL_ISSUED_AUTHORITY_DIGEST,
+            _CANONICAL_ISSUED_AUTHORITY_DIGEST_CODE,
+        ),
+    )
+    for current, expected, expected_code in checks:
+        if (
+            current is not expected
+            or getattr(expected, "__code__", None) is not expected_code
+        ):
+            raise ValueError(
+                "market outcome authority issuance registry dispatch was replaced"
+            )
+
+
+_CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD = (
+    _assert_canonical_issued_authority_registry_dispatch
+)
+_CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD_CODE = getattr(
+    _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD,
+    "__code__",
+    None,
+)
 _BETFAIR_SOURCE_ID = "betfair_exchange_historical"
 _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID = "2593174"
 _BETFAIR_MATCH_ODDS_TYPE = "MATCH_ODDS"
@@ -49,6 +154,14 @@ class OutcomeAuthorityStatus(str, Enum):
     REFUSED = "refused"
 
 
+_CANONICAL_MARKET_TYPE_ENUM = MarketType
+_CANONICAL_OUTCOME_ROSTER_BASIS_TYPE = OutcomeRosterBasis
+_CANONICAL_SETTLEMENT_SEMANTICS_TYPE = SettlementSemantics
+_CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE = OutcomeAuthorityStatus
+_CANONICAL_VERIFIED_AUTHORITY_TOKEN = _VERIFIED_AUTHORITY_TOKEN
+_CANONICAL_VERIFIED_AUTHORITY_ISSUANCE = _VERIFIED_AUTHORITY_ISSUANCE
+
+
 def _canonical_text(name: str, value: object) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ValueError(f"{name} must be a non-empty canonical string")
@@ -61,10 +174,22 @@ def _canonical_text(name: str, value: object) -> str:
     return value
 
 
+def _canonical_betfair_runner_id(name: str, value: object) -> str:
+    """Validate Betfair runner identity before canonical text normalization."""
+
+    if type(value) is str:
+        return _canonical_text(name, value)
+    if type(value) is int:
+        if value <= 0 or value > 0x7FFFFFFFFFFFFFFF:
+            raise ValueError(f"{name} integer must be a positive signed-64-bit value")
+        return str(value)
+    raise ValueError(f"{name} must be a canonical string or signed-64-bit integer")
+
+
 def _canonical_timestamp(name: str, value: object) -> tuple[str, datetime]:
     raw = _canonical_text(name, value)
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = _CANONICAL_DATETIME_TYPE.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{name} must be valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -84,7 +209,7 @@ def _canonical_sha256(name: str, value: object) -> str:
 
 
 def _canonical_json(payload: object) -> str:
-    return json.dumps(
+    return _CANONICAL_JSON_DUMPS(
         payload,
         ensure_ascii=False,
         sort_keys=True,
@@ -94,7 +219,29 @@ def _canonical_json(payload: object) -> str:
 
 
 def _sha256_payload(payload: object) -> str:
-    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+    return _CANONICAL_SHA256_CONSTRUCTOR(
+        _canonical_json(payload).encode("utf-8")
+    ).hexdigest()
+
+
+_CANONICAL_JSON_DUMPS = json.dumps
+_CANONICAL_JSON_DUMPS_CODE = getattr(_CANONICAL_JSON_DUMPS, "__code__", None)
+_CANONICAL_JSON_LOADS = json.loads
+_CANONICAL_JSON_LOADS_CODE = getattr(_CANONICAL_JSON_LOADS, "__code__", None)
+_CANONICAL_SHA256_CONSTRUCTOR = hashlib.sha256
+_CANONICAL_SHA256_CONSTRUCTOR_CODE = getattr(
+    _CANONICAL_SHA256_CONSTRUCTOR,
+    "__code__",
+    None,
+)
+_CANONICAL_JSON_ENCODER = _canonical_json
+_CANONICAL_JSON_ENCODER_CODE = getattr(_CANONICAL_JSON_ENCODER, "__code__", None)
+_CANONICAL_SHA256_PAYLOAD = _sha256_payload
+_CANONICAL_SHA256_PAYLOAD_CODE = getattr(
+    _CANONICAL_SHA256_PAYLOAD,
+    "__code__",
+    None,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +356,297 @@ class MarketTerminalState:
         }
 
 
-@dataclass(frozen=True, slots=True)
+_CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE = MarketOutcomeIdentity
+_CANONICAL_SETTLEMENT_RESULT_TYPE = SettlementResult
+_CANONICAL_MARKET_TERMINAL_STATE_TYPE = MarketTerminalState
+_MISSING_TERMINAL_STATE_CLASS_SLOT = object()
+
+
+def _terminal_state_descriptor_code_identity(member: object) -> tuple[object, ...]:
+    if isinstance(member, property):
+        return tuple(
+            None if accessor is None else getattr(accessor, "__code__", None)
+            for accessor in (member.fget, member.fset, member.fdel)
+        )
+    if isinstance(member, (classmethod, staticmethod)):
+        return (getattr(member.__func__, "__code__", None),)
+    return (getattr(member, "__code__", None),)
+
+
+_CANONICAL_MARKET_TERMINAL_STATE_CLASS_SURFACE = tuple(
+    (
+        name,
+        member,
+        _terminal_state_descriptor_code_identity(member),
+    )
+    for name in (
+        "state_id",
+        "settlements",
+        "__post_init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "to_dict",
+    )
+    for member in (
+        vars(_CANONICAL_MARKET_TERMINAL_STATE_TYPE).get(
+            name,
+            _MISSING_TERMINAL_STATE_CLASS_SLOT,
+        ),
+    )
+)
+
+
+def _assert_canonical_market_terminal_state_dispatch() -> None:
+    class_dict = vars(_CANONICAL_MARKET_TERMINAL_STATE_TYPE)
+    for name, expected, expected_code in (
+        _CANONICAL_MARKET_TERMINAL_STATE_CLASS_SURFACE
+    ):
+        current = class_dict.get(name, _MISSING_TERMINAL_STATE_CLASS_SLOT)
+        if current is not expected:
+            raise ValueError(
+                "canonical market terminal state class dispatch was replaced"
+            )
+        if isinstance(current, property):
+            current_code = tuple(
+                None if accessor is None else getattr(accessor, "__code__", None)
+                for accessor in (current.fget, current.fset, current.fdel)
+            )
+        elif isinstance(current, (classmethod, staticmethod)):
+            current_code = (getattr(current.__func__, "__code__", None),)
+        else:
+            current_code = (getattr(current, "__code__", None),)
+        if current_code != expected_code:
+            raise ValueError(
+                "canonical market terminal state class dispatch was replaced"
+            )
+
+
+_CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD = (
+    _assert_canonical_market_terminal_state_dispatch
+)
+_CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD_CODE = getattr(
+    _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD,
+    "__code__",
+    None,
+)
+
+
+def _assess_betfair_market_definition_structure(
+    *,
+    market_id: str,
+    market_definition: dict[str, object],
+    provider_publish_at: str,
+    observed_at: str,
+    source_id: str,
+) -> tuple[MarketOutcomeIdentity, tuple[str, ...] | None, str | None]:
+    market = _canonical_text("market_id", market_id)
+    _, publish_dt = _canonical_timestamp(
+        "provider_publish_at",
+        provider_publish_at,
+    )
+    _, observed_dt = _canonical_timestamp("observed_at", observed_at)
+    if publish_dt > observed_dt:
+        raise ValueError("provider_publish_at must not be after observed_at")
+    if type(market_definition) is not dict:
+        raise ValueError("market_definition must be a JSON object")
+
+    event_id = _canonical_text(
+        "marketDefinition.eventId",
+        market_definition.get("eventId"),
+    )
+    event_type_id = _canonical_text(
+        "marketDefinition.eventTypeId",
+        market_definition.get("eventTypeId"),
+    )
+    provider_market_type = _canonical_text(
+        "marketDefinition.marketType",
+        market_definition.get("marketType"),
+    )
+    status = _canonical_text(
+        "marketDefinition.status",
+        market_definition.get("status"),
+    ).upper()
+    identity = _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE(
+        sport="table_tennis",
+        event_id=event_id,
+        market_id=market,
+        source_id=_canonical_text("source_id", source_id),
+        market_type=(
+            _CANONICAL_MARKET_TYPE_ENUM.WINNER
+            if provider_market_type == _BETFAIR_MATCH_ODDS_TYPE
+            else _CANONICAL_MARKET_TYPE_ENUM.OTHER
+        ),
+    )
+    if event_type_id != _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID:
+        return (
+            identity,
+            None,
+            "betfair_event_type_has_no_verified_roster_protocol",
+        )
+    if provider_market_type != _BETFAIR_MATCH_ODDS_TYPE:
+        return (
+            identity,
+            None,
+            "market_type_has_no_supported_terminal_settlement_semantics",
+        )
+    if status != "OPEN":
+        return (
+            identity,
+            None,
+            "betfair_market_definition_is_not_open_at_roster_revision",
+        )
+
+    complete = market_definition.get("complete")
+    if type(complete) is not bool:
+        raise ValueError("marketDefinition.complete must be a boolean")
+    if not complete:
+        return (
+            identity,
+            None,
+            "betfair_market_definition_runner_roster_is_not_complete",
+        )
+
+    runners = market_definition.get("runners")
+    if type(runners) is not list or len(runners) < 2:
+        return (
+            identity,
+            None,
+            "betfair_market_definition_lacks_authoritative_runner_roster",
+        )
+    selection_ids: list[str] = []
+    for index, runner in enumerate(runners):
+        if type(runner) is not dict or runner.get("id") is None:
+            raise ValueError(
+                f"marketDefinition.runners[{index}] requires id"
+            )
+        selection_ids.append(
+            _canonical_betfair_runner_id(
+                f"marketDefinition.runners[{index}].id",
+                runner["id"],
+            )
+        )
+    if len(selection_ids) != len(set(selection_ids)):
+        raise ValueError("marketDefinition.runners contains duplicate selection id")
+    return identity, tuple(sorted(selection_ids)), None
+
+
+_CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE = (
+    _assess_betfair_market_definition_structure
+)
+_CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE_CODE = getattr(
+    _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE,
+    "__code__",
+    None,
+)
+
+
+_CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS = (
+    ("datetime", _CANONICAL_DATETIME_TYPE),
+    ("_canonical_json", _CANONICAL_JSON_ENCODER),
+    ("_sha256_payload", _CANONICAL_SHA256_PAYLOAD),
+    (
+        "_assess_betfair_market_definition_structure",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE,
+    ),
+    (
+        "_CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE,
+    ),
+    (
+        "_CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE_CODE",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE_CODE,
+    ),
+    ("_CANONICAL_JSON_DUMPS", _CANONICAL_JSON_DUMPS),
+    ("_CANONICAL_JSON_DUMPS_CODE", _CANONICAL_JSON_DUMPS_CODE),
+    ("_CANONICAL_JSON_LOADS", _CANONICAL_JSON_LOADS),
+    ("_CANONICAL_JSON_LOADS_CODE", _CANONICAL_JSON_LOADS_CODE),
+    ("_CANONICAL_JSON_ENCODER", _CANONICAL_JSON_ENCODER),
+    ("_CANONICAL_JSON_ENCODER_CODE", _CANONICAL_JSON_ENCODER_CODE),
+    ("_CANONICAL_SHA256_CONSTRUCTOR", _CANONICAL_SHA256_CONSTRUCTOR),
+    (
+        "_CANONICAL_SHA256_CONSTRUCTOR_CODE",
+        _CANONICAL_SHA256_CONSTRUCTOR_CODE,
+    ),
+    ("_CANONICAL_SHA256_PAYLOAD", _CANONICAL_SHA256_PAYLOAD),
+    ("_CANONICAL_SHA256_PAYLOAD_CODE", _CANONICAL_SHA256_PAYLOAD_CODE),
+    (
+        "BetfairAuthenticatedMarketDefinitionEvidence",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE,
+    ),
+    ("BETFAIR_STREAM_SOURCE_ID", _CANONICAL_BETFAIR_STREAM_SOURCE_ID),
+    ("MarketType", _CANONICAL_MARKET_TYPE_ENUM),
+    ("OutcomeRosterBasis", _CANONICAL_OUTCOME_ROSTER_BASIS_TYPE),
+    ("SettlementSemantics", _CANONICAL_SETTLEMENT_SEMANTICS_TYPE),
+    ("OutcomeAuthorityStatus", _CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE),
+    ("_VERIFIED_AUTHORITY_TOKEN", _CANONICAL_VERIFIED_AUTHORITY_TOKEN),
+    ("_VERIFIED_AUTHORITY_ISSUANCE", _CANONICAL_VERIFIED_AUTHORITY_ISSUANCE),
+    (
+        "_CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE,
+    ),
+    (
+        "_CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED,
+    ),
+    (
+        "_CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_CODE",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_CODE,
+    ),
+    (
+        "_CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_DEFAULTS",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_DEFAULTS,
+    ),
+    (
+        "_CANONICAL_BETFAIR_STREAM_SOURCE_ID",
+        _CANONICAL_BETFAIR_STREAM_SOURCE_ID,
+    ),
+    ("_CANONICAL_MARKET_TYPE_ENUM", _CANONICAL_MARKET_TYPE_ENUM),
+    (
+        "_CANONICAL_OUTCOME_ROSTER_BASIS_TYPE",
+        _CANONICAL_OUTCOME_ROSTER_BASIS_TYPE,
+    ),
+    (
+        "_CANONICAL_SETTLEMENT_SEMANTICS_TYPE",
+        _CANONICAL_SETTLEMENT_SEMANTICS_TYPE,
+    ),
+    (
+        "_CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE",
+        _CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE,
+    ),
+    ("_CANONICAL_VERIFIED_AUTHORITY_TOKEN", _CANONICAL_VERIFIED_AUTHORITY_TOKEN),
+    (
+        "_CANONICAL_VERIFIED_AUTHORITY_ISSUANCE",
+        _CANONICAL_VERIFIED_AUTHORITY_ISSUANCE,
+    ),
+    ("MarketOutcomeIdentity", _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE),
+    ("timezone", _CANONICAL_TIMEZONE_TYPE),
+    ("MarketTerminalState", _CANONICAL_MARKET_TERMINAL_STATE_TYPE),
+    ("SettlementResult", _CANONICAL_SETTLEMENT_RESULT_TYPE),
+    ("_CANONICAL_DATETIME_TYPE", _CANONICAL_DATETIME_TYPE),
+    (
+        "_CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE",
+        _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE,
+    ),
+    ("_CANONICAL_TIMEZONE_TYPE", _CANONICAL_TIMEZONE_TYPE),
+    ("_CANONICAL_TIMEZONE_UTC", _CANONICAL_TIMEZONE_UTC),
+    (
+        "_CANONICAL_MARKET_TERMINAL_STATE_TYPE",
+        _CANONICAL_MARKET_TERMINAL_STATE_TYPE,
+    ),
+    ("_CANONICAL_SETTLEMENT_RESULT_TYPE", _CANONICAL_SETTLEMENT_RESULT_TYPE),
+    (
+        "_assert_canonical_market_terminal_state_dispatch",
+        _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD,
+    ),
+    (
+        "_CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD",
+        _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD,
+    ),
+)
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class MarketSettlementOutcomeAuthority:
     """Canonical exhaustive terminal-outcome authority for supported market semantics.
 
@@ -230,13 +667,23 @@ class MarketSettlementOutcomeAuthority:
     verification_protocol_sha256: str
     _verification_token: object = field(repr=False, compare=False)
 
+    def __getattribute__(self, name: str) -> object:
+        # Authority-bearing instance dispatch must remain on the exact class surface
+        # captured after class construction. This closes class-method/property
+        # rebinding that could otherwise bypass assert_issued_integrity().
+        _assert_canonical_market_outcome_authority_dispatch()
+        return object.__getattribute__(self, name)
+
     def __post_init__(self) -> None:
-        if self._verification_token is not _VERIFIED_AUTHORITY_TOKEN:
+        if (
+            self._verification_token is not _VERIFIED_AUTHORITY_TOKEN
+            or not _VERIFIED_AUTHORITY_ISSUANCE.get()
+        ):
             raise TypeError(
                 "MarketSettlementOutcomeAuthority must come from verified evidence"
             )
-        if not isinstance(self.identity, MarketOutcomeIdentity):
-            raise TypeError("identity must be MarketOutcomeIdentity")
+        if type(self.identity) is not _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE:
+            raise TypeError("identity must be exact MarketOutcomeIdentity")
         if self.identity.market_type is not MarketType.WINNER:
             raise ValueError(
                 "authoritative terminal outcome semantics currently support winner markets only"
@@ -275,16 +722,77 @@ class MarketSettlementOutcomeAuthority:
         _canonical_sha256(
             "verification_protocol_sha256", self.verification_protocol_sha256
         )
+        self._register_issued_integrity()
+
+    def _calculated_authority_sha256(self) -> str:
+        return _sha256_payload(self._identity_payload())
+
+    def _register_issued_integrity(self) -> None:
+        if (
+            _assert_canonical_issued_authority_registry_dispatch
+            is not _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD
+            or getattr(
+                _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD_CODE
+        ):
+            raise ValueError(
+                "market outcome authority issuance registry guard was replaced"
+            )
+        _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD()
+        _CANONICAL_REGISTER_ISSUED_AUTHORITY(
+            self,
+            self._calculated_authority_sha256(),
+        )
+
+    def assert_issued_integrity(self) -> None:
+        """Require the exact still-unchanged authority issued by a verified adapter."""
+
+        if type(self) is not MarketSettlementOutcomeAuthority:
+            raise ValueError(
+                "market outcome authority is not the exact product-issued instance"
+            )
+        if (
+            _assert_canonical_issued_authority_registry_dispatch
+            is not _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD
+            or getattr(
+                _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD_CODE
+        ):
+            raise ValueError(
+                "market outcome authority issuance registry guard was replaced"
+            )
+        _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD()
+        try:
+            current_digest = self._calculated_authority_sha256()
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "market outcome authority mutated after verified issuance"
+            ) from exc
+        issued_digest = _CANONICAL_ISSUED_AUTHORITY_DIGEST(self)
+        if issued_digest is None:
+            raise ValueError(
+                "market outcome authority is not the exact product-issued instance"
+            )
+        if current_digest != issued_digest:
+            raise ValueError(
+                "market outcome authority mutated after verified issuance"
+            )
 
     @property
     def quote_keys(self) -> tuple[str, ...]:
+        self.assert_issued_integrity()
         return tuple(
             self.identity.quote_key(selection_id)
             for selection_id in self.selection_ids
         )
 
-    @property
-    def terminal_state_count(self) -> int:
+    def _terminal_state_count_unchecked(self) -> int:
         if (
             self.settlement_semantics
             is SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
@@ -297,15 +805,25 @@ class MarketSettlementOutcomeAuthority:
             return len(self.selection_ids) + 1
         return len(self.selection_ids)
 
-    @property
-    def terminal_space_exact(self) -> bool:
+    def _terminal_space_exact_unchecked(self) -> bool:
         return (
             self.settlement_semantics
             is not SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
         )
 
     @property
+    def terminal_state_count(self) -> int:
+        self.assert_issued_integrity()
+        return self._terminal_state_count_unchecked()
+
+    @property
+    def terminal_space_exact(self) -> bool:
+        self.assert_issued_integrity()
+        return self._terminal_space_exact_unchecked()
+
+    @property
     def terminal_states(self) -> tuple[MarketTerminalState, ...]:
+        self.assert_issued_integrity()
         if (
             self.settlement_semantics
             is SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
@@ -320,7 +838,7 @@ class MarketSettlementOutcomeAuthority:
                     result.value for result in combination
                 )
                 states.append(
-                    MarketTerminalState(
+                    _CANONICAL_MARKET_TERMINAL_STATE_TYPE(
                         state_id=state_id,
                         settlements=tuple(
                             zip(self.selection_ids, combination)
@@ -330,7 +848,7 @@ class MarketSettlementOutcomeAuthority:
             return tuple(states)
 
         states = [
-            MarketTerminalState(
+            _CANONICAL_MARKET_TERMINAL_STATE_TYPE(
                 state_id=f"winner:{winner}",
                 settlements=tuple(
                     (
@@ -351,7 +869,7 @@ class MarketSettlementOutcomeAuthority:
             is SettlementSemantics.EXCLUSIVE_SINGLE_WINNER_OR_ALL_VOID
         ):
             states.append(
-                MarketTerminalState(
+                _CANONICAL_MARKET_TERMINAL_STATE_TYPE(
                     state_id="all_void",
                     settlements=tuple(
                         (selection_id, SettlementResult.VOID)
@@ -362,26 +880,27 @@ class MarketSettlementOutcomeAuthority:
         return tuple(states)
 
     def assert_available_as_of(self, decision_as_of: datetime) -> None:
-        if not isinstance(decision_as_of, datetime):
-            raise TypeError("decision_as_of must be a datetime")
+        self.assert_issued_integrity()
+        if type(decision_as_of) is not _CANONICAL_DATETIME_TYPE:
+            raise TypeError("decision_as_of must be an exact datetime")
         if (
             decision_as_of.tzinfo is None
             or decision_as_of.utcoffset() is None
         ):
             raise ValueError("decision_as_of must be timezone-aware")
-        boundary = decision_as_of.astimezone(timezone.utc)
+        boundary = decision_as_of.astimezone(_CANONICAL_TIMEZONE_UTC)
         _, cutoff = _canonical_timestamp("causal_cutoff", self.causal_cutoff)
         _, observed = _canonical_timestamp("observed_at", self.observed_at)
         if (
-            cutoff.astimezone(timezone.utc) > boundary
-            or observed.astimezone(timezone.utc) > boundary
+            cutoff.astimezone(_CANONICAL_TIMEZONE_UTC) > boundary
+            or observed.astimezone(_CANONICAL_TIMEZONE_UTC) > boundary
         ):
             raise ValueError(
                 "market outcome authority is not causally available at decision_as_of"
             )
 
     def _state_is_derived(self, state: MarketTerminalState) -> bool:
-        if not isinstance(state, MarketTerminalState):
+        if type(state) is not _CANONICAL_MARKET_TERMINAL_STATE_TYPE:
             return False
         actual_ids = tuple(
             selection_id for selection_id, _ in state.settlements
@@ -429,8 +948,9 @@ class MarketSettlementOutcomeAuthority:
     def settlement_by_quote(
         self, state: MarketTerminalState
     ) -> dict[str, str]:
-        if not isinstance(state, MarketTerminalState):
-            raise TypeError("state must be MarketTerminalState")
+        self.assert_issued_integrity()
+        if type(state) is not _CANONICAL_MARKET_TERMINAL_STATE_TYPE:
+            raise TypeError("state must be exact MarketTerminalState")
         if not self._state_is_derived(state):
             raise ValueError(
                 "terminal state is not derived from this outcome authority"
@@ -454,13 +974,14 @@ class MarketSettlementOutcomeAuthority:
             "roster_provenance_sha256": self.roster_provenance_sha256,
             "settlement_rules_sha256": self.settlement_rules_sha256,
             "verification_protocol_sha256": self.verification_protocol_sha256,
-            "terminal_space_exact": self.terminal_space_exact,
-            "terminal_state_count": self.terminal_state_count,
+            "terminal_space_exact": self._terminal_space_exact_unchecked(),
+            "terminal_state_count": self._terminal_state_count_unchecked(),
         }
 
     @property
     def authority_sha256(self) -> str:
-        return _sha256_payload(self._identity_payload())
+        self.assert_issued_integrity()
+        return self._calculated_authority_sha256()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -482,10 +1003,13 @@ class MarketSettlementOutcomeAuthority:
         supply that independently derived authority here; durable data then proves
         identity/equality only.
         """
-        if not isinstance(verified_authority, cls):
+        if (
+            cls is not _CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE
+            or type(verified_authority) is not _CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE
+        ):
             raise ValueError(
                 "durable market outcome authority readback requires separately "
-                "verified source authority"
+                "verified source authority of exact canonical type"
             )
         canonical = verified_authority.to_dict()
         expected = set(canonical)
@@ -523,6 +1047,263 @@ class MarketSettlementOutcomeAuthority:
         return verified_authority
 
 
+_MISSING_AUTHORITY_CLASS_SLOT = object()
+_CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
+
+
+def _authority_descriptor_code_identity(member: object) -> tuple[object, ...]:
+    """Capture executable descriptor code without invoking mutable descriptors."""
+
+    if isinstance(member, property):
+        return tuple(
+            None if accessor is None else getattr(accessor, "__code__", None)
+            for accessor in (member.fget, member.fset, member.fdel)
+        )
+    if isinstance(member, (classmethod, staticmethod)):
+        function = member.__func__
+        return (getattr(function, "__code__", None),)
+    return (getattr(member, "__code__", None),)
+
+
+_CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_CLASS_SURFACE = tuple(
+    (
+        name,
+        member,
+        _authority_descriptor_code_identity(member),
+    )
+    for name in (
+        "market_id",
+        "provider_request_id",
+        "connection_id",
+        "connection_generation",
+        "subscription_id",
+        "market_filter_sha256",
+        "provider_publish_time_ms",
+        "observed_at_ms",
+        "market_definition_json",
+        "market_definition_sha256",
+        "transport_frame_sha256",
+        "evidence_id",
+        "__post_init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "assert_issued",
+        "grants_provider_write_authority",
+        "grants_execution_authority",
+        "real_money_authorized",
+    )
+    for member in (
+        vars(_CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE).get(
+            name,
+            _MISSING_AUTHORITY_CLASS_SLOT,
+        ),
+    )
+)
+
+
+_CANONICAL_MARKET_OUTCOME_IDENTITY_CLASS_SURFACE = tuple(
+    (
+        name,
+        member,
+        _authority_descriptor_code_identity(member),
+    )
+    for name in (
+        "sport",
+        "event_id",
+        "market_id",
+        "source_id",
+        "market_type",
+        "__post_init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "__eq__",
+        "__hash__",
+        "identity_key",
+        "market_key",
+        "quote_key",
+        "to_dict",
+        "from_dict",
+    )
+    for member in (
+        vars(_CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE).get(
+            name,
+            _MISSING_AUTHORITY_CLASS_SLOT,
+        ),
+    )
+)
+
+
+_CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE = tuple(
+    (
+        name,
+        member,
+        _authority_descriptor_code_identity(member),
+    )
+    for name in (
+        "identity",
+        "selection_ids",
+        "roster_basis",
+        "settlement_semantics",
+        "source_revision",
+        "causal_cutoff",
+        "observed_at",
+        "roster_provenance_sha256",
+        "settlement_rules_sha256",
+        "verification_protocol_sha256",
+        "_verification_token",
+        "__post_init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "_calculated_authority_sha256",
+        "_register_issued_integrity",
+        "assert_issued_integrity",
+        "quote_keys",
+        "_terminal_state_count_unchecked",
+        "_terminal_space_exact_unchecked",
+        "terminal_state_count",
+        "terminal_space_exact",
+        "terminal_states",
+        "assert_available_as_of",
+        "_state_is_derived",
+        "settlement_by_quote",
+        "_identity_payload",
+        "authority_sha256",
+        "to_dict",
+        "from_dict",
+    )
+    for member in (
+        vars(MarketSettlementOutcomeAuthority).get(
+            name,
+            _MISSING_AUTHORITY_CLASS_SLOT,
+        ),
+    )
+)
+
+
+def _assert_canonical_market_outcome_authority_dispatch(
+    _module_roots=_CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS,
+    _evidence_surface=(
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_CLASS_SURFACE
+    ),
+    _evidence_type=_CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE,
+    _identity_surface=_CANONICAL_MARKET_OUTCOME_IDENTITY_CLASS_SURFACE,
+    _authority_surface=_CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE,
+    _terminal_guard=_CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD,
+    _terminal_guard_code=_CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD_CODE,
+    _identity_type=_CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE,
+    _authority_type=_CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE,
+    _missing_slot=_MISSING_AUTHORITY_CLASS_SLOT,
+) -> None:
+    """Fail closed if authority-bearing class dispatch or trusted roots changed."""
+
+    for name, expected in _module_roots:
+        if globals().get(name) is not expected:
+            raise ValueError(
+                "canonical market outcome authority module root was replaced"
+            )
+    helper_code_checks = (
+        (_CANONICAL_JSON_DUMPS, _CANONICAL_JSON_DUMPS_CODE),
+        (_CANONICAL_JSON_LOADS, _CANONICAL_JSON_LOADS_CODE),
+        (_CANONICAL_JSON_ENCODER, _CANONICAL_JSON_ENCODER_CODE),
+        (
+            _CANONICAL_SHA256_CONSTRUCTOR,
+            _CANONICAL_SHA256_CONSTRUCTOR_CODE,
+        ),
+        (_CANONICAL_SHA256_PAYLOAD, _CANONICAL_SHA256_PAYLOAD_CODE),
+        (
+            _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED,
+            _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_CODE,
+        ),
+        (
+            _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE,
+            _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE_CODE,
+        ),
+    )
+    for helper, expected_code in helper_code_checks:
+        if getattr(helper, "__code__", None) is not expected_code:
+            raise ValueError(
+                "canonical market outcome authority digest helper was replaced"
+            )
+    if (
+        getattr(
+            _terminal_guard,
+            "__code__",
+            None,
+        )
+        is not _terminal_guard_code
+    ):
+        raise ValueError(
+            "canonical market terminal state class dispatch was replaced"
+        )
+    _terminal_guard()
+
+    evidence_class_dict = vars(_evidence_type)
+    for name, expected, expected_code in _evidence_surface:
+        current = evidence_class_dict.get(name, _missing_slot)
+        if current is not expected:
+            raise ValueError(
+                "authenticated marketDefinition evidence class dispatch was replaced"
+            )
+        if isinstance(current, property):
+            current_code = tuple(
+                None if accessor is None else getattr(accessor, "__code__", None)
+                for accessor in (current.fget, current.fset, current.fdel)
+            )
+        elif isinstance(current, (classmethod, staticmethod)):
+            current_code = (getattr(current.__func__, "__code__", None),)
+        else:
+            current_code = (getattr(current, "__code__", None),)
+        if current_code != expected_code:
+            raise ValueError(
+                "authenticated marketDefinition evidence class dispatch was replaced"
+            )
+
+    identity_class_dict = vars(_identity_type)
+    for name, expected, expected_code in _identity_surface:
+        current = identity_class_dict.get(name, _missing_slot)
+        if current is not expected:
+            raise ValueError(
+                "canonical market outcome identity class dispatch was replaced"
+            )
+        if isinstance(current, property):
+            current_code = tuple(
+                None if accessor is None else getattr(accessor, "__code__", None)
+                for accessor in (current.fget, current.fset, current.fdel)
+            )
+        elif isinstance(current, (classmethod, staticmethod)):
+            current_code = (getattr(current.__func__, "__code__", None),)
+        else:
+            current_code = (getattr(current, "__code__", None),)
+        if current_code != expected_code:
+            raise ValueError(
+                "canonical market outcome identity class dispatch was replaced"
+            )
+
+    class_dict = vars(_authority_type)
+    for name, expected, expected_code in _authority_surface:
+        current = class_dict.get(name, _missing_slot)
+        if current is not expected:
+            raise ValueError(
+                "canonical market outcome authority class dispatch was replaced"
+            )
+        if isinstance(current, property):
+            current_code = tuple(
+                None if accessor is None else getattr(accessor, "__code__", None)
+                for accessor in (current.fget, current.fset, current.fdel)
+            )
+        elif isinstance(current, (classmethod, staticmethod)):
+            current_code = (getattr(current.__func__, "__code__", None),)
+        else:
+            current_code = (getattr(current, "__code__", None),)
+        if current_code != expected_code:
+            raise ValueError(
+                "canonical market outcome authority class dispatch was replaced"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class MarketOutcomeAuthorityAssessment:
     identity: MarketOutcomeIdentity
@@ -531,16 +1312,19 @@ class MarketOutcomeAuthorityAssessment:
     refusal_reason: str | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.identity, MarketOutcomeIdentity):
-            raise TypeError("assessment identity must be MarketOutcomeIdentity")
+        if type(self.identity) is not _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE:
+            raise TypeError("assessment identity must be exact MarketOutcomeIdentity")
         if not isinstance(self.status, OutcomeAuthorityStatus):
             raise ValueError("assessment status must be OutcomeAuthorityStatus")
         if self.status is OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE:
             if (
-                not isinstance(self.authority, MarketSettlementOutcomeAuthority)
+                type(self.authority) is not _CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE
                 or self.refusal_reason is not None
             ):
-                raise ValueError("proven assessment requires authority and no refusal")
+                raise ValueError(
+                    "proven assessment requires exact canonical authority and no refusal"
+                )
+            self.authority.assert_issued_integrity()
             if self.authority.identity != self.identity:
                 raise ValueError("assessment authority identity mismatch")
         else:
@@ -564,8 +1348,8 @@ def assess_market_outcome_authority(
 ) -> MarketOutcomeAuthorityAssessment:
     """Refuse raw caller assertions; exhaustive authority needs verified source evidence."""
 
-    if not isinstance(identity, MarketOutcomeIdentity):
-        raise TypeError("identity must be MarketOutcomeIdentity")
+    if type(identity) is not _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE:
+        raise TypeError("identity must be exact MarketOutcomeIdentity")
     if not isinstance(roster_basis, OutcomeRosterBasis):
         raise ValueError("roster_basis must be OutcomeRosterBasis")
     if roster_basis is OutcomeRosterBasis.OBSERVED_ROWS_ONLY:
@@ -591,147 +1375,178 @@ def assess_betfair_historical_market_definition_authority(
     provider_publish_at: str,
     observed_at: str,
 ) -> MarketOutcomeAuthorityAssessment:
-    """Derive conservative exhaustive authority from Betfair marketDefinition evidence.
+    """Structurally assess raw Betfair marketDefinition evidence.
 
-    The adapter does not invent Betfair terminal combinations. It derives the exact
-    runner roster from marketDefinition.runners and evaluates the conservative Cartesian
-    superset of the canonical WINNER/LOSER/REMOVED -> win/loss/void result alphabet.
-    Thus every provider terminal assignment representable by the governed importer is
-    covered, while impossible combinations may remain as conservative states.
+    Raw caller bytes and timestamps are assertions, not provider-origin evidence.
+    Validate the supported market shape but refuse positive exhaustive authority
+    until a product-owned Betfair acquisition witness is composed at this boundary.
     """
 
-    market = _canonical_text("market_id", market_id)
-    publish_raw, publish_dt = _canonical_timestamp(
-        "provider_publish_at",
-        provider_publish_at,
-    )
-    observed_raw, observed_dt = _canonical_timestamp("observed_at", observed_at)
-    if publish_dt > observed_dt:
-        raise ValueError("provider_publish_at must not be after observed_at")
-    if type(market_definition) is not dict:
-        raise ValueError("market_definition must be a JSON object")
-
-    event_id = _canonical_text(
-        "marketDefinition.eventId",
-        market_definition.get("eventId"),
-    )
-    event_type_id = _canonical_text(
-        "marketDefinition.eventTypeId",
-        market_definition.get("eventTypeId"),
-    )
-    provider_market_type = _canonical_text(
-        "marketDefinition.marketType",
-        market_definition.get("marketType"),
-    )
-    status = _canonical_text(
-        "marketDefinition.status",
-        market_definition.get("status"),
-    ).upper()
-
-    identity = MarketOutcomeIdentity(
-        sport="table_tennis",
-        event_id=event_id,
-        market_id=market,
-        source_id=_BETFAIR_SOURCE_ID,
-        market_type=(
-            MarketType.WINNER
-            if provider_market_type == _BETFAIR_MATCH_ODDS_TYPE
-            else MarketType.OTHER
-        ),
-    )
-    if event_type_id != _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID:
-        return MarketOutcomeAuthorityAssessment(
-            identity=identity,
-            status=OutcomeAuthorityStatus.REFUSED,
-            authority=None,
-            refusal_reason="betfair_event_type_has_no_verified_roster_protocol",
+    identity, _, refusal_reason = (
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE(
+            market_id=market_id,
+            market_definition=market_definition,
+            provider_publish_at=provider_publish_at,
+            observed_at=observed_at,
+            source_id=_BETFAIR_SOURCE_ID,
         )
-    if provider_market_type != _BETFAIR_MATCH_ODDS_TYPE:
-        return MarketOutcomeAuthorityAssessment(
-            identity=identity,
-            status=OutcomeAuthorityStatus.REFUSED,
-            authority=None,
-            refusal_reason="market_type_has_no_supported_terminal_settlement_semantics",
-        )
-    if status != "OPEN":
-        return MarketOutcomeAuthorityAssessment(
-            identity=identity,
-            status=OutcomeAuthorityStatus.REFUSED,
-            authority=None,
-            refusal_reason="betfair_market_definition_is_not_open_at_roster_revision",
-        )
-
-    runners = market_definition.get("runners")
-    if type(runners) is not list or len(runners) < 2:
-        return MarketOutcomeAuthorityAssessment(
-            identity=identity,
-            status=OutcomeAuthorityStatus.REFUSED,
-            authority=None,
-            refusal_reason="betfair_market_definition_lacks_authoritative_runner_roster",
-        )
-    selection_ids: list[str] = []
-    for index, runner in enumerate(runners):
-        if type(runner) is not dict or runner.get("id") is None:
-            raise ValueError(
-                f"marketDefinition.runners[{index}] requires id"
-            )
-        selection_ids.append(
-            _canonical_text(
-                f"marketDefinition.runners[{index}].id",
-                str(runner["id"]),
-            )
-        )
-    if len(selection_ids) != len(set(selection_ids)):
-        raise ValueError("marketDefinition.runners contains duplicate selection id")
-    canonical_selections = tuple(sorted(selection_ids))
-
-    definition_payload = {
-        "provider": _BETFAIR_SOURCE_ID,
-        "provider_publish_at": publish_raw,
-        "market_id": market,
-        "market_definition": market_definition,
-    }
-    roster_provenance_sha256 = _sha256_payload(definition_payload)
-    settlement_protocol = {
-        "provider": _BETFAIR_SOURCE_ID,
-        "provider_market_type": _BETFAIR_MATCH_ODDS_TYPE,
-        "canonical_status_map": dict(sorted(_BETFAIR_SETTLEMENT_STATUS_MAP.items())),
-        "terminal_family": SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET.value,
-        "terminal_space_exact": False,
-    }
-    settlement_rules_sha256 = _sha256_payload(settlement_protocol)
-    verification_protocol_sha256 = _sha256_payload(
-        {
-            "protocol": "autosport.betfair_historical.market_definition_roster.v1",
-            "event_type_id": _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID,
-            "market_type": _BETFAIR_MATCH_ODDS_TYPE,
-            "requires_open_status": True,
-            "runner_ids_derived_from": "marketDefinition.runners",
-            "settlement_protocol_sha256": settlement_rules_sha256,
-        }
-    )
-    source_revision = (
-        "betfair-market-definition:"
-        + publish_raw
-        + ":"
-        + roster_provenance_sha256[:16]
-    )
-    authority = MarketSettlementOutcomeAuthority(
-        identity=identity,
-        selection_ids=canonical_selections,
-        roster_basis=OutcomeRosterBasis.PROVIDER_MARKET_DEFINITION,
-        settlement_semantics=SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET,
-        source_revision=source_revision,
-        causal_cutoff=publish_raw,
-        observed_at=observed_raw,
-        roster_provenance_sha256=roster_provenance_sha256,
-        settlement_rules_sha256=settlement_rules_sha256,
-        verification_protocol_sha256=verification_protocol_sha256,
-        _verification_token=_VERIFIED_AUTHORITY_TOKEN,
     )
     return MarketOutcomeAuthorityAssessment(
         identity=identity,
-        status=OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
+        status=OutcomeAuthorityStatus.REFUSED,
+        authority=None,
+        refusal_reason=(
+            refusal_reason
+            or "betfair_market_definition_provider_origin_unverified"
+        ),
+    )
+
+def assess_betfair_authenticated_market_definition_authority(
+    evidence: BetfairAuthenticatedMarketDefinitionEvidence,
+) -> MarketOutcomeAuthorityAssessment:
+    """Mint conservative outcome authority only from authenticated Stream evidence."""
+
+    _assert_canonical_market_outcome_authority_dispatch()
+    if type(evidence) is not _CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE:
+        raise TypeError(
+            "evidence must be exact BetfairAuthenticatedMarketDefinitionEvidence"
+        )
+    current_assert = vars(
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE
+    ).get("assert_issued")
+    if (
+        current_assert is not _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED
+        or getattr(current_assert, "__code__", None)
+        is not _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_CODE
+        or current_assert.__defaults__
+        is not _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_DEFAULTS
+    ):
+        raise ValueError(
+            "authenticated marketDefinition evidence dispatch was replaced"
+        )
+    _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED(evidence)
+
+    try:
+        market_definition = _CANONICAL_JSON_LOADS(evidence.market_definition_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "authenticated marketDefinition evidence JSON is invalid"
+        ) from exc
+    if type(market_definition) is not dict:
+        raise ValueError("authenticated marketDefinition must be a JSON object")
+    if _canonical_json(market_definition) != evidence.market_definition_json:
+        raise ValueError("authenticated marketDefinition JSON is not canonical")
+    if _sha256_payload(market_definition) != evidence.market_definition_sha256:
+        raise ValueError("authenticated marketDefinition digest mismatch")
+
+    def timestamp_from_epoch_millis(value: int, field: str) -> str:
+        if type(value) is not int or value < 0:
+            raise ValueError(f"{field} must be a non-negative integer")
+        seconds, milliseconds = divmod(value, 1000)
+        try:
+            parsed = _CANONICAL_DATETIME_TYPE.fromtimestamp(
+                seconds,
+                tz=_CANONICAL_TIMEZONE_UTC,
+            ).replace(microsecond=milliseconds * 1000)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise ValueError(
+                f"{field} is outside representable UTC range"
+            ) from exc
+        return parsed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    provider_publish_at = timestamp_from_epoch_millis(
+        evidence.provider_publish_time_ms,
+        "provider_publish_time_ms",
+    )
+    observed_at = timestamp_from_epoch_millis(
+        evidence.observed_at_ms,
+        "observed_at_ms",
+    )
+    live_identity, selection_ids, refusal_reason = (
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE(
+            market_id=evidence.market_id,
+            market_definition=market_definition,
+            provider_publish_at=provider_publish_at,
+            observed_at=observed_at,
+            source_id=_CANONICAL_BETFAIR_STREAM_SOURCE_ID,
+        )
+    )
+    if refusal_reason is not None:
+        return MarketOutcomeAuthorityAssessment(
+            identity=live_identity,
+            status=_CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE.REFUSED,
+            authority=None,
+            refusal_reason=refusal_reason,
+        )
+    if selection_ids is None:
+        raise ValueError(
+            "supported authenticated marketDefinition lacks canonical roster"
+        )
+    roster_provenance_sha256 = _sha256_payload(
+        {
+            "protocol": (
+                "autosport.betfair_authenticated_complete_market_definition_roster.v1"
+            ),
+            "evidence_id": evidence.evidence_id,
+            "transport_frame_sha256": evidence.transport_frame_sha256,
+            "market_definition_sha256": evidence.market_definition_sha256,
+            "market_id": evidence.market_id,
+            "provider_publish_time_ms": evidence.provider_publish_time_ms,
+            "selection_ids": list(selection_ids),
+        }
+    )
+    settlement_rules_sha256 = _sha256_payload(
+        {
+            "protocol": "autosport.canonical_win_loss_void_superset.v1",
+            "claim": "conservative_exhaustive_terminal_superset_not_exact_rules",
+            "results": ["loss", "void", "win"],
+        }
+    )
+    verification_protocol_sha256 = _sha256_payload(
+        {
+            "protocol": (
+                "autosport.betfair_authenticated_market_definition_outcome.v1"
+            ),
+            "requires_authenticated_stream_evidence": True,
+            "requires_ex_market_def_subscription": True,
+            "requires_open_market": True,
+            "requires_complete_runner_roster": True,
+            "supported_event_type_id": _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID,
+            "supported_market_type": _BETFAIR_MATCH_ODDS_TYPE,
+            "terminal_semantics": (
+                _CANONICAL_SETTLEMENT_SEMANTICS_TYPE
+                .CANONICAL_WIN_LOSS_VOID_SUPERSET.value
+            ),
+            "terminal_space_exact": False,
+        }
+    )
+
+    issuance = _CANONICAL_VERIFIED_AUTHORITY_ISSUANCE.set(True)
+    try:
+        authority = _CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE(
+            identity=live_identity,
+            selection_ids=selection_ids,
+            roster_basis=(
+                _CANONICAL_OUTCOME_ROSTER_BASIS_TYPE.PROVIDER_MARKET_DEFINITION
+            ),
+            settlement_semantics=(
+                _CANONICAL_SETTLEMENT_SEMANTICS_TYPE
+                .CANONICAL_WIN_LOSS_VOID_SUPERSET
+            ),
+            source_revision=f"stream-market-definition:{evidence.evidence_id}",
+            causal_cutoff=provider_publish_at,
+            observed_at=observed_at,
+            roster_provenance_sha256=roster_provenance_sha256,
+            settlement_rules_sha256=settlement_rules_sha256,
+            verification_protocol_sha256=verification_protocol_sha256,
+            _verification_token=_CANONICAL_VERIFIED_AUTHORITY_TOKEN,
+        )
+    finally:
+        _CANONICAL_VERIFIED_AUTHORITY_ISSUANCE.reset(issuance)
+
+    return MarketOutcomeAuthorityAssessment(
+        identity=live_identity,
+        status=_CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE.PROVEN_EXHAUSTIVE,
         authority=authority,
         refusal_reason=None,
     )

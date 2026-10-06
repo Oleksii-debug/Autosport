@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from market_outcome_test_support import issue_synthetic_market_outcome_authority
+
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -36,24 +38,13 @@ class ScenarioSearchTicketSnapshotIntegrityTests(unittest.TestCase):
         ]
 
     def _authority(self):
-        assessment = assess_betfair_historical_market_definition_authority(
+        return issue_synthetic_market_outcome_authority(
+            event_id="event-1",
             market_id="match_odds",
-            market_definition={
-                "eventId": "event-1",
-                "eventTypeId": "2593174",
-                "marketType": "MATCH_ODDS",
-                "status": "OPEN",
-                "runners": [{"id": "away"}, {"id": "home"}],
-            },
-            provider_publish_at="2026-09-18T15:00:00Z",
+            selection_ids=("away", "home"),
+            causal_cutoff="2026-09-18T15:00:00Z",
             observed_at="2026-09-18T15:00:01Z",
         )
-        self.assertEqual(
-            assessment.status,
-            OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
-        )
-        self.assertIsNotNone(assessment.authority)
-        return assessment.authority
 
     def test_exact_search_is_stable_if_source_ticket_settles_after_snapshot(self) -> None:
         book = PaperBook("100")

@@ -12,11 +12,8 @@ from autosport.market_implied_baseline import (
     build_market_implied_baseline_evidence,
 )
 from autosport.market_mirror import MarketMirror
-from autosport.market_outcomes import (
-    OutcomeAuthorityStatus,
-    assess_betfair_historical_market_definition_authority,
-)
 from autosport.storage import SQLiteMarketStore
+from market_outcome_test_support import issue_synthetic_market_outcome_authority
 
 
 class MarketImpliedHistoricalRosterContradictionTests(unittest.TestCase):
@@ -24,20 +21,15 @@ class MarketImpliedHistoricalRosterContradictionTests(unittest.TestCase):
 
     @staticmethod
     def _authority():
-        assessment = assess_betfair_historical_market_definition_authority(
+        # Deliberately omit canonical durable selection "draw" from this governed
+        # synthetic roster so the test reaches the downstream contradiction fence.
+        return issue_synthetic_market_outcome_authority(
+            event_id="event-1",
             market_id="match_odds",
-            market_definition={
-                "eventId": "event-1",
-                "eventTypeId": "2593174",
-                "marketType": "MATCH_ODDS",
-                "status": "OPEN",
-                # Deliberately omit the canonical durable selection "draw".
-                "runners": [{"id": "away"}, {"id": "home"}],
-            },
-            provider_publish_at="2026-09-18T15:00:00Z",
+            selection_ids=("away", "home"),
+            causal_cutoff="2026-09-18T15:00:00Z",
             observed_at="2026-09-18T15:00:01Z",
         )
-        return assessment
 
     @staticmethod
     def _event(
@@ -87,16 +79,7 @@ class MarketImpliedHistoricalRosterContradictionTests(unittest.TestCase):
                 )
                 mirror.persist_and_apply(store, self._event("home", 3))
 
-                assessment = self._authority()
-                if assessment.status is OutcomeAuthorityStatus.REFUSED:
-                    self.assertIsNone(assessment.authority)
-                    continue
-
-                self.assertEqual(
-                    assessment.status,
-                    OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
-                )
-                self.assertIsNotNone(assessment.authority)
+                authority = self._authority()
                 with self.assertRaisesRegex(
                     MarketImpliedBaselineError,
                     "canonical durable market history contradicts verified outcome roster",
@@ -104,7 +87,7 @@ class MarketImpliedHistoricalRosterContradictionTests(unittest.TestCase):
                     build_market_implied_baseline_evidence(
                         cohort_key="row-1",
                         store=store,
-                        outcome_authority=assessment.authority,
+                        outcome_authority=authority,
                         decision_cutoff=self.CUTOFF,
                         max_age=timedelta(minutes=10),
                     )

@@ -8,6 +8,7 @@ from fractions import Fraction
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from pathlib import Path
+from market_outcome_test_support import issue_synthetic_market_outcome_authority
 
 from autosport.domain import MarketEvent, MarketType
 from autosport.external_validity_baseline import (
@@ -61,25 +62,13 @@ class MarketImpliedBaselineTests(unittest.TestCase):
         observed_at: str = "2026-09-18T15:00:01Z",
         publish_at: str = "2026-09-18T15:00:00Z",
     ) -> MarketSettlementOutcomeAuthority:
-        assessment = assess_betfair_historical_market_definition_authority(
+        return issue_synthetic_market_outcome_authority(
+            event_id=event_id,
             market_id="match_odds",
-            market_definition={
-                "eventId": event_id,
-                "eventTypeId": "2593174",
-                "marketType": "MATCH_ODDS",
-                "status": "OPEN",
-                "runners": [
-                    {"id": "away"},
-                    {"id": "draw"},
-                    {"id": "home"},
-                ],
-            },
-            provider_publish_at=publish_at,
+            selection_ids=("away", "draw", "home"),
+            causal_cutoff=publish_at,
             observed_at=observed_at,
         )
-        self.assertEqual(assessment.status, OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE)
-        self.assertIsNotNone(assessment.authority)
-        return assessment.authority  # type: ignore[return-value]
 
     def event(
         self,

@@ -1375,3 +1375,101 @@ if __name__ == "__main__":
         with self.assertRaisesRegex(ValueError, "exact Decimal required"):
             public_paper._decimal_coefficient(DecimalSubclass("1.25"))
 
+
+    def test_public_exact_addition_rejects_rebound_transitive_dependency(self) -> None:
+        original = public_paper._decimal_coefficient
+        called = False
+
+        def forged(*args, **kwargs):
+            nonlocal called
+            called = True
+            return (0, 0)
+
+        public_paper._decimal_coefficient = forged
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "PAPER exact Decimal arithmetic dependency changed",
+            ):
+                public_paper._decimal_add_exact(
+                    Decimal("1.20"),
+                    Decimal("2.30"),
+                )
+            self.assertFalse(called)
+        finally:
+            public_paper._decimal_coefficient = original
+
+    def test_public_run_economics_rejects_rebound_exact_addition(self) -> None:
+        original = public_paper._decimal_add_exact
+        called = False
+
+        def forged(*args, **kwargs):
+            nonlocal called
+            called = True
+            return Decimal("0")
+
+        public_paper._decimal_add_exact = forged
+        try:
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "PAPER exact Decimal arithmetic authority changed",
+            ):
+                public_paper._derive_run_economics((), ())
+            self.assertFalse(called)
+        finally:
+            public_paper._decimal_add_exact = original
+
+    def test_public_ledger_complete_run_rejects_rebound_economics_deriver(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            original = public_paper._derive_run_economics
+            called = False
+
+            def forged(*args, **kwargs):
+                nonlocal called
+                called = True
+                raise AssertionError("rebound run economics executed")
+
+            public_paper._derive_run_economics = forged
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "PAPER run economics authority changed",
+                ):
+                    ledger.complete_run(
+                        run_id="run-economics-rebind",
+                        pending_action_ids=(),
+                        recovery_decision=RecoveryDecision.NONE,
+                        worst_case_exposure=Decimal("0"),
+                    )
+                self.assertFalse(called)
+                self.assertEqual(ledger.events("run-economics-rebind"), [])
+            finally:
+                public_paper._derive_run_economics = original
+
+    def test_execute_paper_plan_rejects_rebound_synthetic_decimal_authority(self) -> None:
+        original = public_paper._synthetic_attempt
+        called = False
+
+        def forged(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("rebound synthetic execution executed")
+
+        public_paper._synthetic_attempt = forged
+        try:
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "PAPER execution Decimal authority changed",
+            ):
+                execute_paper_plan(
+                    plan=None,  # type: ignore[arg-type]
+                    trigger_id="trigger",
+                    config=None,  # type: ignore[arg-type]
+                    ledger=None,  # type: ignore[arg-type]
+                    started_at="2026-10-05T00:00:00+00:00",
+                )
+            self.assertFalse(called)
+        finally:
+            public_paper._synthetic_attempt = original
+

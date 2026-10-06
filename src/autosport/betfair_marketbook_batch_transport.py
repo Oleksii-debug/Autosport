@@ -348,6 +348,8 @@ def _read_market_book_batch(
     params_for_batch: Callable[[MarketBookReadPlan, MarketBookReadBatch], dict[str, object]],
     request_budget: Callable[[object], object],
     post_readonly: Callable[..., _transport._MarketBookRpcResponse],
+    receipt_from_response: Callable[..., MarketBookBatchReceipt],
+    result_factory: Callable[..., MarketBookBatchTransportResult],
 ) -> MarketBookBatchTransportResult:
     batch = canonical_batch(plan, batch_id)
     params = params_for_batch(plan, batch)
@@ -397,13 +399,13 @@ def _read_market_book_batch(
             )
 
         try:
-            receipt = MarketBookBatchReceipt.from_response(batch, list(response.rows))
+            receipt = receipt_from_response(batch, list(response.rows))
         except MarketBookCompletenessError as exc:
             raise _transport.BetfairMarketBookProtocolError(
                 "MarketBook response cannot produce canonical structural receipt"
             ) from exc
 
-        return MarketBookBatchTransportResult(
+        return result_factory(
             plan_id=plan_id,
             request_contract_id=request_contract_id,
             batch_id=batch.batch_id,
@@ -594,6 +596,8 @@ def _install_transport_result_authority() -> None:
     params_for_batch = _params_for_batch
     market_book_request_budget = _transport._market_book_request_budget
     post_market_book_readonly = _transport._post_market_book_readonly
+    receipt_from_response = MarketBookBatchReceipt.from_response
+    result_factory = MarketBookBatchTransportResult
 
     def read_market_book_batch(
         client: _base.BetfairReadOnlyClient,
@@ -699,6 +703,8 @@ def _install_transport_result_authority() -> None:
                 params_for_batch=params_for_batch,
                 request_budget=market_book_request_budget,
                 post_readonly=post_market_book_readonly,
+                receipt_from_response=receipt_from_response,
+                result_factory=result_factory,
             )
         except BaseException as exc:
             # Parent process-control interruption must not strand a locally
@@ -742,6 +748,10 @@ def _install_transport_result_authority() -> None:
         # Re-run the original structural validator before minting closure-local
         # authority. Dataclass __post_init__ and fingerprint methods are mutable
         # class attributes after import and therefore cannot be trusted here.
+        if type(result) is not result_factory:
+            raise MarketBookPostDispatchFailure(
+                "canonical MarketBook transport returned a noncanonical result type"
+            )
         validate(result)
         key = id(result)
 

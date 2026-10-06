@@ -533,7 +533,7 @@ class RuntimeResourceCoverageTruthTests(unittest.TestCase):
             root = Path(directory)
             owned = root / "owned.txt"
             owned.write_text("owned", encoding="utf-8")
-            external = Path(directory).parent / "autosport-external-fd-probe.txt"
+            external = root.parent / f"{root.name}-external-fd-probe.txt"
             external.write_text("external", encoding="utf-8")
             try:
                 with owned.open("rb") as owned_handle, external.open("rb") as external_handle:
@@ -541,7 +541,7 @@ class RuntimeResourceCoverageTruthTests(unittest.TestCase):
                     self.assertIsNotNone(external_handle)
                     residuals = census(root)
                     self.assertTrue(any("owned.txt" in item for item in residuals))
-                    self.assertFalse(any("autosport-external-fd-probe.txt" in item for item in residuals))
+                    self.assertFalse(any(external.name in item for item in residuals))
 
                 self.assertEqual(census(root), ())
             finally:

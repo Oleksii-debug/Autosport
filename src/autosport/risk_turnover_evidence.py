@@ -19,6 +19,7 @@ from typing import Final
 
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
+from .economic_session import ProductEconomicSession, ProductEconomicSessionStore
 from .paper import PaperBook
 from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
 from ._paperbook_current_binding_verifier import (
@@ -882,3 +883,354 @@ del _resolve_globals
 del _raw_require_descriptor
 del _require_globals
 del _RISK_TURNOVER_RESOLVE_BOUND
+
+
+_SESSION_SCHEMA: Final = "autosport.risk.paper-session-turnover-evidence"
+_SESSION_SCHEMA_VERSION: Final = 1
+_SESSION_SCOPE_CLASS: Final = "ECONOMIC_SESSION"
+
+
+class PaperSessionTurnoverEvidenceError(RuntimeError):
+    """Base error for PAPER economic-session turnover evidence."""
+
+
+class PaperSessionTurnoverEvidenceIncompleteError(PaperSessionTurnoverEvidenceError):
+    """Canonical PAPER/session state is insufficient for exact session turnover."""
+
+
+class PaperSessionTurnoverEvidenceMismatchError(PaperSessionTurnoverEvidenceError):
+    """Caller evidence does not equal a fresh canonical session projection."""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSessionTurnoverEvidence:
+    """Immutable PAPER accepted-stake turnover evidence for one economic session."""
+
+    goal_id: str
+    goal_revision: int
+    goal_contract_sha256: str
+    bankroll_id: str
+    currency: str
+    session_id: str
+    session_started_at: str
+    session_state_sha256: str
+    session_authority_generation: int
+    initial_bankroll: Decimal
+    confirmed_turnover: Decimal
+    turnover_cap: Decimal
+    residual_headroom: Decimal
+    breached: bool
+    constituent_count: int
+    constituent_sha256: str
+    evidence_sha256: str
+    schema: str = _SESSION_SCHEMA
+    schema_version: int = _SESSION_SCHEMA_VERSION
+    metric_class: str = _METRIC_CLASS
+    scope_class: str = _SESSION_SCOPE_CLASS
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema != _SESSION_SCHEMA
+            or type(self.schema_version) is not int
+            or self.schema_version != _SESSION_SCHEMA_VERSION
+            or self.metric_class != _METRIC_CLASS
+            or self.scope_class != _SESSION_SCOPE_CLASS
+        ):
+            raise PaperSessionTurnoverEvidenceError(
+                "session-turnover evidence schema identity is invalid"
+            )
+        for name in (
+            "goal_id",
+            "goal_contract_sha256",
+            "bankroll_id",
+            "currency",
+            "session_id",
+            "session_started_at",
+            "session_state_sha256",
+            "constituent_sha256",
+            "evidence_sha256",
+        ):
+            value = getattr(self, name)
+            if type(value) is not str or not value or value != value.strip():
+                raise PaperSessionTurnoverEvidenceError(
+                    f"{name} must be non-empty canonical text"
+                )
+        for name in ("goal_revision", "session_authority_generation", "constituent_count"):
+            value = getattr(self, name)
+            if type(value) is not int or value < (0 if name == "constituent_count" else 1):
+                raise PaperSessionTurnoverEvidenceError(
+                    f"{name} is outside the canonical integer domain"
+                )
+        for name in (
+            "initial_bankroll",
+            "confirmed_turnover",
+            "turnover_cap",
+            "residual_headroom",
+        ):
+            value = getattr(self, name)
+            if type(value) is not Decimal or not value.is_finite() or value < 0:
+                raise PaperSessionTurnoverEvidenceError(
+                    f"{name} must be a non-negative finite exact Decimal"
+                )
+        if self.initial_bankroll <= 0:
+            raise PaperSessionTurnoverEvidenceError("initial_bankroll must be positive")
+        if type(self.breached) is not bool:
+            raise PaperSessionTurnoverEvidenceError("breached must be exact boolean")
+        expected_breached = self.confirmed_turnover > self.turnover_cap
+        expected_room = (
+            Decimal("0")
+            if expected_breached
+            else _exact_nonnegative_difference(self.turnover_cap, self.confirmed_turnover)
+        )
+        if self.breached != expected_breached or self.residual_headroom != expected_room:
+            raise PaperSessionTurnoverEvidenceError(
+                "session-turnover room conflicts with canonical turnover/cap truth"
+            )
+        for name in (
+            "goal_contract_sha256",
+            "session_state_sha256",
+            "constituent_sha256",
+            "evidence_sha256",
+        ):
+            digest = getattr(self, name)
+            if (
+                len(digest) != 64
+                or digest != digest.lower()
+                or any(ch not in "0123456789abcdef" for ch in digest)
+            ):
+                raise PaperSessionTurnoverEvidenceError(
+                    f"{name} must be canonical SHA-256"
+                )
+
+    @property
+    def atomic_admission_authority(self) -> bool:
+        return False
+
+    @property
+    def account_wide_provider_turnover_complete(self) -> bool:
+        return False
+
+    @property
+    def real_money_execution_authorized(self) -> bool:
+        return False
+
+
+class _PaperSessionTurnoverResolverMeta(type):
+    def __setattr__(cls, name: str, value: object) -> None:
+        if name in {"resolve", "require_current"} and name in cls.__dict__:
+            raise TypeError("canonical PaperSessionTurnoverResolver authority method is sealed")
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if name in {"resolve", "require_current"} and name in cls.__dict__:
+            raise TypeError("canonical PaperSessionTurnoverResolver authority method is sealed")
+        super().__delattr__(name)
+
+
+class PaperSessionTurnoverResolver(metaclass=_PaperSessionTurnoverResolverMeta):
+    """Project durable PAPER accepted stake onto the current economic session."""
+
+    @classmethod
+    def resolve(
+        cls,
+        *,
+        book: PaperBook,
+        goal_store: EconomicGoalStore,
+        session_store: ProductEconomicSessionStore,
+        session_evidence: ProductEconomicSession,
+    ) -> PaperSessionTurnoverEvidence:
+        if cls is not PaperSessionTurnoverResolver:
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "session turnover resolver must be canonical exact class"
+            )
+        if type(book) is not PaperBook:
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "book must be canonical PaperBook"
+            )
+        if type(goal_store) is not EconomicGoalStore:
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "goal_store must be canonical EconomicGoalStore"
+            )
+        if type(session_store) is not ProductEconomicSessionStore:
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "session_store must be canonical ProductEconomicSessionStore"
+            )
+        if type(session_evidence) is not ProductEconomicSession:
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "session_evidence must be canonical ProductEconomicSession"
+            )
+        _require_turnover_path_dispatch()
+        try:
+            goal_workspace = _TURNOVER_PATH_RESOLVE(
+                _TURNOVER_PATH_EXPANDUSER(goal_store.workspace),
+                strict=False,
+            )
+            session_workspace = _TURNOVER_PATH_RESOLVE(
+                _TURNOVER_PATH_EXPANDUSER(session_store.workspace),
+                strict=False,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "session turnover workspace cannot be resolved canonically"
+            ) from exc
+        if goal_workspace != session_workspace:
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "economic goal and economic session must share one workspace"
+            )
+        book_path = _TURNOVER_PATH_TRUEDIV(goal_workspace, "paper_book.json")
+        try:
+            _PAPERBOOK_REQUIRE_CURRENT(book, book_path)
+            durable_book = _PAPERBOOK_LOAD(book_path)
+            _PAPERBOOK_VALIDATE_LOADED_STATE(durable_book)
+            goal = _ECONOMIC_GOAL_LOAD(goal_store)
+            provenance = provenance_for(goal)
+            current_session = ProductEconomicSessionStore.require_current(
+                session_store,
+                session_evidence,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "session turnover dependencies cannot be re-resolved"
+            ) from exc
+
+        if (
+            current_session.goal_id != goal.goal_id
+            or current_session.goal_revision != goal.revision
+            or current_session.goal_contract_sha256 != provenance.contract_sha256
+            or current_session.bankroll_id != goal.bankroll_id
+            or current_session.currency != goal.currency
+        ):
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "economic session identity conflicts with current EconomicGoal"
+            )
+        start = _parse_timestamp(current_session.started_at, "session_started_at")
+        admissions = getattr(durable_book, "_product_day_admissions", None)
+        if type(admissions) is not dict:
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "PaperBook lacks canonical product admission chronology"
+            )
+
+        constituents: list[dict[str, str]] = []
+        stakes: list[Decimal] = []
+        for ticket in durable_book.tickets.values():
+            if ticket.bankroll_id != goal.bankroll_id or ticket.currency != goal.currency:
+                raise PaperSessionTurnoverEvidenceIncompleteError(
+                    "PAPER ticket scope conflicts with EconomicGoal"
+                )
+            witness = admissions.get(ticket.ticket_id)
+            if type(witness) is not tuple or len(witness) != 6:
+                raise PaperSessionTurnoverEvidenceIncompleteError(
+                    "PAPER ticket lacks product-issued admission chronology"
+                )
+            admission_ts = witness[0]
+            admission_time = _parse_timestamp(
+                admission_ts,
+                "ticket.product_day_admission_ts",
+            )
+            if admission_time < start:
+                continue
+            stakes.append(ticket.stake)
+            constituents.append(
+                {
+                    "ticket_id": ticket.ticket_id,
+                    "stake": _decimal_text(ticket.stake),
+                    "admission_ts": admission_ts,
+                    "session_id": current_session.session_id,
+                    "session_state_sha256": current_session.state_sha256,
+                    "session_authority_generation": str(
+                        current_session.authority_generation
+                    ),
+                    "bankroll_id": goal.bankroll_id,
+                    "currency": goal.currency,
+                }
+            )
+
+        constituents.sort(key=lambda item: item["ticket_id"])
+        confirmed = _exact_sum(tuple(stakes))
+        cap = _exact_product(durable_book.initial_bankroll, goal.max_turnover_fraction)
+        breached = confirmed > cap
+        residual = (
+            Decimal("0")
+            if breached
+            else _exact_nonnegative_difference(cap, confirmed)
+        )
+        constituent_sha256 = _canonical_json_sha256(
+            {
+                "metric_class": _METRIC_CLASS,
+                "scope_class": _SESSION_SCOPE_CLASS,
+                "session_id": current_session.session_id,
+                "constituents": constituents,
+            }
+        )
+        payload = {
+            "schema": _SESSION_SCHEMA,
+            "schema_version": _SESSION_SCHEMA_VERSION,
+            "metric_class": _METRIC_CLASS,
+            "scope_class": _SESSION_SCOPE_CLASS,
+            "goal_id": goal.goal_id,
+            "goal_revision": goal.revision,
+            "goal_contract_sha256": provenance.contract_sha256,
+            "bankroll_id": goal.bankroll_id,
+            "currency": goal.currency,
+            "session_id": current_session.session_id,
+            "session_started_at": current_session.started_at,
+            "session_state_sha256": current_session.state_sha256,
+            "session_authority_generation": current_session.authority_generation,
+            "initial_bankroll": _decimal_text(durable_book.initial_bankroll),
+            "confirmed_turnover": _decimal_text(confirmed),
+            "turnover_cap": _decimal_text(cap),
+            "residual_headroom": _decimal_text(residual),
+            "breached": breached,
+            "constituent_count": len(constituents),
+            "constituent_sha256": constituent_sha256,
+        }
+        evidence_sha256 = _canonical_json_sha256(payload)
+        return PaperSessionTurnoverEvidence(
+            goal_id=goal.goal_id,
+            goal_revision=goal.revision,
+            goal_contract_sha256=provenance.contract_sha256,
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+            session_id=current_session.session_id,
+            session_started_at=current_session.started_at,
+            session_state_sha256=current_session.state_sha256,
+            session_authority_generation=current_session.authority_generation,
+            initial_bankroll=durable_book.initial_bankroll,
+            confirmed_turnover=confirmed,
+            turnover_cap=cap,
+            residual_headroom=residual,
+            breached=breached,
+            constituent_count=len(constituents),
+            constituent_sha256=constituent_sha256,
+            evidence_sha256=evidence_sha256,
+        )
+
+    @classmethod
+    def require_current(
+        cls,
+        candidate: PaperSessionTurnoverEvidence,
+        *,
+        book: PaperBook,
+        goal_store: EconomicGoalStore,
+        session_store: ProductEconomicSessionStore,
+        session_evidence: ProductEconomicSession,
+    ) -> PaperSessionTurnoverEvidence:
+        if cls is not PaperSessionTurnoverResolver:
+            raise PaperSessionTurnoverEvidenceMismatchError(
+                "session turnover resolver must be canonical exact class"
+            )
+        if type(candidate) is not PaperSessionTurnoverEvidence:
+            raise PaperSessionTurnoverEvidenceMismatchError(
+                "candidate must be canonical PaperSessionTurnoverEvidence"
+            )
+        current = cls.resolve(
+            book=book,
+            goal_store=goal_store,
+            session_store=session_store,
+            session_evidence=session_evidence,
+        )
+        if candidate != current:
+            raise PaperSessionTurnoverEvidenceMismatchError(
+                "session turnover evidence does not match current canonical PAPER state"
+            )
+        return current

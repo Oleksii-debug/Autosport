@@ -1011,6 +1011,52 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertEqual(calls, 0)
 
+    def test_transitive_callable_code_mutation_fails_before_execution(self) -> None:
+        store = self._store()
+
+        def hostile(*_args, **_kwargs):
+            raise AssertionError("mutated transitive authority executed")
+
+        exercised = 0
+        for label, authority, code in economic_session._ECONOMIC_SESSION_CODE_AUTHORITIES:
+            if code is None or code.co_freevars:
+                continue
+            with self.subTest(label=label):
+                original_code = authority.__code__
+                try:
+                    authority.__code__ = hostile.__code__
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.current()
+                finally:
+                    authority.__code__ = original_code
+                exercised += 1
+
+        self.assertGreaterEqual(exercised, 12)
+
+    def test_constructor_rejects_preexisting_transitive_callable_code_mutation(self) -> None:
+        authority = economic_session._UUID4
+        original_code = authority.__code__
+
+        def hostile(*_args, **_kwargs):
+            raise AssertionError("preexisting mutated uuid4 executed")
+
+        try:
+            authority.__code__ = hostile.__code__
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "uuid4 callable code authority changed",
+            ):
+                ProductEconomicSessionStore(
+                    self.workspace,
+                    authority_root=self.authority_root,
+                    _test_clock=self.clock,
+                )
+        finally:
+            authority.__code__ = original_code
+
     def test_instance_configuration_rebinding_fails_closed(self) -> None:
         store = self._store()
         store.current()

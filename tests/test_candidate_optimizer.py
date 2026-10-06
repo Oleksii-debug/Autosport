@@ -1,11 +1,14 @@
 import unittest
-from decimal import Decimal
+from dataclasses import replace
+from decimal import Decimal, localcontext
+from unittest.mock import patch
 
+import autosport.candidate_optimizer as candidate_optimizer_module
 from autosport.candidate_optimizer import PortfolioAwareCandidateOptimizer
 from autosport.candidate_search import BeamParlayCandidateSearch, CandidateLeg, ParlayCandidate
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
-from autosport.scenario_search import ScenarioGroup, ScenarioOutcome, ScenarioSearchEngine
+from autosport.scenario_search import ScenarioGroup, ScenarioOutcome, ScenarioSearchEngine, ScenarioSearchReport
 
 
 def _single_candidate(leg: CandidateLeg) -> ParlayCandidate:
@@ -13,8 +16,97 @@ def _single_candidate(leg: CandidateLeg) -> ParlayCandidate:
     return ParlayCandidate((leg,), leg.decimal_odds, leg.probability, expected)
 
 
+class _ForgedTerminalScenarioEngine(ScenarioSearchEngine):
+    """Adversarial stub: injected report flags are not terminal-space authority."""
+
+    def analyse(self, tickets, groups):
+        report = super().analyse(tickets, groups)
+        return replace(
+            report,
+            outcome_space_exhaustive=True,
+            outcome_space_exact=True,
+        )
+
+
+class _FixedImpactScenarioEngine(ScenarioSearchEngine):
+    """Deterministic report source for isolating optimizer delta arithmetic."""
+
+    def analyse(self, tickets, groups):
+        if len(tickets) == 1:
+            return ScenarioSearchReport(
+                "fixed",
+                2,
+                2,
+                Decimal("-0.9123456789"),
+                Decimal("0.8234567891"),
+                Decimal("-1"),
+                Decimal("1"),
+                True,
+                True,
+                Decimal("0.567891234"),
+                "fixed",
+            )
+        return ScenarioSearchReport(
+            "fixed",
+            2,
+            2,
+            Decimal("-1.7987654321"),
+            Decimal("1.876543219"),
+            Decimal("-2"),
+            Decimal("2"),
+            True,
+            True,
+            Decimal("1.543219876"),
+            "fixed",
+        )
+
+
+class _ForgedRankingScenarioEngine(ScenarioSearchEngine):
+    """Attempts to steer ranking with forged but bounded scenario evidence."""
+
+    def analyse(self, tickets, groups):
+        report = super().analyse(tickets, groups)
+        if not tickets:
+            return report
+        if tickets[-1].combined_odds == Decimal("2"):
+            return replace(
+                report,
+                observed_worst=report.conservative_ceiling,
+                observed_best=report.conservative_ceiling,
+                worst_proven=True,
+                best_proven=True,
+                expected_case=report.conservative_ceiling,
+                expected_mode="forged-best",
+            )
+        return replace(
+            report,
+            observed_worst=report.conservative_floor,
+            observed_best=report.conservative_ceiling,
+            worst_proven=True,
+            best_proven=True,
+            expected_case=report.conservative_floor,
+            expected_mode="forged-worst",
+        )
+
+
+class _MutatingOriginalScenarioEngine(ScenarioSearchEngine):
+    """Mutates the caller-owned ticket after the base report is computed."""
+
+    def __init__(self, original_ticket):
+        super().__init__()
+        self.original_ticket = original_ticket
+        self.calls = 0
+
+    def analyse(self, tickets, groups):
+        report = super().analyse(tickets, groups)
+        self.calls += 1
+        if self.calls == 1:
+            self.original_ticket.stake = Decimal("999")
+        return report
+
+
 class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
-    def test_equal_standalone_ev_is_reranked_by_exact_portfolio_worst_case_change(self):
+    def test_equal_standalone_ev_uses_scenario_extrema_only_as_secondary_tiebreak(self):
         book = PaperBook("1000")
         a_ticket_leg = TicketLeg("e1", "winner", "a", Decimal("2"))
         existing = book.open_ticket([a_ticket_leg], "10")
@@ -47,11 +139,15 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
         self.assertEqual(hedge.with_candidate_report.observed_worst, Decimal("0"))
         self.assertEqual(hedge.observed_worst_case_change, Decimal("10"))
         self.assertEqual(duplicate.observed_worst_case_change, Decimal("-10"))
-        self.assertTrue(hedge.worst_case_change_proven)
-        self.assertTrue(hedge.best_case_change_proven)
-        self.assertTrue(hedge.exact_marginal_extrema)
-        self.assertEqual(hedge.ranking_risk_truth, "exact-worst-case-change")
-        self.assertEqual(hedge.ranking_risk_change, Decimal("10"))
+        self.assertFalse(hedge.worst_case_change_proven)
+        self.assertFalse(hedge.best_case_change_proven)
+        self.assertFalse(hedge.exact_marginal_extrema)
+        self.assertTrue(hedge.scenario_worst_case_change_proven)
+        self.assertTrue(hedge.scenario_best_case_change_proven)
+        self.assertFalse(hedge.base_report.outcome_space_exhaustive)
+        self.assertFalse(hedge.base_report.outcome_space_exact)
+        self.assertEqual(hedge.ranking_risk_truth, "conservative-floor-change")
+        self.assertEqual(hedge.ranking_risk_change, Decimal("-10"))
         self.assertEqual(hedge.expected_case_change, Decimal("0.0"))
         self.assertEqual(hedge.dependent_existing_ticket_ids, (existing.ticket_id,))
         self.assertEqual(len(book.tickets), 1)
@@ -77,6 +173,7 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
         )[0]
 
         self.assertFalse(impact.worst_case_change_proven)
+        self.assertFalse(impact.scenario_worst_case_change_proven)
         self.assertEqual(impact.ranking_risk_truth, "conservative-floor-change")
         self.assertEqual(impact.conservative_floor_change, Decimal("-10"))
         self.assertEqual(impact.ranking_risk_change, Decimal("-10"))
@@ -145,8 +242,264 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
         impact = impacts[0]
         self.assertEqual(len(impact.candidate.legs), 2)
         self.assertEqual(impact.stake, Decimal("5"))
-        self.assertTrue(impact.worst_case_change_proven)
-        self.assertEqual(impact.ranking_risk_truth, "exact-worst-case-change")
+        self.assertFalse(impact.worst_case_change_proven)
+        self.assertTrue(impact.scenario_worst_case_change_proven)
+        self.assertEqual(impact.ranking_risk_truth, "conservative-floor-change")
+
+    def test_base_and_candidate_reports_share_one_detached_portfolio_snapshot(self):
+        book = PaperBook("1000")
+        existing_leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        existing = book.open_ticket([existing_leg], "10")
+        candidate_leg = CandidateLeg(
+            "e1|winner|b", "e1", Decimal("2"), Decimal("0.5")
+        )
+        groups = [
+            ScenarioGroup(
+                "e1-winner",
+                (
+                    ScenarioOutcome(existing_leg.quote_key, Decimal("0.5")),
+                    ScenarioOutcome(candidate_leg.quote_key, Decimal("0.5")),
+                ),
+            )
+        ]
+        engine = _MutatingOriginalScenarioEngine(existing)
+        impact = PortfolioAwareCandidateOptimizer(
+            scenario_engine=engine
+        ).evaluate_candidates(
+            [existing], [_single_candidate(candidate_leg)], groups, stake="10"
+        )[0]
+
+        self.assertEqual(existing.stake, Decimal("999"))
+        self.assertEqual(impact.base_report.conservative_floor, Decimal("-10"))
+        self.assertEqual(impact.with_candidate_report.conservative_floor, Decimal("-20"))
+        self.assertEqual(impact.conservative_floor_change, Decimal("-10"))
+
+    def test_portfolio_impact_deltas_ignore_ambient_decimal_context(self):
+        book = PaperBook("1000")
+        existing_leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        existing = book.open_ticket([existing_leg], "1")
+        candidate_leg = CandidateLeg(
+            "e1|winner|b", "e1", Decimal("2"), Decimal("0.5")
+        )
+        groups = [
+            ScenarioGroup(
+                "e1-winner",
+                (
+                    ScenarioOutcome(existing_leg.quote_key),
+                    ScenarioOutcome(candidate_leg.quote_key),
+                ),
+            )
+        ]
+        optimizer = PortfolioAwareCandidateOptimizer(
+            scenario_engine=_FixedImpactScenarioEngine()
+        )
+
+        baseline = optimizer.evaluate_candidates(
+            [existing], [_single_candidate(candidate_leg)], groups, stake="1"
+        )[0]
+        with localcontext() as context:
+            context.prec = 2
+            hostile = optimizer.evaluate_candidates(
+                [existing], [_single_candidate(candidate_leg)], groups, stake="1"
+            )[0]
+
+        self.assertEqual(hostile.observed_worst_case_change, baseline.observed_worst_case_change)
+        self.assertEqual(hostile.conservative_floor_change, baseline.conservative_floor_change)
+        self.assertEqual(hostile.observed_best_case_change, baseline.observed_best_case_change)
+        self.assertEqual(hostile.conservative_ceiling_change, baseline.conservative_ceiling_change)
+        self.assertEqual(hostile.expected_case_change, baseline.expected_case_change)
+        self.assertEqual(hostile.ranking_risk_change, baseline.ranking_risk_change)
+
+    def test_injected_report_flags_cannot_authorize_terminal_risk_truth(self):
+        book = PaperBook("1000")
+        existing_leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        existing = book.open_ticket([existing_leg], "10")
+        candidate_leg = CandidateLeg(
+            "e1|winner|b", "e1", Decimal("2"), Decimal("0.5")
+        )
+        groups = [
+            ScenarioGroup(
+                "e1-winner",
+                (
+                    ScenarioOutcome(existing_leg.quote_key, Decimal("0.5")),
+                    ScenarioOutcome(candidate_leg.quote_key, Decimal("0.5")),
+                ),
+            )
+        ]
+        impact = PortfolioAwareCandidateOptimizer(
+            scenario_engine=_ForgedTerminalScenarioEngine()
+        ).evaluate_candidates(
+            [existing], [_single_candidate(candidate_leg)], groups, stake="10"
+        )[0]
+
+        self.assertFalse(impact.worst_case_change_proven)
+        self.assertFalse(impact.best_case_change_proven)
+        self.assertFalse(impact.exact_marginal_extrema)
+        self.assertFalse(impact.scenario_reports_authoritative)
+        self.assertFalse(impact.scenario_worst_case_change_proven)
+        self.assertEqual(impact.ranking_risk_truth, "conservative-floor-change")
+        self.assertEqual(impact.ranking_risk_change, Decimal("-10"))
+
+    def test_injected_engine_cannot_steer_candidate_ranking_with_forged_reports(self):
+        a = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        b = CandidateLeg(
+            "e1|winner|b",
+            "e1",
+            Decimal("3"),
+            Decimal("0.5"),
+        )
+        group = ScenarioGroup(
+            "e1",
+            (
+                ScenarioOutcome(a.quote_key, Decimal("0.5")),
+                ScenarioOutcome(b.quote_key, Decimal("0.5")),
+            ),
+        )
+        impacts = PortfolioAwareCandidateOptimizer(
+            scenario_engine=_ForgedRankingScenarioEngine()
+        ).evaluate_candidates(
+            [],
+            [_single_candidate(a), _single_candidate(b)],
+            [group],
+            stake="1",
+        )
+
+        self.assertEqual(
+            impacts[0].candidate.legs[0].quote_key,
+            b.quote_key,
+        )
+        self.assertFalse(impacts[0].scenario_reports_authoritative)
+        self.assertFalse(impacts[0].scenario_worst_case_change_proven)
+        self.assertIsNone(impacts[0].expected_case_change)
+        self.assertEqual(
+            impacts[0].ranking_risk_change,
+            Decimal("-1"),
+        )
+        self.assertEqual(
+            impacts[0].standalone_expected_profit,
+            Decimal("0.5"),
+        )
+
+    def test_rebound_engine_type_global_cannot_relabel_injected_engine_authoritative(self):
+        a = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        b = CandidateLeg(
+            "e1|winner|b",
+            "e1",
+            Decimal("3"),
+            Decimal("0.5"),
+        )
+        group = ScenarioGroup(
+            "e1",
+            (
+                ScenarioOutcome(a.quote_key, Decimal("0.5")),
+                ScenarioOutcome(b.quote_key, Decimal("0.5")),
+            ),
+        )
+        engine = _ForgedRankingScenarioEngine()
+
+        with patch.object(
+            candidate_optimizer_module,
+            "ScenarioSearchEngine",
+            _ForgedRankingScenarioEngine,
+        ):
+            impacts = PortfolioAwareCandidateOptimizer(
+                scenario_engine=engine
+            ).evaluate_candidates(
+                [],
+                [_single_candidate(a), _single_candidate(b)],
+                [group],
+                stake="1",
+            )
+
+        self.assertEqual(
+            impacts[0].candidate.legs[0].quote_key,
+            b.quote_key,
+        )
+        self.assertFalse(impacts[0].scenario_reports_authoritative)
+        self.assertFalse(impacts[0].scenario_worst_case_change_proven)
+        self.assertIsNone(impacts[0].expected_case_change)
+
+    def test_exact_engine_instance_analyse_override_cannot_steer_ranking(self):
+        a = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        b = CandidateLeg(
+            "e1|winner|b",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        group = ScenarioGroup(
+            "e1",
+            (
+                ScenarioOutcome(a.quote_key, Decimal("0.5")),
+                ScenarioOutcome(b.quote_key, Decimal("0.5")),
+            ),
+        )
+        engine = ScenarioSearchEngine()
+
+        def forged_analyse(tickets, groups):
+            raise AssertionError("instance-substituted analyse must not execute")
+
+        engine.analyse = forged_analyse  # type: ignore[method-assign]
+        impact = PortfolioAwareCandidateOptimizer(
+            scenario_engine=engine
+        ).evaluate_candidates(
+            [],
+            [_single_candidate(a)],
+            [group],
+            stake="1",
+        )[0]
+
+        self.assertTrue(impact.scenario_reports_authoritative)
+        self.assertTrue(impact.scenario_worst_case_change_proven)
+        self.assertEqual(
+            impact.ranking_risk_change,
+            Decimal("-1"),
+        )
+
+    def test_exact_engine_mutated_invalid_config_fails_closed_on_reconstruction(self):
+        a = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        group = ScenarioGroup(
+            "e1",
+            (
+                ScenarioOutcome(a.quote_key, Decimal("0.5")),
+                ScenarioOutcome("e1|winner|b", Decimal("0.5")),
+            ),
+        )
+        engine = ScenarioSearchEngine()
+        engine.exact_state_limit = 0
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact_state_limit must be a positive non-boolean integer",
+        ):
+            PortfolioAwareCandidateOptimizer(
+                scenario_engine=engine
+            ).evaluate_candidates(
+                [],
+                [_single_candidate(a)],
+                [group],
+                stake="1",
+            )
 
     def test_existing_ticket_outside_supplied_scenario_space_fails_closed(self):
         book = PaperBook("100")

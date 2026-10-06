@@ -1,7 +1,10 @@
+import copy
 import json
 import tempfile
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -21,6 +24,7 @@ from autosport.opportunity import (
     StrategyClass,
 )
 from autosport.paper import PaperBook
+import autosport.portfolio_plan as portfolio_plan_module
 from autosport.portfolio_plan import (
     EvidenceTruth,
     OpportunityEvidence,
@@ -1135,6 +1139,7 @@ class PortfolioPlanTests(unittest.TestCase):
             total_states=len(outcomes),
             worst_terminal_profit=Decimal("1"),
             best_terminal_profit=Decimal("2"),
+            evaluated_stakes=(Decimal("50.00"), Decimal("50.00")),
             worst_proven=True,
             best_proven=True,
         )
@@ -1266,6 +1271,252 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertFalse(authority.terminal_space_exact)
         self.assertIn("exhaustive but not exact", plan.reason)
 
+        tampered_checks = tuple(
+            (
+                name,
+                ("7" * 64 if name == "routing_feasibility" else digest),
+            )
+            for name, digest in witness.execution_check_sha256s
+        )
+        tampered_witness = replace(
+            witness,
+            execution_check_sha256s=tampered_checks,
+        )
+        tampered = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            terminal_state_evidence=tampered_witness,
+            market_outcome_authorities=(authority,),
+        )
+        self.assertEqual(tampered.action, PortfolioAction.WAIT)
+        self.assertEqual(tampered.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIn(
+            "execution assumptions do not match verified completeness",
+            tampered.reason,
+        )
+
+    def test_terminal_economics_fails_closed_if_paperbook_changes_during_proof(self) -> None:
+        goal = self._goal()
+        authority = self._betfair_authority()
+        book = PaperBook("1000")
+        existing_leg = TicketLeg(
+            "event-betfair-1",
+            "1.23456789",
+            "101",
+            Decimal("3"),
+            sport="table_tennis",
+        )
+        existing = book.open_ticket(
+            [existing_leg],
+            "10",
+            placed_at="2026-09-18T13:10:00+00:00",
+            provider_source_ids=("betfair_exchange_historical",),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+        intent = self._intent(
+            goal,
+            suffix="betfair-race-202",
+            strategy_class=StrategyClass.PREDICTIVE_EDGE,
+            signal=Decimal("0.03"),
+            odds=Decimal("3"),
+            sport="table_tennis",
+            event_id="event-betfair-1",
+            market_id="1.23456789",
+            selection_id="202",
+            source_id="betfair_exchange_historical",
+        )
+        groups = (
+            ScenarioGroup(
+                "betfair-race-control",
+                (
+                    ScenarioOutcome(existing_leg.quote_key),
+                    ScenarioOutcome(intent.risk_context.legs[0].quote_key),
+                ),
+            ),
+        )
+        intents = self._bind_terminal_state((intent,), groups)
+        graph = self._graph(book, intents)
+        witness = self._terminal_witness(book, intents, graph, groups)
+        canonical_analyse = portfolio_plan_module.ScenarioSearchEngine.analyse_authoritative
+
+        def delegated_analysis(engine, tickets, authorities, *, decision_as_of):
+            return canonical_analyse(
+                engine,
+                tickets,
+                authorities,
+                decision_as_of=decision_as_of,
+            )
+
+        with patch.object(
+            portfolio_plan_module.ScenarioSearchEngine,
+            "analyse_authoritative",
+            delegated_analysis,
+        ):
+            rebound_plan = build_portfolio_plan(
+                book,
+                intents,
+                self._policy(goal),
+                self.DECISION_TS,
+                dependency_graph=graph,
+                terminal_state_evidence=witness,
+                market_outcome_authorities=(authority,),
+            )
+
+        self.assertEqual(rebound_plan.action, PortfolioAction.WAIT)
+        self.assertEqual(rebound_plan.stakes, (Decimal("0"),))
+        self.assertIsNone(rebound_plan.terminal_economics)
+        self.assertIn(
+            "canonical authoritative scenario-search authority changed",
+            rebound_plan.reason,
+        )
+
+        class ReboundScenarioSearchEngine:
+            def __init__(self):
+                raise AssertionError("rebound scenario engine must not be instantiated")
+
+        with patch.object(
+            portfolio_plan_module,
+            "ScenarioSearchEngine",
+            ReboundScenarioSearchEngine,
+        ):
+            type_rebound_plan = build_portfolio_plan(
+                book,
+                intents,
+                self._policy(goal),
+                self.DECISION_TS,
+                dependency_graph=graph,
+                terminal_state_evidence=witness,
+                market_outcome_authorities=(authority,),
+            )
+
+        self.assertEqual(type_rebound_plan.action, PortfolioAction.WAIT)
+        self.assertEqual(type_rebound_plan.stakes, (Decimal("0"),))
+        self.assertIsNone(type_rebound_plan.terminal_economics)
+        self.assertIn(
+            "canonical authoritative scenario-search authority changed",
+            type_rebound_plan.reason,
+        )
+
+        def settle_during_analysis(engine, tickets, authorities, *, decision_as_of):
+            book.settle(
+                existing.ticket_id,
+                {existing_leg.quote_key},
+                settled_at="2026-09-18T13:19:59+00:00",
+            )
+            return canonical_analyse(
+                engine,
+                tickets,
+                authorities,
+                decision_as_of=decision_as_of,
+            )
+
+        with patch.object(
+            portfolio_plan_module.ScenarioSearchEngine,
+            "analyse_authoritative",
+            settle_during_analysis,
+        ):
+            plan = build_portfolio_plan(
+                book,
+                intents,
+                self._policy(goal),
+                self.DECISION_TS,
+                dependency_graph=graph,
+                terminal_state_evidence=witness,
+                market_outcome_authorities=(authority,),
+            )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"),))
+        self.assertIsNone(plan.terminal_economics)
+        self.assertIn(
+            "current portfolio changed during terminal economics evaluation",
+            plan.reason,
+        )
+
+    def test_positive_plan_fails_closed_if_paperbook_changes_after_terminal_proof(self) -> None:
+        goal = self._goal()
+        authority = self._betfair_authority()
+        book = PaperBook("1000")
+        existing_leg = TicketLeg(
+            "event-betfair-1",
+            "1.23456789",
+            "101",
+            Decimal("3"),
+            sport="table_tennis",
+        )
+        existing = book.open_ticket(
+            [existing_leg],
+            "10",
+            placed_at="2026-09-18T13:10:00+00:00",
+            provider_source_ids=("betfair_exchange_historical",),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+        intent = self._intent(
+            goal,
+            suffix="betfair-post-proof-race",
+            strategy_class=StrategyClass.PREDICTIVE_EDGE,
+            signal=Decimal("0.03"),
+            odds=Decimal("3"),
+            sport="table_tennis",
+            event_id="event-betfair-1",
+            market_id="1.23456789",
+            selection_id="202",
+            source_id="betfair_exchange_historical",
+        )
+        groups = (
+            ScenarioGroup(
+                "betfair-post-proof-control",
+                (
+                    ScenarioOutcome(existing_leg.quote_key),
+                    ScenarioOutcome(intent.risk_context.legs[0].quote_key),
+                ),
+            ),
+        )
+        intents = self._bind_terminal_state((intent,), groups)
+        graph = self._graph(book, intents)
+        witness = self._terminal_witness(book, intents, graph, groups)
+        canonical_verify = portfolio_plan_module._verify_terminal_economics
+
+        def settle_after_terminal_proof(*args, **kwargs):
+            proof, reason = canonical_verify(*args, **kwargs)
+            self.assertIsNotNone(proof)
+            self.assertIsNone(reason)
+            book.settle(
+                existing.ticket_id,
+                {existing_leg.quote_key},
+                settled_at="2026-09-18T13:19:59+00:00",
+            )
+            return proof, reason
+
+        with patch.object(
+            portfolio_plan_module,
+            "_verify_terminal_economics",
+            settle_after_terminal_proof,
+        ):
+            plan = build_portfolio_plan(
+                book,
+                intents,
+                self._policy(goal),
+                self.DECISION_TS,
+                dependency_graph=graph,
+                terminal_state_evidence=witness,
+                market_outcome_authorities=(authority,),
+            )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"),))
+        self.assertIsNone(plan.terminal_economics)
+        self.assertIsNone(plan.portfolio_sha256)
+        self.assertIn(
+            "canonical portfolio changed during portfolio-plan construction",
+            plan.reason,
+        )
+
     def test_authoritative_terminal_proof_requires_reverified_authority_on_readback(self) -> None:
         goal = self._goal()
         authority = self._betfair_authority()
@@ -1323,19 +1574,105 @@ class PortfolioPlanTests(unittest.TestCase):
             (authority.authority_sha256,),
         )
 
+        with self.assertRaisesRegex(
+            ValueError,
+            "not issued by canonical portfolio analysis",
+        ):
+            replace(
+                plan,
+                terminal_economics=copy.copy(plan.terminal_economics),
+            )
+
+        changed_stakes = tuple(
+            stake + Decimal("0.01") if stake > 0 else stake
+            for stake in plan.stakes
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "terminal economics must bind the exact portfolio stake vector",
+        ):
+            replace(
+                plan,
+                stakes=changed_stakes,
+                dependency_evidence=None,
+                robust_proposal=None,
+            )
+
+        copied_authority = copy.copy(authority)
+        with self.assertRaisesRegex(
+            ValueError,
+            "not issued by the canonical provider verifier",
+        ):
+            build_portfolio_plan(
+                book,
+                intents,
+                self._policy(goal),
+                self.DECISION_TS,
+                dependency_graph=graph,
+                terminal_state_evidence=witness,
+                market_outcome_authorities=(copied_authority,),
+            )
+
         payload = plan.to_dict()
         with self.assertRaisesRegex(
             ValueError,
             "serialized portfolio plan is invalid",
         ):
             PortfolioPlan.from_dict(payload)
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized portfolio plan is invalid",
+        ):
+            PortfolioPlan.from_dict(
+                payload,
+                verified_outcome_authorities=(authority,),
+            )
+
         self.assertEqual(
             PortfolioPlan.from_dict(
                 payload,
                 verified_outcome_authorities=(authority,),
+                verified_terminal_economics=plan.terminal_economics,
             ),
             plan,
         )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized portfolio plan is invalid",
+        ):
+            PortfolioPlan.from_dict(
+                payload,
+                verified_outcome_authorities=(copy.copy(authority),),
+                verified_terminal_economics=plan.terminal_economics,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized portfolio plan is invalid",
+        ):
+            PortfolioPlan.from_dict(
+                payload,
+                verified_outcome_authorities=(authority,),
+                verified_terminal_economics=copy.copy(plan.terminal_economics),
+            )
+
+        forged_economics = copy.copy(plan.terminal_economics)
+        object.__setattr__(
+            forged_economics,
+            "worst_terminal_profit",
+            plan.terminal_economics.worst_terminal_profit - Decimal("1"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized terminal economics is invalid",
+        ):
+            VerifiedTerminalEconomics.from_dict(
+                forged_economics.to_dict(),
+                verified_outcome_authorities=(authority,),
+                decision_as_of=datetime.fromisoformat(self.DECISION_TS),
+                verified_terminal_economics=plan.terminal_economics,
+            )
 
         tampered = json.loads(json.dumps(payload))
         terminal = tampered["terminal_economics"]
@@ -1348,7 +1685,51 @@ class PortfolioPlanTests(unittest.TestCase):
             PortfolioPlan.from_dict(
                 tampered,
                 verified_outcome_authorities=(authority,),
+                verified_terminal_economics=plan.terminal_economics,
             )
+
+        policy = self._policy(goal)
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "authoritative-terminal-plan.jsonl"
+            first = persist_portfolio_plan_decision(
+                JsonlDecisionLedger(ledger_path),
+                plan,
+                intents,
+                policy,
+                initialize_ledger=True,
+                replay_run_id="replay-authoritative-terminal-plan",
+                material_action_id="authoritative-terminal-plan",
+                verified_outcome_authorities=(authority,),
+            )
+            retry = persist_portfolio_plan_decision(
+                JsonlDecisionLedger(ledger_path),
+                plan,
+                intents,
+                policy,
+                initialize_ledger=False,
+                replay_run_id="replay-authoritative-terminal-plan",
+                material_action_id="authoritative-terminal-plan",
+                verified_outcome_authorities=(authority,),
+            )
+            self.assertEqual(retry.decision_id, first.decision_id)
+            self.assertEqual(
+                len(JsonlDecisionLedger(ledger_path).verified_records()),
+                1,
+            )
+            with self.assertRaisesRegex(
+                PortfolioPlanReconciliationRequired,
+                "cannot be reconstructed",
+            ):
+                persist_portfolio_plan_decision(
+                    JsonlDecisionLedger(ledger_path),
+                    plan,
+                    intents,
+                    policy,
+                    initialize_ledger=False,
+                    replay_run_id="replay-authoritative-terminal-plan",
+                    material_action_id="authoritative-terminal-plan",
+                    verified_outcome_authorities=(),
+                )
 
     def test_verified_terminal_model_with_nonpositive_minimum_fails_closed(self) -> None:
         goal = self._goal()

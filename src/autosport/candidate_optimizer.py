@@ -12,7 +12,16 @@ from .candidate_search import (
     ParlayCandidate,
 )
 from .domain import PaperTicket, TicketLeg, TicketStatus
-from .scenario_search import ScenarioGroup, ScenarioSearchEngine, ScenarioSearchReport
+from .portfolio import (
+    _PORTFOLIO_DECIMAL_CONTEXT,
+    _snapshot_open_tickets_for_analysis,
+)
+from .scenario_search import (
+    ScenarioGroup,
+    ScenarioSearchEngine,
+    ScenarioSearchReport,
+    _scenario_conservative_bounds,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +39,7 @@ class CandidatePortfolioImpact:
     conservative_ceiling_change: Decimal
     expected_case_change: Decimal | None
     expected_change_mode: str | None
+    scenario_reports_authoritative: bool
     worst_case_change_proven: bool
     best_case_change_proven: bool
     ranking_risk_change: Decimal
@@ -37,7 +47,26 @@ class CandidatePortfolioImpact:
     standalone_expected_profit: Decimal
 
     @property
+    def scenario_worst_case_change_proven(self) -> bool:
+        """True only for exact extrema inside the supplied scenario model."""
+        return (
+            self.scenario_reports_authoritative
+            and self.base_report.worst_proven
+            and self.with_candidate_report.worst_proven
+        )
+
+    @property
+    def scenario_best_case_change_proven(self) -> bool:
+        """True only for exact extrema inside the supplied scenario model."""
+        return (
+            self.scenario_reports_authoritative
+            and self.base_report.best_proven
+            and self.with_candidate_report.best_proven
+        )
+
+    @property
     def exact_marginal_extrema(self) -> bool:
+        """Terminal-space exactness; incomplete caller scenario models never qualify."""
         return self.worst_case_change_proven and self.best_case_change_proven
 
 
@@ -45,8 +74,10 @@ class PortfolioAwareCandidateOptimizer:
     """
     Generate bounded candidates, then rerank them by their change to the whole paper portfolio.
 
-    The beam generator's independent-probability EV is only a screening/tie-break signal. Final risk
-    ranking comes from ScenarioSearchEngine on the supplied canonical scenario space.
+    The beam generator's independent-probability EV is only a screening/tie-break signal.
+    This generic API accepts caller-supplied scenario models, so their exact extrema remain
+    secondary ranking evidence and never become terminal-space proof. Positive terminal-risk
+    authority requires a separate product-owned authoritative outcome composition.
     """
 
     def __init__(
@@ -91,17 +122,30 @@ class PortfolioAwareCandidateOptimizer:
             raise ValueError("stake must be finite")
         if amount <= 0:
             raise ValueError("stake must be positive")
-        if not groups:
+
+        candidate_snapshot = tuple(candidates)
+        scenario_groups = list(groups)
+        if not scenario_groups:
             raise ValueError("scenario groups required for portfolio-aware candidate evaluation")
 
-        quote_to_group = _quote_group_map(groups)
-        open_existing = [ticket for ticket in existing_tickets if ticket.status is TicketStatus.OPEN]
-        base_report = self.scenario_engine.analyse(open_existing, groups)
+        quote_to_group = _quote_group_map(scenario_groups)
+        open_existing = _snapshot_open_tickets_for_analysis(existing_tickets)
+        base_floor, base_ceiling = _scenario_conservative_bounds(open_existing)
+        base_report, scenario_reports_authoritative = _analyse_scenario_engine(
+            self.scenario_engine,
+            _snapshot_open_tickets_for_analysis(open_existing),
+            list(scenario_groups),
+        )
+        _validate_scenario_report(
+            base_report,
+            canonical_floor=base_floor,
+            canonical_ceiling=base_ceiling,
+        )
         ranked: list[CandidatePortfolioImpact] = []
         seen_candidate_identities: set[
             tuple[tuple[str, str, str, str, str, str], ...]
         ] = set()
-        for candidate in candidates:
+        for candidate in candidate_snapshot:
             canonical_candidate = _canonical_candidate(candidate)
             candidate_identity = _candidate_identity_key(canonical_candidate)
             if candidate_identity in seen_candidate_identities:
@@ -111,20 +155,71 @@ class PortfolioAwareCandidateOptimizer:
             synthetic = _candidate_ticket(canonical_candidate, amount, quote_to_group)
             touched_groups = {quote_to_group[leg.quote_key] for leg in synthetic.legs}
             dependent = _dependent_existing_ticket_ids(open_existing, touched_groups, quote_to_group)
-            with_report = self.scenario_engine.analyse(open_existing + [synthetic], groups)
+            with_candidate_tickets = open_existing + [synthetic]
+            with_floor, with_ceiling = _scenario_conservative_bounds(with_candidate_tickets)
+            with_report, with_report_authoritative = _analyse_scenario_engine(
+                self.scenario_engine,
+                _snapshot_open_tickets_for_analysis(with_candidate_tickets),
+                list(scenario_groups),
+            )
+            if with_report_authoritative is not scenario_reports_authoritative:
+                raise ValueError("scenario engine authority changed during evaluation")
+            _validate_scenario_report(
+                with_report,
+                canonical_floor=with_floor,
+                canonical_ceiling=with_ceiling,
+            )
 
-            worst_proven = base_report.worst_proven and with_report.worst_proven
-            best_proven = base_report.best_proven and with_report.best_proven
-            observed_worst_change = with_report.observed_worst - base_report.observed_worst
-            conservative_floor_change = with_report.conservative_floor - base_report.conservative_floor
-            observed_best_change = with_report.observed_best - base_report.observed_best
-            conservative_ceiling_change = with_report.conservative_ceiling - base_report.conservative_ceiling
+            # This API accepts caller-supplied ScenarioGroup models, not product-owned
+            # MarketSettlementOutcomeAuthority evidence. Report flags returned by an
+            # injected/subclassed scenario engine therefore cannot mint terminal-space
+            # authority. Generic scenario extrema remain useful secondary evidence only.
+            worst_proven = False
+            best_proven = False
+            try:
+                with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
+                    observed_worst_change = (
+                        with_report.observed_worst - base_report.observed_worst
+                    )
+                    conservative_floor_change = with_floor - base_floor
+                    observed_best_change = (
+                        with_report.observed_best - base_report.observed_best
+                    )
+                    conservative_ceiling_change = with_ceiling - base_ceiling
 
-            expected_change: Decimal | None = None
+                    expected_change: Decimal | None = None
+                    if (
+                        scenario_reports_authoritative
+                        and base_report.expected_case is not None
+                        and with_report.expected_case is not None
+                    ):
+                        expected_change = (
+                            with_report.expected_case - base_report.expected_case
+                        )
+            except DecimalException as exc:
+                raise ValueError(
+                    "candidate portfolio impact exceeds canonical Decimal range"
+                ) from exc
+
+            impact_values = (
+                observed_worst_change,
+                conservative_floor_change,
+                observed_best_change,
+                conservative_ceiling_change,
+            )
+            if any(not value.is_finite() for value in impact_values) or (
+                expected_change is not None and not expected_change.is_finite()
+            ):
+                raise ValueError(
+                    "candidate portfolio impact must be finite"
+                )
+
             expected_mode: str | None = None
-            if base_report.expected_case is not None and with_report.expected_case is not None:
-                expected_change = with_report.expected_case - base_report.expected_case
-                expected_mode = _expected_change_mode(base_report.expected_mode, with_report.expected_mode)
+            if expected_change is not None:
+                expected_mode = _expected_change_mode(
+                    base_report.expected_mode,
+                    with_report.expected_mode,
+                )
 
             if worst_proven:
                 ranking_risk_change = observed_worst_change
@@ -146,6 +241,7 @@ class PortfolioAwareCandidateOptimizer:
                     conservative_ceiling_change=conservative_ceiling_change,
                     expected_case_change=expected_change,
                     expected_change_mode=expected_mode,
+                    scenario_reports_authoritative=scenario_reports_authoritative,
                     worst_case_change_proven=worst_proven,
                     best_case_change_proven=best_proven,
                     ranking_risk_change=ranking_risk_change,
@@ -334,6 +430,93 @@ def _dependent_existing_ticket_ids(
     return tuple(sorted(dependent))
 
 
+def _analyse_scenario_engine(
+    engine: ScenarioSearchEngine,
+    tickets: list[PaperTicket],
+    groups: list[ScenarioGroup],
+    _engine_type=ScenarioSearchEngine,
+    _canonical_analyse=ScenarioSearchEngine.analyse,
+) -> tuple[ScenarioSearchReport, bool]:
+    """Return one report plus authority derived from the captured canonical engine type."""
+
+    if type(engine) is _engine_type:
+        canonical = _engine_type(
+            exact_state_limit=engine.exact_state_limit,
+            branch_node_limit=engine.branch_node_limit,
+            sample_count=engine.sample_count,
+            seed=engine.seed,
+        )
+        return _canonical_analyse(canonical, tickets, groups), True
+    return engine.analyse(tickets, groups), False
+
+
+def _validate_scenario_report(
+    report: ScenarioSearchReport,
+    *,
+    canonical_floor: Decimal,
+    canonical_ceiling: Decimal,
+) -> None:
+    """Validate report shape and independently derived conservative bounds."""
+
+    if type(report) is not ScenarioSearchReport:
+        raise ValueError("scenario engine must return exact ScenarioSearchReport")
+    if (
+        type(report.total_states) is not int
+        or report.total_states <= 0
+        or type(report.nodes_explored) is not int
+        or report.nodes_explored < 0
+    ):
+        raise ValueError("scenario report state counts must be bounded integers")
+    if type(report.mode) is not str or not report.mode or report.mode != report.mode.strip():
+        raise ValueError("scenario report mode must be canonical text")
+    if type(report.worst_proven) is not bool or type(report.best_proven) is not bool:
+        raise ValueError("scenario report proof flags must be bool")
+    if (
+        type(report.outcome_space_exhaustive) is not bool
+        or type(report.outcome_space_exact) is not bool
+    ):
+        raise ValueError("scenario report outcome-space flags must be bool")
+
+    numeric = (
+        report.observed_worst,
+        report.observed_best,
+        report.conservative_floor,
+        report.conservative_ceiling,
+    )
+    if any(type(value) is not Decimal or not value.is_finite() for value in numeric):
+        raise ValueError("scenario report risk values must be exact finite Decimal")
+    if (
+        report.conservative_floor != canonical_floor
+        or report.conservative_ceiling != canonical_ceiling
+    ):
+        raise ValueError("scenario report conservative bounds mismatch")
+    if not (
+        canonical_floor
+        <= report.observed_worst
+        <= report.observed_best
+        <= canonical_ceiling
+    ):
+        raise ValueError("scenario report observed extrema exceed conservative bounds")
+
+    if report.expected_case is None:
+        if report.expected_mode is not None:
+            raise ValueError("scenario expected mode requires expected_case")
+    else:
+        if (
+            type(report.expected_case) is not Decimal
+            or not report.expected_case.is_finite()
+            or report.expected_case < canonical_floor
+            or report.expected_case > canonical_ceiling
+        ):
+            raise ValueError("scenario expected_case exceeds conservative bounds")
+        if (
+            type(report.expected_mode) is not str
+            or not report.expected_mode
+            or report.expected_mode != report.expected_mode.strip()
+        ):
+            raise ValueError("scenario expected mode must be canonical text")
+
+
 def _expected_change_mode(base: str | None, with_candidate: str | None) -> str | None:
     if base is None or with_candidate is None:
         return None
@@ -361,15 +544,25 @@ def _ranking_key(
     Decimal,
     int,
     Decimal,
+    int,
+    Decimal,
     tuple[tuple[str, str, str, str, str, str], ...],
 ]:
-    proof_tier = 1 if impact.worst_case_change_proven else 0
+    terminal_proof_tier = 1 if impact.worst_case_change_proven else 0
+    scenario_proof_tier = 1 if impact.scenario_worst_case_change_proven else 0
+    scenario_worst_change = (
+        impact.observed_worst_case_change
+        if impact.scenario_worst_case_change_proven
+        else Decimal("-Infinity")
+    )
     expected_available = 1 if impact.expected_case_change is not None else 0
     expected_change = impact.expected_case_change if impact.expected_case_change is not None else Decimal("-Infinity")
     dependency_preference = -len(impact.dependent_existing_ticket_ids)
     return (
-        proof_tier,
+        terminal_proof_tier,
         impact.ranking_risk_change,
+        scenario_proof_tier,
+        scenario_worst_change,
         expected_available,
         expected_change,
         dependency_preference,

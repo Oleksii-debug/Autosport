@@ -19,6 +19,9 @@ from .domain import PaperTicket, TicketLeg, TicketStatus
 from .paper import PaperBook
 
 
+_PAPER_SETTLEMENT_RESULT = PaperBook._settlement_result
+
+
 # Portfolio reports are persisted as run evidence, so their values cannot depend
 # on an unrelated caller's thread-local/default Decimal configuration.  This
 # explicit policy matches the canonical PaperBook settlement range and rounding.
@@ -259,7 +262,7 @@ class PortfolioEngine:
                         for quote_key in leg_keys
                         if snapshot[quote_key] == "void"
                     }
-                    _status, payout, _balance = PaperBook._settlement_result(
+                    _status, payout, _balance = _PAPER_SETTLEMENT_RESULT(
                         ticket,
                         Decimal("0"),
                         winners,

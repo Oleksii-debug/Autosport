@@ -160,21 +160,24 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
         )
         return book, ledger, decision
 
-    def test_happy_path_uses_exact_portfolio_hedge_and_opens_paper_ticket(self):
+    def test_happy_path_keeps_incomplete_scenario_risk_conservative_and_opens_paper_ticket(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, decision = self._decide(tmp)
             self.assertTrue(decision.approved)
             self.assertIsNotNone(decision.ticket_id)
             self.assertTrue(decision.critic.approved)
             self.assertTrue(decision.risk.allowed)
-            self.assertTrue(decision.portfolio_impact.worst_case_change_proven)
+            self.assertFalse(decision.portfolio_impact.worst_case_change_proven)
+            self.assertTrue(
+                decision.portfolio_impact.scenario_worst_case_change_proven
+            )
             self.assertEqual(
                 decision.portfolio_impact.ranking_risk_truth,
-                "exact-worst-case-change",
+                "conservative-floor-change",
             )
             self.assertEqual(
                 decision.portfolio_impact.ranking_risk_change,
-                Decimal("10"),
+                Decimal("-10"),
             )
             self.assertEqual(len(book.tickets), 2)
 
@@ -183,10 +186,22 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             envelope = json.loads(lines[0])
             self.assertEqual(envelope["record"]["action"], "OPEN_PAPER_RESEARCH_TICKET")
             self.assertFalse(envelope["record"]["payload"]["real_money_execution"])
+            portfolio_payload = envelope["record"]["payload"]["portfolio"]
             self.assertEqual(
-                envelope["record"]["payload"]["portfolio"]["ranking_risk_truth"],
-                "exact-worst-case-change",
+                portfolio_payload["ranking_risk_truth"],
+                "conservative-floor-change",
             )
+            self.assertFalse(portfolio_payload["worst_case_change_proven"])
+            self.assertTrue(portfolio_payload["scenario_reports_authoritative"])
+            self.assertTrue(portfolio_payload["scenario_worst_case_change_proven"])
+            self.assertFalse(portfolio_payload["best_case_change_proven"])
+            self.assertTrue(portfolio_payload["scenario_best_case_change_proven"])
+            self.assertFalse(portfolio_payload["base_outcome_space_exhaustive"])
+            self.assertFalse(portfolio_payload["base_outcome_space_exact"])
+            self.assertFalse(
+                portfolio_payload["with_candidate_outcome_space_exhaustive"]
+            )
+            self.assertFalse(portfolio_payload["with_candidate_outcome_space_exact"])
             self.assertEqual(decision.audit_sha256, envelope["sha256"])
 
     def test_stale_source_evidence_is_rejected_without_book_mutation(self):
@@ -266,26 +281,21 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 )
             )
 
-    def test_policy_can_require_exact_worst_case_proof(self):
+    def test_policy_requires_exact_terminal_space_not_only_exact_caller_scenarios(self):
         with tempfile.TemporaryDirectory() as tmp:
-            optimizer = PortfolioAwareCandidateOptimizer(
-                scenario_engine=ScenarioSearchEngine(
-                    exact_state_limit=1,
-                    branch_node_limit=1,
-                    sample_count=10,
-                    seed=7,
-                )
-            )
             critic = DeterministicResearchCritic(
                 ResearchDecisionPolicy(require_worst_case_proof=True)
             )
-            pipeline = ResearchDecisionPipeline(
-                optimizer=optimizer,
-                critic=critic,
-            )
+            pipeline = ResearchDecisionPipeline(critic=critic)
             _book, _ledger, decision = self._decide(tmp, pipeline=pipeline)
             self.assertFalse(decision.approved)
             self.assertFalse(decision.portfolio_impact.worst_case_change_proven)
+            self.assertTrue(
+                decision.portfolio_impact.scenario_worst_case_change_proven
+            )
+            self.assertFalse(
+                decision.portfolio_impact.base_report.outcome_space_exhaustive
+            )
             self.assertTrue(
                 any("not proven exact" in reason for reason in decision.reasons)
             )

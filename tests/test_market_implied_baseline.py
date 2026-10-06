@@ -223,6 +223,34 @@ class MarketImpliedBaselineTests(unittest.TestCase):
                 max_age=timedelta(minutes=10),
             )
 
+    def test_copied_or_mutated_outcome_authority_cannot_issue_market_implied_evidence(self) -> None:
+        authority = self.authority()
+        copied = copy.copy(authority)
+        with self.assertRaisesRegex(
+            MarketImpliedBaselineError,
+            "not canonically issued provider evidence",
+        ):
+            build_market_implied_baseline_evidence(
+                cohort_key="row-1",
+                store=self.store,
+                outcome_authority=copied,
+                decision_cutoff=self.CUTOFF,
+                max_age=timedelta(minutes=10),
+            )
+
+        object.__setattr__(authority, "source_revision", "tampered-revision")
+        with self.assertRaisesRegex(
+            MarketImpliedBaselineError,
+            "not canonically issued provider evidence",
+        ):
+            build_market_implied_baseline_evidence(
+                cohort_key="row-1",
+                store=self.store,
+                outcome_authority=authority,
+                decision_cutoff=self.CUTOFF,
+                max_age=timedelta(minutes=10),
+            )
+
     def test_complete_roster_yields_exact_probability_vector_without_authority_widening(self) -> None:
         self.persist()
         evidence = self.evidence()

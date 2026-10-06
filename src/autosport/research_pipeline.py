@@ -1092,9 +1092,26 @@ def _audit_payload(
                 "observed_worst_case_change": str(impact.observed_worst_case_change),
                 "conservative_floor_change": str(impact.conservative_floor_change),
                 "worst_case_change_proven": impact.worst_case_change_proven,
+                "scenario_reports_authoritative": impact.scenario_reports_authoritative,
+                "scenario_worst_case_change_proven": (
+                    impact.scenario_worst_case_change_proven
+                ),
                 "observed_best_case_change": str(impact.observed_best_case_change),
                 "conservative_ceiling_change": str(impact.conservative_ceiling_change),
                 "best_case_change_proven": impact.best_case_change_proven,
+                "scenario_best_case_change_proven": (
+                    impact.scenario_best_case_change_proven
+                ),
+                "base_outcome_space_exhaustive": (
+                    impact.base_report.outcome_space_exhaustive
+                ),
+                "base_outcome_space_exact": impact.base_report.outcome_space_exact,
+                "with_candidate_outcome_space_exhaustive": (
+                    impact.with_candidate_report.outcome_space_exhaustive
+                ),
+                "with_candidate_outcome_space_exact": (
+                    impact.with_candidate_report.outcome_space_exact
+                ),
                 "expected_case_change": (
                     str(impact.expected_case_change)
                     if impact.expected_case_change is not None

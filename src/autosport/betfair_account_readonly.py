@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
-from threading import Lock
+from threading import Lock, RLock
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
@@ -1815,7 +1815,10 @@ def _install_market_price_ladder_authority():
             tuple[object, object, object, object, object] | None,
         ],
     ] = {}
-    generation_lock = Lock()
+    # Weakref cleanup callbacks can run synchronously while an authority check
+    # or issuance mutation still owns this lock.  Re-entry from the same thread
+    # must therefore be safe; cross-thread exclusion remains unchanged.
+    generation_lock = RLock()
     read_sequence = 0
     raw_read = BetfairReadOnlyClient.read_market_price_ladder
     raw_read_code = raw_read.__code__

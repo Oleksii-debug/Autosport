@@ -812,6 +812,53 @@ def test_post_issue_hash_helper_rebinding_cannot_preserve_forged_receipt(
         _assess(receipt, Decimal("2.01"))
 
 
+def test_weakref_cleanup_can_reenter_price_ladder_generation_lock(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    receipt, _client = _canonical_receipt(PriceLadderTransport("CLASSIC"))
+
+    original_opener = urllib_request._opener
+    try:
+        urllib_request._opener = _CanonicalUrlOpenerHarness(
+            PriceLadderTransport("CLASSIC")
+        )
+        victim_client = BetfairReadOnlyClient(
+            BetfairSessionCredentials("app-key", "session-token"),
+            venue_id="betfair",
+            account_id="acct-2",
+        )
+        victim = victim_client.read_market_price_ladder("1.234")
+    finally:
+        urllib_request._opener = original_opener
+
+    # The authority registry keeps only a weak reference to each observation.
+    # Dropping this final strong reference from inside the canonical fingerprint
+    # call synchronously invokes the cleanup callback while require_authoritative
+    # already owns the generation lock.  A plain Lock self-deadlocks here.
+    holder = {"victim": victim}
+    del victim
+    canonical_hash = readonly._canonical_sha256
+
+    def drop_victim_during_hash(value):
+        holder.pop("victim", None)
+        return canonical_hash(value)
+
+    monkeypatch.setattr(
+        readonly,
+        "_canonical_sha256",
+        drop_victim_during_hash,
+    )
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="lacks canonical direct Betfair provider IO origin",
+    ):
+        _assess(receipt, Decimal("2.00"))
+
+    assert holder == {}
+    assert victim_client is not None
+
+
 def test_failed_same_market_refresh_revokes_prior_positive_authority():
     class FailingTransport(PriceLadderTransport):
         def post(

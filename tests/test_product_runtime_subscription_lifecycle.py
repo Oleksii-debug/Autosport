@@ -59,6 +59,12 @@ class _UnavailableCatalogSource(_Source):
         raise ProviderUnavailableError("provider unavailable for retry lifecycle test")
 
 
+class _TerminalCatalogSource(_Source):
+    def fetch_catalog_page(self, checkpoint):
+        self.catalog_calls += 1
+        raise RuntimeError("terminal provider/source failure")
+
+
 class _TrackingMarketEventBus(MarketEventBus):
     instances: list["_TrackingMarketEventBus"] = []
 
@@ -238,6 +244,151 @@ class ProductRuntimeSubscriptionLifecycleTests(unittest.TestCase):
             self.assertEqual(reopened_source.delta_calls, 1)
             self.assertIsNone(reopened.status()["stopped_at"])
             self.assertIsNone(reopened.status()["stop_reason"])
+            self.assertEqual(reopened.status()["provider_failures"], 0)
+
+
+    def test_retry_exhaustion_is_bounded_and_reopen_has_no_inherited_backoff(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _UnavailableCatalogSource()
+            sleeps: list[float] = []
+            service = HeadlessCollectorService(
+                delta_store=CollectorDeltaStore(root / "collector.json"),
+                lifecycle=ContinuousEventLifecycle(root / "catalog.json"),
+                source=source,
+                state_path=root / "service.json",
+                run_id="retry-exhaustion-census",
+                config=CollectorServiceConfig(
+                    poll_interval_seconds=1,
+                    retry_attempts=3,
+                    initial_backoff_seconds=1,
+                    max_backoff_seconds=4,
+                    jitter_fraction=0,
+                ),
+                clock=_Clock(),
+                sleep=sleeps.append,
+                random_value=lambda: 0,
+                stop_requested=lambda: False,
+                stop_reason=lambda: "unused",
+            )
+
+            exhausted = service.run_cycle()
+
+            self.assertTrue(exhausted.provider_unavailable)
+            self.assertEqual(source.catalog_calls, 3)
+            self.assertEqual(source.delta_calls, 0)
+            self.assertEqual(sleeps, [1, 2])
+            self.assertEqual(service.status()["cycles_attempted"], 1)
+            self.assertEqual(service.status()["cycles_succeeded"], 0)
+            self.assertEqual(service.status()["provider_failures"], 1)
+            self.assertEqual(
+                service.status()["last_error_code"],
+                "ProviderUnavailableError",
+            )
+
+            reopened_source = _Source()
+            reopened = HeadlessCollectorService(
+                delta_store=CollectorDeltaStore(root / "collector.json"),
+                lifecycle=ContinuousEventLifecycle(root / "catalog.json"),
+                source=reopened_source,
+                state_path=root / "service.json",
+                run_id="retry-exhaustion-census",
+                config=CollectorServiceConfig(
+                    poll_interval_seconds=1,
+                    retry_attempts=3,
+                    initial_backoff_seconds=1,
+                    max_backoff_seconds=4,
+                    jitter_fraction=0,
+                ),
+                clock=_Clock(),
+                sleep=lambda _: self.fail(
+                    "retry/backoff state must not survive process-local reopen"
+                ),
+                random_value=lambda: 0,
+                stop_requested=lambda: False,
+                stop_reason=lambda: "unused",
+            )
+
+            recovered = reopened.run_cycle()
+
+            self.assertFalse(recovered.provider_unavailable)
+            self.assertEqual(reopened_source.catalog_calls, 1)
+            self.assertEqual(reopened_source.delta_calls, 1)
+            self.assertEqual(reopened.status()["cycles_attempted"], 2)
+            self.assertEqual(reopened.status()["cycles_succeeded"], 1)
+            self.assertEqual(reopened.status()["provider_failures"], 1)
+            self.assertIsNone(reopened.status()["last_error_code"])
+
+    def test_terminal_source_failure_is_not_retried_and_reopen_is_fresh(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _TerminalCatalogSource()
+            sleeps: list[float] = []
+            service = HeadlessCollectorService(
+                delta_store=CollectorDeltaStore(root / "collector.json"),
+                lifecycle=ContinuousEventLifecycle(root / "catalog.json"),
+                source=source,
+                state_path=root / "service.json",
+                run_id="terminal-failure-census",
+                config=CollectorServiceConfig(
+                    poll_interval_seconds=1,
+                    retry_attempts=5,
+                    initial_backoff_seconds=1,
+                    max_backoff_seconds=4,
+                    jitter_fraction=0,
+                ),
+                clock=_Clock(),
+                sleep=sleeps.append,
+                random_value=lambda: 0,
+                stop_requested=lambda: False,
+                stop_reason=lambda: "unused",
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "terminal provider/source failure",
+            ):
+                service.run_cycle()
+
+            self.assertEqual(source.catalog_calls, 1)
+            self.assertEqual(source.delta_calls, 0)
+            self.assertEqual(sleeps, [])
+            self.assertEqual(service.status()["provider_failures"], 0)
+            self.assertEqual(service.status()["last_error_code"], "RuntimeError")
+
+            reopened_source = _Source()
+            reopened = HeadlessCollectorService(
+                delta_store=CollectorDeltaStore(root / "collector.json"),
+                lifecycle=ContinuousEventLifecycle(root / "catalog.json"),
+                source=reopened_source,
+                state_path=root / "service.json",
+                run_id="terminal-failure-census",
+                config=CollectorServiceConfig(
+                    poll_interval_seconds=1,
+                    retry_attempts=5,
+                    initial_backoff_seconds=1,
+                    max_backoff_seconds=4,
+                    jitter_fraction=0,
+                ),
+                clock=_Clock(),
+                sleep=lambda _: self.fail(
+                    "terminal failure must not leave a process-local retry"
+                ),
+                random_value=lambda: 0,
+                stop_requested=lambda: False,
+                stop_reason=lambda: "unused",
+            )
+
+            recovered = reopened.run_cycle()
+
+            self.assertFalse(recovered.provider_unavailable)
+            self.assertEqual(reopened_source.catalog_calls, 1)
+            self.assertEqual(reopened_source.delta_calls, 1)
+            self.assertIsNone(reopened.status()["last_error_code"])
             self.assertEqual(reopened.status()["provider_failures"], 0)
 
 

@@ -45,6 +45,19 @@ _ECONOMIC_GOAL_STORE_NEW_CODE = getattr(_ECONOMIC_GOAL_STORE_NEW, "__code__", No
 _ECONOMIC_GOAL_STORE_INIT = EconomicGoalStore.__init__
 _ECONOMIC_GOAL_STORE_INIT_CODE = getattr(_ECONOMIC_GOAL_STORE_INIT, "__code__", None)
 
+_ECONOMIC_SESSION_STORE_NEW = ProductEconomicSessionStore.__new__
+_ECONOMIC_SESSION_STORE_NEW_CODE = getattr(
+    _ECONOMIC_SESSION_STORE_NEW,
+    "__code__",
+    None,
+)
+_ECONOMIC_SESSION_STORE_INIT = ProductEconomicSessionStore.__init__
+_ECONOMIC_SESSION_STORE_INIT_CODE = getattr(
+    _ECONOMIC_SESSION_STORE_INIT,
+    "__code__",
+    None,
+)
+
 _ADMISSION_PATH_NEW = Path.__new__
 _ADMISSION_PATH_NEW_CODE = getattr(_ADMISSION_PATH_NEW, "__code__", None)
 _ADMISSION_PATH_INIT = Path.__init__
@@ -1068,6 +1081,41 @@ def _canonical_economic_goal_store(root: Path) -> EconomicGoalStore:
     return store
 
 
+def _canonical_economic_session_store(root: Path) -> ProductEconomicSessionStore:
+    """Construct the exact durable economic-session store without live dispatch."""
+
+    _require_instance_state_class_witnesses(
+        ProductEconomicSessionStore,
+        _ECONOMIC_SESSION_STORE_STATE_WITNESSES,
+        error="economic session store state authority changed",
+    )
+    if (
+        ProductEconomicSessionStore.__new__ is not _ECONOMIC_SESSION_STORE_NEW
+        or getattr(ProductEconomicSessionStore.__new__, "__code__", None)
+        is not _ECONOMIC_SESSION_STORE_NEW_CODE
+        or ProductEconomicSessionStore.__init__ is not _ECONOMIC_SESSION_STORE_INIT
+        or getattr(ProductEconomicSessionStore.__init__, "__code__", None)
+        is not _ECONOMIC_SESSION_STORE_INIT_CODE
+    ):
+        raise RuntimeError("economic session store constructor authority changed")
+    if type(root) is not _ADMISSION_CANONICAL_PATH_TYPE:
+        raise RuntimeError("economic session store path is not canonical")
+    store = _ECONOMIC_SESSION_STORE_NEW(ProductEconomicSessionStore)
+    _ECONOMIC_SESSION_STORE_INIT(store, root)
+    if type(store) is not ProductEconomicSessionStore:
+        raise RuntimeError("economic session store authority changed")
+    store_workspace = _ADMISSION_PATH_RESOLVE(
+        _ADMISSION_PATH_EXPANDUSER(store.workspace),
+        strict=False,
+    )
+    if (
+        type(store_workspace) is not _ADMISSION_CANONICAL_PATH_TYPE
+        or store_workspace != root
+    ):
+        raise RuntimeError("economic session store path is not canonical")
+    return store
+
+
 def _prepare_paper_session_turnover_snapshot(
     *,
     root: Path,
@@ -1087,7 +1135,7 @@ def _prepare_paper_session_turnover_snapshot(
             return None
         _require_paperbook_admission_authority()
         snapshot_book = _PAPERBOOK_LOAD_FUNCTION(PaperBook, book_path)
-        session_store = ProductEconomicSessionStore(root)
+        session_store = _canonical_economic_session_store(root)
         session = _ECONOMIC_SESSION_CURRENT(session_store)
         if not _canonical_day_authority_field(
             session,
@@ -1153,7 +1201,7 @@ def _revalidated_product_session_turnover_room(
         if durable_goal != goal:
             return None
         provenance = provenance_for(goal)
-        session_store = ProductEconomicSessionStore(root)
+        session_store = _canonical_economic_session_store(root)
         current_session = _ECONOMIC_SESSION_REQUIRE_CURRENT_UNDER_LOCK(
             session_store,
             session_evidence,

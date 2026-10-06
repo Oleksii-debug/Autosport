@@ -223,6 +223,35 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(legacy._decimal_text(Decimal("12.3400")), "12.3400")
 
 
+    def test_in_place_resource_validator_code_mutation_fails_closed(self) -> None:
+        validator = legacy._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+        original_code = validator.__code__
+
+        def forged_validator(value):
+            raise AssertionError("mutated resource validator executed")
+
+        validator.__code__ = forged_validator.__code__
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal resource validator authority changed",
+            ):
+                evidence(odds="2.50", stake="10.00")
+
+            record = object.__new__(PaperExecutionEvidenceRecord)
+            object.__setattr__(record, "accepted_odds", Decimal("2.50"))
+            object.__setattr__(record, "accepted_stake", Decimal("10.00"))
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal resource validator authority changed",
+            ):
+                legacy._preflight_decimal_text_fields(
+                    record.accepted_odds,
+                    record.accepted_stake,
+                )
+        finally:
+            validator.__code__ = original_code
+
     def test_durable_decimal_serializers_ignore_rebound_module_helpers(self) -> None:
         record = evidence()
         attempt = PaperLegAttempt(

@@ -1835,10 +1835,30 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             for resolution in resolutions
         )
 
-    def _load_book(self) -> PaperBook:
+    def _load_book(
+        self,
+        *,
+        _paper_book_type: type[PaperBook] = PaperBook,
+        _paper_book_load: Callable[..., PaperBook] = PaperBook.load,
+        _paper_book_load_descriptor: object = PaperBook.__dict__["load"],
+    ) -> PaperBook:
+        current_load = PaperBook.__dict__.get("load")
+        if (
+            PaperBook is not _paper_book_type
+            or current_load is not _paper_book_load_descriptor
+            or not isinstance(current_load, classmethod)
+            or current_load.__func__ is not getattr(
+                _paper_book_load_descriptor,
+                "__func__",
+                None,
+            )
+        ):
+            raise ContinuousSessionError(
+                "settlement book loader authority changed"
+            )
         if self.paper_book_path.exists():
-            return PaperBook.load(self.paper_book_path)
-        return PaperBook(self.initial_bankroll)
+            return _paper_book_load(self.paper_book_path)
+        return _paper_book_type(self.initial_bankroll)
 
     @_seal_settlement_consumer_entry
     @_bind_canonical_settlement_engine

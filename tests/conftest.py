@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from supervised_clock_test_support import install_trusted_clock
+from supervised_clock_test_support import install_trusted_clock, reset_trusted_time
 
 # Root-selection production now correctly treats post-composition replacement of the
 # OS account-location resolver as an authority violation. Tests that need a sandbox
@@ -63,6 +63,14 @@ else:
 # resolver shim is composed, but still before test collection can import the Betfair
 # provider-write module that seals the trusted-clock function identity.
 install_trusted_clock()
+
+
+@pytest.fixture(autouse=True)
+def _reset_supervised_execution_test_clock():
+    reset_trusted_time()
+    yield
+    reset_trusted_time()
+
 
 from autosport import monotonic_authority_root_binding as _root_selection
 from autosport._provider_evaluation_semantic_gate import (

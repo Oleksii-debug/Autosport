@@ -9,7 +9,11 @@ import autosport.risk_reporting as risk_reporting
 from autosport.domain import TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
-from autosport.risk import PaperRiskPolicy
+from autosport.risk import (
+    PaperRiskPolicy,
+    RiskOfRuinEvidence,
+    RiskOfRuinVectorEvidence,
+)
 from autosport.risk_reporting import (
     DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
     RISK_OF_RUIN_STATUS_UNKNOWN,
@@ -17,6 +21,58 @@ from autosport.risk_reporting import (
     RISK_REPORT_SCOPE_PAPER_ONLY,
     build_paper_risk_report,
 )
+
+
+class RiskOfRuinEvidenceCanonicalityTests(unittest.TestCase):
+    @staticmethod
+    def _kwargs(**overrides):
+        values = {
+            "evidence_id": "risk-evidence",
+            "research_protocol_sha256": "a" * 64,
+            "reproducibility_bundle_sha256": "b" * 64,
+            "producer_identity": "research-run",
+            "causal_cutoff": "2026-09-21T07:00:00+00:00",
+            "evaluated_at": "2026-09-21T07:05:00+00:00",
+            "bankroll_id": "paper-bankroll",
+            "currency": "USD",
+            "base_portfolio_sha256": "c" * 64,
+            "candidate_sha256": "d" * 64,
+            "evaluated_stake": Decimal("10"),
+            "upper_bound": Decimal("0"),
+        }
+        values.update(overrides)
+        return values
+
+    def test_risk_of_ruin_rejects_signed_zero_upper_bound(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "must not use a signed-zero Decimal representation",
+        ):
+            RiskOfRuinEvidence(**self._kwargs(upper_bound=Decimal("-0")))
+
+    def test_vector_risk_of_ruin_rejects_signed_zero_values(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "must not use a signed-zero Decimal representation",
+        ):
+            RiskOfRuinVectorEvidence(
+                **self._kwargs(
+                    candidate_sha256="e" * 64,
+                    evaluated_stakes=(Decimal("-0"), Decimal("10")),
+                )
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "must not use a signed-zero Decimal representation",
+        ):
+            RiskOfRuinVectorEvidence(
+                **self._kwargs(
+                    candidate_sha256="f" * 64,
+                    evaluated_stakes=(Decimal("10"),),
+                    upper_bound=Decimal("-0"),
+                )
+            )
 
 
 class PaperRiskReportingTests(unittest.TestCase):

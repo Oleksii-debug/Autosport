@@ -4048,3 +4048,17 @@ def test_settlement_book_loader_rejects_runtime_path_exists_rebinding(monkeypatc
             assert "book loader authority changed" in str(exc)
         else:
             raise AssertionError("runtime-rebound settlement existence authority was accepted")
+
+def test_session_id_access_does_not_read_full_settlement_history() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _LARGE_HISTORY)
+
+        def forbidden_reader():
+            raise AssertionError(
+                "session_id access must not read or validate retained settlement history"
+            )
+
+        with patch.object(state, "_read", forbidden_reader):
+            assert state.session_id == "session-history-scaling"
+

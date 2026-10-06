@@ -1346,3 +1346,32 @@ if __name__ == "__main__":
             finally:
                 public_paper._CANONICAL_DECIMAL_PARSER = original
 
+
+    def test_public_exact_decimal_arithmetic_rejects_rebound_decimal_type(self) -> None:
+        original = public_paper._CANONICAL_DECIMAL_TYPE
+        called = False
+
+        class ForgedDecimal:
+            def __new__(cls, *args, **kwargs):
+                nonlocal called
+                called = True
+                raise AssertionError("rebound facade Decimal type executed")
+
+        public_paper._CANONICAL_DECIMAL_TYPE = ForgedDecimal
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "PAPER Decimal type authority changed",
+            ):
+                public_paper._decimal_from_coefficient(1, 0)
+            self.assertFalse(called)
+        finally:
+            public_paper._CANONICAL_DECIMAL_TYPE = original
+
+    def test_public_exact_decimal_arithmetic_rejects_decimal_subclass(self) -> None:
+        class DecimalSubclass(Decimal):
+            pass
+
+        with self.assertRaisesRegex(ValueError, "exact Decimal required"):
+            public_paper._decimal_coefficient(DecimalSubclass("1.25"))
+

@@ -2025,12 +2025,26 @@ def cancel_superseded_explicit_pr_runs(
     explicit_singletons_by_id = {
         run.run_id: run for run in explicit_singleton_runs
     }
+    # The transport budget is shared across every PR group in this sweep. Prefer
+    # groups that already expose multiple distinct heads: against one live PR head,
+    # at least all but one of those observed heads are necessarily superseded, so
+    # they offer deterministic high-yield cleanup before the bounded request budget
+    # is exhausted. Then prefer groups occupying more active runs; keep PR number as
+    # the stable tie-breaker. This changes scheduling only, never cancellation
+    # authority: every effect still requires the same live qualification, exact-run
+    # identity reread, final qualification reread, and cancellation boundary.
+    pr_runs: dict[int, list[WorkflowRun]] = {}
+    for run in explicit_singleton_runs:
+        if run.run_id == current_run_id:
+            continue
+        pr_runs.setdefault(run.pr_numbers[0], []).append(run)
     pr_numbers = sorted(
-        {
-            run.pr_numbers[0]
-            for run in explicit_singleton_runs
-            if run.run_id != current_run_id
-        }
+        pr_runs,
+        key=lambda pr_number: (
+            -len({run.head_sha for run in pr_runs[pr_number]}),
+            -len(pr_runs[pr_number]),
+            pr_number,
+        ),
     )
 
     cancelled: list[int] = []

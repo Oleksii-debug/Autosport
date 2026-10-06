@@ -2055,6 +2055,65 @@ def test_current_trigger_only_group_needs_no_sweep_qualification_read() -> None:
     assert api.reads == []
 
 
+def test_sweep_prioritizes_multi_head_groups_before_budget_exhaustion() -> None:
+    target_pr = 909
+    clean_prs = tuple(range(101, 121))
+    qualifications = {
+        pr_number: [
+            PullRequestQualification(head_sha=HEAD, integration_capable=True)
+        ]
+        for pr_number in clean_prs
+    }
+    target_qualification = PullRequestQualification(
+        head_sha=HEAD,
+        integration_capable=True,
+    )
+    qualifications[target_pr] = [target_qualification, target_qualification]
+    api = SweepApi(
+        tuple(
+            _run(1000 + pr_number, HEAD, (pr_number,))
+            for pr_number in clean_prs
+        )
+        + (
+            _run(9001, STALE_HEAD, (target_pr,)),
+            _run(9002, HEAD, (target_pr,)),
+        ),
+        qualifications,
+    )
+    qualification_reads = 0
+
+    def budgeted_qualification(
+        fixture_api: SweepApi,
+        pr_number: int,
+    ) -> PullRequestQualification:
+        nonlocal qualification_reads
+        qualification_reads += 1
+        if qualification_reads > 2:
+            raise scoped_controller.RequestBudgetExhausted(
+                "fixture request budget exhausted"
+            )
+        return fixture_api.live_pr_qualification(pr_number)
+
+    # Numeric PR ordering would spend both available reads on clean singleton
+    # groups and never reach target_pr. The multi-head group is provably
+    # higher-yield: one of its two observed heads must be stale relative to the
+    # single live PR head, so it is serviced first and makes one bounded effect.
+    with pytest.raises(
+        scoped_controller.RequestBudgetExhausted,
+        match="request budget exhausted",
+    ):
+        cancel_superseded_explicit_pr_runs(
+            api,  # type: ignore[arg-type]
+            workflow_name="CI",
+            current_run_id=99999,
+            _qualification_reader=budgeted_qualification,
+            _qualification_reader_code=budgeted_qualification.__code__,
+        )
+
+    assert api.cancelled == [9001]
+    assert api.reads == [target_pr, target_pr]
+
+
 def test_workflow_wide_sweep_cancels_same_head_for_nonqualifying_pr() -> None:
     head = "5" * 40
     qualification = PullRequestQualification(

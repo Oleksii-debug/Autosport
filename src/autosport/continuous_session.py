@@ -381,12 +381,35 @@ class _ContinuousSessionState:
         self._error_path = self.path.with_name(
             f"{self.path.name}.operational_error.json"
         )
-        if self._error_path.exists():
+        if self._error_checkpoint_present():
             self._read_error_checkpoint()
 
     @staticmethod
     def _file_identity(info: os.stat_result) -> tuple[int, int]:
         return (info.st_dev, info.st_ino)
+
+    def _error_checkpoint_present(self) -> bool:
+        try:
+            self._error_path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ContinuousSessionError(
+                "cannot inspect continuous session operational error checkpoint"
+            ) from exc
+        return True
+
+    @staticmethod
+    def _bounded_descriptor_read(descriptor: int, limit: int) -> bytes:
+        chunks: list[bytes] = []
+        remaining = limit
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
     def _read_error_checkpoint_bytes(self) -> bytes:
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
@@ -418,8 +441,16 @@ class _ContinuousSessionState:
                     "was replaced before verification"
                 )
 
-            with os.fdopen(os.dup(descriptor), "rb") as handle:
-                encoded = handle.read(self._MAX_ERROR_CHECKPOINT_BYTES + 1)
+            read_limit = self._MAX_ERROR_CHECKPOINT_BYTES + 1
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            first_image = self._bounded_descriptor_read(descriptor, read_limit)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            encoded = self._bounded_descriptor_read(descriptor, read_limit)
+            if encoded != first_image:
+                raise ContinuousSessionError(
+                    "continuous session operational error checkpoint "
+                    "changed during bounded read"
+                )
 
             current = os.fstat(descriptor)
             after = self._error_path.lstat()
@@ -653,7 +684,7 @@ class _ContinuousSessionState:
 
     def snapshot(self) -> ContinuousSessionStatus:
         raw = self._read()
-        if self._error_path.exists():
+        if self._error_checkpoint_present():
             error_checkpoint = self._read_error_checkpoint()
             marker_matches = (
                 error_checkpoint["observed_cycles_completed"] == raw["cycles_completed"]
@@ -708,7 +739,7 @@ class _ContinuousSessionState:
                 raw["last_error_code"] = _text(reason, "reason")
 
         self._update(mutate)
-        if reason is not None and self._error_path.exists():
+        if reason is not None and self._error_checkpoint_present():
             self._write_error_checkpoint(None)
 
     @staticmethod
@@ -831,7 +862,7 @@ class _ContinuousSessionState:
         updated = self._update(mutate)
         self._cycles_completed = updated["cycles_completed"]
         self._last_success_at = updated["last_success_at"]
-        if self._error_path.exists():
+        if self._error_checkpoint_present():
             self._write_error_checkpoint(None)
 
     def record_failure(self, *, code: str) -> None:

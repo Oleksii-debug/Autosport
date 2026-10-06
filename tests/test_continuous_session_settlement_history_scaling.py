@@ -449,3 +449,74 @@ def test_operational_checkpoint_path_replacement_during_open_fails_closed() -> N
                 raise AssertionError(
                     "path-replaced operational checkpoint was accepted"
                 )
+
+
+def test_dangling_operational_checkpoint_symlink_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        error_path = root / "continuous_session.json.operational_error.json"
+        missing_target = root / "missing-operational-error.json"
+        try:
+            os.symlink(missing_target, error_path)
+        except (OSError, NotImplementedError):
+            return
+
+        try:
+            continuous_session._ContinuousSessionState(
+                root / "continuous_session.json",
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError("dangling operational checkpoint symlink was ignored")
+
+
+def test_in_place_operational_checkpoint_mutation_during_read_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="FIRST_FAILURE")
+        error_path = root / "continuous_session.json.operational_error.json"
+        original_read = state._bounded_descriptor_read
+        calls = 0
+
+        def mutating_read(descriptor: int, limit: int) -> bytes:
+            nonlocal calls
+            data = original_read(descriptor, limit)
+            calls += 1
+            if calls == 1:
+                payload = json.loads(error_path.read_text(encoding="utf-8"))
+                payload["last_error_code"] = "OTHER_FAILURE"
+                replacement = (
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                        allow_nan=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                assert len(replacement) == len(error_path.read_bytes())
+                with error_path.open("r+b") as handle:
+                    handle.seek(0)
+                    handle.write(replacement)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            return data
+
+        with patch.object(
+            state,
+            "_bounded_descriptor_read",
+            mutating_read,
+        ):
+            try:
+                state._read_error_checkpoint()
+            except continuous_session.ContinuousSessionError as exc:
+                assert "changed during bounded read" in str(exc)
+            else:
+                raise AssertionError("same-inode checkpoint mutation was accepted")

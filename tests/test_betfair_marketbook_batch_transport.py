@@ -500,6 +500,91 @@ def test_invalid_client_fails_before_gate_mutation():
     assert concurrency_gate.snapshot().active == ()
 
 
+def test_instance_shadowed_concurrency_begin_cannot_bypass_full_gate(monkeypatch):
+    plan = _plan(order_projection="EXECUTABLE")
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    for index in range(3):
+        decision = BetfairMarketBookProjectionConcurrencyGate.begin(
+            concurrency_gate,
+            f"held-{index}",
+            observed_at=NOW,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+        assert decision.allowed is True
+
+    shadow_called = False
+
+    class ForgedDecision:
+        allowed = True
+        lease_generation = None
+
+    def forged_begin(*args, **kwargs):
+        nonlocal shadow_called
+        shadow_called = True
+        return ForgedDecision()
+
+    monkeypatch.setattr(concurrency_gate, "begin", forged_begin)
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="shadowed-concurrency",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY
+    assert shadow_called is False
+    assert transport.calls == []
+    assert len(concurrency_gate.snapshot().active) == 3
+
+
+def test_instance_shadowed_rate_reserve_cannot_bypass_full_gate(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    for _ in range(5):
+        assert BetfairMarketBookPerMarketRateGate.reserve(
+            rate_gate,
+            ("1.001",),
+            scheduled_at=NOW,
+        ).allowed is True
+
+    shadow_called = False
+
+    class ForgedDecision:
+        allowed = True
+
+    def forged_reserve(*args, **kwargs):
+        nonlocal shadow_called
+        shadow_called = True
+        return ForgedDecision()
+
+    monkeypatch.setattr(rate_gate, "reserve", forged_reserve)
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="shadowed-rate",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert shadow_called is False
+    assert transport.calls == []
+
+
 def test_projection_concurrency_denial_precedes_rate_reservation_and_transport():
     plan = _plan(order_projection="EXECUTABLE")
     batch = plan.batches[0]

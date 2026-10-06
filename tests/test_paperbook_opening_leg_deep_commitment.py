@@ -937,6 +937,43 @@ def test_inexact_settlement_fails_before_economic_mutation() -> None:
     assert ticket.payout == Decimal("0")
 
 
+@pytest.mark.parametrize(
+    ("registrar_name", "message"),
+    (
+        (
+            "_register_paperbook_operation_lock",
+            "operation lock registry is already established",
+        ),
+        (
+            "_register_ticket_opening_authority_book",
+            "opening authority registry is already established",
+        ),
+        (
+            "_register_paperbook_causal_history_authority_book",
+            "causal history authority registry is already established",
+        ),
+    ),
+)
+def test_live_paperbook_authority_registries_cannot_be_reset(
+    registrar_name: str,
+    message: str,
+) -> None:
+    book = PaperBook("100")
+    leg = _leg()
+    ticket = book.open_ticket([leg], "10", placed_at=_TS)
+    original_lock = paper_module._require_paperbook_operation_lock(book)
+    opening_before = tuple(book.tickets)
+    lifecycle_before = tuple(book._lifecycle)
+
+    registrar = getattr(paper_module, registrar_name)
+    with pytest.raises(RuntimeError, match=message):
+        registrar(book)
+
+    assert paper_module._require_paperbook_operation_lock(book) is original_lock
+    assert tuple(book.tickets) == opening_before == (ticket.ticket_id,)
+    assert tuple(book._lifecycle) == lifecycle_before
+
+
 def test_operation_lock_dispatch_ignores_module_rebinding(monkeypatch) -> None:
     book = PaperBook("100")
     attacker_calls = 0

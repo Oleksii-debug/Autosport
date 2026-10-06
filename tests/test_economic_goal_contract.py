@@ -474,6 +474,8 @@ def test_contract_authority_rejects_direct_type_mutation() -> None:
         raise AssertionError("direct type mutation executed")
 
     for name, replacement in (
+        ("__init__", forged_validator),
+        ("__post_init__", forged_validator),
         ("validate_automatic_successor", forged_validator),
         ("_authority_operations_sealed", False),
     ):
@@ -586,11 +588,21 @@ def test_contract_constructor_rejects_code_rebinding() -> None:
         operation.__code__ = original_code
 
 
-def test_contract_constructor_ignores_rebound_post_init(monkeypatch) -> None:
-    def forged_post_init(self) -> None:
-        raise AssertionError("rebound contract post-init executed")
+def test_contract_constructor_and_post_init_bindings_are_sealed() -> None:
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound contract constructor authority executed")
 
-    monkeypatch.setattr(EconomicGoalContract, "__post_init__", forged_post_init)
+    for name in ("__init__", "__post_init__"):
+        with pytest.raises(
+            TypeError,
+            match="public authority operation binding is immutable",
+        ):
+            setattr(EconomicGoalContract, name, forged)
+        with pytest.raises(
+            TypeError,
+            match="public authority operation binding is immutable",
+        ):
+            type.__setattr__(EconomicGoalContract, name, forged)
 
     with pytest.raises(EconomicGoalContractError, match="between 0 and 1"):
         _goal(max_stake_fraction=Decimal("2"))

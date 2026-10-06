@@ -197,9 +197,15 @@ class BetfairMarketBookPerMarketRateGate:
             # Frozen restart DTOs are not a trust boundary: object.__setattr__
             # can tamper them after construction. Re-run both the aggregate and
             # nested validators before importing any persisted capacity state.
-            MarketBookRateGateState.__post_init__(state)
+            if type(state.markets) is not tuple:
+                raise TypeError("markets must be a tuple")
             for market in state.markets:
+                if type(market) is not MarketBookRateWindowState:
+                    raise TypeError(
+                        "markets must contain MarketBookRateWindowState values"
+                    )
                 MarketBookRateWindowState.__post_init__(market)
+            MarketBookRateGateState.__post_init__(state)
             self._last_scheduled_at_utc_us = state.last_scheduled_at_utc_us
             self._accepted = {
                 market.market_id: [

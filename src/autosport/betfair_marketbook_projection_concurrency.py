@@ -175,9 +175,15 @@ class BetfairMarketBookProjectionConcurrencyGate:
             # Revalidate frozen restart DTOs at use time. A caller can mutate a
             # frozen dataclass through object.__setattr__, so construction-time
             # validation alone cannot authorize restored local pressure state.
-            MarketBookProjectionConcurrencyState.__post_init__(state)
+            if type(state.active) is not tuple:
+                raise TypeError("active must be a tuple")
             for lease in state.active:
+                if type(lease) is not MarketBookProjectionLease:
+                    raise TypeError(
+                        "active must contain MarketBookProjectionLease values"
+                    )
                 MarketBookProjectionLease.__post_init__(lease)
+            MarketBookProjectionConcurrencyState.__post_init__(state)
             self._last_observed_at_utc_us = state.last_observed_at_utc_us
             self._active = {lease.request_id: lease for lease in state.active}
             self._next_lease_generation = state.next_lease_generation

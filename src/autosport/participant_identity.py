@@ -278,6 +278,10 @@ class ParticipantIdentityRegistry:
                 raise ParticipantIdentityError("alias correction must preserve source and alias")
             if target.entity_id == alias.entity_id:
                 raise ParticipantIdentityError("alias correction must change entity")
+            if self._entities[target.entity_id].kind is not self._entities[alias.entity_id].kind:
+                raise ParticipantIdentityError(
+                    "alias correction identities must have the same EntityKind"
+                )
             if not _overlap(target.valid_from, target.valid_until, alias.valid_from, alias.valid_until):
                 raise ParticipantIdentityError("alias correction must overlap superseded interval")
             if _instant("available_at", alias.available_at) <= _instant("available_at", target.available_at):

@@ -7,18 +7,25 @@ import pytest
 from autosport.betfair_account_readonly import (
     BETTING_JSON_RPC_ENDPOINT,
     BetfairReadOnlyClient,
+    BetfairReadOnlyError,
     BetfairSessionCredentials,
 )
 from autosport.betfair_marketbook_batch_completeness import BatchReceiptStatus
+from autosport.betfair_marketbook_rate_gate import BetfairMarketBookPerMarketRateGate
+from autosport.betfair_marketbook_projection_concurrency import (
+    BetfairMarketBookProjectionConcurrencyGate,
+)
 from autosport.betfair_marketbook_batch_plan import MarketBookReadPlan
 from autosport.betfair_marketbook_attempt_history import (
     MarketBookAttemptHistory,
     MarketBookAttemptOutcome,
 )
 from autosport.betfair_marketbook_batch_transport import (
+    MarketBookBatchAdmissionError,
     MarketBookBatchTransportError,
     MarketBookBatchTransportResult,
     append_market_book_transport_attempt,
+    execute_market_book_batch_attempt,
     read_market_book_batch,
 )
 
@@ -74,6 +81,26 @@ def _plan(market_ids=("1.001", "1.002"), **kwargs) -> MarketBookReadPlan:
     )
 
 
+def _gates():
+    return (
+        BetfairMarketBookPerMarketRateGate(),
+        BetfairMarketBookProjectionConcurrencyGate(),
+    )
+
+
+def _read(client, plan, *, batch_id, request_id="request-1", scheduled_at=NOW):
+    rate_gate, concurrency_gate = _gates()
+    return read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch_id,
+        request_id=request_id,
+        scheduled_at=scheduled_at,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+
 def test_exact_batch_read_maps_full_canonical_contract_to_wire_and_origin_binds_result():
     plan = _plan(
         price_data=("EX_BEST_OFFERS",),
@@ -95,7 +122,7 @@ def test_exact_batch_read_maps_full_canonical_contract_to_wire_and_origin_binds_
     batch = plan.batches[0]
     client, transport = _client(_payload(batch.market_ids))
 
-    result = read_market_book_batch(client, plan, batch_id=batch.batch_id)
+    result = _read(client, plan, batch_id=batch.batch_id)
 
     result.assert_issued()
     with pytest.raises(
@@ -153,7 +180,7 @@ def test_incomplete_provider_response_remains_structurally_incomplete():
     batch = plan.batches[0]
     client, _ = _client(_payload(("1.001",)))
 
-    result = read_market_book_batch(client, plan, batch_id=batch.batch_id)
+    result = _read(client, plan, batch_id=batch.batch_id)
 
     result.assert_issued()
     assert result.receipt.status is BatchReceiptStatus.INCOMPLETE_RESPONSE
@@ -165,7 +192,7 @@ def test_forged_copy_cannot_inherit_transport_issuance():
     plan = _plan()
     batch = plan.batches[0]
     client, _ = _client(_payload(batch.market_ids))
-    issued = read_market_book_batch(client, plan, batch_id=batch.batch_id)
+    issued = _read(client, plan, batch_id=batch.batch_id)
 
     forged = replace(issued)
 
@@ -189,7 +216,7 @@ def test_plan_use_time_mutation_invalidates_old_batch_before_transport():
         MarketBookBatchTransportError,
         match="batch_id must identify exactly one current canonical plan batch",
     ):
-        read_market_book_batch(client, plan, batch_id=old_batch_id)
+        _read(client, plan, batch_id=old_batch_id)
 
     assert transport.calls == []
 
@@ -203,7 +230,7 @@ def test_large_plan_uses_budget_partition_and_dispatches_only_named_batch():
     second = plan.batches[1]
     client, transport = _client(_payload(second.market_ids))
 
-    result = read_market_book_batch(client, plan, batch_id=second.batch_id)
+    result = _read(client, plan, batch_id=second.batch_id)
 
     assert result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
     request = json.loads(transport.calls[0]["body"])
@@ -222,14 +249,14 @@ def test_duplicate_provider_market_rows_fail_closed_as_noncanonical_receipt():
         MarketBookBatchTransportError,
         match="cannot produce canonical structural receipt",
     ):
-        read_market_book_batch(client, plan, batch_id=batch.batch_id)
+        _read(client, plan, batch_id=batch.batch_id)
 
 
 def test_direct_transport_result_construction_cannot_mint_issuance():
     plan = _plan()
     batch = plan.batches[0]
     fake_receipt_client, _ = _client(_payload(batch.market_ids))
-    issued = read_market_book_batch(
+    issued = _read(
         fake_receipt_client,
         plan,
         batch_id=batch.batch_id,
@@ -258,7 +285,7 @@ def test_exact_transport_result_appends_to_canonical_attempt_history():
     history = MarketBookAttemptHistory(plan, ())
     batch = plan.batches[0]
     client, _ = _client(_payload(batch.market_ids))
-    result = read_market_book_batch(client, plan, batch_id=batch.batch_id)
+    result = _read(client, plan, batch_id=batch.batch_id)
 
     updated = append_market_book_transport_attempt(
         history,
@@ -280,7 +307,7 @@ def test_incomplete_transport_result_preserves_required_gap_in_attempt_history()
     history = MarketBookAttemptHistory(plan, ())
     batch = plan.batches[0]
     client, _ = _client(_payload(("1.001",)))
-    result = read_market_book_batch(client, plan, batch_id=batch.batch_id)
+    result = _read(client, plan, batch_id=batch.batch_id)
 
     updated = append_market_book_transport_attempt(
         history,
@@ -301,7 +328,7 @@ def test_forged_transport_result_cannot_be_appended_to_attempt_history():
     history = MarketBookAttemptHistory(plan, ())
     batch = plan.batches[0]
     client, _ = _client(_payload(batch.market_ids))
-    issued = read_market_book_batch(client, plan, batch_id=batch.batch_id)
+    issued = _read(client, plan, batch_id=batch.batch_id)
     forged = replace(issued)
 
     with pytest.raises(
@@ -314,3 +341,215 @@ def test_forged_transport_result_cannot_be_appended_to_attempt_history():
             attempt_id="attempt-forged",
             required=True,
         )
+
+
+def test_projection_concurrency_denial_precedes_rate_reservation_and_transport():
+    plan = _plan(order_projection="EXECUTABLE")
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate = BetfairMarketBookPerMarketRateGate()
+    concurrency_gate = BetfairMarketBookProjectionConcurrencyGate()
+    for index in range(3):
+        decision = concurrency_gate.begin(
+            f"occupied-{index}",
+            observed_at=NOW,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+        assert decision.allowed is True
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="blocked-concurrency",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY
+    assert rate_gate.snapshot().markets == ()
+    assert transport.calls == []
+
+
+def test_rate_denial_releases_projection_lease_without_transport():
+    plan = _plan(
+        market_ids=("1.001",),
+        order_projection="EXECUTABLE",
+    )
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate = BetfairMarketBookPerMarketRateGate()
+    concurrency_gate = BetfairMarketBookProjectionConcurrencyGate()
+    for _ in range(5):
+        assert rate_gate.reserve(("1.001",), scheduled_at=NOW).allowed is True
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="rate-denied",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert concurrency_gate.snapshot().active == ()
+    assert transport.calls == []
+
+
+def test_successful_projection_read_releases_local_concurrency_lease():
+    plan = _plan(order_projection="EXECUTABLE")
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="projection-success",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+    assert len(transport.calls) == 1
+    assert concurrency_gate.snapshot().active == ()
+
+
+def test_attempt_executor_records_rate_denial_as_required_gap():
+    plan = _plan(market_ids=("1.001",))
+    history = MarketBookAttemptHistory(plan, ())
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    for _ in range(5):
+        assert rate_gate.reserve(("1.001",), scheduled_at=NOW).allowed is True
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="attempt-rate",
+        required=True,
+        request_id="attempt-rate-request",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert execution.result is None
+    assert execution.history.required_gap_attempt_ids == ("attempt-rate",)
+    assert transport.calls == []
+
+
+def test_attempt_executor_records_transport_failure_and_releases_projection_lease():
+    class RaisingTransport:
+        def post(self, url, *, headers, body, timeout_seconds):
+            raise BetfairReadOnlyError("network failed")
+
+    plan = _plan(
+        market_ids=("1.001",),
+        order_projection="EXECUTABLE",
+    )
+    history = MarketBookAttemptHistory(plan, ())
+    batch = plan.batches[0]
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=RaisingTransport(),
+        clock=lambda: NOW,
+    )
+    rate_gate, concurrency_gate = _gates()
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="attempt-transport",
+        required=True,
+        request_id="transport-failure",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.TRANSPORT_FAILURE
+    assert execution.result is None
+    assert execution.history.required_gap_attempt_ids == ("attempt-transport",)
+    assert concurrency_gate.snapshot().active == ()
+    state = rate_gate.snapshot()
+    assert state.markets[0].market_id == "1.001"
+    assert len(state.markets[0].accepted_at_utc_us) == 1
+
+
+def test_attempt_executor_records_provider_and_protocol_failures():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+
+    provider_payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "error": {"code": -32099, "message": "provider rejected"},
+            "id": 1,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    provider_client, _ = _client(provider_payload)
+    rate_gate, concurrency_gate = _gates()
+    provider_execution = execute_market_book_batch_attempt(
+        provider_client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="attempt-provider",
+        required=True,
+        request_id="provider-failure",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+    assert provider_execution.outcome is MarketBookAttemptOutcome.PROVIDER_FAILURE
+
+    protocol_client, _ = _client(b"{")
+    rate_gate, concurrency_gate = _gates()
+    protocol_execution = execute_market_book_batch_attempt(
+        protocol_client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="attempt-protocol",
+        required=True,
+        request_id="protocol-failure",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+    assert protocol_execution.outcome is MarketBookAttemptOutcome.PARSE_FAILURE
+
+
+def test_immediate_dispatch_rejects_future_causal_instant_before_any_gate_mutation():
+    plan = _plan()
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+    with pytest.raises(ValueError, match="must not be in the future"):
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="future",
+            scheduled_at=future,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert rate_gate.snapshot().markets == ()
+    assert concurrency_gate.snapshot().active == ()
+    assert transport.calls == []

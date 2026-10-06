@@ -9,6 +9,7 @@ authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from weakref import ref
@@ -29,10 +30,27 @@ from .betfair_marketbook_attempt_history import (
     MarketBookAttemptOutcome,
     MarketBookAttemptRecord,
 )
+from .betfair_marketbook_rate_gate import BetfairMarketBookPerMarketRateGate
+from .betfair_marketbook_projection_concurrency import (
+    BetfairMarketBookProjectionConcurrencyGate,
+)
 
 
 class MarketBookBatchTransportError(RuntimeError):
     """Raised when a planned MarketBook batch cannot be dispatched canonically."""
+
+
+class MarketBookBatchAdmissionError(MarketBookBatchTransportError):
+    """Expected local admission denial; no provider request was dispatched."""
+
+    def __init__(self, outcome: MarketBookAttemptOutcome, message: str) -> None:
+        if outcome not in {
+            MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
+            MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY,
+        }:
+            raise ValueError("admission outcome must be a NOT_DISPATCHED outcome")
+        super().__init__(message)
+        self.outcome = outcome
 
 
 def _canonical_json(value: object) -> str:
@@ -67,6 +85,31 @@ def _sha256_token(value: object, field: str) -> str:
     if len(token) != 64 or any(char not in "0123456789abcdef" for char in token):
         raise MarketBookBatchTransportError(f"{field} must be lowercase sha256")
     return token
+
+
+def _dispatch_instant(value: object) -> datetime:
+    if type(value) is not datetime:
+        raise TypeError("scheduled_at must be an exact datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("scheduled_at must be timezone-aware")
+    normalized = value.astimezone(timezone.utc)
+    if normalized > datetime.now(timezone.utc):
+        raise ValueError("scheduled_at must not be in the future")
+    return value
+
+
+def _release_projection_lease(
+    gate: BetfairMarketBookProjectionConcurrencyGate,
+    request_id: str,
+    lease_generation: int | None,
+) -> None:
+    if lease_generation is None:
+        return
+    gate.complete(
+        request_id,
+        lease_generation=lease_generation,
+        observed_at=datetime.now(timezone.utc),
+    )
 
 
 def _canonical_batch(
@@ -261,7 +304,7 @@ def _read_market_book_batch(
     try:
         receipt = MarketBookBatchReceipt.from_response(batch, list(response.rows))
     except MarketBookCompletenessError as exc:
-        raise MarketBookBatchTransportError(
+        raise _transport.BetfairMarketBookProtocolError(
             "MarketBook response cannot produce canonical structural receipt"
         ) from exc
 
@@ -323,6 +366,66 @@ def append_market_book_transport_attempt(
     return MarketBookAttemptHistory(history.plan, history.records + (record,))
 
 
+def _append_nonresponse_attempt(
+    history: MarketBookAttemptHistory,
+    *,
+    batch_id: str,
+    attempt_id: str,
+    required: bool,
+    outcome: MarketBookAttemptOutcome,
+) -> MarketBookAttemptHistory:
+    if outcome not in {
+        MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
+        MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY,
+        MarketBookAttemptOutcome.PROVIDER_FAILURE,
+        MarketBookAttemptOutcome.TRANSPORT_FAILURE,
+        MarketBookAttemptOutcome.PARSE_FAILURE,
+    }:
+        raise MarketBookBatchTransportError(
+            "nonresponse attempt outcome is not supported by this coordinator"
+        )
+    _canonical_batch(history.plan, batch_id)
+    previous = history.records[-1] if history.records else None
+    record = MarketBookAttemptRecord.issue(
+        history.plan,
+        attempt_id=attempt_id,
+        sequence=len(history.records) + 1,
+        batch_id=batch_id,
+        required=required,
+        outcome=outcome,
+        exact_receipt=None,
+        previous_record=previous,
+    )
+    return MarketBookAttemptHistory(history.plan, history.records + (record,))
+
+
+@dataclass(frozen=True, slots=True)
+class MarketBookBatchAttemptExecution:
+    history: MarketBookAttemptHistory
+    outcome: MarketBookAttemptOutcome
+    result: MarketBookBatchTransportResult | None
+
+    def __post_init__(self) -> None:
+        if type(self.history) is not MarketBookAttemptHistory:
+            raise TypeError("history must be an exact MarketBookAttemptHistory")
+        if not isinstance(self.outcome, MarketBookAttemptOutcome):
+            raise TypeError("outcome must be MarketBookAttemptOutcome")
+        response_outcomes = {
+            MarketBookAttemptOutcome.EXACT_RESPONSE,
+            MarketBookAttemptOutcome.INCOMPLETE_RESPONSE,
+        }
+        if self.outcome in response_outcomes:
+            if type(self.result) is not MarketBookBatchTransportResult:
+                raise MarketBookBatchTransportError(
+                    "response outcome requires canonical transport result"
+                )
+            self.result.assert_issued()
+        elif self.result is not None:
+            raise MarketBookBatchTransportError(
+                "nonresponse outcome cannot carry transport result"
+            )
+
+
 def _install_transport_result_authority() -> None:
     issued: dict[int, tuple[object, str, bool]] = {}
     validate = MarketBookBatchTransportResult.__post_init__
@@ -332,8 +435,73 @@ def _install_transport_result_authority() -> None:
         plan: MarketBookReadPlan,
         *,
         batch_id: str,
+        request_id: str,
+        scheduled_at: datetime,
+        rate_gate: BetfairMarketBookPerMarketRateGate,
+        concurrency_gate: BetfairMarketBookProjectionConcurrencyGate,
     ) -> MarketBookBatchTransportResult:
-        result = _read_market_book_batch(client, plan, batch_id=batch_id)
+        if type(rate_gate) is not BetfairMarketBookPerMarketRateGate:
+            raise TypeError("rate_gate must be exact BetfairMarketBookPerMarketRateGate")
+        if type(concurrency_gate) is not BetfairMarketBookProjectionConcurrencyGate:
+            raise TypeError(
+                "concurrency_gate must be exact BetfairMarketBookProjectionConcurrencyGate"
+            )
+        request = _token(request_id, "request_id")
+        instant = _dispatch_instant(scheduled_at)
+
+        batch = _canonical_batch(plan, batch_id)
+        params = _params_for_batch(plan, batch)
+        wire_budget = _transport._market_book_request_budget(params)
+        if wire_budget.evidence_id != batch.budget_evidence_id:
+            raise MarketBookBatchTransportError(
+                "wire-derived request budget does not match the canonical planned batch"
+            )
+
+        contract = plan.request_contract_payload
+        concurrency_decision = concurrency_gate.begin(
+            request,
+            observed_at=instant,
+            has_order_projection=contract["order_projection"] is not None,
+            has_match_projection=contract["match_projection"] is not None,
+        )
+        if concurrency_decision.allowed is not True:
+            raise MarketBookBatchAdmissionError(
+                MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY,
+                "MarketBook projection concurrency gate denied local admission",
+            )
+
+        lease_generation = concurrency_decision.lease_generation
+        try:
+            rate_decision = rate_gate.reserve(
+                batch.market_ids,
+                scheduled_at=instant,
+            )
+        except Exception:
+            _release_projection_lease(
+                concurrency_gate,
+                request,
+                lease_generation,
+            )
+            raise
+        if rate_decision.allowed is not True:
+            _release_projection_lease(
+                concurrency_gate,
+                request,
+                lease_generation,
+            )
+            raise MarketBookBatchAdmissionError(
+                MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
+                "MarketBook per-market rate gate denied local admission",
+            )
+
+        try:
+            result = _read_market_book_batch(client, plan, batch_id=batch_id)
+        finally:
+            _release_projection_lease(
+                concurrency_gate,
+                request,
+                lease_generation,
+            )
         key = id(result)
 
         def forget(_weakref: object, *, result_id: int = key) -> None:
@@ -382,3 +550,85 @@ def _install_transport_result_authority() -> None:
 
 _install_transport_result_authority()
 del _install_transport_result_authority
+
+
+def execute_market_book_batch_attempt(
+    client: _base.BetfairReadOnlyClient,
+    history: MarketBookAttemptHistory,
+    *,
+    batch_id: str,
+    attempt_id: str,
+    required: bool,
+    request_id: str,
+    scheduled_at: datetime,
+    rate_gate: BetfairMarketBookPerMarketRateGate,
+    concurrency_gate: BetfairMarketBookProjectionConcurrencyGate,
+) -> MarketBookBatchAttemptExecution:
+    """Execute one admitted read and durably classify its structural attempt truth."""
+
+    if type(history) is not MarketBookAttemptHistory:
+        raise TypeError("history must be an exact MarketBookAttemptHistory")
+
+    try:
+        result = read_market_book_batch(
+            client,
+            history.plan,
+            batch_id=batch_id,
+            request_id=request_id,
+            scheduled_at=scheduled_at,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+    except MarketBookBatchAdmissionError as exc:
+        outcome = exc.outcome
+        updated = _append_nonresponse_attempt(
+            history,
+            batch_id=batch_id,
+            attempt_id=attempt_id,
+            required=required,
+            outcome=outcome,
+        )
+        return MarketBookBatchAttemptExecution(updated, outcome, None)
+    except _transport.BetfairMarketBookTransportError:
+        outcome = MarketBookAttemptOutcome.TRANSPORT_FAILURE
+        updated = _append_nonresponse_attempt(
+            history,
+            batch_id=batch_id,
+            attempt_id=attempt_id,
+            required=required,
+            outcome=outcome,
+        )
+        return MarketBookBatchAttemptExecution(updated, outcome, None)
+    except _transport.BetfairMarketBookProviderError:
+        outcome = MarketBookAttemptOutcome.PROVIDER_FAILURE
+        updated = _append_nonresponse_attempt(
+            history,
+            batch_id=batch_id,
+            attempt_id=attempt_id,
+            required=required,
+            outcome=outcome,
+        )
+        return MarketBookBatchAttemptExecution(updated, outcome, None)
+    except _transport.BetfairMarketBookProtocolError:
+        outcome = MarketBookAttemptOutcome.PARSE_FAILURE
+        updated = _append_nonresponse_attempt(
+            history,
+            batch_id=batch_id,
+            attempt_id=attempt_id,
+            required=required,
+            outcome=outcome,
+        )
+        return MarketBookBatchAttemptExecution(updated, outcome, None)
+
+    updated = append_market_book_transport_attempt(
+        history,
+        result,
+        attempt_id=attempt_id,
+        required=required,
+    )
+    outcome = (
+        MarketBookAttemptOutcome.EXACT_RESPONSE
+        if result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+        else MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
+    )
+    return MarketBookBatchAttemptExecution(updated, outcome, result)

@@ -29,7 +29,7 @@ from .execution_scope_admission import ExecutionScopePreAdmission
 from .supervised_execution import BoundSupervisedExecutionPlan
 
 
-class ProviderAccountFundingError(ValueError):
+_MAX_FUNDING_DECIMAL_TEXT_LENGTH = 8192\n\n\nclass ProviderAccountFundingError(ValueError):
     """Canonical funding inputs conflict or cannot be interpreted safely."""
 
 
@@ -78,6 +78,20 @@ def _money(value: object, field: str) -> Decimal:
     if type(value) is not Decimal or not value.is_finite() or value < 0:
         raise ProviderAccountFundingError(
             f"{field} must be an exact finite non-negative Decimal"
+        )
+    sign, digits, exponent = value.as_tuple()
+    if sign or not isinstance(exponent, int):
+        raise ProviderAccountFundingError(
+            f"{field} must be an exact finite non-negative Decimal"
+        )
+    if exponent >= 0:
+        rendered_length = len(digits) + exponent
+    else:
+        point = len(digits) + exponent
+        rendered_length = len(digits) + 1 if point > 0 else 2 - exponent
+    if rendered_length > _MAX_FUNDING_DECIMAL_TEXT_LENGTH:
+        raise ProviderAccountFundingError(
+            f"{field} fixed-point representation exceeds resource limit"
         )
     return value
 

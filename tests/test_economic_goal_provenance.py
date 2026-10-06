@@ -69,6 +69,52 @@ def test_provenance_is_deterministic_and_revision_specific() -> None:
     assert changed_provenance.decision_identity != first.decision_identity
 
 
+def test_decision_identity_rejects_provenance_mutation_between_snapshots() -> None:
+    evidence = provenance_for(_goal())
+    canonical_snapshot = economic_goal_provenance_module._canonical_provenance_snapshot
+    mutated = False
+
+    def snapshot_then_mutate(provenance):
+        nonlocal mutated
+        snapshot = canonical_snapshot(provenance)
+        if not mutated:
+            object.__setattr__(evidence, "goal_id", "mutated-after-snapshot")
+            object.__setattr__(evidence, "revision", 999)
+            mutated = True
+        return snapshot
+
+    with pytest.raises(
+        EconomicGoalProvenanceError,
+        match="changed during identity derivation",
+    ):
+        economic_goal_provenance_module._decision_identity_bound(
+            evidence,
+            _snapshot=snapshot_then_mutate,
+        )
+
+    assert mutated is True
+
+
+def test_decision_identity_ignores_rebound_bound_implementation(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    expected = evidence.decision_identity
+    called = False
+
+    def forged(*args: object, **kwargs: object) -> str:
+        nonlocal called
+        called = True
+        raise AssertionError("rebound decision identity implementation executed")
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_decision_identity_bound",
+        forged,
+    )
+
+    assert evidence.decision_identity == expected
+    assert called is False
+
+
 def test_provenance_verifies_after_durable_restart_readback(tmp_path) -> None:
     goal = _goal()
     store = EconomicGoalStore(tmp_path)

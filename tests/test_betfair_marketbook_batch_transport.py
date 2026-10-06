@@ -3119,6 +3119,8 @@ def test_failure_cleanup_seals_nested_release_rebind(monkeypatch):
         ("_normalize_market_ids", lambda *args, **kwargs: ("9.999",)),
         ("_utc_microseconds", lambda *args, **kwargs: 0),
         ("MarketBookRateDecision", object),
+        ("_MAX_CALLS_PER_WINDOW", 999),
+        ("_WINDOW_MICROSECONDS", 1),
     ),
 )
 def test_transport_rejects_rebound_rate_gate_primitives_before_mutation(
@@ -3156,6 +3158,8 @@ def test_transport_rejects_rebound_rate_gate_primitives_before_mutation(
         ("_validate_request_id", lambda *args, **kwargs: "forged-request"),
         ("_utc_microseconds", lambda *args, **kwargs: 0),
         ("MarketBookProjectionConcurrencyDecision", object),
+        ("MarketBookProjectionLease", object),
+        ("_MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED", 999),
     ),
 )
 def test_transport_rejects_rebound_projection_gate_primitives_before_mutation(

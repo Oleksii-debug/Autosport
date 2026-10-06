@@ -28,6 +28,7 @@ from . import betfair_marketbook_request_budget as _marketbook_budget
 
 _ONE_SECOND_NS = 1_000_000_000
 _MAX_MARKET_BOOK_PER_MARKET_PER_SECOND = 5
+_MAX_MUTATION_INSTRUCTIONS_PER_SECOND = 1000
 _ORDER_PROJECTIONS = frozenset({"ALL", "EXECUTABLE", "EXECUTION_COMPLETE"})
 _MATCH_PROJECTIONS = frozenset(
     {"NO_ROLLUP", "ROLLED_UP_BY_PRICE", "ROLLED_UP_BY_AVG_PRICE"}
@@ -262,6 +263,7 @@ class BetfairRequestIntent:
     best_prices_depth: int | None = None
     order_projection: str | None = None
     match_projection: str | None = None
+    mutation_instruction_count: int | None = None
     dedupe_key: str | None = None
     reconciliation_for_request_id: str | None = None
     _market_book_params_json: str | None = field(
@@ -338,6 +340,18 @@ class BetfairRequestIntent:
             )
 
         if self.operation in _MUTATION_OPERATIONS:
+            if self.mutation_instruction_count is None:
+                raise BetfairRequestBudgetError(
+                    "provider mutation requires mutation_instruction_count"
+                )
+            instruction_count = _positive_int(
+                self.mutation_instruction_count,
+                "mutation_instruction_count",
+            )
+            if instruction_count > _MAX_MUTATION_INSTRUCTIONS_PER_SECOND:
+                raise BetfairRequestBudgetError(
+                    "provider mutation instruction count exceeds 1000 per request"
+                )
             if self.dedupe_key is not None:
                 raise BetfairRequestBudgetError(
                     "provider mutations cannot use read coalescing dedupe_key"
@@ -351,6 +365,10 @@ class BetfairRequestIntent:
                 raise BetfairRequestBudgetError(
                     "place/update/replace must use EXECUTION_MUTATION priority"
                 )
+        elif self.mutation_instruction_count is not None:
+            raise BetfairRequestBudgetError(
+                "mutation_instruction_count is only valid for provider mutations"
+            )
 
     def _assert_market_book_origin(self) -> str:
         if self.operation is not BetfairRequestOperation.LIST_MARKET_BOOK:
@@ -543,10 +561,23 @@ class BetfairPoolBackoff:
 
 
 @dataclass(frozen=True, slots=True)
+class BetfairMutationInstructionDispatch:
+    instruction_count: int
+    dispatched_monotonic_ns: int
+
+    def __post_init__(self) -> None:
+        _positive_int(self.instruction_count, "instruction_count")
+        _nonnegative_int(self.dispatched_monotonic_ns, "dispatched_monotonic_ns")
+
+
+@dataclass(frozen=True, slots=True)
 class BetfairRequestBudgetState:
     """Process-local rate state plus externally re-resolved UNKNOWN mutation ids."""
 
     recent_market_book_dispatches: tuple[BetfairMarketBookDispatch, ...] = ()
+    recent_mutation_instruction_dispatches: tuple[
+        BetfairMutationInstructionDispatch, ...
+    ] = ()
     in_flight_shared_order_reads: int = 0
     in_flight_cleared_orders: int = 0
     in_flight_market_data: int = 0
@@ -567,6 +598,15 @@ class BetfairRequestBudgetState:
             if type(item) is not BetfairMarketBookDispatch:
                 raise BetfairRequestBudgetError(
                     "recent_market_book_dispatches must contain exact dispatch values"
+                )
+        if type(self.recent_mutation_instruction_dispatches) is not tuple:
+            raise BetfairRequestBudgetError(
+                "recent_mutation_instruction_dispatches must be a tuple"
+            )
+        for item in self.recent_mutation_instruction_dispatches:
+            if type(item) is not BetfairMutationInstructionDispatch:
+                raise BetfairRequestBudgetError(
+                    "recent_mutation_instruction_dispatches must contain exact dispatch values"
                 )
         for field in (
             "in_flight_shared_order_reads",
@@ -713,6 +753,36 @@ def _market_book_retry_after(
     return retry_after
 
 
+def _mutation_instruction_retry_after(
+    intent: BetfairRequestIntent,
+    state: BetfairRequestBudgetState,
+    now_monotonic_ns: int,
+) -> int | None:
+    if intent.operation not in _MUTATION_OPERATIONS:
+        return None
+    assert intent.mutation_instruction_count is not None
+    lower_bound = now_monotonic_ns - _ONE_SECOND_NS
+    active = sorted(
+        (
+            dispatch.dispatched_monotonic_ns,
+            dispatch.instruction_count,
+        )
+        for dispatch in state.recent_mutation_instruction_dispatches
+        if dispatch.dispatched_monotonic_ns > lower_bound
+        and dispatch.dispatched_monotonic_ns <= now_monotonic_ns
+    )
+    prospective = intent.mutation_instruction_count + sum(
+        count for _, count in active
+    )
+    if prospective <= _MAX_MUTATION_INSTRUCTIONS_PER_SECOND:
+        return None
+    for dispatched_at, count in active:
+        prospective -= count
+        if prospective <= _MAX_MUTATION_INSTRUCTIONS_PER_SECOND:
+            return dispatched_at + _ONE_SECOND_NS
+    return now_monotonic_ns + _ONE_SECOND_NS
+
+
 def admit_betfair_request(
     intent: BetfairRequestIntent,
     *,
@@ -748,6 +818,13 @@ def admit_betfair_request(
     ):
         raise BetfairRequestBudgetError(
             "market-book dispatch history cannot be from the future clock state"
+        )
+    if any(
+        dispatch.dispatched_monotonic_ns > now
+        for dispatch in state.recent_mutation_instruction_dispatches
+    ):
+        raise BetfairRequestBudgetError(
+            "mutation instruction dispatch history cannot be from the future clock state"
         )
 
     if (
@@ -822,6 +899,14 @@ def admit_betfair_request(
             BetfairAdmissionDecision.THROTTLE,
             "listMarketBook per-market rolling rate budget exhausted",
             market_retry,
+        )
+
+    mutation_retry = _mutation_instruction_retry_after(intent, state, now)
+    if mutation_retry is not None and now < mutation_retry:
+        return BetfairAdmission(
+            BetfairAdmissionDecision.THROTTLE,
+            "provider mutation rolling instruction budget exhausted",
+            mutation_retry,
         )
 
     in_flight = _pool_in_flight(state, pool)
@@ -921,6 +1006,38 @@ def record_market_book_dispatch(
     )
 
 
+def record_mutation_instruction_dispatch(
+    state: BetfairRequestBudgetState,
+    *,
+    intent: BetfairRequestIntent,
+    now_monotonic_ns: int,
+) -> BetfairRequestBudgetState:
+    """Record one admitted provider-mutation instruction batch for the 1s fence."""
+
+    if type(state) is not BetfairRequestBudgetState:
+        raise BetfairRequestBudgetError("state must be an exact BetfairRequestBudgetState")
+    if type(intent) is not BetfairRequestIntent:
+        raise BetfairRequestBudgetError("intent must be an exact BetfairRequestIntent")
+    if intent.operation not in _MUTATION_OPERATIONS:
+        raise BetfairRequestBudgetError(
+            "record_mutation_instruction_dispatch requires provider mutation intent"
+        )
+    assert intent.mutation_instruction_count is not None
+    now = _nonnegative_int(now_monotonic_ns, "now_monotonic_ns")
+    lower_bound = now - _ONE_SECOND_NS
+    retained = tuple(
+        dispatch
+        for dispatch in state.recent_mutation_instruction_dispatches
+        if dispatch.dispatched_monotonic_ns > lower_bound
+        and dispatch.dispatched_monotonic_ns <= now
+    )
+    return replace(
+        state,
+        recent_mutation_instruction_dispatches=retained
+        + (BetfairMutationInstructionDispatch(intent.mutation_instruction_count, now),),
+    )
+
+
 def _pool_counter_field(pool: BetfairRequestPool) -> str:
     return {
         BetfairRequestPool.SHARED_ORDER_READ: "in_flight_shared_order_reads",
@@ -948,6 +1065,12 @@ def _reserve_admitted_request(
     )
     if intent.operation is BetfairRequestOperation.LIST_MARKET_BOOK:
         reserved = record_market_book_dispatch(
+            reserved,
+            intent=intent,
+            now_monotonic_ns=now_monotonic_ns,
+        )
+    elif intent.operation in _MUTATION_OPERATIONS:
+        reserved = record_mutation_instruction_dispatch(
             reserved,
             intent=intent,
             now_monotonic_ns=now_monotonic_ns,

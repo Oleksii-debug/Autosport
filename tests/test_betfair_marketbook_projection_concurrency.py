@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from threading import Barrier, Thread
 
 import pytest
@@ -980,3 +980,30 @@ def test_projection_decision_construction_ignores_rebound_field_descriptor(
 
     assert decision.allowed is True
     assert decision.lease_generation == 1
+
+
+def test_projection_timezone_offset_is_observed_once_before_gate_lock() -> None:
+    class ChangingOffset(tzinfo):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def utcoffset(self, dt):
+            self.calls += 1
+            return timedelta(hours=self.calls)
+
+        def dst(self, dt):
+            return timedelta(0)
+
+    zone = ChangingOffset()
+    local = datetime(2026, 9, 22, 1, 0, 0, tzinfo=zone)
+    value = BetfairMarketBookProjectionConcurrencyGate()
+
+    decision = value.begin(
+        "r0",
+        observed_at=local,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+
+    assert zone.calls == 1
+    assert decision.observed_at_utc_us == int(T0.timestamp() * 1_000_000)

@@ -194,6 +194,7 @@ def _install_rate_gate_authority() -> None:
     timedelta_type = timedelta
     utc_timezone = timezone.utc
     epoch = datetime_type(1970, 1, 1, tzinfo=utc_timezone)
+    epoch_naive = datetime_type(1970, 1, 1)
     policy_version = BETFAIR_MARKETBOOK_RATE_POLICY_VERSION
     max_calls = _MAX_CALLS_PER_WINDOW
     window_us = _WINDOW_MICROSECONDS
@@ -232,10 +233,16 @@ def _install_rate_gate_authority() -> None:
     def utc_microseconds(value: object) -> int:
         if type(value) is not datetime_type:
             raise TypeError("scheduled_at must be exact datetime")
-        if value.tzinfo is None or value.utcoffset() is None:
+        if value.tzinfo is None:
             raise ValueError("scheduled_at must be timezone-aware")
-        utc_value = value.astimezone(utc_timezone)
-        delta = utc_value - epoch
+        offset = value.utcoffset()
+        if offset is None:
+            raise ValueError("scheduled_at must be timezone-aware")
+        if type(offset) is not timedelta_type:
+            raise TypeError("scheduled_at UTC offset must be exact timedelta")
+        local_naive = value.replace(tzinfo=None)
+        utc_naive = local_naive - offset
+        delta = utc_naive - epoch_naive
         return (
             delta.days * 86_400 * 1_000_000
             + delta.seconds * 1_000_000

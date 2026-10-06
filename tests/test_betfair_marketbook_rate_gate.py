@@ -825,3 +825,25 @@ def test_rate_decision_time_property_ignores_rebound_timestamp_descriptor(
     )
 
     assert decision.scheduled_at == T0
+
+
+def test_rate_timezone_offset_is_observed_once_before_gate_lock() -> None:
+    class ChangingOffset(tzinfo):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def utcoffset(self, dt):
+            self.calls += 1
+            return timedelta(hours=self.calls)
+
+        def dst(self, dt):
+            return timedelta(0)
+
+    zone = ChangingOffset()
+    local = datetime(2026, 9, 22, 1, 0, 0, tzinfo=zone)
+    value = BetfairMarketBookPerMarketRateGate()
+
+    decision = value.reserve(("1.234",), scheduled_at=local)
+
+    assert zone.calls == 1
+    assert decision.scheduled_at == T0

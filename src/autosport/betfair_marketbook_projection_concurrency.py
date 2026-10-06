@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import RLock
 
 
@@ -167,8 +167,8 @@ def _install_projection_gate_authority() -> None:
     decision_type = MarketBookProjectionConcurrencyDecision
     lock_type = RLock
     datetime_type = datetime
-    utc_timezone = timezone.utc
-    epoch = datetime_type(1970, 1, 1, tzinfo=utc_timezone)
+    timedelta_type = timedelta
+    epoch_naive = datetime_type(1970, 1, 1)
     policy_version = BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION
     max_unresolved = _MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
     object_getattribute = object.__getattribute__
@@ -199,10 +199,16 @@ def _install_projection_gate_authority() -> None:
     def utc_microseconds(value: object, *, name: str) -> int:
         if type(value) is not datetime_type:
             raise TypeError(f"{name} must be exact datetime")
-        if value.tzinfo is None or value.utcoffset() is None:
+        if value.tzinfo is None:
             raise ValueError(f"{name} must be timezone-aware")
-        utc_value = value.astimezone(utc_timezone)
-        delta = utc_value - epoch
+        offset = value.utcoffset()
+        if offset is None:
+            raise ValueError(f"{name} must be timezone-aware")
+        if type(offset) is not timedelta_type:
+            raise TypeError(f"{name} UTC offset must be exact timedelta")
+        local_naive = value.replace(tzinfo=None)
+        utc_naive = local_naive - offset
+        delta = utc_naive - epoch_naive
         return (
             delta.days * 86_400 * 1_000_000
             + delta.seconds * 1_000_000

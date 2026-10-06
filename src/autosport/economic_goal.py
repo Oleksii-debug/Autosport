@@ -45,6 +45,8 @@ class AutomationLevel(IntEnum):
 
 _ZERO: Final = Decimal("0")
 _ONE: Final = Decimal("1")
+_MAX_CANONICAL_TEXT_CHARS: Final = 512
+_MAX_RESTRICTION_MEMBERS: Final = 1024
 
 
 def _canonical_text(name: str, value: object) -> str:
@@ -53,6 +55,10 @@ def _canonical_text(name: str, value: object) -> str:
     if not value or value != value.strip():
         raise EconomicGoalContractError(
             f"{name} must be a non-empty canonical string"
+        )
+    if len(value) > _MAX_CANONICAL_TEXT_CHARS:
+        raise EconomicGoalContractError(
+            f"{name} exceeds the canonical text size limit"
         )
     if "\x00" in value:
         raise EconomicGoalContractError(f"{name} must not contain NUL")
@@ -109,6 +115,10 @@ def _positive_int(name: str, value: object) -> int:
 def _canonical_restrictions(name: str, value: object) -> frozenset[str]:
     if type(value) is not frozenset:
         raise EconomicGoalContractError(f"{name} must be a frozenset of strings")
+    if len(value) > _MAX_RESTRICTION_MEMBERS:
+        raise EconomicGoalContractError(
+            f"{name} exceeds the canonical restriction-count limit"
+        )
     normalized: set[str] = set()
     for item in value:
         normalized.add(_canonical_text(f"{name} member", item))

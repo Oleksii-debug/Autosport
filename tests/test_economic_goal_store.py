@@ -5,6 +5,8 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.economic_goal_store as economic_goal_store_module
+
 from autosport.economic_goal import (
     AutomationLevel,
     EconomicGoalContract,
@@ -305,3 +307,48 @@ def test_payload_encoder_revalidates_post_construction_contract_mutation() -> No
 
     with pytest.raises(EconomicGoalContractError):
         economic_goal_to_payload(goal)
+
+
+def test_payload_encoder_ignores_rebound_codec_authorities(monkeypatch) -> None:
+    goal = _goal()
+    expected = economic_goal_to_payload(goal)
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound goal codec authority executed")
+
+    monkeypatch.setattr(economic_goal_store_module, "EconomicGoalContract", object)
+    monkeypatch.setattr(economic_goal_store_module, "EconomicGoalContractError", RuntimeError)
+
+    assert economic_goal_to_payload(goal) == expected
+
+
+def test_payload_decoder_ignores_rebound_semantic_helpers(monkeypatch) -> None:
+    payload = economic_goal_to_payload(_goal())
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound durable decoder dependency executed")
+
+    monkeypatch.setattr(economic_goal_store_module, "_require_exact_keys", forged)
+    monkeypatch.setattr(economic_goal_store_module, "_decimal_text", forged)
+    monkeypatch.setattr(economic_goal_store_module, "_restriction_set", forged)
+    monkeypatch.setattr(economic_goal_store_module, "EconomicObjective", object)
+    monkeypatch.setattr(economic_goal_store_module, "AutomationLevel", object)
+    monkeypatch.setattr(economic_goal_store_module, "EconomicGoalContract", object)
+
+    restored = economic_goal_from_payload(payload)
+    assert restored == _goal()
+
+
+def test_json_decoder_ignores_rebound_parser_and_payload_decoder(monkeypatch) -> None:
+    payload = economic_goal_to_payload(_goal())
+    import json
+
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound JSON decoder dependency executed")
+
+    monkeypatch.setattr(economic_goal_store_module, "strict_json_loads", forged)
+    monkeypatch.setattr(economic_goal_store_module, "economic_goal_from_payload", forged)
+
+    assert economic_goal_from_json(text) == _goal()

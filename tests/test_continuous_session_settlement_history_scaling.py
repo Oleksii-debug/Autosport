@@ -2674,3 +2674,131 @@ def test_source_projection_rejects_invalid_expected_predecessor_identity() -> No
             raise AssertionError("invalid projection predecessor identity was accepted")
 
         assert (root / "continuous_session.json").read_bytes() == before
+
+
+class _ResolutionRecord:
+    def __init__(self, identity: str, settlement_ref: str) -> None:
+        self.phase = continuous_session.EventPhase.COMPLETED
+        self.settlement_ref = settlement_ref
+        self.identity = identity
+
+
+class _ResolutionLifecycle:
+    def __init__(self, records: tuple[object, ...]) -> None:
+        self._records = records
+
+    def records(self) -> tuple[object, ...]:
+        return self._records
+
+
+class _ResolutionAuthority:
+    def __init__(
+        self,
+        values: tuple[continuous_session.SettlementResolution | None, ...],
+    ) -> None:
+        self._values = list(values)
+
+    def resolve(
+        self,
+        _record: object,
+        *,
+        as_of: str,
+    ) -> continuous_session.SettlementResolution | None:
+        assert as_of
+        return self._values.pop(0)
+
+
+def _resolution_coordinator(
+    records: tuple[object, ...],
+    values: tuple[continuous_session.SettlementResolution | None, ...],
+) -> continuous_session.ContinuousSessionCoordinator:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    coordinator.lifecycle = _ResolutionLifecycle(records)
+    coordinator.outcome_authority = _ResolutionAuthority(values)
+    return coordinator
+
+
+def _resolution(
+    *,
+    evidence_id: str = "evidence-1",
+    outcome: str = "win",
+    digest_char: str = "e",
+    available_at: str = _AT,
+) -> continuous_session.SettlementResolution:
+    return continuous_session.SettlementResolution(
+        event_identity="provider-a:event-1",
+        settlement_ref="settlement-1",
+        quote_outcomes={"quote-1": outcome},
+        evidence_id=evidence_id,
+        evidence_sha256=digest_char * 64,
+        available_at=available_at,
+    )
+
+
+def test_settlement_resolution_collection_deduplicates_identical_evidence() -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    resolution = _resolution()
+    coordinator = _resolution_coordinator(
+        (record, record),
+        (resolution, resolution),
+    )
+
+    collected = coordinator._settlement_resolutions(as_of=_AT)
+
+    assert collected == (resolution,)
+
+
+def test_settlement_resolution_collection_rejects_conflicting_duplicate_evidence() -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    coordinator = _resolution_coordinator(
+        (record, record),
+        (
+            _resolution(outcome="win", digest_char="e"),
+            _resolution(outcome="loss", digest_char="f"),
+        ),
+    )
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "conflicting duplicate evidence_id" in str(exc)
+    else:
+        raise AssertionError("conflicting duplicate settlement evidence was accepted")
+
+
+def test_settlement_resolution_collection_rejects_derived_resolution_type() -> None:
+    class DerivedResolution(continuous_session.SettlementResolution):
+        pass
+
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    derived = DerivedResolution(
+        event_identity="provider-a:event-1",
+        settlement_ref="settlement-1",
+        quote_outcomes={"quote-1": "win"},
+        evidence_id="evidence-derived",
+        evidence_sha256="a" * 64,
+        available_at=_AT,
+    )
+    coordinator = _resolution_coordinator((record,), (derived,))
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "exact SettlementResolution" in str(exc)
+    else:
+        raise AssertionError("derived settlement resolution was accepted")
+
+
+def test_settlement_resolution_collection_normalizes_future_evidence_error() -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    coordinator = _resolution_coordinator(
+        (record,),
+        (_resolution(available_at="2026-09-22T06:21:00+00:00"),),
+    )
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "invalid settlement resolution" in str(exc)
+    else:
+        raise AssertionError("future settlement resolution was accepted")

@@ -614,11 +614,23 @@ class ParticipantIdentityRegistry:
             },
         }
         for collection, expected in record_fields.items():
+            seen_records: set[str] = set()
             for item in raw[collection]:
                 if type(item) is not dict or set(item) != expected:
                     raise ParticipantIdentityError(
                         f"unsupported identity registry {collection} record schema"
                     )
+                canonical_record = json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if canonical_record in seen_records:
+                    raise ParticipantIdentityError(
+                        f"duplicate identity registry {collection} record"
+                    )
+                seen_records.add(canonical_record)
 
         self._loading = True
         try:

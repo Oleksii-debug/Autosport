@@ -280,6 +280,39 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             self.assertEqual(persisted["schema_version"], 1)
             self.assertNotIn("sport", persisted["events"][legacy_identity])
 
+    def test_event_id_with_source_scope_delimiter_fails_before_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = ContinuousEventLifecycle(Path(directory) / "catalog.json")
+            ambiguous = self._catalog_event(event_id="scope:event")
+            with self.assertRaisesRegex(ValueError, "source-scope delimiter"):
+                lifecycle.apply_page(
+                    self._page(1, ambiguous),
+                    discovered_at=(self.START + timedelta(seconds=1)).isoformat(),
+                )
+            self.assertEqual(lifecycle.records(), ())
+
+    def test_pipe_delimiters_are_rejected_from_selector_components(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reserved identity delimiter"):
+            canonical_event_identity(
+                source_id="provider|a",
+                sport="table_tennis",
+                event_id="event-1",
+            )
+        with self.assertRaisesRegex(ValueError, "reserved identity delimiter"):
+            canonical_event_identity(
+                source_id="provider-a",
+                sport="table_tennis",
+                event_id="event|1",
+            )
+
+    def test_colon_bearing_source_id_remains_valid_with_provider_event_id(self) -> None:
+        value = canonical_event_identity(
+            source_id="parlayapi:table_tennis",
+            sport="table_tennis",
+            event_id="event-1",
+        )
+        self.assertTrue(value.startswith("sport-v2-"))
+
     def test_completed_state_is_hidden_before_local_discovery_time(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lifecycle = ContinuousEventLifecycle(Path(directory) / "catalog.json")

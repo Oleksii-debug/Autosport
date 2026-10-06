@@ -959,59 +959,65 @@ _BOUND_STORE_INITIALIZE_OWNER = EconomicGoalStore.initialize_owner
 _BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR = EconomicGoalStore.persist_automatic_successor
 
 
+def _capture_callable_authority_graph(root):
+    """Capture transitive Python-function defaults used as authority dependencies."""
+
+    captured: list[tuple[object, object, object, object, tuple[tuple[str, object], ...]]] = []
+    seen: set[int] = set()
+
+    def visit(candidate) -> None:
+        if not callable(candidate):
+            return
+        identity = id(candidate)
+        if identity in seen:
+            return
+        seen.add(identity)
+
+        code = getattr(candidate, "__code__", None)
+        defaults = getattr(candidate, "__defaults__", None)
+        kwdefaults = getattr(candidate, "__kwdefaults__", None)
+        kwdefault_items = tuple((kwdefaults or {}).items())
+        captured.append((candidate, code, defaults, kwdefaults, kwdefault_items))
+
+        for value in defaults or ():
+            if callable(value):
+                visit(value)
+        for _, value in kwdefault_items:
+            if callable(value):
+                visit(value)
+
+    visit(root)
+    return tuple(captured)
+
+
 def _make_store_callable_authority(operation, label: str):
-    operation_code = operation.__code__
-    operation_defaults = operation.__defaults__
-    operation_kwdefaults = operation.__kwdefaults__
-    operation_kwdefault_items = tuple((operation_kwdefaults or {}).items())
-    nested_callables = tuple(
-        value
-        for value in (operation_defaults or ())
-        if callable(value)
-    )
-    nested_authority = tuple(
-        (
-            callable_object,
-            getattr(callable_object, "__code__", None),
-            getattr(callable_object, "__defaults__", None),
-            getattr(callable_object, "__kwdefaults__", None),
-            tuple((getattr(callable_object, "__kwdefaults__", None) or {}).items()),
-        )
-        for callable_object in nested_callables
-    )
+    authority_graph = _capture_callable_authority_graph(operation)
 
     def require_authority() -> None:
-        if operation.__code__ is not operation_code:
-            raise EconomicGoalContractError(f"{label} authority changed")
-        if operation.__defaults__ is not operation_defaults:
-            raise EconomicGoalContractError(f"{label} defaults authority changed")
-        current_kwdefaults = operation.__kwdefaults__
-        if (
-            current_kwdefaults is not operation_kwdefaults
-            or tuple((current_kwdefaults or {}).items()) != operation_kwdefault_items
-        ):
-            raise EconomicGoalContractError(
-                f"{label} keyword defaults authority changed"
-            )
-        for (
+        for index, (
             callable_object,
             expected_code,
             expected_defaults,
             expected_kwdefaults,
             expected_kwdefault_items,
-        ) in nested_authority:
+        ) in enumerate(authority_graph):
+            suffix = "" if index == 0 else " transitive nested"
             if getattr(callable_object, "__code__", None) is not expected_code:
-                raise EconomicGoalContractError(f"{label} nested authority changed")
+                raise EconomicGoalContractError(
+                    f"{label}{suffix} authority changed"
+                )
             if getattr(callable_object, "__defaults__", None) is not expected_defaults:
-                raise EconomicGoalContractError(f"{label} nested defaults authority changed")
-            current_nested_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
+                raise EconomicGoalContractError(
+                    f"{label}{suffix} defaults authority changed"
+                )
+            current_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
             if (
-                current_nested_kwdefaults is not expected_kwdefaults
-                or tuple((current_nested_kwdefaults or {}).items())
+                current_kwdefaults is not expected_kwdefaults
+                or tuple((current_kwdefaults or {}).items())
                 != expected_kwdefault_items
             ):
                 raise EconomicGoalContractError(
-                    f"{label} nested keyword defaults authority changed"
+                    f"{label}{suffix} keyword defaults authority changed"
                 )
 
     def bound(*args, **kwargs):

@@ -200,6 +200,25 @@ def _install_rate_gate_authority() -> None:
     window_us = _WINDOW_MICROSECONDS
     object_getattribute = object.__getattribute__
     object_setattr = object.__setattr__
+    object_new = object.__new__
+    type_of = type
+    isinstance_fn = isinstance
+    tuple_type = tuple
+    set_type = set
+    str_type = str
+    bytes_type = bytes
+    int_type = int
+    bool_type = bool
+    len_fn = len
+    sorted_fn = sorted
+    max_fn = max
+    any_fn = any
+    type_error = TypeError
+    value_error = ValueError
+    base_exception_type = BaseException
+    exception_type = Exception
+    getattr_fn = getattr
+    callable_fn = callable
     window_market_id_member = window_type.__dict__["market_id"]
     window_accepted_at_member = window_type.__dict__["accepted_at_utc_us"]
     state_policy_version_member = state_type.__dict__["policy_version"]
@@ -214,32 +233,32 @@ def _install_rate_gate_authority() -> None:
     decision_dispatch_authorized_member = decision_type.__dict__["provider_dispatch_authorized"]
 
     def validate_market_id(value: object) -> str:
-        if type(value) is not str:
-            raise TypeError("market_id must be exact str")
+        if type_of(value) is not str_type:
+            raise type_error("market_id must be exact str")
         if not value or value != value.strip():
-            raise ValueError("market_id must be non-empty and trimmed")
+            raise value_error("market_id must be non-empty and trimmed")
         return value
 
     def normalize_market_ids(market_ids: Iterable[str]) -> tuple[str, ...]:
-        if isinstance(market_ids, (str, bytes)):
-            raise TypeError("market_ids must be an iterable of market ids, not text")
-        normalized = tuple(validate_market_id(market_id) for market_id in market_ids)
+        if isinstance_fn(market_ids, (str_type, bytes_type)):
+            raise type_error("market_ids must be an iterable of market ids, not text")
+        normalized = tuple_type(validate_market_id(market_id) for market_id in market_ids)
         if not normalized:
-            raise ValueError("market_ids must not be empty")
-        if len(set(normalized)) != len(normalized):
-            raise ValueError("duplicate market_id in one provider request")
+            raise value_error("market_ids must not be empty")
+        if len_fn(set_type(normalized)) != len_fn(normalized):
+            raise value_error("duplicate market_id in one provider request")
         return normalized
 
     def utc_microseconds(value: object) -> int:
-        if type(value) is not datetime_type:
-            raise TypeError("scheduled_at must be exact datetime")
+        if type_of(value) is not datetime_type:
+            raise type_error("scheduled_at must be exact datetime")
         if value.tzinfo is None:
-            raise ValueError("scheduled_at must be timezone-aware")
+            raise value_error("scheduled_at must be timezone-aware")
         offset = value.utcoffset()
         if offset is None:
-            raise ValueError("scheduled_at must be timezone-aware")
-        if type(offset) is not timedelta_type:
-            raise TypeError("scheduled_at UTC offset must be exact timedelta")
+            raise value_error("scheduled_at must be timezone-aware")
+        if type_of(offset) is not timedelta_type:
+            raise type_error("scheduled_at UTC offset must be exact timedelta")
         local_naive = value.replace(tzinfo=None)
         utc_naive = local_naive - offset
         delta = utc_naive - epoch_naive
@@ -250,52 +269,52 @@ def _install_rate_gate_authority() -> None:
         )
 
     def datetime_from_utc_microseconds(value: int) -> datetime:
-        if type(value) is not int:
-            raise TypeError("UTC microsecond timestamp must be a non-boolean int")
+        if type_of(value) is not int_type:
+            raise type_error("UTC microsecond timestamp must be a non-boolean int")
         return epoch + timedelta_type(microseconds=value)
 
     def validate_window(value: object) -> None:
-        if type(value) is not window_type:
-            raise TypeError("markets must contain MarketBookRateWindowState values")
+        if type_of(value) is not window_type:
+            raise type_error("markets must contain MarketBookRateWindowState values")
         market_id = window_market_id_member.__get__(value, window_type)
         accepted_at_utc_us = window_accepted_at_member.__get__(value, window_type)
         validate_market_id(market_id)
-        if type(accepted_at_utc_us) is not tuple:
-            raise TypeError("accepted_at_utc_us must be a tuple")
+        if type_of(accepted_at_utc_us) is not tuple_type:
+            raise type_error("accepted_at_utc_us must be a tuple")
         if not accepted_at_utc_us:
-            raise ValueError("accepted_at_utc_us must not be empty")
-        if len(accepted_at_utc_us) > max_calls:
-            raise ValueError("rate state exceeds provider maximum calls per window")
+            raise value_error("accepted_at_utc_us must not be empty")
+        if len_fn(accepted_at_utc_us) > max_calls:
+            raise value_error("rate state exceeds provider maximum calls per window")
         previous: int | None = None
         for timestamp in accepted_at_utc_us:
-            if type(timestamp) is not int:
-                raise TypeError("accepted rate timestamp must be a non-boolean int")
+            if type_of(timestamp) is not int_type:
+                raise type_error("accepted rate timestamp must be a non-boolean int")
             if previous is not None and timestamp < previous:
-                raise ValueError("accepted rate timestamps must be monotonic")
+                raise value_error("accepted rate timestamps must be monotonic")
             previous = timestamp
 
     def validate_state(value: object) -> None:
-        if type(value) is not state_type:
-            raise TypeError("state must be MarketBookRateGateState or None")
+        if type_of(value) is not state_type:
+            raise type_error("state must be MarketBookRateGateState or None")
         policy = state_policy_version_member.__get__(value, state_type)
         last_scheduled_at_utc_us = state_last_scheduled_member.__get__(
             value,
             state_type,
         )
         markets = state_markets_member.__get__(value, state_type)
-        if type(policy) is not str or policy != policy_version:
-            raise ValueError("unsupported Betfair MarketBook rate policy version")
+        if type_of(policy) is not str_type or policy != policy_version:
+            raise value_error("unsupported Betfair MarketBook rate policy version")
         if (
             last_scheduled_at_utc_us is not None
-            and type(last_scheduled_at_utc_us) is not int
+            and type_of(last_scheduled_at_utc_us) is not int_type
         ):
-            raise TypeError(
+            raise type_error(
                 "last_scheduled_at_utc_us must be a non-boolean int or None"
             )
-        if type(markets) is not tuple:
-            raise TypeError("markets must be a tuple")
+        if type_of(markets) is not tuple_type:
+            raise type_error("markets must be a tuple")
         if markets and last_scheduled_at_utc_us is None:
-            raise ValueError("market rate state requires last scheduled time")
+            raise value_error("market rate state requires last scheduled time")
         ids: list[str] = []
         for market in markets:
             validate_window(market)
@@ -307,24 +326,24 @@ def _install_rate_gate_authority() -> None:
             ids.append(market_id)
             if last_scheduled_at_utc_us is not None:
                 if accepted_at_utc_us[-1] > last_scheduled_at_utc_us:
-                    raise ValueError(
+                    raise value_error(
                         "rate state contains reservation after last scheduled time"
                     )
                 cutoff = last_scheduled_at_utc_us - window_us
                 if accepted_at_utc_us[0] <= cutoff:
-                    raise ValueError(
+                    raise value_error(
                         "rate state contains reservation outside active window"
                     )
-        if ids != sorted(ids):
-            raise ValueError("market rate state must be sorted by market_id")
-        if len(set(ids)) != len(ids):
-            raise ValueError("duplicate market rate state")
+        if ids != sorted_fn(ids):
+            raise value_error("market rate state must be sorted by market_id")
+        if len_fn(set_type(ids)) != len_fn(ids):
+            raise value_error("duplicate market rate state")
 
     def make_window(
         market_id: str,
         accepted_at_utc_us: tuple[int, ...],
     ) -> MarketBookRateWindowState:
-        value = object.__new__(window_type)
+        value = object_new(window_type)
         window_market_id_member.__set__(value, market_id)
         window_accepted_at_member.__set__(value, accepted_at_utc_us)
         validate_window(value)
@@ -334,7 +353,7 @@ def _install_rate_gate_authority() -> None:
         last_scheduled_at_utc_us: int | None,
         markets: tuple[MarketBookRateWindowState, ...],
     ) -> MarketBookRateGateState:
-        value = object.__new__(state_type)
+        value = object_new(state_type)
         state_policy_version_member.__set__(value, policy_version)
         state_last_scheduled_member.__set__(value, last_scheduled_at_utc_us)
         state_markets_member.__set__(value, markets)
@@ -349,36 +368,36 @@ def _install_rate_gate_authority() -> None:
         blocked_market_ids: tuple[str, ...] = (),
         next_eligible_at_utc_us: int | None = None,
     ) -> MarketBookRateDecision:
-        if type(scheduled_at_utc_us) is not int:
-            raise TypeError("scheduled_at_utc_us must be a non-boolean int")
-        if type(allowed) is not bool:
-            raise TypeError("allowed must be bool")
+        if type_of(scheduled_at_utc_us) is not int_type:
+            raise type_error("scheduled_at_utc_us must be a non-boolean int")
+        if type_of(allowed) is not bool_type:
+            raise type_error("allowed must be bool")
         normalized = normalize_market_ids(market_ids)
         if normalized != market_ids:
-            raise ValueError("market_ids must be canonical")
-        if type(blocked_market_ids) is not tuple:
-            raise TypeError("blocked_market_ids must be a tuple")
+            raise value_error("market_ids must be canonical")
+        if type_of(blocked_market_ids) is not tuple_type:
+            raise type_error("blocked_market_ids must be a tuple")
         if blocked_market_ids:
             normalized_blocked = normalize_market_ids(blocked_market_ids)
             if normalized_blocked != blocked_market_ids:
-                raise ValueError("blocked_market_ids must be canonical")
-            if any(market_id not in market_ids for market_id in blocked_market_ids):
-                raise ValueError("blocked_market_ids must be a subset of market_ids")
+                raise value_error("blocked_market_ids must be canonical")
+            if any_fn(market_id not in market_ids for market_id in blocked_market_ids):
+                raise value_error("blocked_market_ids must be a subset of market_ids")
         if allowed:
             if blocked_market_ids or next_eligible_at_utc_us is not None:
-                raise ValueError(
+                raise value_error(
                     "allowed decision cannot carry blocked/next-eligible state"
                 )
         else:
             if (
                 not blocked_market_ids
-                or type(next_eligible_at_utc_us) is not int
+                or type_of(next_eligible_at_utc_us) is not int_type
                 or next_eligible_at_utc_us <= scheduled_at_utc_us
             ):
-                raise ValueError(
+                raise value_error(
                     "denied decision requires blocked markets and next-eligible time"
                 )
-        value = object.__new__(decision_type)
+        value = object_new(decision_type)
         decision_market_ids_member.__set__(value, market_ids)
         decision_scheduled_at_member.__set__(value, scheduled_at_utc_us)
         decision_allowed_member.__set__(value, allowed)
@@ -399,10 +418,10 @@ def _install_rate_gate_authority() -> None:
         if state is not None:
             validate_state(state)
             source_markets = state_markets_member.__get__(state, state_type)
-            detached_markets = tuple(
+            detached_markets = tuple_type(
                 make_window(
                     window_market_id_member.__get__(market, window_type),
-                    tuple(
+                    tuple_type(
                         window_accepted_at_member.__get__(
                             market,
                             window_type,
@@ -449,15 +468,15 @@ def _install_rate_gate_authority() -> None:
                 self,
                 "_last_scheduled_at_utc_us",
             )
-            markets = tuple(
+            markets = tuple_type(
                 make_window(
                     market_id,
-                    tuple(
+                    tuple_type(
                         timestamp
                         for timestamp, _generation in accepted_by_market[market_id]
                     ),
                 )
-                for market_id in sorted(accepted_by_market)
+                for market_id in sorted_fn(accepted_by_market)
                 if accepted_by_market[market_id]
             )
             return make_state(last_scheduled_at_utc_us, markets)
@@ -482,7 +501,7 @@ def _install_rate_gate_authority() -> None:
                     last_scheduled_at_utc_us is not None
                     and scheduled_us < last_scheduled_at_utc_us
                 ):
-                    raise ValueError("scheduled_at must not move backwards")
+                    raise value_error("scheduled_at must not move backwards")
 
                 accepted_by_market = object_getattribute(self, "_accepted")
                 cutoff = scheduled_us - window_us
@@ -496,7 +515,7 @@ def _install_rate_gate_authority() -> None:
                 next_eligible: list[int] = []
                 for market_id in normalized_ids:
                     accepted = working.get(market_id, [])
-                    if len(accepted) >= max_calls:
+                    if len_fn(accepted) >= max_calls:
                         blocked.append(market_id)
                         next_eligible.append(accepted[0][0] + window_us)
 
@@ -508,8 +527,8 @@ def _install_rate_gate_authority() -> None:
                         market_ids=normalized_ids,
                         scheduled_at_utc_us=scheduled_us,
                         allowed=False,
-                        blocked_market_ids=tuple(blocked),
-                        next_eligible_at_utc_us=max(next_eligible),
+                        blocked_market_ids=tuple_type(blocked),
+                        next_eligible_at_utc_us=max_fn(next_eligible),
                     )
 
                 reservation_generation = object_getattribute(
@@ -531,7 +550,7 @@ def _install_rate_gate_authority() -> None:
                         (scheduled_us, reservation_generation)
                     )
                 return decision
-        except BaseException as primary:
+        except base_exception_type as primary:
             if reservation_generation is not None:
                 try:
                     with lock:
@@ -549,17 +568,17 @@ def _install_rate_gate_authority() -> None:
                                 accepted_by_market[market_id] = retained
                             else:
                                 accepted_by_market.pop(market_id, None)
-                except BaseException as cleanup_exc:
+                except base_exception_type as cleanup_exc:
                     if (
-                        not isinstance(cleanup_exc, Exception)
-                        and isinstance(primary, Exception)
+                        not isinstance_fn(cleanup_exc, exception_type)
+                        and isinstance_fn(primary, exception_type)
                     ):
                         raise
-                    add_note = getattr(primary, "add_note", None)
-                    if callable(add_note):
+                    add_note = getattr_fn(primary, "add_note", None)
+                    if callable_fn(add_note):
                         add_note(
                             "rate-reservation cleanup also failed: "
-                            f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                            f"{type_of(cleanup_exc).__name__}: {cleanup_exc}"
                         )
             raise
 

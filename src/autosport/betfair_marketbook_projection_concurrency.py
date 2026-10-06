@@ -173,6 +173,22 @@ def _install_projection_gate_authority() -> None:
     max_unresolved = _MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
     object_getattribute = object.__getattribute__
     object_setattr = object.__setattr__
+    object_new = object.__new__
+    type_of = type
+    isinstance_fn = isinstance
+    tuple_type = tuple
+    set_type = set
+    str_type = str
+    int_type = int
+    bool_type = bool
+    len_fn = len
+    sorted_fn = sorted
+    type_error = TypeError
+    value_error = ValueError
+    base_exception_type = BaseException
+    exception_type = Exception
+    getattr_fn = getattr
+    callable_fn = callable
     lease_request_id_member = lease_type.__dict__["request_id"]
     lease_acquired_at_member = lease_type.__dict__["acquired_at_utc_us"]
     lease_generation_member = lease_type.__dict__["generation"]
@@ -190,22 +206,22 @@ def _install_projection_gate_authority() -> None:
     decision_dispatch_authorized_member = decision_type.__dict__["provider_dispatch_authorized"]
 
     def validate_request_id(value: object) -> str:
-        if type(value) is not str:
-            raise TypeError("request_id must be exact str")
+        if type_of(value) is not str_type:
+            raise type_error("request_id must be exact str")
         if not value or value != value.strip():
-            raise ValueError("request_id must be non-empty and trimmed")
+            raise value_error("request_id must be non-empty and trimmed")
         return value
 
     def utc_microseconds(value: object, *, name: str) -> int:
-        if type(value) is not datetime_type:
-            raise TypeError(f"{name} must be exact datetime")
+        if type_of(value) is not datetime_type:
+            raise type_error(f"{name} must be exact datetime")
         if value.tzinfo is None:
-            raise ValueError(f"{name} must be timezone-aware")
+            raise value_error(f"{name} must be timezone-aware")
         offset = value.utcoffset()
         if offset is None:
-            raise ValueError(f"{name} must be timezone-aware")
-        if type(offset) is not timedelta_type:
-            raise TypeError(f"{name} UTC offset must be exact timedelta")
+            raise value_error(f"{name} must be timezone-aware")
+        if type_of(offset) is not timedelta_type:
+            raise type_error(f"{name} UTC offset must be exact timedelta")
         local_naive = value.replace(tzinfo=None)
         utc_naive = local_naive - offset
         delta = utc_naive - epoch_naive
@@ -216,20 +232,20 @@ def _install_projection_gate_authority() -> None:
         )
 
     def validate_lease(value: object) -> None:
-        if type(value) is not lease_type:
-            raise TypeError("active must contain MarketBookProjectionLease values")
+        if type_of(value) is not lease_type:
+            raise type_error("active must contain MarketBookProjectionLease values")
         request_id = lease_request_id_member.__get__(value, lease_type)
         acquired_at_utc_us = lease_acquired_at_member.__get__(value, lease_type)
         generation = lease_generation_member.__get__(value, lease_type)
         validate_request_id(request_id)
-        if type(acquired_at_utc_us) is not int:
-            raise TypeError("acquired_at_utc_us must be a non-boolean int")
-        if type(generation) is not int or generation < 1:
-            raise ValueError("generation must be a positive non-boolean int")
+        if type_of(acquired_at_utc_us) is not int_type:
+            raise type_error("acquired_at_utc_us must be a non-boolean int")
+        if type_of(generation) is not int_type or generation < 1:
+            raise value_error("generation must be a positive non-boolean int")
 
     def validate_state(value: object) -> None:
-        if type(value) is not state_type:
-            raise TypeError(
+        if type_of(value) is not state_type:
+            raise type_error(
                 "state must be MarketBookProjectionConcurrencyState or None"
             )
         policy = state_policy_version_member.__get__(value, state_type)
@@ -242,29 +258,29 @@ def _install_projection_gate_authority() -> None:
             value,
             state_type,
         )
-        if type(policy) is not str or policy != policy_version:
-            raise ValueError(
+        if type_of(policy) is not str_type or policy != policy_version:
+            raise value_error(
                 "unsupported Betfair MarketBook projection concurrency policy"
             )
         if (
             last_observed_at_utc_us is not None
-            and type(last_observed_at_utc_us) is not int
+            and type_of(last_observed_at_utc_us) is not int_type
         ):
-            raise TypeError(
+            raise type_error(
                 "last_observed_at_utc_us must be a non-boolean int or None"
             )
-        if type(active) is not tuple:
-            raise TypeError("active must be a tuple")
-        if type(next_lease_generation) is not int or next_lease_generation < 1:
-            raise ValueError(
+        if type_of(active) is not tuple_type:
+            raise type_error("active must be a tuple")
+        if type_of(next_lease_generation) is not int_type or next_lease_generation < 1:
+            raise value_error(
                 "next_lease_generation must be a positive non-boolean int"
             )
-        if len(active) > max_unresolved:
-            raise ValueError(
+        if len_fn(active) > max_unresolved:
+            raise value_error(
                 "projection concurrency state exceeds conservative local maximum"
             )
         if active and last_observed_at_utc_us is None:
-            raise ValueError("active leases require last observed time")
+            raise value_error("active leases require last observed time")
         ids: list[str] = []
         generations: list[int] = []
         for lease in active:
@@ -278,27 +294,27 @@ def _install_projection_gate_authority() -> None:
             ids.append(request_id)
             generations.append(generation)
             if generation >= next_lease_generation:
-                raise ValueError(
+                raise value_error(
                     "active lease generation must precede next generation"
                 )
             if (
                 last_observed_at_utc_us is not None
                 and acquired_at_utc_us > last_observed_at_utc_us
             ):
-                raise ValueError("lease was acquired after last observed time")
-        if ids != sorted(ids):
-            raise ValueError("active leases must be sorted by request_id")
-        if len(set(ids)) != len(ids):
-            raise ValueError("duplicate active request_id")
-        if len(set(generations)) != len(generations):
-            raise ValueError("duplicate active lease generation")
+                raise value_error("lease was acquired after last observed time")
+        if ids != sorted_fn(ids):
+            raise value_error("active leases must be sorted by request_id")
+        if len_fn(set_type(ids)) != len_fn(ids):
+            raise value_error("duplicate active request_id")
+        if len_fn(set_type(generations)) != len_fn(generations):
+            raise value_error("duplicate active lease generation")
 
     def make_lease(
         request_id: str,
         acquired_at_utc_us: int,
         generation: int,
     ) -> MarketBookProjectionLease:
-        value = object.__new__(lease_type)
+        value = object_new(lease_type)
         lease_request_id_member.__set__(value, request_id)
         lease_acquired_at_member.__set__(value, acquired_at_utc_us)
         lease_generation_member.__set__(value, generation)
@@ -310,7 +326,7 @@ def _install_projection_gate_authority() -> None:
         active: tuple[MarketBookProjectionLease, ...],
         next_lease_generation: int,
     ) -> MarketBookProjectionConcurrencyState:
-        value = object.__new__(state_type)
+        value = object_new(state_type)
         state_policy_version_member.__set__(value, policy_version)
         state_last_observed_member.__set__(value, last_observed_at_utc_us)
         state_active_member.__set__(value, active)
@@ -328,27 +344,27 @@ def _install_projection_gate_authority() -> None:
         lease_generation: int | None = None,
     ) -> MarketBookProjectionConcurrencyDecision:
         validate_request_id(request_id)
-        if type(observed_at_utc_us) is not int:
-            raise TypeError("observed_at_utc_us must be a non-boolean int")
-        if type(projection_bearing) is not bool:
-            raise TypeError("projection_bearing must be bool")
-        if type(allowed) is not bool:
-            raise TypeError("allowed must be bool")
+        if type_of(observed_at_utc_us) is not int_type:
+            raise type_error("observed_at_utc_us must be a non-boolean int")
+        if type_of(projection_bearing) is not bool_type:
+            raise type_error("projection_bearing must be bool")
+        if type_of(allowed) is not bool_type:
+            raise type_error("allowed must be bool")
         if (
-            type(active_projection_requests) is not int
+            type_of(active_projection_requests) is not int_type
             or not 0 <= active_projection_requests <= max_unresolved
         ):
-            raise ValueError("active_projection_requests is outside local bounds")
+            raise value_error("active_projection_requests is outside local bounds")
         if projection_bearing and allowed:
-            if type(lease_generation) is not int or lease_generation < 1:
-                raise ValueError(
+            if type_of(lease_generation) is not int_type or lease_generation < 1:
+                raise value_error(
                     "allowed projection decision requires lease_generation"
                 )
         elif lease_generation is not None:
-            raise ValueError("non-admitted decision cannot carry lease_generation")
+            raise value_error("non-admitted decision cannot carry lease_generation")
         if not projection_bearing and not allowed:
-            raise ValueError("price-only local decision cannot be denied by projection gate")
-        value = object.__new__(decision_type)
+            raise value_error("price-only local decision cannot be denied by projection gate")
+        value = object_new(decision_type)
         decision_request_id_member.__set__(value, request_id)
         decision_observed_at_member.__set__(value, observed_at_utc_us)
         decision_projection_bearing_member.__set__(value, projection_bearing)
@@ -371,7 +387,7 @@ def _install_projection_gate_authority() -> None:
         if state is not None:
             validate_state(state)
             source_active = state_active_member.__get__(state, state_type)
-            detached_active = tuple(
+            detached_active = tuple_type(
                 make_lease(
                     lease_request_id_member.__get__(lease, lease_type),
                     lease_acquired_at_member.__get__(lease, lease_type),
@@ -413,7 +429,7 @@ def _install_projection_gate_authority() -> None:
         lock = object_getattribute(self, "_lock")
         with lock:
             active_by_request = object_getattribute(self, "_active")
-            active = tuple(
+            active = tuple_type(
                 make_lease(
                     lease_request_id_member.__get__(
                         active_by_request[request_id],
@@ -428,7 +444,7 @@ def _install_projection_gate_authority() -> None:
                         lease_type,
                     ),
                 )
-                for request_id in sorted(active_by_request)
+                for request_id in sorted_fn(active_by_request)
             )
             return make_state(
                 object_getattribute(self, "_last_observed_at_utc_us"),
@@ -445,10 +461,10 @@ def _install_projection_gate_authority() -> None:
         has_match_projection: bool,
     ) -> MarketBookProjectionConcurrencyDecision:
         request = validate_request_id(request_id)
-        if type(has_order_projection) is not bool:
-            raise TypeError("has_order_projection must be bool")
-        if type(has_match_projection) is not bool:
-            raise TypeError("has_match_projection must be bool")
+        if type_of(has_order_projection) is not bool_type:
+            raise type_error("has_order_projection must be bool")
+        if type_of(has_match_projection) is not bool_type:
+            raise type_error("has_match_projection must be bool")
         observed_us = utc_microseconds(observed_at, name="observed_at")
         projection_bearing = has_order_projection or has_match_projection
         lock = object_getattribute(self, "_lock")
@@ -465,9 +481,9 @@ def _install_projection_gate_authority() -> None:
                     last_observed_at_utc_us is not None
                     and observed_us < last_observed_at_utc_us
                 ):
-                    raise ValueError("observed_at must not move backwards")
+                    raise value_error("observed_at must not move backwards")
                 if request in active_by_request:
-                    raise ValueError("request_id is already active")
+                    raise value_error("request_id is already active")
 
                 if not projection_bearing:
                     decision = make_decision(
@@ -475,18 +491,18 @@ def _install_projection_gate_authority() -> None:
                         observed_at_utc_us=observed_us,
                         projection_bearing=False,
                         allowed=True,
-                        active_projection_requests=len(active_by_request),
+                        active_projection_requests=len_fn(active_by_request),
                     )
                     object_setattr(self, "_last_observed_at_utc_us", observed_us)
                     return decision
 
-                if len(active_by_request) >= max_unresolved:
+                if len_fn(active_by_request) >= max_unresolved:
                     decision = make_decision(
                         request_id=request,
                         observed_at_utc_us=observed_us,
                         projection_bearing=True,
                         allowed=False,
-                        active_projection_requests=len(active_by_request),
+                        active_projection_requests=len_fn(active_by_request),
                     )
                     object_setattr(self, "_last_observed_at_utc_us", observed_us)
                     return decision
@@ -499,13 +515,13 @@ def _install_projection_gate_authority() -> None:
                     observed_at_utc_us=observed_us,
                     projection_bearing=True,
                     allowed=True,
-                    active_projection_requests=len(active_by_request) + 1,
+                    active_projection_requests=len_fn(active_by_request) + 1,
                     lease_generation=generation,
                 )
                 active_by_request[request] = lease
                 object_setattr(self, "_last_observed_at_utc_us", observed_us)
                 return decision
-        except BaseException as primary:
+        except base_exception_type as primary:
             if generation is not None:
                 try:
                     with lock:
@@ -517,17 +533,17 @@ def _install_projection_gate_authority() -> None:
                             == generation
                         ):
                             del active_by_request[request]
-                except BaseException as cleanup_exc:
+                except base_exception_type as cleanup_exc:
                     if (
-                        not isinstance(cleanup_exc, Exception)
-                        and isinstance(primary, Exception)
+                        not isinstance_fn(cleanup_exc, exception_type)
+                        and isinstance_fn(primary, exception_type)
                     ):
                         raise
-                    add_note = getattr(primary, "add_note", None)
-                    if callable(add_note):
+                    add_note = getattr_fn(primary, "add_note", None)
+                    if callable_fn(add_note):
                         add_note(
                             "projection-begin cleanup also failed: "
-                            f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                            f"{type_of(cleanup_exc).__name__}: {cleanup_exc}"
                         )
             raise
 
@@ -539,8 +555,8 @@ def _install_projection_gate_authority() -> None:
         observed_at: datetime,
     ) -> None:
         request = validate_request_id(request_id)
-        if type(lease_generation) is not int or lease_generation < 1:
-            raise ValueError(
+        if type_of(lease_generation) is not int_type or lease_generation < 1:
+            raise value_error(
                 "lease_generation must be a positive non-boolean int"
             )
         observed_us = utc_microseconds(observed_at, name="observed_at")
@@ -555,15 +571,15 @@ def _install_projection_gate_authority() -> None:
                 last_observed_at_utc_us is not None
                 and observed_us < last_observed_at_utc_us
             ):
-                raise ValueError("observed_at must not move backwards")
+                raise value_error("observed_at must not move backwards")
             active_by_request = object_getattribute(self, "_active")
             lease = active_by_request.get(request)
             if lease is None:
-                raise ValueError(
+                raise value_error(
                     "request_id is not an active projection-bearing request"
                 )
             if lease_generation_member.__get__(lease, lease_type) != lease_generation:
-                raise ValueError(
+                raise value_error(
                     "lease_generation does not match active request"
                 )
             object_setattr(self, "_last_observed_at_utc_us", observed_us)

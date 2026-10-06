@@ -1007,3 +1007,107 @@ def test_projection_timezone_offset_is_observed_once_before_gate_lock() -> None:
 
     assert zone.calls == 1
     assert decision.observed_at_utc_us == int(T0.timestamp() * 1_000_000)
+
+
+def test_projection_gate_authority_ignores_late_builtin_shadowing(monkeypatch) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    shadowed = (
+        "object",
+        "type",
+        "isinstance",
+        "tuple",
+        "set",
+        "str",
+        "int",
+        "bool",
+        "len",
+        "sorted",
+        "TypeError",
+        "ValueError",
+    )
+    for name in shadowed:
+        monkeypatch.setattr(_projection_gate_module, name, None, raising=False)
+
+    value = gate_type()
+    with pytest.raises(TypeError, match="request_id must be exact str"):
+        value.begin(
+            object(),  # type: ignore[arg-type]
+            observed_at=T0,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+
+    first = value.begin(
+        "r0",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    with pytest.raises(ValueError, match="request_id is already active"):
+        value.begin(
+            "r0",
+            observed_at=T0,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+    state = value.snapshot()
+    restored = gate_type(state=state)
+
+    assert first.allowed is True
+    assert first.lease_generation == 1
+    assert restored.snapshot() == state
+    restored.complete(
+        "r0",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(microseconds=1),
+    )
+    assert restored.snapshot().active == ()
+
+
+def test_projection_cleanup_authority_ignores_late_exception_builtin_shadowing(
+    monkeypatch,
+) -> None:
+    value = BetfairMarketBookProjectionConcurrencyGate()
+    original_lock = value._lock
+    primary = KeyboardInterrupt("primary process-control failure")
+
+    class InterruptThenCleanupFailureLock:
+        def __init__(self) -> None:
+            self.cleanup = False
+
+        def __enter__(self):
+            if self.cleanup:
+                raise RuntimeError("cleanup lock failure")
+            return original_lock.__enter__()
+
+        def __exit__(self, exc_type, exc, tb):
+            result = original_lock.__exit__(exc_type, exc, tb)
+            if exc_type is None and not self.cleanup:
+                self.cleanup = True
+                raise primary
+            return result
+
+    value._lock = InterruptThenCleanupFailureLock()
+    for name in ("BaseException", "Exception", "getattr", "callable"):
+        monkeypatch.setattr(_projection_gate_module, name, None, raising=False)
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        value.begin(
+            "r0",
+            observed_at=T0,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+
+    assert exc_info.value is primary
+    assert any(
+        "projection-begin cleanup also failed: RuntimeError: cleanup lock failure"
+        in note
+        for note in getattr(primary, "__notes__", ())
+    )
+
+    value._lock = original_lock
+    state = value.snapshot()
+    assert [lease.request_id for lease in state.active] == ["r0"]
+    assert state.next_lease_generation == 2
+

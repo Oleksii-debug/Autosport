@@ -847,3 +847,93 @@ def test_rate_timezone_offset_is_observed_once_before_gate_lock() -> None:
 
     assert zone.calls == 1
     assert decision.scheduled_at == T0
+
+
+def test_rate_gate_authority_ignores_late_builtin_shadowing(monkeypatch) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    shadowed = (
+        "object",
+        "type",
+        "isinstance",
+        "tuple",
+        "set",
+        "str",
+        "bytes",
+        "int",
+        "bool",
+        "len",
+        "sorted",
+        "max",
+        "any",
+        "TypeError",
+        "ValueError",
+    )
+    for name in shadowed:
+        monkeypatch.setattr(_rate_gate_module, name, None, raising=False)
+
+    value = gate_type()
+    with pytest.raises(TypeError, match="scheduled_at must be exact datetime"):
+        value.reserve(("1.234",), scheduled_at=object())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="duplicate market_id"):
+        value.reserve(("1.234", "1.234"), scheduled_at=T0)
+
+    for index in range(5):
+        assert value.reserve(
+            ("1.234",),
+            scheduled_at=T0 + timedelta(microseconds=index),
+        ).allowed
+
+    denied = value.reserve(
+        ("1.234",),
+        scheduled_at=T0 + timedelta(microseconds=5),
+    )
+    state = value.snapshot()
+    restored = gate_type(state)
+
+    assert denied.allowed is False
+    assert denied.blocked_market_ids == ("1.234",)
+    assert restored.snapshot() == state
+
+
+def test_rate_cleanup_authority_ignores_late_exception_builtin_shadowing(
+    monkeypatch,
+) -> None:
+    value = BetfairMarketBookPerMarketRateGate()
+    original_lock = value._lock
+    primary = KeyboardInterrupt("primary process-control failure")
+
+    class InterruptThenCleanupFailureLock:
+        def __init__(self) -> None:
+            self.cleanup = False
+
+        def __enter__(self):
+            if self.cleanup:
+                raise RuntimeError("cleanup lock failure")
+            return original_lock.__enter__()
+
+        def __exit__(self, exc_type, exc, tb):
+            result = original_lock.__exit__(exc_type, exc, tb)
+            if exc_type is None and not self.cleanup:
+                self.cleanup = True
+                raise primary
+            return result
+
+    value._lock = InterruptThenCleanupFailureLock()
+    for name in ("BaseException", "Exception", "getattr", "callable"):
+        monkeypatch.setattr(_rate_gate_module, name, None, raising=False)
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        value.reserve(("1.234",), scheduled_at=T0)
+
+    assert exc_info.value is primary
+    assert any(
+        "rate-reservation cleanup also failed: RuntimeError: cleanup lock failure"
+        in note
+        for note in getattr(primary, "__notes__", ())
+    )
+
+    value._lock = original_lock
+    assert value.snapshot().markets[0].accepted_at_utc_us == (
+        int(T0.timestamp() * 1_000_000),
+    )
+

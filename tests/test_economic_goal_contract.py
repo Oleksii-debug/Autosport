@@ -340,6 +340,22 @@ def test_contract_successor_ignores_rebound_public_transition_validator(monkeypa
     previous.validate_automatic_successor(candidate)
 
 
+def test_contract_successor_ignores_rebound_canonical_transition_alias(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+
+    def forged_validator(*args, **kwargs):
+        raise AssertionError("rebound canonical transition alias executed")
+
+    monkeypatch.setattr(
+        economic_goal_module,
+        "_CANONICAL_TRANSITION_VALIDATOR",
+        forged_validator,
+    )
+
+    previous.validate_automatic_successor(candidate)
+
+
 def test_contract_validation_ignores_rebound_public_helpers(monkeypatch) -> None:
     def forged(*args, **kwargs):
         raise AssertionError("rebound validation helper executed")

@@ -198,29 +198,21 @@ def _rehashed_record(
     result = dict(record)
     revision = dict(result["revision"])
     revision.update(revision_changes)
-    semantic_fields = (
-        "bookmaker_id",
-        "account_id",
-        "adapter_id",
-        "adapter_version",
-        "plan_id",
-        "action_id",
-        "attempt_id",
-        "external_bet_id",
-        "event_id",
-        "market_id",
-        "selection_id",
-        "side",
-        "provider_status",
-        "placed_date",
-        "settled_date",
-        "price_requested",
-        "price_matched",
-        "size_settled",
-        "provider_profit",
-    )
+    nonsemantic_fields = {
+        "revision_id",
+        "previous_revision_id",
+        "revision_number",
+        "available_at",
+        "source_payload_sha256",
+        "capture_evidence_sha256",
+        "content_sha256",
+    }
     revision["content_sha256"] = _test_digest(
-        {field: revision[field] for field in semantic_fields}
+        {
+            field: value
+            for field, value in revision.items()
+            if field not in nonsemantic_fields
+        }
     )
     revision["revision_id"] = _test_digest(
         {
@@ -272,6 +264,10 @@ def test_identical_reread_is_idempotent_and_restart_safe(tmp_path) -> None:
         ({"price_requested": "0"}, "price_requested must be positive"),
         ({"price_matched": "-0.01"}, "price_matched must be non-negative"),
         ({"size_settled": "-0.01"}, "size_settled must be non-negative"),
+        (
+            {"available_at": "2026-09-21T18:59:59+00:00"},
+            "settlement cannot be available before settled_date",
+        ),
     ),
 )
 def test_rehashed_unanchored_baseline_rejects_impossible_durable_semantics(

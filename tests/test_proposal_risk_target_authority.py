@@ -117,6 +117,7 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
         proposal_ts: str | None = None,
         scalar_ruin_bound: Decimal | None = None,
         metadata: dict[str, object] | None = None,
+        market_semantics_id: str | None = None,
     ) -> ProposedTicketRiskContext:
         leg = TicketLeg(
             event_id=f"event-{suffix}",
@@ -124,6 +125,7 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             selection_id=f"selection-{suffix}",
             locked_odds=Decimal("2"),
             sport="soccer",
+            market_semantics_id=market_semantics_id,
         )
         quote = MarketEvent(
             event_id=leg.event_id,
@@ -137,6 +139,7 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             ingest_ts=cls.QUOTE_TS,
             metadata=metadata or {},
             sport="soccer",
+            market_semantics_id=market_semantics_id,
         )
         return ProposedTicketRiskContext(
             legs=(leg,),
@@ -605,6 +608,33 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             self.workspace, issued.target_sha256
         )
         self.assertEqual(resolved, issued)
+
+    def test_target_preserves_market_semantics_identity_in_durable_context(self) -> None:
+        context = self._context(
+            self.goal,
+            "semantics",
+            market_semantics_id="market-semantics-v1",
+        )
+        issued = issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("1"),),
+            contexts=(context,),
+        )
+
+        payload = json.loads(issued.candidate_context_json[0])
+        self.assertEqual(
+            payload["legs"][0]["market_semantics_id"],
+            "market-semantics-v1",
+        )
+        resolved = resolve_product_proposal_risk_target(
+            self.workspace,
+            issued.target_sha256,
+        )
+        resolved_payload = json.loads(resolved.candidate_context_json[0])
+        self.assertEqual(
+            resolved_payload["legs"][0]["market_semantics_id"],
+            "market-semantics-v1",
+        )
 
     def test_retry_is_idempotent_and_does_not_append_duplicate_target(self) -> None:
         first = self._issue()

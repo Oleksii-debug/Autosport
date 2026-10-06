@@ -1055,6 +1055,19 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertEqual(successor.predecessor_state_sha256, first.state_sha256)
 
+    def test_pathological_state_json_nesting_is_normalized(self) -> None:
+        raw = (b"[" * 1500) + b"0" + (b"]" * 1500)
+        self.assertLess(len(raw), economic_session._MAX_STATE_BYTES)
+
+        with self.assertRaisesRegex(
+            EconomicSessionIntegrityError,
+            "not strict UTF-8 JSON",
+        ):
+            economic_session._decode_state(
+                raw,
+                workspace_instance_id="workspace-instance",
+            )
+
     def test_default_clock_session_is_positive_boundary_authority(self) -> None:
         store = ProductEconomicSessionStore(
             self.workspace,

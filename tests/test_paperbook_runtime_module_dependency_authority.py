@@ -162,3 +162,71 @@ def test_load_bytes_rejects_rebound_snapshot_timestamp_parser_before_execution(
         PaperBook.load_bytes(payload)
 
     assert attacker_calls == 0
+
+
+def test_save_rejects_rebound_named_temporary_file_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound NamedTemporaryFile executed")
+
+    monkeypatch.setattr(paper_module.tempfile, "NamedTemporaryFile", hostile)
+
+    with pytest.raises(
+        ValueError,
+        match=r"temporary-file authority changed",
+    ):
+        book.save(tmp_path / "paper.json")
+
+    assert attacker_calls == 0
+
+
+def test_save_rejects_rebound_atomic_replace_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound os.replace executed")
+
+    monkeypatch.setattr(paper_module.os, "replace", hostile)
+
+    with pytest.raises(
+        ValueError,
+        match=r"atomic replace authority changed",
+    ):
+        book.save(tmp_path / "paper.json")
+
+    assert attacker_calls == 0
+
+
+def test_save_rejects_rebound_path_unlink_before_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    original = paper_module.Path.unlink
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("rebound Path.unlink executed")
+
+    monkeypatch.setattr(paper_module.Path, "unlink", hostile)
+
+    try:
+        with pytest.raises(
+            ValueError,
+            match=r"snapshot unlink authority changed",
+        ):
+            book.save(tmp_path / "paper.json")
+    finally:
+        monkeypatch.setattr(paper_module.Path, "unlink", original)

@@ -285,7 +285,7 @@ def _sha256(value: object, field: str) -> str:
 _CONTINUOUS_SESSION_SCHEMA: Final = "autosport.continuous_session"
 _CONTINUOUS_SESSION_VERSION: Final = 2
 _CONTINUOUS_SESSION_ERROR_SCHEMA: Final = "autosport.continuous_session.operational_error"
-_CONTINUOUS_SESSION_ERROR_VERSION: Final = 1
+_CONTINUOUS_SESSION_ERROR_VERSION: Final = 2
 _CONTINUOUS_SESSION_ERROR_MAX_BYTES: Final = 16 * 1024
 _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS: Final = 512
 _CONTINUOUS_SESSION_ERROR_FIELDS: Final = frozenset(
@@ -296,6 +296,7 @@ _CONTINUOUS_SESSION_ERROR_FIELDS: Final = frozenset(
         "source_id",
         "observed_cycles_completed",
         "observed_last_success_at",
+        "observed_state",
         "last_error_code",
     }
 )
@@ -394,6 +395,7 @@ class _ContinuousSessionState:
         self._session_id = raw["session_id"]
         self._cycles_completed = raw["cycles_completed"]
         self._last_success_at = raw["last_success_at"]
+        self._state = raw["state"]
         self._error_path = self.path.with_name(
             f"{self.path.name}.operational_error.json"
         )
@@ -551,6 +553,15 @@ class _ContinuousSessionState:
                 raw["observed_last_success_at"],
                 "operational error observed_last_success_at",
             )
+        observed_state = raw["observed_state"]
+        if type(observed_state) is not str or observed_state not in {
+            "RUNNING",
+            "PAUSED",
+            "STOPPED",
+        }:
+            raise ContinuousSessionError(
+                "operational error observed_state is unsupported"
+            )
         if raw["last_error_code"] is not None:
             error_code = _text(
                 raw["last_error_code"],
@@ -582,6 +593,7 @@ class _ContinuousSessionState:
             "source_id": self.source_id,
             "observed_cycles_completed": self._cycles_completed,
             "observed_last_success_at": self._last_success_at,
+            "observed_state": self._state,
             "last_error_code": code,
         }
         encoded = (
@@ -731,6 +743,7 @@ class _ContinuousSessionState:
             marker_matches = (
                 error_checkpoint["observed_cycles_completed"] == raw["cycles_completed"]
                 and error_checkpoint["observed_last_success_at"] == raw["last_success_at"]
+                and error_checkpoint["observed_state"] == raw["state"]
             )
             if marker_matches and error_checkpoint["last_error_code"] is not None:
                 durable_error = raw["last_error_code"]
@@ -780,7 +793,8 @@ class _ContinuousSessionState:
             if reason is not None:
                 raw["last_error_code"] = _text(reason, "reason")
 
-        self._update(mutate)
+        updated = self._update(mutate)
+        self._state = updated["state"]
         if reason is not None and self._error_checkpoint_present():
             self._write_error_checkpoint(None)
 
@@ -904,6 +918,7 @@ class _ContinuousSessionState:
         updated = self._update(mutate)
         self._cycles_completed = updated["cycles_completed"]
         self._last_success_at = updated["last_success_at"]
+        self._state = updated["state"]
         if self._error_checkpoint_present():
             self._write_error_checkpoint(None)
 

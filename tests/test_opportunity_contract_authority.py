@@ -495,11 +495,13 @@ def test_public_opportunity_dependency_parameters_are_sealed() -> None:
         "QuoteRef.__post_init__": QuoteRef.__post_init__,
         "QuoteRef.quote_key": QuoteRef.quote_key.fget,
         "QuoteRef.from_market_event": QuoteRef.from_market_event,
+        "QuoteRef.from_dict": QuoteRef.from_dict,
         "PredictiveEligibilityEvidence.__post_init__": (
             PredictiveEligibilityEvidence.__post_init__
         ),
         "ForecastRef.__post_init__": ForecastRef.__post_init__,
         "ForecastRef.from_forecast": ForecastRef.from_forecast,
+        "ForecastRef.from_dict": ForecastRef.from_dict,
         "ForecastRef.predictive_eligibility_reason": (
             ForecastRef.predictive_eligibility_reason
         ),
@@ -519,6 +521,7 @@ def test_public_opportunity_dependency_parameters_are_sealed() -> None:
         "QuoteRef.__post_init__": ("self",),
         "QuoteRef.quote_key": ("self",),
         "QuoteRef.from_market_event": ("event", "market_snapshot_hash"),
+        "QuoteRef.from_dict": ("raw",),
         "PredictiveEligibilityEvidence.__post_init__": ("self",),
         "ForecastRef.__post_init__": ("self",),
         "ForecastRef.from_forecast": (
@@ -526,6 +529,7 @@ def test_public_opportunity_dependency_parameters_are_sealed() -> None:
             "quote",
             "predictive_eligibility",
         ),
+        "ForecastRef.from_dict": ("raw",),
         "ForecastRef.predictive_eligibility_reason": (
             "self",
             "decision_time",
@@ -579,9 +583,29 @@ def test_public_opportunity_dependency_injection_is_rejected() -> None:
         )
 
     with pytest.raises(TypeError):
+        QuoteRef.from_dict(
+            quote.to_dict(),
+            _market_semantics_fn=lambda value, *_args: value,
+        )
+
+    with pytest.raises(TypeError):
         QuoteRef.quote_key.fget(
             quote,
             _quote_key_fn=lambda *_args: "attacker|quote|key",
+        )
+
+    with pytest.raises(TypeError):
+        ForecastRef.from_dict(
+            ForecastRef(
+                forecast_id="forecast-public-hook",
+                forecast_hash=_HASH,
+                quote_key=quote.quote_key,
+                probability=Decimal("0.5"),
+                input_cutoff_ts="2026-09-16T16:00:00+00:00",
+                market_snapshot_hash=_HASH,
+                quote_market_event_hash=_HASH,
+            ).to_dict(),
+            _market_semantics_fn=lambda value, *_args: value,
         )
 
     with pytest.raises(TypeError):

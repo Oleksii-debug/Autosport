@@ -191,7 +191,7 @@ def test_provenance_operations_revalidate_post_construction_mutation() -> None:
     provenance = provenance_for(goal)
 
     object.__setattr__(goal, "max_stake_fraction", "0.01")
-    with pytest.raises(Exception):
+    with pytest.raises(EconomicGoalContractError):
         contract_sha256(goal)
 
     clean_goal = _goal()

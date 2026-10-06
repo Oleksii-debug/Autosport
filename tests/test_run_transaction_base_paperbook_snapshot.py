@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -83,7 +84,9 @@ class RunTransactionBasePaperBookSnapshotTests(unittest.TestCase):
 
             # A later canonical PaperBook generation must not rewrite the retained
             # predecessor bytes used by run-capital-path evidence.
-            PaperBook("12345").save(book_path)
+            advanced_book = PaperBook.load(book_path)
+            advanced_book.balance += Decimal("1")
+            advanced_book.save(book_path)
             detached = RunTransaction(root, "retained-after-advance")
             snapshot = detached.verified_base_paper_book_snapshot()
 
@@ -123,7 +126,9 @@ class RunTransactionBasePaperBookSnapshotTests(unittest.TestCase):
             root = Path(tmp)
             tx = self._start(root, run_id="registry-bound-base")
 
-            PaperBook("7777").save(tx.base_book_snapshot_path)
+            tamper_path = root / "tamper-base.json"
+            PaperBook("7777").save(tamper_path)
+            tx.base_book_snapshot_path.write_bytes(tamper_path.read_bytes())
             rebound_sha = sha256_file(tx.base_book_snapshot_path)
             manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
             manifest["base"]["paper_book_sha256"] = rebound_sha
@@ -144,7 +149,9 @@ class RunTransactionBasePaperBookSnapshotTests(unittest.TestCase):
             root = Path(tmp)
             tx = self._start(root, run_id="tampered-retained-base")
 
-            PaperBook("9999").save(tx.base_book_snapshot_path)
+            tamper_path = root / "tamper-base.json"
+            PaperBook("9999").save(tamper_path)
+            tx.base_book_snapshot_path.write_bytes(tamper_path.read_bytes())
 
             with self.assertRaisesRegex(
                 RunTransactionError,

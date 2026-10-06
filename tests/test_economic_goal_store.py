@@ -463,7 +463,7 @@ def test_payload_encoder_rejects_nested_snapshotter_default_rebinding() -> None:
     operation = economic_goal_store_module._BOUND_ECONOMIC_GOAL_TO_PAYLOAD
     original_defaults = operation.__defaults__
     assert original_defaults is not None
-    snapshotter = original_defaults[0]
+    snapshotter = original_defaults[1]
     snapshot_defaults = snapshotter.__defaults__
     assert snapshot_defaults is not None
 

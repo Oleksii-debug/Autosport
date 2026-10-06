@@ -642,3 +642,19 @@ def test_provenance_creation_and_identity_ignore_rebound_constructor(monkeypatch
     assert evidence == expected
     assert evidence.decision_identity == expected.decision_identity
     verify_provenance(goal, evidence)
+
+def test_contract_sha256_rejects_bound_keyword_default_rebinding() -> None:
+    contract = _goal()
+    operation = economic_goal_provenance_module._contract_sha256_bound
+    original_kwdefaults = operation.__kwdefaults__
+
+    operation.__kwdefaults__ = {"forged_authority": object()}
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="provenance operation keyword defaults authority changed",
+        ):
+            contract_sha256(contract)
+    finally:
+        operation.__kwdefaults__ = original_kwdefaults
+

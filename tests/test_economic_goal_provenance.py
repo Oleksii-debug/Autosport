@@ -1013,3 +1013,52 @@ def test_provenance_class_guard_ignores_rebound_getattr(monkeypatch) -> None:
             lambda *_args, **_kwargs: None,
         )
     assert executed is False
+
+def test_provenance_validation_ignores_rebound_primitive_builtins(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    def forged(name: str):
+        def operation(*_args, **_kwargs):
+            calls.append(name)
+            raise AssertionError(f"rebound {name} executed")
+        return operation
+
+    for name in ("type", "len", "any", "dict", "zip"):
+        monkeypatch.setattr(
+            economic_goal_provenance_module,
+            name,
+            forged(name),
+            raising=False,
+        )
+
+    goal = _goal()
+    proof = provenance_for(goal)
+    verify_provenance(goal, proof)
+    assert proof.decision_identity.endswith(proof.contract_sha256)
+    assert calls == []
+
+
+def test_provenance_digest_rejects_rebound_any_laundering(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "any",
+        lambda _values: False,
+        raising=False,
+    )
+
+    with pytest.raises(
+        EconomicGoalProvenanceError,
+        match="contract_sha256 must be lowercase SHA-256 hex",
+    ):
+        EconomicGoalProvenance(
+            schema=economic_goal_provenance_module.PROVENANCE_SCHEMA,
+            schema_version=economic_goal_provenance_module.PROVENANCE_SCHEMA_VERSION,
+            goal_id="owner-goal-v1",
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="g" * 64,
+        )

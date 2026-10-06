@@ -687,6 +687,9 @@ def _decode_state(
     return canonical
 
 
+_DECODE_STATE_CODE: Final = _decode_state.__code__
+
+
 class ProductEconomicSessionStore:
     """Issue/re-resolve one active economic session for one workspace."""
 
@@ -938,6 +941,7 @@ class ProductEconomicSessionStore:
             or _canonical_json_bytes is not self._canonical_json_bytes_witness
             or _read_regular_bytes is not self._read_regular_bytes_witness
             or _decode_state is not self._decode_state_witness
+            or self._decode_state_witness.__code__ is not _DECODE_STATE_CODE
             or _state_payload is not self._state_payload_witness
             or hashlib.sha256 is not self._sha256_witness
             or os.path.lexists is not self._lexists_witness

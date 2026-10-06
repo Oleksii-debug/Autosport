@@ -184,6 +184,32 @@ _PORTFOLIO_LOCKED_CAPITAL_CODE = getattr(
     "__code__",
     None,
 )
+_PORTFOLIO_LOCKED_CAPITAL_CLOSURE = getattr(
+    _PORTFOLIO_LOCKED_CAPITAL,
+    "__closure__",
+    None,
+)
+_PORTFOLIO_LOCKED_CAPITAL_CLOSURE_VALUES = tuple(
+    cell.cell_contents
+    for cell in (_PORTFOLIO_LOCKED_CAPITAL_CLOSURE or ())
+)
+_PORTFOLIO_EXCHANGE_CALCULATOR = (
+    _portfolio_module.locked_capital_for_exchange_side
+)
+_PORTFOLIO_EXCHANGE_CALCULATOR_CODE = getattr(
+    _PORTFOLIO_EXCHANGE_CALCULATOR,
+    "__code__",
+    None,
+)
+_PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE = getattr(
+    _PORTFOLIO_EXCHANGE_CALCULATOR,
+    "__closure__",
+    None,
+)
+_PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE_VALUES = tuple(
+    cell.cell_contents
+    for cell in (_PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE or ())
+)
 _PORTFOLIO_REQUIRE_FINITE = _portfolio_module._require_finite_decimal
 _PORTFOLIO_REQUIRE_FINITE_CODE = getattr(
     _PORTFOLIO_REQUIRE_FINITE,
@@ -1683,6 +1709,32 @@ def _require_dispatch() -> None:
         is not _PORTFOLIO_LOCKED_CAPITAL
         or getattr(_PORTFOLIO_LOCKED_CAPITAL, "__code__", None)
         is not _PORTFOLIO_LOCKED_CAPITAL_CODE
+        or getattr(_PORTFOLIO_LOCKED_CAPITAL, "__closure__", None)
+        is not _PORTFOLIO_LOCKED_CAPITAL_CLOSURE
+        or len(_PORTFOLIO_LOCKED_CAPITAL_CLOSURE or ())
+        != len(_PORTFOLIO_LOCKED_CAPITAL_CLOSURE_VALUES)
+        or any(
+            cell.cell_contents is not expected
+            for cell, expected in zip(
+                _PORTFOLIO_LOCKED_CAPITAL_CLOSURE or (),
+                _PORTFOLIO_LOCKED_CAPITAL_CLOSURE_VALUES,
+            )
+        )
+        or _portfolio_module.locked_capital_for_exchange_side
+        is not _PORTFOLIO_EXCHANGE_CALCULATOR
+        or getattr(_PORTFOLIO_EXCHANGE_CALCULATOR, "__code__", None)
+        is not _PORTFOLIO_EXCHANGE_CALCULATOR_CODE
+        or getattr(_PORTFOLIO_EXCHANGE_CALCULATOR, "__closure__", None)
+        is not _PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE
+        or len(_PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE or ())
+        != len(_PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE_VALUES)
+        or any(
+            cell.cell_contents is not expected
+            for cell, expected in zip(
+                _PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE or (),
+                _PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE_VALUES,
+            )
+        )
         or _portfolio_module._require_finite_decimal
         is not _PORTFOLIO_REQUIRE_FINITE
         or getattr(_PORTFOLIO_REQUIRE_FINITE, "__code__", None)

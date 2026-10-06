@@ -127,6 +127,12 @@ def _canonical_sha256(name: str, value: object) -> str:
     return digest
 
 
+def _reject_signed_zero_decimal(value: Decimal, name: str) -> None:
+    """Reject signed zero so durable risk evidence has one canonical zero form."""
+    if type(value) is Decimal and value.is_zero() and value.as_tuple().sign:
+        raise ValueError(f"{name} must not use a signed-zero Decimal representation")
+
+
 def _sha256_payload(payload: object) -> str:
     canonical = json.dumps(
         payload,
@@ -222,6 +228,11 @@ class RiskOfRuinEvidence:
             raise ValueError(
                 "risk-of-ruin upper_bound must be an exact Decimal between 0 and 1"
             )
+        _reject_signed_zero_decimal(
+            self.upper_bound,
+            "vector risk-of-ruin upper_bound",
+        )
+        _reject_signed_zero_decimal(self.upper_bound, "risk-of-ruin upper_bound")
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +318,10 @@ class RiskOfRuinVectorEvidence:
                 raise ValueError(
                     "vector risk-of-ruin evaluated_stakes must contain non-negative finite exact Decimals"
                 )
+            _reject_signed_zero_decimal(
+                stake,
+                "vector risk-of-ruin evaluated_stake",
+            )
             has_positive = has_positive or stake > 0
         if not has_positive:
             raise ValueError(

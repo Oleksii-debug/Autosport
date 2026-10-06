@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from functools import wraps
 from typing import Final
 
 from .economic_goal import (

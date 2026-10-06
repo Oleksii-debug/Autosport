@@ -343,15 +343,40 @@ class ProviderCapabilityManifest:
     source_payload_sha256: str
     schema_version: int = 1
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _profile_contract_validator=BookmakerCapabilityProfile.__post_init__,
+        _profile_contract_validator_code: object = BookmakerCapabilityProfile.__post_init__.__code__,
+        _integration_contract_validator=BookmakerIntegrationEvidence.__post_init__,
+        _integration_contract_validator_code: object = BookmakerIntegrationEvidence.__post_init__.__code__,
+        _verify_profile=BookmakerIntegrationEvidence.verify_profile,
+        _verify_profile_code: object = BookmakerIntegrationEvidence.verify_profile.__code__,
+    ) -> None:
+        if (
+            BookmakerCapabilityProfile.__post_init__ is not _profile_contract_validator
+            or getattr(_profile_contract_validator, "__code__", None)
+            is not _profile_contract_validator_code
+            or BookmakerIntegrationEvidence.__post_init__
+            is not _integration_contract_validator
+            or getattr(_integration_contract_validator, "__code__", None)
+            is not _integration_contract_validator_code
+            or BookmakerIntegrationEvidence.verify_profile is not _verify_profile
+            or getattr(_verify_profile, "__code__", None) is not _verify_profile_code
+        ):
+            raise ProviderCapabilityManifestError(
+                "canonical manifest dependency validator changed"
+            )
+
         _text(self.manifest_ref, "manifest_ref")
         _positive_int(self.manifest_version, "manifest_version")
         _validate_exact_profile(self.profile)
+        _profile_contract_validator(self.profile)
         if type(self.integration) is not BookmakerIntegrationEvidence:
             raise ProviderCapabilityManifestError(
                 "integration must be an exact BookmakerIntegrationEvidence"
             )
-        self.integration.verify_profile(self.profile)
+        _integration_contract_validator(self.integration)
+        _verify_profile(self.integration, self.profile)
 
         profile_at = _timestamp(self.profile.observed_at, "profile.observed_at")
         integration_at = _timestamp(

@@ -588,6 +588,51 @@ class DecisionLedgerTests(unittest.TestCase):
             self.assertRegex(str(failures[0]), "already contains material_action_id")
             self.assertEqual(JsonlDecisionLedger(path).verify_integrity(), 1)
 
+    def test_verified_read_rejects_oversized_ledger_before_decode(self):
+        import autosport.decision_ledger as decision_ledger_runtime
+
+        original_limit = decision_ledger_runtime._MAX_DECISION_LEDGER_BYTES
+        try:
+            decision_ledger_runtime._MAX_DECISION_LEDGER_BYTES = 128
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "decisions.jsonl"
+                with path.open("wb") as handle:
+                    handle.seek(129)
+                    handle.write(b"\n")
+
+                with self.assertRaisesRegex(
+                    DecisionLedgerIntegrityError,
+                    "exceeds durable resource limit",
+                ):
+                    JsonlDecisionLedger(path).verify_integrity()
+        finally:
+            decision_ledger_runtime._MAX_DECISION_LEDGER_BYTES = original_limit
+
+    def test_append_rejects_payload_that_would_exceed_ledger_resource_limit(self):
+        import autosport.decision_ledger as decision_ledger_runtime
+
+        original_limit = decision_ledger_runtime._MAX_DECISION_LEDGER_BYTES
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "decisions.jsonl"
+                ledger = JsonlDecisionLedger(path)
+                ledger.append(self._record(decision_id="resource-first"))
+                existing_size = path.stat().st_size
+                decision_ledger_runtime._MAX_DECISION_LEDGER_BYTES = (
+                    existing_size + 1
+                )
+
+                with self.assertRaisesRegex(
+                    DecisionLedgerIntegrityError,
+                    "append exceeds durable resource limit",
+                ):
+                    ledger.append(self._record(decision_id="resource-second"))
+
+                self.assertEqual(path.stat().st_size, existing_size)
+                self.assertEqual(ledger.verify_integrity(), 1)
+        finally:
+            decision_ledger_runtime._MAX_DECISION_LEDGER_BYTES = original_limit
+
     def test_append_refuses_to_extend_corrupt_existing_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"

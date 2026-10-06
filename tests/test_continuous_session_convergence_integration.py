@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from autosport import continuous_session
+from autosport.market_mirror import MarketMirror
 from autosport.paper import PaperBook
 
 
@@ -415,6 +416,56 @@ def test_missing_lifecycle_registration_fails_before_provider_io() -> None:
             coordinator.tick()
 
         assert collector.calls == 0
+
+
+def test_register_rejects_existing_canonical_dependency_selector_drift() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register(
+        "input-1",
+        source_ids="provider-a",
+        sports="table_tennis",
+        event_ids="event-1",
+    )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="existing dependency selectors conflict with lifecycle registration",
+    ):
+        coordinator._register_input(
+            "input-1",
+            dependency_index=index,
+            register_input=index.register,
+            source_ids="provider-b",
+            sports="table_tennis",
+            event_ids="event-1",
+        )
+
+
+def test_register_rejects_canonical_dependency_selector_publication_mismatch() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+
+    def publish_wrong_selectors(input_id: str, **_selectors: object) -> None:
+        index.register(
+            input_id,
+            source_ids="provider-b",
+            sports="table_tennis",
+            event_ids="event-1",
+        )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="registration selectors do not match lifecycle request",
+    ):
+        coordinator._register_input(
+            "input-1",
+            dependency_index=index,
+            register_input=publish_wrong_selectors,
+            source_ids="provider-a",
+            sports="table_tennis",
+            event_ids="event-1",
+        )
 
 
 @pytest.mark.parametrize(

@@ -25,6 +25,7 @@ from .integrity import atomic_write_json, durable_path_lock
 from .json_integrity import strict_json_loads
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
+    FocusedMirrorDependency,
     FocusedMirrorDependencyIndex,
     MirrorInvalidationBatch,
 )
@@ -2261,7 +2262,65 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index input identity state is invalid"
             )
+        if (
+            type(input_id) is not str
+            or not input_id
+            or input_id.strip() != input_id
+        ):
+            raise ContinuousSessionError(
+                "dependency index registration input id is invalid"
+            )
+        canonical_selector_names = {
+            "source_ids",
+            "sports",
+            "event_ids",
+            "market_ids",
+            "selection_ids",
+        }
+        if any(name not in canonical_selector_names for name in selectors):
+            raise ContinuousSessionError(
+                "dependency index registration selectors are invalid"
+            )
+        expected_dependency: FocusedMirrorDependency | None = None
+        if type(dependency_index) is FocusedMirrorDependencyIndex:
+            try:
+                expected_dependency = FocusedMirrorDependency(
+                    input_id=input_id,
+                    source_ids=FocusedMirrorDependencyIndex._selector(
+                        selectors.get("source_ids"),
+                        name="source_ids",
+                    ),
+                    sports=FocusedMirrorDependencyIndex._selector(
+                        selectors.get("sports"),
+                        name="sports",
+                    ),
+                    event_ids=FocusedMirrorDependencyIndex._selector(
+                        selectors.get("event_ids"),
+                        name="event_ids",
+                    ),
+                    market_ids=FocusedMirrorDependencyIndex._selector(
+                        selectors.get("market_ids"),
+                        name="market_ids",
+                    ),
+                    selection_ids=FocusedMirrorDependencyIndex._selector(
+                        selectors.get("selection_ids"),
+                        name="selection_ids",
+                    ),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "dependency index registration selectors are invalid"
+                ) from exc
         if input_id in before_ids:
+            if expected_dependency is not None:
+                existing_dependency = FocusedMirrorDependencyIndex._dependency(
+                    dependency_index,
+                    input_id,
+                )
+                if existing_dependency != expected_dependency:
+                    raise ContinuousSessionError(
+                        "existing dependency selectors conflict with lifecycle registration"
+                    )
             return False
         if not callable(register_input):
             raise ContinuousSessionError(
@@ -2290,6 +2349,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index registration changed unrelated input identities"
             )
+        if expected_dependency is not None:
+            published_dependency = FocusedMirrorDependencyIndex._dependency(
+                dependency_index,
+                input_id,
+            )
+            if published_dependency != expected_dependency:
+                raise ContinuousSessionError(
+                    "dependency index registration selectors do not match lifecycle request"
+                )
         return True
 
     def _retire_input(

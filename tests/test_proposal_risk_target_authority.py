@@ -1713,7 +1713,7 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
                 getter.__code__ = original_code
 
 
-    def test_outcome_input_mapping_rejects_exchange_side_identity_collapse(
+    def test_outcome_input_mapping_binds_exact_sided_quote_before_market_projection(
         self,
     ) -> None:
         decision_ts = "2026-09-18T15:05:00Z"
@@ -1724,7 +1724,8 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             selection_id="home",
             locked_odds=Decimal("2"),
             sport="table_tennis",
-            exchange_side="back",
+            exchange_side="lay",
+            market_semantics_id="exchange.match.odds.v1",
         )
         quote = MarketEvent(
             event_id=leg.event_id,
@@ -1739,7 +1740,8 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             ingest_ts=quote_ts,
             metadata={},
             sport="table_tennis",
-            exchange_side="back",
+            exchange_side="lay",
+            market_semantics_id="exchange.match.odds.v1",
         )
         target = issue_product_proposal_risk_target(
             self.workspace,
@@ -1754,26 +1756,24 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
                 ),
             ),
         )
-        store = SQLiteMarketStore(self.workspace / "sided_outcome_inputs.db")
-        self.addCleanup(store.close)
-        forged_exact_type = object.__new__(
-            outcome_input_authority.MarketSettlementOutcomeAuthority
-        )
-        market_input = ProposalRiskMarketInput(
-            store=store,
-            outcome_authority=forged_exact_type,
-            max_age=timedelta(minutes=10),
-        )
 
-        with self.assertRaisesRegex(
-            ProductProposalRiskOutcomeInputMappingError,
-            "does not yet support exchange-side target identities",
-        ):
-            issue_product_proposal_risk_outcome_input_mapping(
-                self.workspace,
-                target_sha256=target.target_sha256,
-                market_inputs=(market_input,),
-            )
+        requirements = outcome_input_authority._target_market_requirements(target)
+
+        self.assertEqual(
+            requirements,
+            (
+                (
+                    (
+                        "table_tennis",
+                        "event-sided",
+                        "match_odds",
+                        "betfair_exchange_historical",
+                        "winner",
+                    ),
+                    ("home",),
+                ),
+            ),
+        )
 
     def test_outcome_input_mapping_json_dump_root_rechecks_after_dispatch(self) -> None:
         original = outcome_input_authority.json.dumps

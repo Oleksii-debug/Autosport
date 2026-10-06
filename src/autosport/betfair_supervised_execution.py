@@ -15,6 +15,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+import weakref
 
 from .betfair_account_readonly import (
     BETTING_JSON_RPC_ENDPOINT,
@@ -690,10 +691,56 @@ def _build_canonical_place_action_dispatch():
     """Capture the exact provider-write method before callers can shadow dispatch."""
 
     client_type = BetfairSupervisedPlaceOrdersClient
+    object_getattribute = object.__getattribute__
+    original_init = client_type.__dict__.get("__init__")
+    if not callable(original_init) or getattr(original_init, "__code__", None) is None:
+        raise RuntimeError("canonical Betfair client constructor is unavailable")
+    original_init_code = original_init.__code__
+    bindings: weakref.WeakKeyDictionary[BetfairSupervisedPlaceOrdersClient, tuple[object, object, object, object]] = (
+        weakref.WeakKeyDictionary()
+    )
+
+    def sealed_init(self, *args, **kwargs):
+        if (
+            client_type.__dict__.get("__init__") is not sealed_init
+            or original_init.__code__ is not original_init_code
+        ):
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair client constructor authority changed"
+            )
+        original_init(self, *args, **kwargs)
+        namespace = object_getattribute(self, "__dict__")
+        gate = namespace.get("_gate")
+        transport = namespace.get("_transport")
+        if gate is None or transport is None:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependencies were not initialized canonically"
+            )
+        gate_method = type(gate).__dict__.get("require")
+        transport_method = type(transport).__dict__.get("post")
+        if (
+            not callable(gate_method)
+            or getattr(gate_method, "__code__", None) is None
+            or not callable(transport_method)
+            or getattr(transport_method, "__code__", None) is None
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency dispatch is unavailable"
+            )
+        bindings[self] = (
+            gate,
+            gate_method,
+            transport,
+            transport_method,
+        )
+
+    client_type.__init__ = sealed_init
+
     place_action = client_type.__dict__.get("place_action")
     if not callable(place_action) or getattr(place_action, "__code__", None) is None:
         raise RuntimeError("canonical Betfair place_action dispatch is unavailable")
     place_action_code = place_action.__code__
+    sealed_init_code = sealed_init.__code__
 
     def dispatch(
         client: BetfairSupervisedPlaceOrdersClient,
@@ -707,16 +754,45 @@ def _build_canonical_place_action_dispatch():
     ) -> BetfairPlaceExecutionReport:
         if (
             type(client) is not client_type
+            or client_type.__dict__.get("__init__") is not sealed_init
+            or sealed_init.__code__ is not sealed_init_code
             or client_type.__dict__.get("place_action") is not place_action
             or place_action.__code__ is not place_action_code
         ):
             raise BetfairSupervisedExecutionError(
-                "canonical Betfair place_action dispatch changed"
+                "canonical Betfair client dispatch changed"
             )
-        namespace = object.__getattribute__(client, "__dict__")
+        namespace = object_getattribute(client, "__dict__")
         if type(namespace) is not dict or "place_action" in namespace:
             raise BetfairSupervisedExecutionError(
                 "Betfair client shadows canonical place_action dispatch"
+            )
+        binding = bindings.get(client)
+        if binding is None:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client has no canonical dependency binding"
+            )
+        bound_gate, gate_method, bound_transport, transport_method = binding
+        current_gate = namespace.get("_gate")
+        current_transport = namespace.get("_transport")
+        if current_gate is not bound_gate or current_transport is not bound_transport:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency binding changed"
+            )
+        current_gate_method = type(bound_gate).__dict__.get("require")
+        current_transport_method = type(bound_transport).__dict__.get("post")
+        if (
+            current_gate_method is not gate_method
+            or getattr(gate_method, "__code__", None)
+            is not getattr(current_gate_method, "__code__", None)
+            or current_transport_method is not transport_method
+            or getattr(transport_method, "__code__", None)
+            is not getattr(current_transport_method, "__code__", None)
+            or "require" in getattr(bound_gate, "__dict__", {})
+            or "post" in getattr(bound_transport, "__dict__", {})
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency dispatch changed"
             )
         return place_action(
             client,

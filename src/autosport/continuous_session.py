@@ -457,6 +457,7 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "durable session_id does not match configured session"
                 )
+            checkpoint_token = self._checkpoint_identity_token()
 
         self._session_id = raw["session_id"]
         self._generation = raw["generation"]
@@ -466,6 +467,7 @@ class _ContinuousSessionState:
         self._last_error_code = raw["last_error_code"]
         self._source_gap_state = raw["source_gap_state"]
         self._source_sync_state = raw["source_sync_state"]
+        self._checkpoint_token = checkpoint_token
         self._error_path = self.path.with_name(
             f"{self.path.name}.operational_error.json"
         )
@@ -499,6 +501,29 @@ class _ContinuousSessionState:
     @staticmethod
     def _file_identity(info: os.stat_result) -> tuple[int, int]:
         return (info.st_dev, info.st_ino)
+
+    def _checkpoint_identity_token(
+        self,
+        *,
+        _os_stat: Callable[..., os.stat_result] = os.stat,
+    ) -> tuple[int, int, int, int, int]:
+        if os.stat is not _os_stat:
+            raise ContinuousSessionError(
+                "canonical session checkpoint identity authority changed"
+            )
+        try:
+            info = _os_stat(self.path)
+        except OSError as exc:
+            raise ContinuousSessionError(
+                "cannot inspect continuous session checkpoint identity"
+            ) from exc
+        return (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_size),
+            int(info.st_mtime_ns),
+            int(info.st_ctime_ns),
+        )
 
     def _error_checkpoint_present(
         self,
@@ -1128,6 +1153,45 @@ class _ContinuousSessionState:
             ],
         )
 
+    def bounded_state(
+        self,
+        *,
+        _durable_path_lock: Callable[..., Any] = durable_path_lock,
+        _durable_path_lock_code: object = durable_path_lock.__code__,
+        _checkpoint_identity_token: Callable[
+            ["_ContinuousSessionState"], tuple[int, int, int, int, int]
+        ] = _checkpoint_identity_token,
+        _checkpoint_identity_token_code: object = _checkpoint_identity_token.__code__,
+    ) -> SessionState:
+        if (
+            durable_path_lock is not _durable_path_lock
+            or getattr(_durable_path_lock, "__code__", None)
+            is not _durable_path_lock_code
+            or type(self)._checkpoint_identity_token is not _checkpoint_identity_token
+            or getattr(_checkpoint_identity_token, "__code__", None)
+            is not _checkpoint_identity_token_code
+        ):
+            raise ContinuousSessionError(
+                "canonical bounded session-state authority changed"
+            )
+        with _durable_path_lock(self.path):
+            current_token = _checkpoint_identity_token(self)
+            if current_token != self._checkpoint_token:
+                # Another canonical writer changed the session checkpoint.
+                # Refresh full durable truth only on that external-change edge;
+                # steady-state running checks remain independent of retained
+                # settlement-history size.
+                raw = self._read()
+                self._generation = raw["generation"]
+                self._cycles_completed = raw["cycles_completed"]
+                self._last_success_at = raw["last_success_at"]
+                self._state = raw["state"]
+                self._last_error_code = raw["last_error_code"]
+                self._source_gap_state = raw["source_gap_state"]
+                self._source_sync_state = raw["source_sync_state"]
+                self._checkpoint_token = _checkpoint_identity_token(self)
+            return SessionState(self._state)
+
     @property
     def session_id(self) -> str:
         # Session identity is fixed by the serialized bootstrap transaction and
@@ -1186,6 +1250,7 @@ class _ContinuousSessionState:
             self._last_error_code = updated["last_error_code"]
             self._source_gap_state = updated["source_gap_state"]
             self._source_sync_state = updated["source_sync_state"]
+            self._checkpoint_token = self._checkpoint_identity_token()
             if mutation_result is not False and finalize_under_lock is not None:
                 finalize_under_lock(updated)
         return updated
@@ -1789,7 +1854,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self._state.set_state(SessionState.RUNNING)
 
     def _require_running(self) -> None:
-        state = self._state.snapshot().state
+        state = self._state.bounded_state()
         if state is SessionState.PAUSED:
             raise SessionPausedError("continuous session is durably PAUSED")
         if state is SessionState.STOPPED:

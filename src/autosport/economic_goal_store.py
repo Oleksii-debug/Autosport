@@ -95,7 +95,7 @@ def _require_exact_keys(
 
 
 def _decimal_text(name: str, value: object) -> Decimal:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise EconomicGoalContractError(f"{name} must be a Decimal string")
     if not value or value != value.strip():
         raise EconomicGoalContractError(f"{name} must be a canonical Decimal string")
@@ -111,9 +111,9 @@ def _decimal_text(name: str, value: object) -> Decimal:
 
 
 def _restriction_set(name: str, value: object) -> frozenset[str]:
-    if not isinstance(value, list):
+    if type(value) is not list:
         raise EconomicGoalContractError(f"{name} must be a sorted JSON array")
-    if any(not isinstance(item, str) for item in value):
+    if any(type(item) is not str for item in value):
         raise EconomicGoalContractError(f"{name} must contain only strings")
     if value != sorted(value) or len(value) != len(set(value)):
         raise EconomicGoalContractError(
@@ -125,7 +125,7 @@ def _restriction_set(name: str, value: object) -> frozenset[str]:
 def economic_goal_to_payload(contract: EconomicGoalContract) -> dict[str, object]:
     """Return the canonical schema-v1 JSON payload for ``contract``."""
 
-    if not isinstance(contract, EconomicGoalContract):
+    if type(contract) is not EconomicGoalContract:
         raise EconomicGoalContractError(
             "economic goal persistence requires an EconomicGoalContract"
         )
@@ -181,8 +181,8 @@ def economic_goal_to_payload(contract: EconomicGoalContract) -> dict[str, object
 def economic_goal_from_payload(payload: object) -> EconomicGoalContract:
     """Decode schema-v1 persistence input and fail closed on any ambiguity."""
 
-    if not isinstance(payload, dict) or not all(
-        isinstance(key, str) for key in payload
+    if type(payload) is not dict or not all(
+        type(key) is str for key in payload
     ):
         raise EconomicGoalContractError("economic goal payload must be a JSON object")
     root: dict[str, object] = payload
@@ -191,16 +191,12 @@ def economic_goal_from_payload(payload: object) -> EconomicGoalContract:
     if root["schema"] != ECONOMIC_GOAL_SCHEMA:
         raise EconomicGoalContractError("unsupported economic goal schema")
     version = root["schema_version"]
-    if (
-        isinstance(version, bool)
-        or not isinstance(version, int)
-        or version != ECONOMIC_GOAL_SCHEMA_VERSION
-    ):
+    if type(version) is not int or version != ECONOMIC_GOAL_SCHEMA_VERSION:
         raise EconomicGoalContractError("unsupported economic goal schema_version")
 
     raw_contract = root["contract"]
-    if not isinstance(raw_contract, dict) or not all(
-        isinstance(key, str) for key in raw_contract
+    if type(raw_contract) is not dict or not all(
+        type(key) is str for key in raw_contract
     ):
         raise EconomicGoalContractError("contract must be a JSON object")
     body: dict[str, object] = raw_contract
@@ -222,7 +218,7 @@ def economic_goal_from_payload(payload: object) -> EconomicGoalContract:
         raise EconomicGoalContractError("unsupported economic objective") from exc
 
     automation = body["automation_level"]
-    if isinstance(automation, bool) or not isinstance(automation, int):
+    if type(automation) is not int:
         raise EconomicGoalContractError("automation_level must be an integer")
     try:
         decoded["automation_level"] = AutomationLevel(automation)
@@ -243,7 +239,7 @@ def economic_goal_from_payload(payload: object) -> EconomicGoalContract:
 def economic_goal_from_json(text: str) -> EconomicGoalContract:
     """Decode one strict JSON document into a validated contract."""
 
-    if not isinstance(text, str):
+    if type(text) is not str:
         raise EconomicGoalContractError("economic goal JSON must be text")
     try:
         payload = strict_json_loads(text)

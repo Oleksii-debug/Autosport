@@ -1165,8 +1165,6 @@ def test_operational_checkpoint_filesystem_function_rebinding_fails_closed(monke
         state = _state_with_history(root, _SMALL_HISTORY)
         state.record_failure(code="CANONICAL_FAILURE")
 
-        original_fstat = continuous_session.os.fstat
-
         def attacker_fstat(_descriptor: object) -> object:
             raise AssertionError("runtime-rebound os.fstat executed")
 

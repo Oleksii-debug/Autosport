@@ -1764,6 +1764,43 @@ def test_invalidation_drain_rejects_input_ids_descriptor_rebinding(monkeypatch) 
         )
 
 
+def test_invalidation_routing_rejects_midbatch_input_ids_descriptor_rebinding(
+    monkeypatch,
+) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+    buffer._dirty[("provider-a", "quote-a")] = None
+    index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+    index.register("input-a", source_ids="provider-a")
+
+    def hostile_input_ids(_self):
+        raise AssertionError("rebound input_ids getter executed")
+
+    def malicious_routing(_batch):
+        monkeypatch.setattr(
+            continuous_session.FocusedMirrorDependencyIndex,
+            "input_ids",
+            property(hostile_input_ids),
+        )
+        return ("input-a",)
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency routing identity authority changed",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=malicious_routing,
+            max_batches=4,
+            max_items=250,
+        )
+
+    assert buffer.full_refresh_required is True
+
+
 def test_register_rejects_callback_dependency_verifier_rebinding(monkeypatch) -> None:
     coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
     index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())

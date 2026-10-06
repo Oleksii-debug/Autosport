@@ -235,6 +235,71 @@ class SportSeasonIdentityTests(unittest.TestCase):
             {participant.entity_id, team.entity_id},
         )
 
+    def test_nested_persisted_record_schema_rejects_unknown_fields(self) -> None:
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        sport_old = identity("sport:football-old", EntityKind.SPORT, "provider:sport-old")
+        sport_new = identity("sport:football", EntityKind.SPORT, "canonical:football")
+        participant = identity("participant:1", EntityKind.PARTICIPANT, "provider:p1")
+        registry.add_entity(sport_old)
+        registry.add_entity(sport_new)
+        registry.add_entity(participant)
+        registry.add_alias(
+            AliasRecord("provider-a", "soccer", sport_old.entity_id, T0, None, T0, SHA, T0)
+        )
+        registry.add_roster_membership(
+            RosterMembership("event-1", "provider-a", participant.entity_id, T0, None, T0, SHA)
+        )
+        registry.add_lineage(
+            EntityLineage(
+                sport_old.entity_id,
+                sport_new.entity_id,
+                LineageRelation.SUPERSEDES,
+                T0,
+                T0,
+                T0,
+                SHA,
+            )
+        )
+        baseline = json.loads(self.path.read_text(encoding="utf-8"))
+
+        for collection in ("entities", "aliases", "rosters", "lineages"):
+            with self.subTest(collection=collection):
+                payload = json.loads(json.dumps(baseline))
+                payload[collection][0]["future_unversioned_field"] = "must-not-be-ignored"
+                self.path.write_text(
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ParticipantIdentityError,
+                    rf"{collection} record schema",
+                ):
+                    ParticipantIdentityRegistry(self.path)
+
+        self.path.write_text(
+            json.dumps(baseline, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        reopened = ParticipantIdentityRegistry(self.path)
+        self.assertEqual(
+            reopened.resolve_alias("provider-a", "soccer", as_of=T1).entity_id,
+            sport_old.entity_id,
+        )
+        self.assertEqual(
+            reopened.lineage_at(sport_old.entity_id, as_of=T1),
+            (
+                EntityLineage(
+                    sport_old.entity_id,
+                    sport_new.entity_id,
+                    LineageRelation.SUPERSEDES,
+                    T0,
+                    T0,
+                    T0,
+                    SHA,
+                ),
+            ),
+        )
+
     def test_cross_kind_correction_fails_closed(self) -> None:
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         sport = identity("sport:football", EntityKind.SPORT, "canonical:football")

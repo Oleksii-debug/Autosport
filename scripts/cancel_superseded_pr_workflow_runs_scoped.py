@@ -1136,7 +1136,13 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     1,
                     (total_count + _runs_per_page - 1) // _runs_per_page,
                 )
-                scan_page_limit = initial_pages + 1
+                # Under severe queue pressure, exhaustive pagination can consume the
+                # bounded transport budget before any stale run reaches the separately
+                # revalidated cancellation boundary. Missing later pages can only defer
+                # cleanup; they grant no cancellation authority. Preserve two provider
+                # pages plus one moving-snapshot grace page, leaving budget for exact
+                # run-identity/live-PR rereads and cancellation effects.
+                scan_page_limit = min(initial_pages + 1, 3)
             unique_before_page = len(seen_run_ids)
             if len(page_runs) > _runs_per_page:
                 raise CancellationError("invalid workflow-runs page size")

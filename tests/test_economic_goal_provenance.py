@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from decimal import Decimal
 
 import pytest
@@ -105,4 +105,58 @@ def test_provenance_schema_validation_is_fail_closed() -> None:
             revision=1,
             bankroll_id="bankroll",
             contract_sha256="not-a-digest",
+        )
+
+
+def test_provenance_rejects_contract_and_provenance_subclasses() -> None:
+    class ContractSubclass(EconomicGoalContract):
+        pass
+
+    class ProvenanceSubclass(EconomicGoalProvenance):
+        pass
+
+    goal = _goal()
+    contract_subclass = ContractSubclass(
+        **{field.name: getattr(goal, field.name) for field in fields(EconomicGoalContract)}
+    )
+    with pytest.raises((EconomicGoalProvenanceError, TypeError, ValueError)):
+        provenance_for(contract_subclass)
+
+    provenance = provenance_for(goal)
+    provenance_subclass = ProvenanceSubclass(
+        schema=provenance.schema,
+        schema_version=provenance.schema_version,
+        goal_id=provenance.goal_id,
+        revision=provenance.revision,
+        bankroll_id=provenance.bankroll_id,
+        contract_sha256=provenance.contract_sha256,
+    )
+    with pytest.raises(EconomicGoalProvenanceError):
+        verify_provenance(goal, provenance_subclass)
+
+
+def test_provenance_rejects_scalar_subclasses() -> None:
+    class TextSubclass(str):
+        pass
+
+    class IntSubclass(int):
+        pass
+
+    with pytest.raises(EconomicGoalProvenanceError):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id=TextSubclass("goal"),
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
+        )
+    with pytest.raises(EconomicGoalProvenanceError):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="goal",
+            revision=IntSubclass(1),
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
         )

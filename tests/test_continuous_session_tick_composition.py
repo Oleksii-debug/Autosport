@@ -4714,3 +4714,111 @@ def test_provider_unavailable_tick_rejects_dependency_reader_dispatch_rebinding(
 
         assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
 
+def test_invalidation_rejects_matched_key_mutation_during_drain() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("input-a", source_ids="provider-a")
+
+    class Buffer:
+        pending_count = 0
+        full_refresh_required = False
+
+        def drain(self, *, max_items: int):
+            assert max_items == 250
+            index._matched_keys["input-a"].add(("provider-a", "forged-quote"))
+            return continuous_session.MirrorInvalidationBatch(
+                changed_keys=(),
+                full_refresh_required=False,
+                has_more=False,
+            )
+
+    buffer = Buffer()
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="dependency index matched-key routing changed during invalidation drain",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=index.affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+
+
+def test_invalidation_rejects_matched_key_mutation_during_backlog_inspection() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("input-a", source_ids="provider-a")
+
+    class Buffer:
+        full_refresh_required = False
+
+        @property
+        def pending_count(self):
+            index._matched_keys["input-a"].add(("provider-a", "forged-quote"))
+            return 0
+
+        def drain(self, *, max_items: int):
+            assert max_items == 250
+            return continuous_session.MirrorInvalidationBatch(
+                changed_keys=(),
+                full_refresh_required=False,
+                has_more=False,
+            )
+
+    buffer = Buffer()
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="dependency index matched-key routing changed during invalidation backlog inspection",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=index.affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+
+
+def test_provider_unavailable_rejects_matched_key_mutation_during_backlog_inspection() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class ProviderUnavailableCollector(_Collector):
+            def run_cycle(self):
+                return type(
+                    "UnavailableCycle",
+                    (),
+                    {
+                        "provider_unavailable": True,
+                        "source_id": "provider-a",
+                        "committed_delta_ids": (),
+                    },
+                )()
+
+        class Buffer:
+            full_refresh_required = False
+
+            @property
+            def pending_count(self):
+                index._matched_keys["input-a"].add(("provider-a", "forged-quote"))
+                return 0
+
+        coordinator.collector = ProviderUnavailableCollector()
+        coordinator.invalidation_buffer = Buffer()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency routing authority changed during provider-unavailable backlog inspection",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+

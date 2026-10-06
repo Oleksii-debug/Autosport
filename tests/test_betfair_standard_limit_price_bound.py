@@ -130,6 +130,49 @@ def test_public_provider_client_rebinding_cannot_redirect_canonical_capture(
     assert actual.to_dict() == expected.to_dict()
 
 
+def test_provider_contract_rebinding_cannot_rewrite_issued_identity(
+    monkeypatch,
+) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    bound, action, expected = _evidence()
+
+    monkeypatch.setattr(
+        module,
+        "_PROVIDER_CONTRACT_ID",
+        "forged-provider-contract",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        module,
+        "_PROVIDER_CONTRACT_REF",
+        "https://invalid.example/forged",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        module,
+        "_WRITE_ADAPTER_ID",
+        "forged-write-adapter",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        module,
+        "_WRITE_ADAPTER_VERSION",
+        "999",
+        raising=False,
+    )
+
+    actual = module.resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    assert actual.provider_contract_id == expected.provider_contract_id
+    assert actual.provider_contract_ref == expected.provider_contract_ref
+    assert actual.write_adapter_id == expected.write_adapter_id
+    assert actual.write_adapter_version == expected.write_adapter_version
+
+
 def test_execution_action_serializer_rebinding_fails_before_capture(
     monkeypatch,
 ) -> None:

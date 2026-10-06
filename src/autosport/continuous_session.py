@@ -2086,8 +2086,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _instant(now, "now")
         try:
             cycle = self.collector.run_cycle()
-            source_snapshot = self._refresh_source_state_projection()
             if cycle.provider_unavailable:
+                # A provider-unavailable collector cycle commits no source deltas,
+                # so there is no new source projection to publish. Avoid the full
+                # continuous-session snapshot path here: retained settlement history
+                # must not amplify an operational provider failure into O(history).
                 failure = self._state.record_failure(
                     code="ProviderUnavailableError"
                 )
@@ -2096,16 +2099,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     cycle_index=failure.cycles_completed,
                     source_id=cycle.source_id,
                     source_provider_unavailable=True,
-                    source_gap_states=(
-                        ()
-                        if source_snapshot.source_gap_state is None
-                        else (source_snapshot.source_gap_state,)
-                    ),
-                    source_sync_states=(
-                        ()
-                        if source_snapshot.source_sync_state is None
-                        else (source_snapshot.source_sync_state,)
-                    ),
+                    source_gap_states=(),
+                    source_sync_states=(),
                     committed_delta_ids=cycle.committed_delta_ids,
                     delivered_delta_ids=(),
                     affected_input_ids=(),
@@ -2123,6 +2118,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     last_success_at=failure.last_success_at,
                 )
 
+            source_snapshot = self._refresh_source_state_projection()
             source_gap_states = (
                 ()
                 if source_snapshot.source_gap_state is None

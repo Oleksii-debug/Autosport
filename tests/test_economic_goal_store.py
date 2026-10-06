@@ -2129,3 +2129,33 @@ def test_store_class_guard_ignores_rebound_getattr(
 
     assert EconomicGoalStore.load(store) == goal
 
+def test_payload_decoder_ignores_rebound_frozenset_that_would_erase_restrictions(
+    monkeypatch,
+) -> None:
+    expected = _goal(
+        blocked_sports=frozenset({"football", "tennis"}),
+        blocked_providers=frozenset({"provider:a"}),
+        blocked_markets=frozenset({"market:x"}),
+    )
+    payload = economic_goal_to_payload(expected)
+    canonical_frozenset = frozenset
+
+    def forged_frozenset(value=()):
+        if type(value) is dict:
+            return canonical_frozenset(value)
+        return canonical_frozenset()
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "frozenset",
+        forged_frozenset,
+        raising=False,
+    )
+
+    restored = economic_goal_from_payload(payload)
+
+    assert restored == expected
+    assert restored.blocked_sports == canonical_frozenset({"football", "tennis"})
+    assert restored.blocked_providers == canonical_frozenset({"provider:a"})
+    assert restored.blocked_markets == canonical_frozenset({"market:x"})
+

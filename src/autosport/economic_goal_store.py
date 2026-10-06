@@ -130,8 +130,9 @@ def _require_exact_keys(
     value: dict[str, object],
     expected: frozenset[str],
     _error_type=EconomicGoalContractError,
+    _frozenset=frozenset,
 ) -> None:
-    keys = frozenset(value)
+    keys = _frozenset(value)
     if keys != expected:
         missing = sorted(expected - keys)
         extra = sorted(keys - expected)
@@ -173,6 +174,7 @@ def _restriction_set(
     _error_type=EconomicGoalContractError,
     _max_members=_MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS,
     _max_text_chars=_MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS,
+    _frozenset=frozenset,
 ) -> frozenset[str]:
     if type(value) is not list:
         raise _error_type(f"{name} must be a sorted JSON array")
@@ -196,7 +198,7 @@ def _restriction_set(
         raise _error_type(
             f"{name} must be sorted and contain unique strings"
         )
-    return frozenset(value)
+    return _frozenset(value)
 
 
 _CANONICAL_GOAL_TYPE: Final = EconomicGoalContract

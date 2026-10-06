@@ -1227,8 +1227,24 @@ class _ContinuousSessionState:
                 "canonical settlement evidence normalizer code identity changed"
             )
         timestamp = _instant(at, "at")
+        if type(full_refresh) is not bool:
+            raise TypeError("full_refresh must be boolean")
 
         def mutate(raw: dict[str, Any]) -> None:
+            started_at = _instant(raw["started_at"], "started_at")
+            if timestamp < started_at:
+                raise ContinuousSessionError(
+                    "success timestamp precedes session start"
+                )
+            if raw["last_success_at"] is not None:
+                previous_success = _instant(
+                    raw["last_success_at"],
+                    "last_success_at",
+                )
+                if timestamp < previous_success:
+                    raise ContinuousSessionError(
+                        "success timestamp would roll back durable session time"
+                    )
             raw["cycles_completed"] = int(raw["cycles_completed"]) + 1
             raw["last_success_at"] = timestamp.isoformat()
             raw["last_error_code"] = None

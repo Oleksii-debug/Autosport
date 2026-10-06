@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 import hashlib
+import json
 import multiprocessing
 import os
 import tempfile
@@ -17,6 +18,7 @@ from autosport.betfair_supervised_execution import (
 )
 from autosport.real_execution_ledger import (
     AttemptState,
+    EventType,
     ExecutionLedgerBusyError,
     RealExecutionLedger,
 )
@@ -1333,3 +1335,93 @@ def test_structural_transport_response_cannot_mint_durable_provider_truth() -> N
         )
         assert attempt.submitted_at is not None
         assert attempt.provider_evidence is None
+
+def test_late_canonical_transport_shadow_cannot_mint_provider_origin() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        gate = betfair_execution.BetfairSupervisedExecutionGate.from_economic_goal_store(
+            goal_store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            profile_sha256=profile.profile_id,
+        )
+        client = betfair_execution.BetfairSupervisedPlaceOrdersClient(
+            betfair_execution.BetfairSessionCredentials(
+                "app-key",
+                "session-token",
+            ),
+            gate=gate,
+            clock=lambda: READBACK_AT,
+        )
+        transport = object.__getattribute__(client, "_transport")
+        forged_calls: list[dict[str, object]] = []
+
+        def forged_post(
+            url: str,
+            *,
+            headers,
+            body: bytes,
+            timeout_seconds: float,
+        ) -> bytes:
+            request = json.loads(body.decode("utf-8"))
+            forged_calls.append(
+                {
+                    "url": url,
+                    "headers": dict(headers),
+                    "request": request,
+                    "timeout_seconds": timeout_seconds,
+                }
+            )
+            return _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+
+        original_append = ledger._append
+
+        def append_then_shadow(
+            kind,
+            plan_id,
+            action_id,
+            attempt_id,
+            payload,
+        ) -> None:
+            original_append(
+                kind,
+                plan_id,
+                action_id,
+                attempt_id,
+                payload,
+            )
+            if kind is EventType.ATTEMPT_SUBMITTED:
+                # Reproduce the exact irreversible-boundary race: preflight has
+                # already succeeded and SUBMITTED is durable, but provider I/O
+                # has not started yet.
+                transport.post = forged_post
+
+        ledger._append = append_then_shadow
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-late-transport-shadow",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert forged_calls == []
+        assert (
+            ledger.provider_evidence_binding(
+                "attempt-late-transport-shadow"
+            )
+            is None
+        )
+

@@ -1482,6 +1482,26 @@ def test_tick_rejects_registration_without_published_index_effect() -> None:
             coordinator.tick()
 
 
+@pytest.mark.parametrize("input_id", ("", " input-old", "input-old ", 1, True))
+def test_retire_rejects_malformed_input_ids(input_id: object) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    class Index:
+        input_ids = ("input-old",)
+
+        def unregister(self, _input_id):
+            return False
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="dependency index retirement input id is invalid",
+    ):
+        coordinator._retire_input(
+            input_id,  # type: ignore[arg-type]
+            dependency_index=Index(),
+        )
+
+
 def test_tick_rejects_false_retirement_receipt_that_keeps_input() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

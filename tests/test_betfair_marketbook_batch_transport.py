@@ -5,6 +5,7 @@ import json
 import pytest
 
 import autosport.betfair_marketbook_batch_transport as _batch_transport_module
+import autosport.betfair_marketbook_batch_completeness as _batch_completeness_module
 import autosport.betfair_marketbook_rate_gate as _rate_gate_module
 import autosport.betfair_marketbook_projection_concurrency as _projection_gate_module
 from autosport.betfair_account_readonly import (
@@ -3453,4 +3454,70 @@ def test_attempt_executor_uses_canonical_duplicate_error_after_rebind(monkeypatc
             concurrency_gate=concurrency_gate,
         )
 
+    assert len(transport.calls) == 1
+
+def test_attempt_executor_rejects_rebound_receipt_hash_helpers(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+
+    monkeypatch.setattr(
+        _batch_completeness_module,
+        "_sha",
+        lambda value: "0" * 64,
+    )
+    monkeypatch.setattr(
+        _batch_completeness_module,
+        "_receipt_id",
+        lambda payload: "1" * 64,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="sealed-receipt-hash",
+        required=True,
+        request_id="sealed-receipt-hash",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.PARSE_FAILURE
+    assert execution.result is None
+    assert execution.history.records[-1].outcome is MarketBookAttemptOutcome.PARSE_FAILURE
+    assert len(transport.calls) == 1
+
+
+def test_attempt_executor_rejects_rebound_receipt_market_parser(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+
+    monkeypatch.setattr(
+        _batch_completeness_module,
+        "_market_ids_from_response",
+        lambda response: ("9.999",),
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="sealed-receipt-market-parser",
+        required=True,
+        request_id="sealed-receipt-market-parser",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.PARSE_FAILURE
+    assert execution.result is None
+    assert execution.history.records[-1].outcome is MarketBookAttemptOutcome.PARSE_FAILURE
     assert len(transport.calls) == 1

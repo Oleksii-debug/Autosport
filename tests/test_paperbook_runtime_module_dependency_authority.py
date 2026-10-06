@@ -57,3 +57,57 @@ def test_open_ticket_rejects_rebound_timestamp_parser_before_execution(
         match=r"runtime module dependency changed: parse_iso_timestamp",
     ):
         book.open_ticket([], "1")
+
+
+def test_constructor_rejects_rebound_decimal_dependency_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound Decimal executed")
+
+    monkeypatch.setattr(paper_module, "Decimal", hostile)
+
+    with pytest.raises(
+        ValueError,
+        match=r"constructor module dependency changed: Decimal",
+    ):
+        PaperBook("100")
+
+    assert attacker_calls == 0
+
+
+def test_constructor_rejects_rebound_runtime_helper_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound finite validator executed")
+
+    monkeypatch.setattr(PaperBook, "_require_finite", staticmethod(hostile))
+
+    with pytest.raises(
+        ValueError,
+        match=r"runtime helper dispatch changed: _require_finite",
+    ):
+        PaperBook("100")
+
+    assert attacker_calls == 0
+
+
+def test_constructor_rejects_rebound_decimal_text_limit_before_ingress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(paper_module, "_MAX_PAPER_DECIMAL_TEXT_CHARS", 10_000)
+
+    with pytest.raises(
+        ValueError,
+        match=r"constructor module dependency changed: _MAX_PAPER_DECIMAL_TEXT_CHARS",
+    ):
+        PaperBook("100")

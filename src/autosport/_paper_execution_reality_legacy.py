@@ -31,6 +31,12 @@ _CANONICAL_DECIMAL_INPUT_TEXT_LIMIT = _MAX_EXECUTION_DECIMAL_TEXT_LENGTH
 # canonical fixed-point validator remains the exact acceptance authority.
 _CANONICAL_DECIMAL_INPUT_INT_MAX_BITS = _MAX_EXECUTION_DECIMAL_TEXT_LENGTH * 4
 _CANONICAL_DECIMAL_FORMATTER = Decimal.__format__
+_CANONICAL_DATETIME_FROMISOFORMAT = datetime.fromisoformat
+_CANONICAL_TIMEZONE_UTC = timezone.utc
+_CANONICAL_JSON_DUMPS = json.dumps
+_CANONICAL_JSON_LOADS = json.loads
+_CANONICAL_JSON_DECODE_ERROR = json.JSONDecodeError
+_CANONICAL_SHA256 = hashlib.sha256
 
 
 class PaperExecutionRealityError(RuntimeError):
@@ -89,21 +95,28 @@ def _text(value: object, name: str) -> str:
     return value
 
 
+_CANONICAL_TEXT_VALIDATOR = _text
+_CANONICAL_TEXT_VALIDATOR_CODE = _text.__code__
+
+
 def _timestamp(value: object, name: str) -> datetime:
-    raw = _text(value, name)
+    text_validator = _CANONICAL_TEXT_VALIDATOR
+    if text_validator.__code__ is not _CANONICAL_TEXT_VALIDATOR_CODE:
+        raise ValueError("text validator authority changed")
+    raw = text_validator(value, name)
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = _CANONICAL_DATETIME_FROMISOFORMAT(raw.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{name} must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(_CANONICAL_TIMEZONE_UTC)
 
 
 def _timestamp_text(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    return value.astimezone(_CANONICAL_TIMEZONE_UTC).isoformat(timespec="microseconds")
 
 
 def _decimal(
@@ -173,7 +186,7 @@ _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE = _decimal_text.__code__
 
 def _canonical(value: Any) -> str:
     try:
-        return json.dumps(
+        return _CANONICAL_JSON_DUMPS(
             value,
             ensure_ascii=False,
             sort_keys=True,
@@ -184,8 +197,19 @@ def _canonical(value: Any) -> str:
         raise PaperExecutionIntegrityError("value is not canonical JSON") from exc
 
 
+_CANONICAL_CANONICALIZER = _canonical
+_CANONICAL_CANONICALIZER_CODE = _canonical.__code__
+
+
 def _digest(value: Any) -> str:
-    return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+    canonicalizer = _CANONICAL_CANONICALIZER
+    if canonicalizer.__code__ is not _CANONICAL_CANONICALIZER_CODE:
+        raise ValueError("canonical JSON authority changed")
+    return _CANONICAL_SHA256(canonicalizer(value).encode("utf-8")).hexdigest()
+
+
+_CANONICAL_DIGEST = _digest
+_CANONICAL_DIGEST_CODE = _digest.__code__
 
 
 def _parse_json_object(raw: str, *, what: str) -> dict[str, Any]:
@@ -198,7 +222,7 @@ def _parse_json_object(raw: str, *, what: str) -> dict[str, Any]:
         return result
 
     try:
-        value = json.loads(
+        value = _CANONICAL_JSON_LOADS(
             raw,
             object_pairs_hook=pairs,
             parse_constant=lambda token: (_ for _ in ()).throw(
@@ -209,7 +233,7 @@ def _parse_json_object(raw: str, *, what: str) -> dict[str, Any]:
         )
     except PaperExecutionIntegrityError:
         raise
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (_CANONICAL_JSON_DECODE_ERROR, UnicodeDecodeError) as exc:
         raise PaperExecutionIntegrityError(f"invalid {what} JSON") from exc
     if type(value) is not dict:
         raise PaperExecutionIntegrityError(f"{what} must be a JSON object")
@@ -231,7 +255,7 @@ def _deterministic_int(seed_material: str, label: str, modulus: int) -> int:
     if modulus <= 0:
         raise ValueError("modulus must be positive")
     payload = f"{seed_material}\x1f{label}".encode("utf-8")
-    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big") % modulus
+    return int.from_bytes(_CANONICAL_SHA256(payload).digest()[:8], "big") % modulus
 
 
 @dataclass(frozen=True, slots=True)

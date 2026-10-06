@@ -531,6 +531,68 @@ def test_projection_concurrency_denial_precedes_rate_reservation_and_transport()
     assert transport.calls == []
 
 
+def test_attempt_executor_records_concurrency_clock_regression_without_transport():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    primed = concurrency_gate.begin(
+        "future-clock-prime",
+        observed_at=NOW + timedelta(seconds=1),
+        has_order_projection=False,
+        has_match_projection=False,
+    )
+    assert primed.allowed is True
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="attempt-concurrency-clock",
+        required=True,
+        request_id="concurrency-clock",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY
+    assert execution.result is None
+    assert execution.history.required_gap_attempt_ids == (
+        "attempt-concurrency-clock",
+    )
+    assert rate_gate.snapshot().markets == ()
+    assert transport.calls == []
+
+
+def test_attempt_executor_records_rate_clock_regression_without_transport():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    assert rate_gate.reserve(
+        batch.market_ids,
+        scheduled_at=NOW + timedelta(seconds=1),
+    ).allowed is True
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="attempt-rate-clock",
+        required=True,
+        request_id="rate-clock",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert execution.result is None
+    assert execution.history.required_gap_attempt_ids == ("attempt-rate-clock",)
+    assert transport.calls == []
+
+
 def test_rate_denial_releases_projection_lease_without_transport():
     plan = _plan(
         market_ids=("1.001",),

@@ -825,7 +825,59 @@ def _validate_automatic_transition_bound(
     _restrictions_guard("blocked_markets", previous_view["blocked_markets"], candidate_view["blocked_markets"])
 
 
-_CANONICAL_TRANSITION_VALIDATOR: Final = _make_transition_validator_authority(
+def _make_transition_validator_authority(operation):
+    operation_code = operation.__code__
+    operation_defaults = operation.__defaults__
+    nested_callables = tuple(
+        value
+        for value in (operation_defaults or ())
+        if callable(value)
+    )
+    nested_authority = tuple(
+        (
+            callable_object,
+            getattr(callable_object, "__code__", None),
+            getattr(callable_object, "__defaults__", None),
+            getattr(callable_object, "__kwdefaults__", None),
+        )
+        for callable_object in nested_callables
+    )
+
+    def require_authority() -> None:
+        if operation.__code__ is not operation_code:
+            raise EconomicGoalContractError(
+                "automatic transition validator authority changed"
+            )
+        if operation.__defaults__ is not operation_defaults:
+            raise EconomicGoalContractError(
+                "automatic transition validator defaults authority changed"
+            )
+        for callable_object, expected_code, expected_defaults, expected_kwdefaults in nested_authority:
+            if getattr(callable_object, "__code__", None) is not expected_code:
+                raise EconomicGoalContractError(
+                    "automatic transition nested validator authority changed"
+                )
+            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                raise EconomicGoalContractError(
+                    "automatic transition nested validator defaults authority changed"
+                )
+            if getattr(callable_object, "__kwdefaults__", None) is not expected_kwdefaults:
+                raise EconomicGoalContractError(
+                    "automatic transition nested validator keyword defaults authority changed"
+                )
+
+    def bound(
+        previous: EconomicGoalContract,
+        candidate: EconomicGoalContract,
+    ) -> None:
+        require_authority()
+        operation(previous, candidate)
+        require_authority()
+
+    return bound
+
+
+_CANONICAL_TRANSITION_VALIDATOR: Final = _make_transition_validator_authority(_CANONICAL_TRANSITION_VALIDATOR: Final = _make_transition_validator_authority(
     _validate_automatic_transition_bound
 )
 

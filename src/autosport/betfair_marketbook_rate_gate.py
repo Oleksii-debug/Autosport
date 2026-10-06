@@ -230,12 +230,14 @@ class BetfairMarketBookPerMarketRateGate:
         *,
         scheduled_at: datetime,
     ) -> MarketBookRateDecision:
-        normalized_ids: tuple[str, ...] = ()
+        # Normalize all caller-controlled inputs before taking the authority
+        # lock. Custom iterables and tzinfo hooks must never execute while this
+        # gate is blocking concurrent reserve/snapshot operations.
+        normalized_ids = _normalize_market_ids(market_ids)
+        scheduled_us = _utc_microseconds(scheduled_at)
         reservation_generation: int | None = None
         try:
             with self._lock:
-                normalized_ids = _normalize_market_ids(market_ids)
-                scheduled_us = _utc_microseconds(scheduled_at)
                 if (
                     self._last_scheduled_at_utc_us is not None
                     and scheduled_us < self._last_scheduled_at_utc_us

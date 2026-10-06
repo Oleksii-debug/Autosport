@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from threading import Barrier, Thread
 
 import pytest
@@ -494,4 +494,53 @@ def test_rate_gate_rejects_subclassed_authority_inputs_before_mutation() -> None
             None,
             (),
         )
+
+def test_rate_inputs_are_normalized_before_gate_lock() -> None:
+    gate = BetfairMarketBookPerMarketRateGate()
+
+    class LockProbe:
+        def __init__(self) -> None:
+            self.depth = 0
+            self.entries = 0
+
+        def __enter__(self) -> "LockProbe":
+            assert self.depth == 0
+            self.depth = 1
+            self.entries += 1
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            assert self.depth == 1
+            self.depth = 0
+
+    probe = LockProbe()
+    gate._lock = probe  # type: ignore[assignment]
+
+    class MarketIds:
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            assert probe.depth == 0
+            return iter(("1.1",))
+
+    class GuardedTimezone(tzinfo):
+        def utcoffset(self, dt: datetime | None) -> timedelta:
+            assert probe.depth == 0
+            return timedelta(0)
+
+        def dst(self, dt: datetime | None) -> timedelta:
+            assert probe.depth == 0
+            return timedelta(0)
+
+        def tzname(self, dt: datetime | None) -> str:
+            assert probe.depth == 0
+            return "GUARDED"
+
+    decision = gate.reserve(
+        MarketIds(),  # type: ignore[arg-type]
+        scheduled_at=datetime(2026, 9, 22, tzinfo=GuardedTimezone()),
+    )
+
+    assert decision.allowed is True
+    assert decision.market_ids == ("1.1",)
+    assert probe.entries == 1
+    assert probe.depth == 0
 

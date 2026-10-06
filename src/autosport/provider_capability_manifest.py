@@ -457,11 +457,13 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
 
     def __post_init__(
         self,
+        _profile_type=BookmakerCapabilityProfile,
+        _profile_validator=_validate_exact_profile,
+        _profile_validator_code: object = _validate_exact_profile.__code__,
         _profile_contract_validator=BookmakerCapabilityProfile.__post_init__,
         _profile_contract_validator_code: object = BookmakerCapabilityProfile.__post_init__.__code__,
         _integration_contract_validator=BookmakerIntegrationEvidence.__post_init__,
         _integration_contract_validator_code: object = BookmakerIntegrationEvidence.__post_init__.__code__,
-        _profile_type=BookmakerCapabilityProfile,
         _integration_type=BookmakerIntegrationEvidence,
         _verify_profile=BookmakerIntegrationEvidence.verify_profile,
         _verify_profile_code: object = BookmakerIntegrationEvidence.verify_profile.__code__,
@@ -469,7 +471,9 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         _identity_guard_code: object = _manifest_identity_guard.__code__,
     ) -> None:
         if (
-            _profile_type.__post_init__ is not _profile_contract_validator
+            getattr(_profile_validator, "__code__", None)
+            is not _profile_validator_code
+            or _profile_type.__post_init__ is not _profile_contract_validator
             or getattr(_profile_contract_validator, "__code__", None)
             is not _profile_contract_validator_code
             or _integration_type.__post_init__ is not _integration_contract_validator
@@ -485,7 +489,11 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
 
         _text(self.manifest_ref, "manifest_ref")
         _positive_int(self.manifest_version, "manifest_version")
-        _validate_exact_profile(self.profile)
+        _profile_validator(self.profile)
+        if type(self.profile) is not _profile_type:
+            raise ProviderCapabilityManifestError(
+                "profile must be an exact BookmakerCapabilityProfile"
+            )
         _profile_contract_validator(self.profile)
         if type(self.integration) is not _integration_type:
             raise ProviderCapabilityManifestError(
@@ -833,6 +841,8 @@ def _make_provider_capability_manifest_builder(
     _profile_state,
     _manifest_type,
     _manifest_fact_type,
+    _profile_type,
+    _profile_validator,
     _integration_type,
     _verify_profile,
 ):
@@ -855,7 +865,11 @@ def _make_provider_capability_manifest_builder(
         closed until a separate product-owned, re-resolvable issuer is composed.
         """
 
-        _validate_exact_profile(profile)
+        _profile_validator(profile)
+        if type(profile) is not _profile_type:
+            raise ProviderCapabilityManifestError(
+                "profile must be an exact BookmakerCapabilityProfile"
+            )
         if type(integration) is not _integration_type:
             raise ProviderCapabilityManifestError(
                 "integration must be an exact BookmakerIntegrationEvidence"
@@ -924,6 +938,8 @@ build_provider_capability_manifest = _make_provider_capability_manifest_builder(
     _profile_state,
     ProviderCapabilityManifest,
     ProviderCapabilityManifestFact,
+    BookmakerCapabilityProfile,
+    _validate_exact_profile,
     BookmakerIntegrationEvidence,
     BookmakerIntegrationEvidence.verify_profile,
 )

@@ -34,8 +34,10 @@ _PAPER_LOAD_DESCRIPTOR = PaperBook.__dict__["load"]
 _PAPER_LOAD_FUNC = _PAPER_LOAD_DESCRIPTOR.__func__
 _PAPER_LOAD_CODE = _PAPER_LOAD_FUNC.__code__
 _PAPER_LOAD = PaperBook.load
+_PAPER_VALIDATE_DESCRIPTOR = PaperBook.__dict__["_validate_loaded_state"]
+_PAPER_VALIDATE_FUNC = _PAPER_VALIDATE_DESCRIPTOR.__func__
+_PAPER_VALIDATE_CODE = _PAPER_VALIDATE_FUNC.__code__
 _PAPER_VALIDATE = PaperBook._validate_loaded_state
-_PAPER_VALIDATE_CODE = PaperBook._validate_loaded_state.__code__
 _PROVENANCE_FOR = provenance_for
 _PROVENANCE_FOR_CODE = provenance_for.__code__
 
@@ -327,8 +329,9 @@ class PaperSessionTurnoverResolver:
             or type(PaperBook.__dict__.get("load")) is not classmethod
             or PaperBook.__dict__["load"].__func__ is not _PAPER_LOAD_FUNC
             or PaperBook.__dict__["load"].__func__.__code__ is not _PAPER_LOAD_CODE
-            or PaperBook._validate_loaded_state is not _PAPER_VALIDATE
-            or PaperBook._validate_loaded_state.__code__ is not _PAPER_VALIDATE_CODE
+            or type(PaperBook.__dict__.get("_validate_loaded_state")) is not classmethod
+            or PaperBook.__dict__["_validate_loaded_state"].__func__ is not _PAPER_VALIDATE_FUNC
+            or PaperBook.__dict__["_validate_loaded_state"].__func__.__code__ is not _PAPER_VALIDATE_CODE
             or provenance_for is not _PROVENANCE_FOR
             or provenance_for.__code__ is not _PROVENANCE_FOR_CODE
         ):

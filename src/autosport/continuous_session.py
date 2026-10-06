@@ -2451,7 +2451,25 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "invalidation buffer returned an invalid batch"
                 )
+            indexed_input_ids = dependency_index.input_ids
+            if (
+                type(indexed_input_ids) is not tuple
+                or any(
+                    type(input_id) is not str
+                    or not input_id
+                    or input_id.strip() != input_id
+                    for input_id in indexed_input_ids
+                )
+                or len(set(indexed_input_ids)) != len(indexed_input_ids)
+            ):
+                raise ContinuousSessionError(
+                    "dependency index input identity state is invalid"
+                )
             routed = affected_inputs(batch)
+            if dependency_index.input_ids != indexed_input_ids:
+                raise ContinuousSessionError(
+                    "dependency index routing mutated input identity state"
+                )
             if (
                 type(routed) is not tuple
                 or any(
@@ -2465,32 +2483,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "dependency index returned invalid affected inputs"
                 )
-            if routed or batch.full_refresh_required:
-                indexed_input_ids = dependency_index.input_ids
-                if (
-                    type(indexed_input_ids) is not tuple
-                    or any(
-                        type(input_id) is not str
-                        or not input_id
-                        or input_id.strip() != input_id
-                        for input_id in indexed_input_ids
-                    )
-                    or len(set(indexed_input_ids)) != len(indexed_input_ids)
-                ):
-                    raise ContinuousSessionError(
-                        "dependency index input identity state is invalid"
-                    )
-                if any(input_id not in indexed_input_ids for input_id in routed):
-                    raise ContinuousSessionError(
-                        "dependency index routed an unregistered input"
-                    )
-                if (
-                    batch.full_refresh_required
-                    and routed != indexed_input_ids
-                ):
-                    raise ContinuousSessionError(
-                        "dependency index full refresh routing is incomplete or reordered"
-                    )
+            if any(input_id not in indexed_input_ids for input_id in routed):
+                raise ContinuousSessionError(
+                    "dependency index routed an unregistered input"
+                )
+            if (
+                batch.full_refresh_required
+                and routed != indexed_input_ids
+            ):
+                raise ContinuousSessionError(
+                    "dependency index full refresh routing is incomplete or reordered"
+                )
             affected.extend(routed)
             full_refresh_required = full_refresh_required or batch.full_refresh_required
             last_has_more = batch.has_more

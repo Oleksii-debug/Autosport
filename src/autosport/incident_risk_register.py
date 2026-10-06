@@ -184,7 +184,7 @@ _OPERATOR_REDACTION: Final = "[REDACTED]"
 _OPERATOR_SECRET_PATTERNS: Final = (
     re.compile(r"(?i)\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic|token)\s+\S+"),
     re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}"),
-    re.compile(r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret[_-]?key|password|passwd|pwd)\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)"),
+    re.compile(r'''(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret[_-]?key|password|passwd|pwd)\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)'''),
     re.compile(r"-----BEGIN [^\r\n-]*PRIVATE KEY-----[\s\S]*?-----END [^\r\n-]*PRIVATE KEY-----"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),

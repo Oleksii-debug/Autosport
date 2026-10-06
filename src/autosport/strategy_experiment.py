@@ -20,8 +20,14 @@ _MAX_PROTOCOL_JSON_DEPTH = 32
 
 
 def _require_text(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field} must be a non-empty string")
+    if type(value) is not str or not value or value.strip() != value:
+        raise ValueError(f"{field} must be a non-empty trimmed string")
+    if "\x00" in value:
+        raise ValueError(f"{field} must not contain NUL")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be valid UTF-8") from exc
     return value
 
 
@@ -100,8 +106,8 @@ def _require_bool(value: Any, field: str) -> bool:
 
 
 def _require_text_tuple(value: Any, field: str) -> tuple[str, ...]:
-    if not isinstance(value, tuple):
-        raise ValueError(f"{field} must be a tuple of strings")
+    if type(value) is not tuple:
+        raise ValueError(f"{field} must be an exact tuple of strings")
     normalized = tuple(
         _require_text(item, f"{field}[{index}]") for index, item in enumerate(value)
     )
@@ -426,26 +432,26 @@ class ChampionChallengerProtocol:
         _require_text(self.experiment_id, "experiment_id")
         _require_text(self.research_question_id, "research_question_id")
         _require_text(self.hypothesis_id, "hypothesis_id")
-        if not isinstance(self.scientific_protocol, ScientificProtocolBinding):
-            raise ValueError("scientific_protocol must be a ScientificProtocolBinding")
+        if type(self.scientific_protocol) is not ScientificProtocolBinding:
+            raise ValueError("scientific_protocol must be an exact ScientificProtocolBinding")
         if self.scientific_protocol.research_question_id != self.research_question_id:
             raise ValueError("scientific protocol research question identity mismatch")
         if self.scientific_protocol.hypothesis_id != self.hypothesis_id:
             raise ValueError("scientific protocol hypothesis identity mismatch")
         if type(self.protocol_schema_version) is not int or self.protocol_schema_version != 1:
             raise ValueError("protocol_schema_version must be 1")
-        if not isinstance(self.champion, CandidateRef):
-            raise ValueError("champion must be a CandidateRef")
-        if not isinstance(self.challengers, tuple) or not all(
-            isinstance(candidate, CandidateRef) for candidate in self.challengers
+        if type(self.champion) is not CandidateRef:
+            raise ValueError("champion must be an exact CandidateRef")
+        if type(self.challengers) is not tuple or not all(
+            type(candidate) is CandidateRef for candidate in self.challengers
         ):
             raise ValueError("challengers must be a tuple of CandidateRef values")
-        if not isinstance(self.cases, tuple) or not all(
-            isinstance(case, EvaluationCase) for case in self.cases
+        if type(self.cases) is not tuple or not all(
+            type(case) is EvaluationCase for case in self.cases
         ):
             raise ValueError("cases must be a tuple of EvaluationCase values")
-        if not isinstance(self.guardrails, tuple) or not all(
-            isinstance(rule, GuardrailRule) for rule in self.guardrails
+        if type(self.guardrails) is not tuple or not all(
+            type(rule) is GuardrailRule for rule in self.guardrails
         ):
             raise ValueError("guardrails must be a tuple of GuardrailRule values")
         if not self.challengers:

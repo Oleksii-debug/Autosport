@@ -1589,13 +1589,56 @@ def _make_paperbook_economic_helper_dispatch_authority():
         "len": len,
         "ValueError": ValueError,
     }
+    debit_dependencies = {
+        "DecimalException": DecimalException,
+        "Inexact": Inexact,
+        "_paper_decimal_context": _paper_decimal_context,
+        "localcontext": localcontext,
+        "ValueError": ValueError,
+    }
+    settlement_dependencies = {
+        "Decimal": Decimal,
+        "DecimalException": DecimalException,
+        "Inexact": Inexact,
+        "TicketStatus": TicketStatus,
+        "_paper_decimal_context": _paper_decimal_context,
+        "_CANONICAL_LOCKED_CAPITAL_FOR_TICKET": _CANONICAL_LOCKED_CAPITAL_FOR_TICKET,
+        "localcontext": localcontext,
+        "any": any,
+        "len": len,
+        "tuple": tuple,
+        "ValueError": ValueError,
+    }
+    economic_dependency_codes = {
+        name: getattr(dependency, "__code__", None)
+        for dependencies in (
+            decimal_dependencies,
+            debit_dependencies,
+            settlement_dependencies,
+        )
+        for name, dependency in dependencies.items()
+    }
 
-    def require_decimal_dependencies() -> None:
-        for name, expected in decimal_dependencies.items():
+    def require_economic_dependencies(
+        helper_name: str,
+        dependencies: dict[str, object],
+    ) -> None:
+        for name, expected in dependencies.items():
             if module_globals.get(name, expected) is not expected:
                 raise error_type(
-                    f"PaperBook decimal helper dependency changed: {name}"
+                    f"PaperBook {helper_name} helper dependency changed: {name}"
                 )
+            expected_code = economic_dependency_codes.get(name)
+            if (
+                expected_code is not None
+                and getattr(expected, "__code__", None) is not expected_code
+            ):
+                raise error_type(
+                    f"PaperBook {helper_name} helper dependency authority changed: {name}"
+                )
+
+    def require_decimal_dependencies() -> None:
+        require_economic_dependencies("decimal", decimal_dependencies)
 
     def install(canonical_type: type) -> None:
         nonlocal decimal_descriptor, decimal_function, decimal_code
@@ -1640,7 +1683,9 @@ def _make_paperbook_economic_helper_dispatch_authority():
             raise ValueError("PaperBook debit helper dispatch changed")
         if debit_function.__code__ is not debit_code:
             raise ValueError("PaperBook debit helper authority changed")
+        require_economic_dependencies("debit", debit_dependencies)
         result = debit_function(canonical_type, balance, amount)
+        require_economic_dependencies("debit", debit_dependencies)
         if debit_function.__code__ is not debit_code:
             raise ValueError("PaperBook debit helper authority changed")
         return result
@@ -1658,6 +1703,7 @@ def _make_paperbook_economic_helper_dispatch_authority():
             raise ValueError("PaperBook settlement helper dispatch changed")
         if settlement_function.__code__ is not settlement_code:
             raise ValueError("PaperBook settlement helper authority changed")
+        require_economic_dependencies("settlement", settlement_dependencies)
         result = settlement_function(
             canonical_type,
             ticket,
@@ -1665,6 +1711,7 @@ def _make_paperbook_economic_helper_dispatch_authority():
             winning_quote_keys,
             void_quote_keys,
         )
+        require_economic_dependencies("settlement", settlement_dependencies)
         if settlement_function.__code__ is not settlement_code:
             raise ValueError("PaperBook settlement helper authority changed")
         return result

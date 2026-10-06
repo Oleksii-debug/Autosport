@@ -58,6 +58,14 @@ def _make_paperbook_market_semantics_authority():
     return require
 
 
+class _TicketForCapitalProbe:
+    __slots__ = ("stake", "legs")
+
+    def __init__(self, *, stake: Decimal, legs: tuple[TicketLeg, ...]) -> None:
+        self.stake = stake
+        self.legs = legs
+
+
 def _make_paperbook_locked_capital_authority():
     calculator = locked_capital_for_exchange_side
     calculator_code = calculator.__code__
@@ -2055,7 +2063,16 @@ class PaperBook:
         _debit_balance=None,
     ) -> PaperTicket:
         amount = _canonical_decimal(type(self), stake, "stake")
-        new_balance = _debit_balance(type(self), self.balance, amount)
+        new_balance = _debit_balance(
+            type(self),
+            self.balance,
+            _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                _TicketForCapitalProbe(
+                    stake=amount,
+                    legs=ticket_legs,
+                )
+            ),
+        )
 
         ticket_placed_at = self._validate_placed_at(
             placed_at if placed_at is not None else _placed_at_now()

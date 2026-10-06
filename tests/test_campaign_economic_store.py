@@ -110,6 +110,71 @@ def test_atomic_json_closes_raw_descriptor_when_fdopen_fails(
     assert not target.exists()
 
 
+def test_atomic_json_cleanup_failures_do_not_shadow_primary_fdopen_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "head.json"
+    captured: dict[str, object] = {}
+    original_mkstemp = economic_store_module.tempfile.mkstemp
+    real_close = os.close
+    real_unlink = Path.unlink
+
+    def capture_mkstemp(*args, **kwargs):
+        descriptor, temp_name = original_mkstemp(*args, **kwargs)
+        captured["descriptor"] = descriptor
+        captured["temp_name"] = temp_name
+        return descriptor, temp_name
+
+    def fail_fdopen(descriptor: int, mode: str):
+        assert descriptor == captured["descriptor"]
+        raise RuntimeError("fdopen-primary")
+
+    def fail_close(descriptor: int) -> None:
+        assert descriptor == captured["descriptor"]
+        raise OSError("close-secondary")
+
+    def fail_unlink(path: Path, *args, **kwargs) -> None:
+        assert path == Path(captured["temp_name"])
+        raise PermissionError("unlink-secondary")
+
+    monkeypatch.setattr(
+        economic_store_module.tempfile,
+        "mkstemp",
+        capture_mkstemp,
+    )
+    monkeypatch.setattr(economic_store_module.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(economic_store_module.os, "close", fail_close)
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    try:
+        with pytest.raises(RuntimeError, match="fdopen-primary") as raised:
+            economic_store_module._atomic_json(target, {"schema_version": 1})
+
+        notes = tuple(getattr(raised.value, "__notes__", ()))
+        assert any("close-secondary" in note for note in notes)
+        assert any("unlink-secondary" in note for note in notes)
+
+        descriptor = captured["descriptor"]
+        temp_name = captured["temp_name"]
+        assert isinstance(descriptor, int)
+        assert isinstance(temp_name, str)
+        assert Path(temp_name).exists()
+        assert not target.exists()
+    finally:
+        descriptor = captured.get("descriptor")
+        temp_name = captured.get("temp_name")
+        if isinstance(descriptor, int):
+            try:
+                real_close(descriptor)
+            except OSError:
+                pass
+        if isinstance(temp_name, str):
+            temp_path = Path(temp_name)
+            if temp_path.exists():
+                real_unlink(temp_path)
+
+
 def test_successor_retry_recovers_crash_after_version_before_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

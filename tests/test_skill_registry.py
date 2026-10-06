@@ -837,6 +837,69 @@ def test_handler_result_pipe_failure_becomes_terminal_truth(monkeypatch, failure
     assert process.closed is True
 
 
+@pytest.mark.parametrize(
+    ("close_fails", "expected_error"),
+    (
+        (False, "HANDLER_START_RUNTIMEERROR"),
+        (True, "HANDLER_START_HANDLE_CLOSE_FAILED"),
+    ),
+)
+def test_handler_spawn_failure_closes_process_handle_and_preserves_terminal_truth(
+    monkeypatch, close_fails, expected_error
+):
+    class FakeEndpoint:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FakeEndpoint()
+    sender = FakeEndpoint()
+
+    class FakeProcess:
+        def __init__(self):
+            self.closed = False
+
+        def start(self):
+            raise RuntimeError("simulated spawn failure")
+
+        def close(self):
+            if close_fails:
+                raise RuntimeError("simulated process handle close failure")
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, sender
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == expected_error
+    assert receiver.closed is True
+    assert sender.closed is True
+    assert process.closed is (not close_fails)
+
+
 def test_handler_timeout_terminates_and_persists_terminal_failure(tmp_path):
     registry = SkillRegistry.initialize(tmp_path / "skills.json")
     definition = SkillDefinition(

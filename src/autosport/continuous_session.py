@@ -4038,6 +4038,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "continuous-session dependency index authority changed during tick"
                 )
 
+        def restore_invalidation_buffer_identity() -> bool:
+            if self.invalidation_buffer is invalidation_buffer:
+                return False
+            self.invalidation_buffer = invalidation_buffer
+            return True
+
+        def require_invalidation_buffer_identity() -> None:
+            if restore_invalidation_buffer_identity():
+                raise ContinuousSessionError(
+                    "continuous-session invalidation buffer authority changed during tick"
+                )
+
         def require_invalidation_buffer_dispatch_authority() -> None:
             if type(invalidation_buffer) is not _invalidation_buffer_type:
                 return
@@ -4178,6 +4190,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             tick_dependency_lock = dependency_index._lock
 
         def refresh_tick_dependency_routing_authority() -> None:
+            require_invalidation_buffer_identity()
             nonlocal tick_dependency_input_ids
             nonlocal tick_dependency_fingerprints
             nonlocal tick_dependency_entries
@@ -4294,6 +4307,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             return changed
 
         def require_tick_dependency_routing_authority(message: str) -> None:
+            require_invalidation_buffer_identity()
             require_lifecycle_dispatch_authority()
             if type(dependency_index) is not _dependency_index_type:
                 return
@@ -4389,6 +4403,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         except Exception as exc:
             state_was_rebound = restore_state_identity()
             dependency_index_was_rebound = restore_dependency_index_identity()
+            invalidation_buffer_was_rebound = restore_invalidation_buffer_identity()
+            if invalidation_buffer_was_rebound:
+                try:
+                    exc.add_note(
+                        "continuous-session invalidation buffer authority was rebound "
+                        "during collector observation and was restored"
+                    )
+                except BaseException:
+                    pass
             if dependency_index_was_rebound:
                 try:
                     exc.add_note(
@@ -4476,6 +4499,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     # state while the provider-unavailable result is being handled.
                     state_was_rebound = restore_state_identity()
                     dependency_index_was_rebound = restore_dependency_index_identity()
+                    invalidation_buffer_was_rebound = (
+                        restore_invalidation_buffer_identity()
+                    )
+                    if invalidation_buffer_was_rebound:
+                        try:
+                            exc.add_note(
+                                "continuous-session invalidation buffer authority was "
+                                "rebound during provider-unavailable backlog inspection "
+                                "and was restored"
+                            )
+                        except BaseException:
+                            pass
                     if dependency_index_was_rebound:
                         try:
                             exc.add_note(
@@ -4880,6 +4915,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # authority before failing.
                 state_was_rebound = restore_state_identity()
                 dependency_index_was_rebound = restore_dependency_index_identity()
+                invalidation_buffer_was_rebound = restore_invalidation_buffer_identity()
+                if invalidation_buffer_was_rebound:
+                    try:
+                        exc.add_note(
+                            "continuous-session invalidation buffer authority was rebound "
+                            "during tick effects and was restored"
+                        )
+                    except BaseException:
+                        pass
                 if dependency_index_was_rebound:
                     try:
                         exc.add_note(

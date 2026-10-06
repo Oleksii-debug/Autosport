@@ -2896,7 +2896,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "invalidation buffer returned an invalid batch"
                 )
+            batch_changed_keys = batch.changed_keys
+            batch_full_refresh_required = batch.full_refresh_required
+            batch_has_more = batch.has_more
             routed = affected_inputs(batch)
+            if (
+                batch.changed_keys != batch_changed_keys
+                or batch.full_refresh_required is not batch_full_refresh_required
+                or batch.has_more is not batch_has_more
+            ):
+                raise ContinuousSessionError(
+                    "dependency index routing mutated invalidation batch truth"
+                )
             if dependency_index.input_ids != indexed_input_ids:
                 raise ContinuousSessionError(
                     "dependency index routing mutated input identity state"
@@ -2921,7 +2932,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "dependency index routed an unregistered input"
                 )
-            if not batch.full_refresh_required:
+            if not batch_full_refresh_required:
                 routed_ids = set(routed)
                 expected_routed = tuple(
                     input_id
@@ -2933,16 +2944,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         "dependency index affected input routing is reordered"
                     )
             if (
-                batch.full_refresh_required
+                batch_full_refresh_required
                 and routed != indexed_input_ids
             ):
                 raise ContinuousSessionError(
                     "dependency index full refresh routing is incomplete or reordered"
                 )
             affected.extend(routed)
-            full_refresh_required = full_refresh_required or batch.full_refresh_required
-            last_has_more = batch.has_more
-            if not batch.has_more:
+            full_refresh_required = (
+                full_refresh_required or batch_full_refresh_required
+            )
+            last_has_more = batch_has_more
+            if not batch_has_more:
                 break
 
         pending_count = invalidation_buffer.pending_count

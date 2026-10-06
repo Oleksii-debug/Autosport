@@ -468,7 +468,7 @@ class EconomicGoalStore:
         """Create the first owner contract while holding the economic writer lock."""
 
         workspace, path, path_exists, _ = _binding_resolver(self)
-        with _lock_scope(workspace):
+        with _lock_scope(workspace, _lock_type):
             if path_exists():
                 raise _error_type(
                     "persisted economic goal already exists; owner replacement requires "
@@ -492,7 +492,7 @@ class EconomicGoalStore:
         """Publish one machine revision only when durable authority cannot expand."""
 
         workspace, path, _, path_open = _binding_resolver(self)
-        with _lock_scope(workspace):
+        with _lock_scope(workspace, _lock_type):
             try:
                 with path_open("r", encoding="utf-8") as handle:
                     previous_text = handle.read(_max_chars + 1)

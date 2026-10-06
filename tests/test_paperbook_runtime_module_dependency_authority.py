@@ -111,3 +111,54 @@ def test_constructor_rejects_rebound_decimal_text_limit_before_ingress(
         match=r"constructor module dependency changed: _MAX_PAPER_DECIMAL_TEXT_CHARS",
     ):
         PaperBook("100")
+
+
+def test_raw_snapshot_rejects_rebound_paper_ticket_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound PaperTicket executed")
+
+    monkeypatch.setattr(paper_module, "PaperTicket", hostile)
+
+    raw = {
+        "initial_bankroll": "100",
+        "balance": "100",
+        "tickets": [],
+    }
+    with pytest.raises(
+        ValueError,
+        match=r"snapshot module dependency changed: PaperTicket",
+    ):
+        PaperBook._from_raw_snapshot(raw)
+
+    assert attacker_calls == 0
+
+
+def test_load_bytes_rejects_rebound_snapshot_timestamp_parser_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound snapshot timestamp parser executed")
+
+    monkeypatch.setattr(paper_module, "parse_iso_timestamp", hostile)
+
+    payload = (
+        b'{"schema_version":7,"initial_bankroll":"100","balance":"100",'
+        b'"tickets":[],"lifecycle":[]}'
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"snapshot module dependency changed: parse_iso_timestamp",
+    ):
+        PaperBook.load_bytes(payload)
+
+    assert attacker_calls == 0

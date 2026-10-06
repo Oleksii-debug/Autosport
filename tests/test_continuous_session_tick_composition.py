@@ -5385,3 +5385,111 @@ def test_collector_malformed_matched_keys_are_restored_without_sorting_tampered_
         assert index.matching_keys("input-a") == ()
         assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
 
+def test_collector_invalidation_dirty_storage_rebind_is_restored() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        canonical_dirty = buffer._dirty
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop ran after invalidation storage rebind")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after invalidation storage rebind")
+
+        def mutate() -> None:
+            buffer._dirty = {("provider-a", "forged"): None}
+
+        coordinator.collector = _Collector(callback=mutate)
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="invalidation buffer structure changed during tick",
+        ):
+            coordinator.tick()
+
+        assert buffer._dirty is canonical_dirty
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_desktop_invalidation_capacity_mutation_is_restored() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(
+            mirror,
+            max_dirty_keys=8,
+        )
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                buffer._max_dirty_keys = 1
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after invalidation capacity mutation")
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="invalidation buffer structure changed during tick",
+        ):
+            coordinator.tick()
+
+        assert buffer.max_dirty_keys == 8
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_desktop_failure_restores_invalidation_lock_rebind() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        canonical_lock = buffer._lock
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                buffer._lock = object()
+                raise RuntimeError("desktop failed after invalidation lock rebind")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            RuntimeError,
+            match="desktop failed after invalidation lock rebind",
+        ):
+            coordinator.tick()
+
+        assert buffer._lock is canonical_lock
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+

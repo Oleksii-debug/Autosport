@@ -81,8 +81,79 @@ class EconomicGoalProvenance:
 
 _CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
 _CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
-_CANONICAL_PROVENANCE_TYPE: Final = EconomicGoalProvenance
-_CANONICAL_PROVENANCE_VALIDATOR: Final = EconomicGoalProvenance.__post_init__
+_CANONICAL_PROVENANCE_RAW_POST_INIT: Final = EconomicGoalProvenance.__post_init__
+
+
+def _make_provenance_post_init_authority(operation):
+    operation_code = operation.__code__
+    operation_defaults = operation.__defaults__
+    nested_callables = tuple(
+        value
+        for value in (operation_defaults or ())
+        if callable(value)
+    )
+    nested_authority = tuple(
+        (
+            callable_object,
+            getattr(callable_object, "__code__", None),
+            getattr(callable_object, "__defaults__", None),
+            getattr(callable_object, "__kwdefaults__", None),
+        )
+        for callable_object in nested_callables
+    )
+    error_type = EconomicGoalProvenanceError
+
+    def require_authority() -> None:
+        if operation.__code__ is not operation_code:
+            raise error_type("economic-goal provenance validator authority changed")
+        if operation.__defaults__ is not operation_defaults:
+            raise error_type("economic-goal provenance validator defaults authority changed")
+        for callable_object, expected_code, expected_defaults, expected_kwdefaults in nested_authority:
+            if getattr(callable_object, "__code__", None) is not expected_code:
+                raise error_type("economic-goal provenance nested validator authority changed")
+            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                raise error_type("economic-goal provenance nested validator defaults authority changed")
+            if getattr(callable_object, "__kwdefaults__", None) is not expected_kwdefaults:
+                raise error_type(
+                    "economic-goal provenance nested validator keyword defaults authority changed"
+                )
+
+    def bound(self: EconomicGoalProvenance) -> None:
+        require_authority()
+        operation(self)
+        require_authority()
+
+    return bound
+
+
+_CANONICAL_PROVENANCE_VALIDATOR: Final = _make_provenance_post_init_authority(
+    _CANONICAL_PROVENANCE_RAW_POST_INIT
+)
+EconomicGoalProvenance.__post_init__ = _CANONICAL_PROVENANCE_VALIDATOR
+
+
+def _provenance_init_authority(
+    self: EconomicGoalProvenance,
+    schema: str,
+    schema_version: int,
+    goal_id: str,
+    revision: int,
+    bankroll_id: str,
+    contract_sha256: str,
+) -> None:
+    for name, value in (
+        ("schema", schema),
+        ("schema_version", schema_version),
+        ("goal_id", goal_id),
+        ("revision", revision),
+        ("bankroll_id", bankroll_id),
+        ("contract_sha256", contract_sha256),
+    ):
+        object.__setattr__(self, name, value)
+    _CANONICAL_PROVENANCE_VALIDATOR(self)
+
+
+EconomicGoalProvenance.__init__ = _provenance_init_authority
 
 
 def _build_provenance(

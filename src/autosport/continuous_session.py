@@ -2236,31 +2236,53 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         input_id: str,
         *,
         dependency_index: FocusedMirrorDependencyIndex | None = None,
+        register_input: Callable[..., object] | None = None,
         **selectors: object,
     ) -> None:
         dependency_index = (
             self.dependency_index if dependency_index is None else dependency_index
         )
+        register_input = (
+            getattr(dependency_index, "register", None)
+            if register_input is None
+            else register_input
+        )
         if input_id in dependency_index.input_ids:
             return
-        dependency_index.register(input_id, **selectors)
+        if not callable(register_input):
+            raise ContinuousSessionError(
+                "dependency index registration authority is unavailable"
+            )
+        register_input(input_id, **selectors)
 
     def _retire_input(
         self,
         input_id: str,
         *,
         dependency_index: FocusedMirrorDependencyIndex | None = None,
+        unregister_input: Callable[[str], object] | None = None,
     ) -> None:
         dependency_index = (
             self.dependency_index if dependency_index is None else dependency_index
         )
-        dependency_index.unregister(input_id)
+        unregister_input = (
+            getattr(dependency_index, "unregister", None)
+            if unregister_input is None
+            else unregister_input
+        )
+        if not callable(unregister_input):
+            raise ContinuousSessionError(
+                "dependency index retirement authority is unavailable"
+            )
+        unregister_input(input_id)
 
     def _drain_invalidations(
         self,
         *,
         invalidation_buffer: BoundedMirrorInvalidationBuffer | None = None,
         dependency_index: FocusedMirrorDependencyIndex | None = None,
+        drain_invalidation: Callable[..., MirrorInvalidationBatch] | None = None,
+        affected_inputs: Callable[[MirrorInvalidationBatch], tuple[str, ...]] | None = None,
         max_batches: int | None = None,
         max_items: int | None = None,
     ) -> tuple[
@@ -2276,6 +2298,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         dependency_index = (
             self.dependency_index if dependency_index is None else dependency_index
         )
+        drain_invalidation = (
+            getattr(invalidation_buffer, "drain", None)
+            if drain_invalidation is None
+            else drain_invalidation
+        )
+        affected_inputs = (
+            getattr(dependency_index, "affected_inputs", None)
+            if affected_inputs is None
+            else affected_inputs
+        )
         max_batches = (
             self.max_invalidation_batches_per_tick
             if max_batches is None
@@ -2286,6 +2318,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if max_items is None
             else max_items
         )
+        if (
+            not callable(drain_invalidation)
+            or not callable(affected_inputs)
+        ):
+            raise ContinuousSessionError(
+                "continuous-session invalidation routing authority is unavailable"
+            )
         if (
             type(max_batches) is not int
             or max_batches <= 0
@@ -2300,12 +2339,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         backlog = False
 
         for _ in range(max_batches):
-            batch = invalidation_buffer.drain(max_items=max_items)
+            batch = drain_invalidation(max_items=max_items)
             if type(batch) is not MirrorInvalidationBatch:
                 raise ContinuousSessionError(
                     "invalidation buffer returned an invalid batch"
                 )
-            routed = dependency_index.affected_inputs(batch)
+            routed = affected_inputs(batch)
             if (
                 type(routed) is not tuple
                 or any(
@@ -2884,7 +2923,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         desktop_consumer = self.desktop_consumer
         desktop_drain = desktop_consumer.drain
         invalidation_buffer = self.invalidation_buffer
+        invalidation_drain = invalidation_buffer.drain
         dependency_index = self.dependency_index
+        dependency_affected_inputs = dependency_index.affected_inputs
+        dependency_register = getattr(dependency_index, "register", None)
+        dependency_unregister = getattr(dependency_index, "unregister", None)
         max_invalidation_batches = self.max_invalidation_batches_per_tick
         max_invalidation_items = self.max_invalidation_items_per_batch
         causal_view = self.causal_view
@@ -3065,6 +3108,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     self,
                     invalidation_buffer=invalidation_buffer,
                     dependency_index=dependency_index,
+                    drain_invalidation=invalidation_drain,
+                    affected_inputs=dependency_affected_inputs,
                     max_batches=max_invalidation_batches,
                     max_items=max_invalidation_items,
                 )
@@ -3078,6 +3123,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         self,
                         input_id,
                         dependency_index=dependency_index,
+                        register_input=dependency_register,
                         **selectors,
                     )
                     if not before:
@@ -3089,6 +3135,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         self,
                         input_id,
                         dependency_index=dependency_index,
+                        unregister_input=dependency_unregister,
                     )
                     if before:
                         retired.append(input_id)

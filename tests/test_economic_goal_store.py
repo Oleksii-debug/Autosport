@@ -1346,7 +1346,8 @@ def test_payload_snapshot_ignores_rebound_contract_constructor(monkeypatch) -> N
 
 
 def test_payload_decoder_ignores_rebound_contract_constructor(monkeypatch) -> None:
-    payload = economic_goal_to_payload(_goal())
+    expected = _goal()
+    payload = economic_goal_to_payload(expected)
 
     def forged(*args, **kwargs):
         raise AssertionError("rebound EconomicGoalContract constructor executed")
@@ -1355,4 +1356,4 @@ def test_payload_decoder_ignores_rebound_contract_constructor(monkeypatch) -> No
     monkeypatch.setattr(EconomicGoalContract, "__post_init__", forged)
 
     restored = economic_goal_from_payload(payload)
-    assert restored == _goal()
+    assert restored == expected

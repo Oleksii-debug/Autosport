@@ -256,6 +256,56 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertFalse(called)
 
+    def test_require_current_rejects_rebound_product_session_equality(self) -> None:
+        store = ProductEconomicSessionStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+        evidence = store.current()
+        original_eq = ProductEconomicSession.__eq__
+        called = False
+
+        def hostile_eq(self, other):
+            nonlocal called
+            called = True
+            raise AssertionError("rebound ProductEconomicSession equality executed")
+
+        ProductEconomicSession.__eq__ = hostile_eq
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.require_current(evidence)
+            self.assertFalse(called)
+        finally:
+            ProductEconomicSession.__eq__ = original_eq
+
+    def test_require_current_rejects_class_current_rebinding_without_dispatch(self) -> None:
+        store = ProductEconomicSessionStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+        evidence = store.current()
+        original_current = ProductEconomicSessionStore.current
+        called = False
+
+        def hostile_current(self):
+            nonlocal called
+            called = True
+            return evidence
+
+        ProductEconomicSessionStore.current = hostile_current
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.require_current(evidence)
+            self.assertFalse(called)
+        finally:
+            ProductEconomicSessionStore.current = original_current
+
     def test_transition_rejects_rebound_product_session_equality(self) -> None:
         store = self._store()
         first = store.current()

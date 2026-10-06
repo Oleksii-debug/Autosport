@@ -86,3 +86,35 @@ def test_record_source_projection_cannot_publish_non_running_session(
         assert durable["generation"] == 1
         assert durable["source_state_delta_id"] is None
         assert durable["state"] == state_value.value
+
+@pytest.mark.parametrize(
+    "state_value",
+    (
+        continuous_session.SessionState.PAUSED,
+        continuous_session.SessionState.STOPPED,
+    ),
+)
+def test_operator_state_transition_preserves_active_same_generation_failure(
+    state_value: continuous_session.SessionState,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        failure = state.record_failure(code="ProviderUnavailableError")
+        assert failure.generation == 0
+
+        state.set_state(state_value)
+
+        durable = json.loads(path.read_text(encoding="utf-8"))
+        sidecar = json.loads(
+            path.with_name(f"{path.name}.operational_error.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert durable["generation"] == 1
+        assert durable["state"] == state_value.value
+        assert durable["last_error_code"] == "ProviderUnavailableError"
+        assert sidecar["observed_generation"] == 1
+        assert sidecar["observed_state"] == state_value.value
+        assert sidecar["last_error_code"] is None
+        assert state.snapshot().last_error_code == "ProviderUnavailableError"
+

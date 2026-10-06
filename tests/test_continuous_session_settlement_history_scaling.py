@@ -945,7 +945,7 @@ def test_durable_session_path_reader_ignores_runtime_rebinding(monkeypatch) -> N
         assert state.snapshot().cycles_completed == _SMALL_HISTORY
 
 
-def test_state_round_trip_does_not_resurrect_superseded_failure() -> None:
+def test_state_round_trip_preserves_failure_until_resume() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         state = _state_with_history(root, _SMALL_HISTORY)
@@ -953,7 +953,7 @@ def test_state_round_trip_does_not_resurrect_superseded_failure() -> None:
         assert state.snapshot().last_error_code == "STALE_PROVIDER_FAILURE"
 
         state.set_state(continuous_session.SessionState.PAUSED)
-        assert state.snapshot().last_error_code is None
+        assert state.snapshot().last_error_code == "STALE_PROVIDER_FAILURE"
 
         state.set_state(continuous_session.SessionState.RUNNING)
         reopened = continuous_session._ContinuousSessionState(
@@ -1529,7 +1529,7 @@ def test_state_cycle_cleanup_crashes_cannot_resurrect_stale_failure() -> None:
             clock=lambda: _AT,
         )
         assert paused.snapshot().state is continuous_session.SessionState.PAUSED
-        assert paused.snapshot().last_error_code is None
+        assert paused.snapshot().last_error_code == "ORIGINAL_FAILURE"
         assert error_path.read_bytes() == stale_error
 
         with patch.object(paused, "_write_error_checkpoint", crash_on_cleanup):
@@ -1626,7 +1626,7 @@ def test_session_update_rejects_runtime_rmw_lock_rebinding(monkeypatch) -> None:
             raise AssertionError("runtime-rebound durable path lock was accepted")
 
 
-def test_state_transition_cleanup_cannot_erase_newer_failure() -> None:
+def test_state_transition_blocks_late_failure_after_pause_wins() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         state = _state_with_history(root, _SMALL_HISTORY)
@@ -1637,6 +1637,7 @@ def test_state_transition_cleanup_cannot_erase_newer_failure() -> None:
         release_cleanup = threading.Event()
         failure_started = threading.Event()
         failure_completed = threading.Event()
+        failure_errors: list[BaseException] = []
 
         def gated_write(code: str | None) -> None:
             if code is None:
@@ -1655,8 +1656,12 @@ def test_state_transition_cleanup_cannot_erase_newer_failure() -> None:
 
         def publish_new_failure() -> None:
             failure_started.set()
-            state.record_failure(code="NEWER_FAILURE")
-            failure_completed.set()
+            try:
+                state.record_failure(code="NEWER_FAILURE")
+            except BaseException as exc:
+                failure_errors.append(exc)
+            finally:
+                failure_completed.set()
 
         failure = threading.Thread(target=publish_new_failure, daemon=True)
         failure.start()
@@ -1672,7 +1677,9 @@ def test_state_transition_cleanup_cannot_erase_newer_failure() -> None:
 
         snapshot = state.snapshot()
         assert snapshot.state is continuous_session.SessionState.PAUSED
-        assert snapshot.last_error_code == "NEWER_FAILURE"
+        assert snapshot.last_error_code == "OLDER_FAILURE"
+        assert len(failure_errors) == 1
+        assert isinstance(failure_errors[0], continuous_session.SessionPausedError)
 
 
 def test_record_failure_rejects_runtime_session_lock_rebinding(monkeypatch) -> None:
@@ -2175,8 +2182,8 @@ def test_repeated_pause_is_generation_neutral_and_preserves_failure() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         state = _state_with_history(root, _SMALL_HISTORY)
-        state.set_state(continuous_session.SessionState.PAUSED)
         state.record_failure(code="PAUSED_FAILURE")
+        state.set_state(continuous_session.SessionState.PAUSED)
 
         before = json.loads(
             (root / "continuous_session.json").read_text(encoding="utf-8")

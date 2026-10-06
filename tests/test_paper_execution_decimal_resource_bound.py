@@ -1473,3 +1473,33 @@ if __name__ == "__main__":
         finally:
             public_paper._synthetic_attempt = original
 
+
+    def test_public_exact_addition_rejects_derived_resource_overflow(self) -> None:
+        left = Decimal("9" * _MAX_FIXED_POINT_CHARS)
+        right = Decimal("1")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            public_paper._decimal_add_exact(left, right)
+
+    def test_public_exact_result_rejects_rebound_resource_validator(self) -> None:
+        original = public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+        called = False
+
+        def forged(*args, **kwargs):
+            nonlocal called
+            called = True
+
+        public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR = forged
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "PAPER Decimal resource authority changed",
+            ):
+                public_paper._decimal_from_coefficient(1, 0)
+            self.assertFalse(called)
+        finally:
+            public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR = original
+

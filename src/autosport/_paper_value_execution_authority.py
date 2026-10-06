@@ -668,6 +668,8 @@ def _first_execution_risk_authority(
         durable_event.selection_id,
         durable_event.decimal_odds,
         sport=durable_event.sport,
+        market_semantics_id=durable_event.market_semantics_id,
+        exchange_side=durable_event.exchange_side,
     )
     proposal_context = ProposedTicketRiskContext(
         legs=(leg,),

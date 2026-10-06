@@ -77,6 +77,14 @@ _CRITICAL_UI_KEYS = {
     "ui.accessibility.log.description",
     "ui.accessibility.bankroll.name",
     "ui.accessibility.bankroll.description",
+    "ui.product_runtime.button.start",
+    "ui.product_runtime.button.stop",
+    "ui.product_runtime.accessibility.start.name",
+    "ui.product_runtime.accessibility.start.description",
+    "ui.product_runtime.accessibility.stop.name",
+    "ui.product_runtime.accessibility.stop.description",
+    "ui.product_runtime.accessibility.status.name",
+    "ui.product_runtime.accessibility.status.description",
 }
 
 _RUNTIME_RECOVERY_KEYS = {
@@ -120,12 +128,29 @@ _RUNTIME_RECOVERY_KEYS = {
     "ui.error.replay.reopen",
     "ui.status.replay.reopen_blocked",
     "ui.status.close.recovery_busy",
+    "ui.product_runtime.status.idle",
+    "ui.product_runtime.status.starting",
+    "ui.product_runtime.status.running",
+    "ui.product_runtime.status.tick",
+    "ui.product_runtime.status.stopping",
+    "ui.product_runtime.status.stopped",
+    "ui.product_runtime.status.error",
+    "ui.product_runtime.status.configuration_missing",
+    "ui.product_runtime.status.configuration_invalid",
+    "ui.product_runtime.status.recovery_required",
+    "ui.product_runtime.status.operation_busy",
+    "ui.product_runtime.status.session_close_failed",
+    "ui.product_runtime.status.start_failed",
+    "ui.product_runtime.status.stop_not_running",
+    "ui.product_runtime.status.close_wait",
+    "ui.product_runtime.status.base_session_reopened",
+    "ui.product_runtime.status.base_session_reopen_failed",
 }
 
 
 def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
     assert DEFAULT_LOCALE == "uk-UA"
-    assert CATALOG_VERSION == 7
+    assert CATALOG_VERSION == 8
     assert text("ui.ticket.empty") == "Паперові квитки ще відсутні."
     assert text("ui.boolean.true") == "так"
     assert text("ui.boolean.false") == "ні"
@@ -164,6 +189,8 @@ def test_critical_catalog_strings_are_exact_ukrainian_presentation() -> None:
     assert text("ui.accessibility.strategy.name") == "Стратегія повтору"
     assert text("ui.accessibility.live_quotes.name") == "Поточні котирування"
     assert text("ui.accessibility.bankroll.name") == "Віртуальний банк"
+    assert text("ui.product_runtime.button.start") == "PAPER: старт"
+    assert text("ui.product_runtime.accessibility.status.name") == "Стан тривалої PAPER-роботи"
 
 
 def test_whole_product_chrome_has_no_version_finish_line_token() -> None:

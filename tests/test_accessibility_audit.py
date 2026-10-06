@@ -7,6 +7,7 @@ from unittest.mock import patch
 import autosport.accessibility_audit as accessibility_audit
 from autosport.accessibility_audit import summarize_description
 from autosport.gui import AUTOMATION_IDS, _SPEEDS, _STRATEGY_CHOICES, strategy_id_from_display
+from autosport.product_windows_gui import PRODUCT_RUNTIME_AUTOMATION_IDS
 from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
 from autosport.windows_layout import OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS, WINDOWS_SHELL_AUTOMATION_IDS
 from autosport.windows_manual_calculation import WORKBENCH_AUTOMATION_IDS
@@ -51,6 +52,9 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self._widget(AUTOMATION_IDS["log"], "Журнал виконання", role="TEXT", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_quotes"], "Live quotes", role="LIST", answers_rows=True),
                 self._widget(WINDOWS_BANKROLL_AUTOMATION_ID, "Віртуальний банк", role="TEXT", patterns=("VALUE",)),
+                self._widget(PRODUCT_RUNTIME_AUTOMATION_IDS["start"], "Запустити канонічну тривалу PAPER-роботу", patterns=("INVOKE",)),
+                self._widget(PRODUCT_RUNTIME_AUTOMATION_IDS["stop"], "Зупинити канонічну тривалу PAPER-роботу", patterns=("INVOKE",)),
+                self._widget(PRODUCT_RUNTIME_AUTOMATION_IDS["status"], "Стан тривалої PAPER-роботи", role="TEXT", patterns=("VALUE",)),
                 self._widget(shell["navigation"], "Навігація екранами Автоспорт", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(shell["state"], "Стан вибраної поверхні", role="TEXT", patterns=("VALUE",)),
                 self._widget(shell["open"], "Перейти до робочої поверхні", patterns=("INVOKE",)),
@@ -77,6 +81,7 @@ class AccessibilityAuditTests(unittest.TestCase):
         description,
         *,
         bankroll_readonly=True,
+        product_runtime_status_readonly=True,
         shell_state_readonly=True,
         owner_economic_state_readonly=True,
         workbench_result_readonly=True,
@@ -84,6 +89,7 @@ class AccessibilityAuditTests(unittest.TestCase):
         return summarize_description(
             description,
             bankroll_readonly=bankroll_readonly,
+            product_runtime_status_readonly=product_runtime_status_readonly,
             shell_state_readonly=shell_state_readonly,
             owner_economic_state_readonly=owner_economic_state_readonly,
             workbench_result_readonly=workbench_result_readonly,
@@ -112,11 +118,16 @@ class AccessibilityAuditTests(unittest.TestCase):
     def test_critical_contract_passes_with_names_roles_patterns_rows_and_readonly(self):
         report = self._summarize(self._passing_description())
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(len(report["critical_controls"]), 30)
+        self.assertEqual(len(report["critical_controls"]), 33)
         bankroll = next(
             item
             for item in report["critical_controls"]
             if item["automation_id"] == WINDOWS_BANKROLL_AUTOMATION_ID
+        )
+        product_status = next(
+            item
+            for item in report["critical_controls"]
+            if item["automation_id"] == PRODUCT_RUNTIME_AUTOMATION_IDS["status"]
         )
         shell_state = next(
             item
@@ -124,6 +135,7 @@ class AccessibilityAuditTests(unittest.TestCase):
             if item["automation_id"] == WINDOWS_SHELL_AUTOMATION_IDS["state"]
         )
         self.assertTrue(bankroll["read_only"])
+        self.assertTrue(product_status["read_only"])
         self.assertTrue(shell_state["read_only"])
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
@@ -212,6 +224,7 @@ class AccessibilityAuditTests(unittest.TestCase):
             (AUTOMATION_IDS["tickets"], "TEXT", "LIST"),
             (AUTOMATION_IDS["log"], "EDIT", "TEXT"),
             (WINDOWS_BANKROLL_AUTOMATION_ID, "EDIT", "TEXT"),
+            (PRODUCT_RUNTIME_AUTOMATION_IDS["status"], "EDIT", "TEXT"),
             (WINDOWS_SHELL_AUTOMATION_IDS["navigation"], "TEXT", "COMBO_BOX"),
             (WINDOWS_SHELL_AUTOMATION_IDS["details"], "TEXT", "LIST"),
             (OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"], "TEXT", "LIST"),
@@ -255,6 +268,19 @@ class AccessibilityAuditTests(unittest.TestCase):
             if item["automation_id"] == WINDOWS_BANKROLL_AUTOMATION_ID
         )
         self.assertFalse(bankroll["read_only"])
+
+    def test_editable_product_runtime_status_fails_closed(self):
+        report = self._summarize(
+            self._passing_description(),
+            product_runtime_status_readonly=False,
+        )
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any(
+                "product runtime status is not runtime readonly" in item
+                for item in report["failures"]
+            )
+        )
 
     def test_editable_shell_state_fails_closed(self):
         report = self._summarize(self._passing_description(), shell_state_readonly=False)
@@ -370,7 +396,7 @@ class AccessibilityAuditTests(unittest.TestCase):
             )
             owner_dialog = SimpleNamespace(destroy=lambda: None)
             with (
-                patch.object(accessibility_audit, "WindowsAutosportApp", return_value=_AuditApp()),
+                patch.object(accessibility_audit, "ProductWindowsAutosportApp", return_value=_AuditApp()),
                 patch.object(
                     accessibility_audit,
                     "_open_owner_economic_dialog_for_audit",

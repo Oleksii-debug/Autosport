@@ -714,3 +714,70 @@ class EconomicGoalStore:
             previous = _json_decoder(_text_reader(path))
             _transition_validator(previous, candidate)
             _writer(path, _payload_encoder(candidate))
+
+
+# Freeze public codec/store call shapes.  Authority-bearing dependencies remain
+# captured by the implementations above, but external callers cannot inject
+# replacement validators, writers, parsers, locks, paths, or transition proofs.
+_BOUND_ECONOMIC_GOAL_TO_PAYLOAD = economic_goal_to_payload
+_BOUND_ECONOMIC_GOAL_FROM_PAYLOAD = economic_goal_from_payload
+_BOUND_ECONOMIC_GOAL_FROM_JSON = economic_goal_from_json
+_BOUND_STORE_INIT = EconomicGoalStore.__init__
+_BOUND_STORE_LOAD = EconomicGoalStore.load
+_BOUND_STORE_INITIALIZE_OWNER = EconomicGoalStore.initialize_owner
+_BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR = EconomicGoalStore.persist_automatic_successor
+
+
+def _bind_goal_encoder(operation):
+    def bound(contract: EconomicGoalContract) -> dict[str, object]:
+        return operation(contract)
+
+    return bound
+
+
+def _bind_goal_payload_decoder(operation):
+    def bound(payload: object) -> EconomicGoalContract:
+        return operation(payload)
+
+    return bound
+
+
+def _bind_goal_json_decoder(operation):
+    def bound(text: str) -> EconomicGoalContract:
+        return operation(text)
+
+    return bound
+
+
+def _bind_store_init(operation):
+    def bound(self: EconomicGoalStore, workspace: str | Path) -> None:
+        operation(self, workspace)
+
+    return bound
+
+
+def _bind_store_load(operation):
+    def bound(self: EconomicGoalStore) -> EconomicGoalContract:
+        return operation(self)
+
+    return bound
+
+
+def _bind_store_contract_write(operation):
+    def bound(self: EconomicGoalStore, contract: EconomicGoalContract) -> None:
+        operation(self, contract)
+
+    return bound
+
+
+economic_goal_to_payload = _bind_goal_encoder(_BOUND_ECONOMIC_GOAL_TO_PAYLOAD)
+economic_goal_from_payload = _bind_goal_payload_decoder(_BOUND_ECONOMIC_GOAL_FROM_PAYLOAD)
+economic_goal_from_json = _bind_goal_json_decoder(_BOUND_ECONOMIC_GOAL_FROM_JSON)
+EconomicGoalStore.__init__ = _bind_store_init(_BOUND_STORE_INIT)
+EconomicGoalStore.load = _bind_store_load(_BOUND_STORE_LOAD)
+EconomicGoalStore.initialize_owner = _bind_store_contract_write(
+    _BOUND_STORE_INITIALIZE_OWNER
+)
+EconomicGoalStore.persist_automatic_successor = _bind_store_contract_write(
+    _BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR
+)

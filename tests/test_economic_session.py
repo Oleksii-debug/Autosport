@@ -146,6 +146,46 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         self.assertEqual(second.session_id, first.session_id)
         self.assertEqual(second.authority_generation, 1)
 
+    def test_durable_state_rejects_noncanonical_session_identifier(self) -> None:
+        import autosport.economic_session as economic_session
+
+        store = self._store()
+        store.current()
+        payload = json.loads(store.state_path.read_text(encoding="utf-8"))
+        payload["session_id"] = "not-a-canonical-session-id"
+        raw = economic_session._canonical_json_bytes(payload)
+
+        with self.assertRaisesRegex(
+            EconomicSessionIntegrityError,
+            "state identity is invalid",
+        ):
+            economic_session._decode_state(
+                raw,
+                workspace_instance_id=store._authority.workspace_instance_id,
+            )
+
+    def test_evidence_rejects_noncanonical_session_identifier(self) -> None:
+        evidence = self._store().current()
+
+        with self.assertRaisesRegex(
+            EconomicSessionIntegrityError,
+            "session_id must be canonical UUID hex",
+        ):
+            ProductEconomicSession(
+                workspace_instance_id=evidence.workspace_instance_id,
+                session_id="not-a-canonical-session-id",
+                goal_id=evidence.goal_id,
+                goal_revision=evidence.goal_revision,
+                bankroll_id=evidence.bankroll_id,
+                currency=evidence.currency,
+                goal_contract_sha256=evidence.goal_contract_sha256,
+                started_at=evidence.started_at,
+                opening_paperbook_sha256=evidence.opening_paperbook_sha256,
+                state_sha256=evidence.state_sha256,
+                authority_generation=evidence.authority_generation,
+                product_clock_authoritative=evidence.product_clock_authoritative,
+            )
+
     def test_midnight_does_not_reset_economic_session(self) -> None:
         first = self._store().current()
         self.clock.set("2026-10-06T12:00:00Z")

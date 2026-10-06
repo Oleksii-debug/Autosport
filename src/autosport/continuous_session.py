@@ -1214,6 +1214,8 @@ class _ContinuousSessionState:
         _normalized_settlement_evidence_code: object = (
             _normalized_settlement_evidence.__func__.__code__
         ),
+        _validate_resolution: Callable[..., None] = SettlementResolution.validate,
+        _validate_resolution_code: object = SettlementResolution.validate.__code__,
     ) -> int:
         if (
             getattr(
@@ -1222,13 +1224,23 @@ class _ContinuousSessionState:
                 None,
             )
             is not _normalized_settlement_evidence_code
+            or getattr(_validate_resolution, "__code__", None)
+            is not _validate_resolution_code
         ):
             raise ContinuousSessionError(
-                "canonical settlement evidence normalizer code identity changed"
+                "canonical settlement evidence validation authority changed"
             )
         timestamp = _instant(at, "at")
         if type(full_refresh) is not bool:
             raise TypeError("full_refresh must be boolean")
+        if type(settlement_evidence) is not tuple:
+            raise TypeError("settlement_evidence must be an exact tuple")
+        for evidence in settlement_evidence:
+            if type(evidence) is not SettlementResolution:
+                raise TypeError(
+                    "settlement_evidence must contain exact SettlementResolution values"
+                )
+            _validate_resolution(evidence, as_of=timestamp.isoformat())
 
         def mutate(raw: dict[str, Any]) -> None:
             started_at = _instant(raw["started_at"], "started_at")

@@ -266,6 +266,98 @@ def test_plan_mutation_during_physical_post_cannot_mint_bound_result():
     assert len(rate_state.markets) == len(batch.market_ids)
 
 
+def test_attempt_executor_freezes_pre_dispatch_plan_for_durable_history():
+    plan = _plan(
+        price_data=("EX_BEST_OFFERS",),
+        best_prices_depth=1,
+    )
+    batch = plan.batches[0]
+
+    class MutatingPlanTransport:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, url, *, headers, body, timeout_seconds):
+            self.calls += 1
+            object.__setattr__(plan, "best_prices_depth", 2)
+            return _payload(batch.market_ids)
+
+    transport = MutatingPlanTransport()
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: NOW,
+    )
+    rate_gate, concurrency_gate = _gates()
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="attempt-plan-snapshot",
+        required=True,
+        request_id="plan-snapshot",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert transport.calls == 1
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert execution.result is not None
+    assert execution.history.plan.best_prices_depth == 1
+    assert execution.history.plan.plan_id == execution.result.plan_id
+    assert plan.best_prices_depth == 2
+
+
+def test_attempt_executor_records_post_dispatch_lease_cleanup_failure():
+    plan = _plan(
+        market_ids=("1.001",),
+        order_projection="EXECUTABLE",
+    )
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    rate_gate, concurrency_gate = _gates()
+
+    class CompletingThenReturningTransport:
+        def post(self, url, *, headers, body, timeout_seconds):
+            active = concurrency_gate.snapshot().active
+            assert len(active) == 1
+            lease = active[0]
+            concurrency_gate.complete(
+                lease.request_id,
+                lease_generation=lease.generation,
+                observed_at=datetime.now(timezone.utc),
+            )
+            return _payload(batch.market_ids)
+
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=CompletingThenReturningTransport(),
+        clock=lambda: NOW,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="attempt-post-dispatch-cleanup",
+        required=True,
+        request_id="post-dispatch-cleanup",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.TRANSPORT_FAILURE
+    assert execution.result is None
+    assert execution.history.required_gap_attempt_ids == (
+        "attempt-post-dispatch-cleanup",
+    )
+    assert concurrency_gate.snapshot().active == ()
+    assert len(rate_gate.snapshot().markets[0].accepted_at_utc_us) == 1
+
+
 def test_large_plan_uses_budget_partition_and_dispatches_only_named_batch():
     market_ids = tuple(f"1.{index:03d}" for index in range(41))
     plan = _plan(market_ids=market_ids, price_data=("EX_BEST_OFFERS",))

@@ -53,6 +53,10 @@ class MarketBookBatchAdmissionError(MarketBookBatchTransportError):
         self.outcome = outcome
 
 
+class MarketBookPostDispatchFailure(MarketBookBatchTransportError):
+    """Provider I/O occurred but canonical attempt evidence could not finalize."""
+
+
 def _canonical_json(value: object) -> str:
     try:
         return json.dumps(
@@ -327,7 +331,7 @@ def _read_market_book_batch(
         resolve_application_context=False,
     )
     if response.request_budget.evidence_id != batch.budget_evidence_id:
-        raise MarketBookBatchTransportError(
+        raise MarketBookPostDispatchFailure(
             "transport request budget drifted from the canonical planned batch"
         )
 
@@ -336,7 +340,7 @@ def _read_market_book_batch(
         current_plan_id = plan.plan_id
         current_request_contract_id = plan.request_contract_id
     except Exception as exc:
-        raise MarketBookBatchTransportError(
+        raise MarketBookPostDispatchFailure(
             "MarketBook plan changed during provider dispatch"
         ) from exc
     if (
@@ -344,7 +348,7 @@ def _read_market_book_batch(
         or current_plan_id != plan_id
         or current_request_contract_id != request_contract_id
     ):
-        raise MarketBookBatchTransportError(
+        raise MarketBookPostDispatchFailure(
             "MarketBook plan changed during provider dispatch"
         )
 
@@ -531,12 +535,18 @@ def _install_transport_result_authority() -> None:
             )
 
         contract = plan.request_contract_payload
-        concurrency_decision = concurrency_gate.begin(
-            request,
-            observed_at=instant,
-            has_order_projection=contract["order_projection"] is not None,
-            has_match_projection=contract["match_projection"] is not None,
-        )
+        try:
+            concurrency_decision = concurrency_gate.begin(
+                request,
+                observed_at=instant,
+                has_order_projection=contract["order_projection"] is not None,
+                has_match_projection=contract["match_projection"] is not None,
+            )
+        except Exception as exc:
+            raise MarketBookBatchAdmissionError(
+                MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY,
+                "MarketBook projection concurrency gate could not establish local admission",
+            ) from exc
         if concurrency_decision.allowed is not True:
             raise MarketBookBatchAdmissionError(
                 MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY,
@@ -550,23 +560,29 @@ def _install_transport_result_authority() -> None:
                 scheduled_at=instant,
             )
         except Exception as exc:
+            denial = MarketBookBatchAdmissionError(
+                MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
+                "MarketBook per-market rate gate could not establish local admission",
+            )
             _release_projection_lease_after_failure(
                 concurrency_gate,
                 request,
                 lease_generation,
-                exc,
+                denial,
             )
-            raise
+            raise denial from exc
         if rate_decision.allowed is not True:
-            _release_projection_lease(
-                concurrency_gate,
-                request,
-                lease_generation,
-            )
-            raise MarketBookBatchAdmissionError(
+            denial = MarketBookBatchAdmissionError(
                 MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
                 "MarketBook per-market rate gate denied local admission",
             )
+            _release_projection_lease_after_failure(
+                concurrency_gate,
+                request,
+                lease_generation,
+                denial,
+            )
+            raise denial
 
         try:
             result = _read_market_book_batch(client, plan, batch_id=batch_id)
@@ -579,11 +595,16 @@ def _install_transport_result_authority() -> None:
             )
             raise
         else:
-            _release_projection_lease(
-                concurrency_gate,
-                request,
-                lease_generation,
-            )
+            try:
+                _release_projection_lease(
+                    concurrency_gate,
+                    request,
+                    lease_generation,
+                )
+            except Exception as exc:
+                raise MarketBookPostDispatchFailure(
+                    "provider read completed but projection lease cleanup failed"
+                ) from exc
         key = id(result)
 
         def forget(_weakref: object, *, result_id: int = key) -> None:
@@ -650,23 +671,28 @@ def execute_market_book_batch_attempt(
 
     if type(history) is not MarketBookAttemptHistory:
         raise TypeError("history must be an exact MarketBookAttemptHistory")
-    # Re-run canonical validation before any provider I/O. Frozen dataclasses can
-    # still be adversarially mutated through object.__setattr__, and discovering
-    # that only after dispatch would create an unrecordable duplicate/gap.
-    MarketBookAttemptHistory(history.plan, history.records)
+    # Freeze a canonical plan+history snapshot before any provider I/O. Frozen
+    # dataclasses can still be adversarially mutated through object.__setattr__;
+    # a detached round-trip snapshot preserves the exact pre-dispatch denominator
+    # so post-I/O failures can always be recorded against what was actually sent.
+    frozen_plan = MarketBookReadPlan.from_json(history.plan.to_json())
+    frozen_history = MarketBookAttemptHistory.from_json(
+        frozen_plan,
+        history.to_json(),
+    )
     attempt = _token(attempt_id, "attempt_id")
     if type(required) is not bool:
         raise TypeError("required must be exact bool")
-    if any(record.attempt_id == attempt for record in history.records):
+    if any(record.attempt_id == attempt for record in frozen_history.records):
         raise MarketBookBatchTransportError(
             "attempt_id is already present in canonical MarketBook history"
         )
-    _canonical_batch(history.plan, batch_id)
+    _canonical_batch(frozen_history.plan, batch_id)
 
     try:
         result = read_market_book_batch(
             client,
-            history.plan,
+            frozen_history.plan,
             batch_id=batch_id,
             request_id=request_id,
             scheduled_at=scheduled_at,
@@ -676,17 +702,17 @@ def execute_market_book_batch_attempt(
     except MarketBookBatchAdmissionError as exc:
         outcome = exc.outcome
         updated = _append_nonresponse_attempt(
-            history,
+            frozen_history,
             batch_id=batch_id,
             attempt_id=attempt,
             required=required,
             outcome=outcome,
         )
         return MarketBookBatchAttemptExecution(updated, outcome, None)
-    except _transport.BetfairMarketBookTransportError:
+    except (MarketBookPostDispatchFailure, _transport.BetfairMarketBookTransportError):
         outcome = MarketBookAttemptOutcome.TRANSPORT_FAILURE
         updated = _append_nonresponse_attempt(
-            history,
+            frozen_history,
             batch_id=batch_id,
             attempt_id=attempt,
             required=required,
@@ -696,7 +722,7 @@ def execute_market_book_batch_attempt(
     except _transport.BetfairMarketBookProviderError:
         outcome = MarketBookAttemptOutcome.PROVIDER_FAILURE
         updated = _append_nonresponse_attempt(
-            history,
+            frozen_history,
             batch_id=batch_id,
             attempt_id=attempt,
             required=required,
@@ -706,7 +732,7 @@ def execute_market_book_batch_attempt(
     except _transport.BetfairMarketBookProtocolError:
         outcome = MarketBookAttemptOutcome.PARSE_FAILURE
         updated = _append_nonresponse_attempt(
-            history,
+            frozen_history,
             batch_id=batch_id,
             attempt_id=attempt,
             required=required,
@@ -715,7 +741,7 @@ def execute_market_book_batch_attempt(
         return MarketBookBatchAttemptExecution(updated, outcome, None)
 
     updated = append_market_book_transport_attempt(
-        history,
+        frozen_history,
         result,
         attempt_id=attempt,
         required=required,

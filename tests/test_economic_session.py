@@ -4,6 +4,7 @@ import hashlib
 import json
 import unittest
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -765,24 +766,25 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         EconomicGoalStore(self.workspace).persist_automatic_successor(_goal(revision=2))
         self.clock.set("2026-10-05T13:00:00Z")
 
-        first_attempt = self._store().transition_to_current_goal(first)
-        second_attempt = self._store().transition_to_current_goal(first)
+        def transition() -> tuple[str, ProductEconomicSession | None]:
+            try:
+                return ("success", self._store().transition_to_current_goal(first))
+            except EconomicSessionMismatchError:
+                return ("stale", None)
 
-        self.assertNotEqual(first_attempt.session_id, first.session_id)
-        self.assertEqual(
-            self._store().current().session_id,
-            first_attempt.session_id,
-        )
-        with self.assertRaisesRegex(
-            EconomicSessionMismatchError,
-            "predecessor does not match current durable session",
-        ):
-            self._store().transition_to_current_goal(first)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(lambda _index: transition(), (0, 1)))
 
-        self.assertEqual(
-            self._store().current().predecessor_session_id,
-            first.session_id,
-        )
+        successes = [value for kind, value in outcomes if kind == "success"]
+        stale = [kind for kind, _value in outcomes if kind == "stale"]
+
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(len(stale), 1)
+        winner = successes[0]
+        assert winner is not None
+        self.assertNotEqual(winner.session_id, first.session_id)
+        self.assertEqual(self._store().current(), winner)
+        self.assertEqual(winner.predecessor_session_id, first.session_id)
 
     def test_transition_clock_cannot_backdate_session_before_predecessor_start(self) -> None:
         store = self._store()

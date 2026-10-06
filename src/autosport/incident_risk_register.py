@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum, IntEnum
@@ -177,6 +178,30 @@ def _canonical_string_tuple(name: str, value: object) -> tuple[str, ...]:
     if normalized != tuple(sorted(set(normalized))):
         raise IncidentRiskRegisterError(f"{name} must be sorted and unique")
     return normalized
+
+
+_OPERATOR_REDACTION: Final = "[REDACTED]"
+_OPERATOR_SECRET_PATTERNS: Final = (
+    re.compile(r"(?i)\\b(?:authorization|proxy-authorization)\\s*:\\s*(?:bearer|basic|token)\\s+\\S+"),
+    re.compile(r"(?i)\\b(?:bearer|basic)\\s+[A-Za-z0-9._~+/=-]{16,}"),
+    re.compile(r"(?i)\\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret[_-]?key|password|passwd|pwd)\\s*[:=]\\s*(?:\"[^\"]*\"|'[^']*'|\\S+)"),
+    re.compile(r"-----BEGIN [^\\r\\n-]*PRIVATE KEY-----[\\s\\S]*?-----END [^\\r\\n-]*PRIVATE KEY-----"),
+    re.compile(r"\\bAKIA[0-9A-Z]{16}\\b"),
+    re.compile(r"\\bgh[pousr]_[A-Za-z0-9_]{20,}\\b"),
+    re.compile(r"\\beyJ[A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\b"),
+)
+
+
+def _operator_safe_text(name: str, value: object, *, allow_empty: bool = False) -> str:
+    """Remove recognized credential-bearing material at the operator boundary.
+
+    Canonical register truth remains unchanged; only presentation text is sanitized.
+    Distinct secret values matching one credential shape intentionally render identically.
+    """
+    text = _canonical_text(name, value, allow_empty=allow_empty)
+    for pattern in _OPERATOR_SECRET_PATTERNS:
+        text = pattern.sub(_OPERATOR_REDACTION, text)
+    return text
 
 
 def _enum_value(enum_type, name: str, value: object):
@@ -548,10 +573,10 @@ def operator_projection(entry: IncidentRiskEntry) -> OperatorRiskProjection:
         severity_key=f"ui.risk_register.severity.{entry.severity.token}",
         status_key=f"ui.risk_register.status.{entry.status.value}",
         evidence_key=f"ui.risk_register.evidence.{entry.evidence_state.value}",
-        title=entry.title,
-        summary=entry.summary,
-        mitigation=entry.mitigation,
-        residual_risk=entry.residual_risk,
+        title=_operator_safe_text("title", entry.title),
+        summary=_operator_safe_text("summary", entry.summary),
+        mitigation=_operator_safe_text("mitigation", entry.mitigation, allow_empty=True),
+        residual_risk=_operator_safe_text("residual_risk", entry.residual_risk, allow_empty=True),
         affected_components=entry.affected_components,
         occurrence_evidence_refs=entry.occurrence_evidence_refs,
         evidence_refs=entry.evidence_refs,

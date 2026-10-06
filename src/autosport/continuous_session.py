@@ -15,7 +15,7 @@ from .causal_collector import (
     GapState,
     SyncState,
 )
-from .collector_service import HeadlessCollectorService
+from .collector_service import CollectorServiceStoppedError, HeadlessCollectorService
 from .event_lifecycle import ContinuousEventLifecycle, EventLifecycleRecord, EventPhase
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
@@ -676,6 +676,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         max_invalidation_items_per_batch: int = 250,
         causal_view: CausalView = CausalView.AS_KNOWN_AT_DECISION,
         initial_bankroll: str = "10000",
+        prospective_collection: bool = False,
     ) -> None:
         if not isinstance(workspace, (str, Path)):
             raise TypeError("workspace must be a path-like value")
@@ -693,6 +694,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         if not isinstance(dependency_index, FocusedMirrorDependencyIndex):
             raise TypeError("dependency_index must be FocusedMirrorDependencyIndex")
+        if type(prospective_collection) is not bool:
+            raise TypeError("prospective_collection must be bool")
         if outcome_authority is not None and not callable(
             getattr(outcome_authority, "resolve", None)
         ):
@@ -725,6 +728,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         )
         self.outcome_authority = outcome_authority
         self.settlement_learning_handoff = settlement_learning_handoff
+        self.prospective_collection = prospective_collection
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
         if isinstance(required_history, timedelta) and required_history.total_seconds() < 0:
             raise ValueError("required_history cannot be negative")
@@ -956,7 +960,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         now = self.clock()
         _instant(now, "now")
         try:
-            cycle = self.collector.run_cycle()
+            if self.prospective_collection:
+                cycle = self.collector.run_scheduled_cycle()
+                # A due-slot wait may advance time materially. All downstream causal
+                # reads/settlement in this tick must use the post-acquisition instant.
+                now = self.clock()
+                _instant(now, "now")
+            else:
+                cycle = self.collector.run_cycle()
             source_snapshot = self._refresh_source_state_projection()
             if cycle.provider_unavailable:
                 self._state.record_failure(code="ProviderUnavailableError")
@@ -1086,6 +1097,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 settlement_evidence_ids=evidence_ids,
                 last_success_at=self._state.snapshot().last_success_at or now,
             )
+        except CollectorServiceStoppedError as exc:
+            source_status = self.collector.status()
+            reason = source_status.get("stop_reason")
+            if type(reason) is not str or not reason:
+                reason = "collector_stop"
+            self.stop(reason)
+            raise SessionStoppedError(
+                "continuous session stopped during prospective collection"
+            ) from exc
         except Exception as exc:
             self._state.record_failure(code=type(exc).__name__)
             raise

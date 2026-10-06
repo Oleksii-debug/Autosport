@@ -926,7 +926,7 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
         elif ticket.status is _TICKET_STATUS_TYPE.WON:
             try:
                 _require_decimal_arithmetic_authority()
-            with _CANONICAL_LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+                with _CANONICAL_LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
                     expected_payout = locked_capital + ticket.stake
                     if context.flags[Inexact]:
                         raise ValueError(

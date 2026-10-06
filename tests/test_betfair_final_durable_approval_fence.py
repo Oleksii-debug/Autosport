@@ -2754,10 +2754,12 @@ def test_economic_goal_store_load_rebinding_fails_closed_before_attempt(
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
 
+        original_load = betfair_execution.EconomicGoalStore.load
+
         monkeypatch.setattr(
             betfair_execution.EconomicGoalStore,
             "load",
-            lambda self: goal_store.load(),
+            lambda self: original_load(goal_store),
         )
 
         with pytest.raises(
@@ -2849,5 +2851,73 @@ def test_economic_goal_field_descriptor_rebinding_fails_before_read(
             )
 
         assert hostile_reads == 0
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_workspace_lock_acquire_code_swap_fails_closed_before_attempt(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        acquire = betfair_execution.WorkspaceEconomicLock.acquire
+
+        def hostile_acquire(self):
+            del self
+            return None
+
+        monkeypatch.setattr(acquire, "__code__", hostile_acquire.__code__)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-workspace-acquire-code-swap",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_economic_goal_store_load_code_swap_fails_closed_before_attempt(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        load = betfair_execution.EconomicGoalStore.load
+
+        def hostile_load(self):
+            del self
+            return None
+
+        monkeypatch.setattr(load, "__code__", hostile_load.__code__)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-owner-load-code-swap",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
         assert transport.calls == []
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}

@@ -33,7 +33,11 @@ from .bookmaker_capability import (
     BookmakerCapabilityError,
     BookmakerCapabilityProfile,
 )
-from .economic_goal import AutomationLevel, EconomicGoalContractError
+from .economic_goal import (
+    AutomationLevel,
+    EconomicGoalContract,
+    EconomicGoalContractError,
+)
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
 from .workspace_lock import WorkspaceEconomicLock
@@ -804,6 +808,9 @@ def _build_canonical_place_action_dispatch():
     canonical_plan_type = ExecutionPlan
     canonical_ledger_type = RealExecutionLedger
     canonical_workspace_lock_type = WorkspaceEconomicLock
+    canonical_goal_store_type = EconomicGoalStore
+    canonical_goal_contract_type = EconomicGoalContract
+    canonical_automation_level_type = AutomationLevel
     canonical_acknowledgement_type = ExternalAcknowledgement
     canonical_instruction_report_type = BetfairInstructionReport
     canonical_execution_report_type = BetfairPlaceExecutionReport
@@ -870,14 +877,38 @@ def _build_canonical_place_action_dispatch():
         "fget",
         None,
     )
+    canonical_goal_store_init = canonical_goal_store_type.__dict__.get("__init__")
+    canonical_goal_store_load = canonical_goal_store_type.__dict__.get("load")
+    canonical_goal_store_file_name = canonical_goal_store_type.__dict__.get("FILE_NAME")
+    canonical_provenance_for = provenance_for
+    canonical_supervised_automation_level = (
+        canonical_automation_level_type.SUPERVISED_EXECUTION
+    )
     canonical_trusted_now = _supervised_execution_runtime._trusted_now
     canonical_bound_binding_sha256 = _supervised_execution_runtime._bound_binding_sha256
     canonical_supervised_digest = _supervised_execution_runtime._digest
-    canonical_workspace_lock_enter = canonical_workspace_lock_type.__dict__.get(
-        "__enter__"
+    workspace_lock_method_names = (
+        "__init__",
+        "acquire",
+        "release",
+        "__enter__",
+        "__exit__",
+        "_open_lock_handle",
+        "_open_new_lock_handle",
+        "_validate_existing_lock_path",
+        "_validate_open_handle_identity",
+        "_require_regular_file",
+        "_require_single_link",
+        "_lock_handle",
+        "_unlock_handle",
     )
-    canonical_workspace_lock_exit = canonical_workspace_lock_type.__dict__.get(
-        "__exit__"
+    workspace_lock_methods = tuple(
+        (
+            name,
+            canonical_workspace_lock_type.__dict__.get(name),
+            getattr(canonical_workspace_lock_type.__dict__.get(name), "__code__", None),
+        )
+        for name in workspace_lock_method_names
     )
     canonical_profile_require_code = getattr(
         canonical_profile_require,
@@ -964,6 +995,21 @@ def _build_canonical_place_action_dispatch():
         "__code__",
         None,
     )
+    canonical_goal_store_init_code = getattr(
+        canonical_goal_store_init,
+        "__code__",
+        None,
+    )
+    canonical_goal_store_load_code = getattr(
+        canonical_goal_store_load,
+        "__code__",
+        None,
+    )
+    canonical_provenance_for_code = getattr(
+        canonical_provenance_for,
+        "__code__",
+        None,
+    )
     canonical_trusted_now_code = getattr(
         canonical_trusted_now,
         "__code__",
@@ -976,16 +1022,6 @@ def _build_canonical_place_action_dispatch():
     )
     canonical_supervised_digest_code = getattr(
         canonical_supervised_digest,
-        "__code__",
-        None,
-    )
-    canonical_workspace_lock_enter_code = getattr(
-        canonical_workspace_lock_enter,
-        "__code__",
-        None,
-    )
-    canonical_workspace_lock_exit_code = getattr(
-        canonical_workspace_lock_exit,
         "__code__",
         None,
     )
@@ -1060,16 +1096,21 @@ def _build_canonical_place_action_dispatch():
         or canonical_execution_report_post_init_code is None
         or not callable(canonical_evidence_id_getter)
         or canonical_evidence_id_getter_code is None
+        or not callable(canonical_goal_store_init)
+        or canonical_goal_store_init_code is None
+        or not callable(canonical_goal_store_load)
+        or canonical_goal_store_load_code is None
+        or type(canonical_goal_store_file_name) is not str
+        or not canonical_goal_store_file_name
+        or not callable(canonical_provenance_for)
+        or canonical_provenance_for_code is None
+        or any(method is None or code is None for _, method, code in workspace_lock_methods)
         or not callable(canonical_trusted_now)
         or canonical_trusted_now_code is None
         or not callable(canonical_bound_binding_sha256)
         or canonical_bound_binding_sha256_code is None
         or not callable(canonical_supervised_digest)
         or canonical_supervised_digest_code is None
-        or not callable(canonical_workspace_lock_enter)
-        or canonical_workspace_lock_enter_code is None
-        or not callable(canonical_workspace_lock_exit)
-        or canonical_workspace_lock_exit_code is None
         or any(method is None or code is None for _, method, code in bound_methods)
         or any(method is None or code is None for _, method, code in ledger_methods)
     ):
@@ -1171,6 +1212,19 @@ def _build_canonical_place_action_dispatch():
     profile_binding_field_descriptors = tuple(
         (name, canonical_profile_binding_type.__dict__.get(name))
         for name in profile_binding_field_names
+    )
+    goal_field_names = (
+        "goal_id",
+        "revision",
+        "automation_level",
+        "emergency_stop",
+        "blocked_providers",
+        "blocked_markets",
+        "max_execution_slippage_fraction",
+    )
+    goal_field_descriptors = tuple(
+        (name, canonical_goal_contract_type.__dict__.get(name))
+        for name in goal_field_names
     )
     acknowledgement_field_names = (
         "attempt_id",
@@ -1305,6 +1359,11 @@ def _build_canonical_place_action_dispatch():
             and ExecutionPlan is canonical_plan_type
             and RealExecutionLedger is canonical_ledger_type
             and WorkspaceEconomicLock is canonical_workspace_lock_type
+            and EconomicGoalStore is canonical_goal_store_type
+            and EconomicGoalContract is canonical_goal_contract_type
+            and AutomationLevel is canonical_automation_level_type
+            and canonical_automation_level_type.SUPERVISED_EXECUTION
+            is canonical_supervised_automation_level
             and ExternalAcknowledgement is canonical_acknowledgement_type
             and BetfairInstructionReport is canonical_instruction_report_type
             and BetfairPlaceExecutionReport is canonical_execution_report_type
@@ -1386,6 +1445,24 @@ def _build_canonical_place_action_dispatch():
             is canonical_evidence_id_getter
             and getattr(canonical_evidence_id_getter, "__code__", None)
             is canonical_evidence_id_getter_code
+            and canonical_goal_store_type.__dict__.get("__init__")
+            is canonical_goal_store_init
+            and getattr(canonical_goal_store_init, "__code__", None)
+            is canonical_goal_store_init_code
+            and canonical_goal_store_type.__dict__.get("load")
+            is canonical_goal_store_load
+            and getattr(canonical_goal_store_load, "__code__", None)
+            is canonical_goal_store_load_code
+            and canonical_goal_store_type.__dict__.get("FILE_NAME")
+            == canonical_goal_store_file_name
+            and provenance_for is canonical_provenance_for
+            and getattr(canonical_provenance_for, "__code__", None)
+            is canonical_provenance_for_code
+            and all(
+                canonical_workspace_lock_type.__dict__.get(name) is method
+                and getattr(method, "__code__", None) is code
+                for name, method, code in workspace_lock_methods
+            )
             and _supervised_execution_runtime._trusted_now is canonical_trusted_now
             and getattr(canonical_trusted_now, "__code__", None)
             is canonical_trusted_now_code
@@ -1396,14 +1473,6 @@ def _build_canonical_place_action_dispatch():
             and _supervised_execution_runtime._digest is canonical_supervised_digest
             and getattr(canonical_supervised_digest, "__code__", None)
             is canonical_supervised_digest_code
-            and canonical_workspace_lock_type.__dict__.get("__enter__")
-            is canonical_workspace_lock_enter
-            and getattr(canonical_workspace_lock_enter, "__code__", None)
-            is canonical_workspace_lock_enter_code
-            and canonical_workspace_lock_type.__dict__.get("__exit__")
-            is canonical_workspace_lock_exit
-            and getattr(canonical_workspace_lock_exit, "__code__", None)
-            is canonical_workspace_lock_exit_code
             and all(
                 canonical_bound_type.__dict__.get(name) is method
                 and getattr(method, "__code__", None) is code
@@ -1441,6 +1510,10 @@ def _build_canonical_place_action_dispatch():
             and all(
                 canonical_profile_binding_type.__dict__.get(name) is descriptor
                 for name, descriptor in profile_binding_field_descriptors
+            )
+            and all(
+                canonical_goal_contract_type.__dict__.get(name) is descriptor
+                for name, descriptor in goal_field_descriptors
             )
             and all(
                 canonical_acknowledgement_type.__dict__.get(name) is descriptor

@@ -104,6 +104,29 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(actual, expected)
 
 
+    def test_locked_replay_helpers_are_not_module_level_bypass_surfaces(self) -> None:
+        self.assertFalse(
+            hasattr(
+                risk_reporting,
+                "_build_product_issued_paper_equity_path_locked",
+            )
+        )
+        self.assertFalse(
+            hasattr(
+                risk_reporting,
+                "_build_paper_risk_report_locked",
+            )
+        )
+
+        book = PaperBook("100")
+        goal = self._goal()
+        path = build_product_issued_paper_equity_path(book, goal)
+        report = build_paper_risk_report(book, goal)
+
+        self.assertEqual(path.current_equity, Decimal("100"))
+        self.assertEqual(report.current_equity, Decimal("100"))
+
+
     def test_equity_path_builder_holds_operation_lock_during_full_replay(self) -> None:
         book = PaperBook("100")
         book.open_ticket(

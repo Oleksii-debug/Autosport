@@ -84,28 +84,64 @@ def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
     return decimal_type((sign, digits, exponent))
 
 
+_CANONICAL_DECIMAL_COEFFICIENT = _decimal_coefficient
+_CANONICAL_DECIMAL_COEFFICIENT_CODE = _decimal_coefficient.__code__
+_CANONICAL_DECIMAL_FROM_COEFFICIENT = _decimal_from_coefficient
+_CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE = _decimal_from_coefficient.__code__
+
+
 def _decimal_add_exact(left: Decimal, right: Decimal) -> Decimal:
-    left_coefficient, left_exponent = _decimal_coefficient(left)
-    right_coefficient, right_exponent = _decimal_coefficient(right)
+    coefficient_fn = _decimal_coefficient
+    from_coefficient = _decimal_from_coefficient
+    if (
+        coefficient_fn is not _CANONICAL_DECIMAL_COEFFICIENT
+        or coefficient_fn.__code__ is not _CANONICAL_DECIMAL_COEFFICIENT_CODE
+        or from_coefficient is not _CANONICAL_DECIMAL_FROM_COEFFICIENT
+        or from_coefficient.__code__ is not _CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE
+    ):
+        raise ValueError("PAPER exact Decimal arithmetic dependency changed")
+    left_coefficient, left_exponent = coefficient_fn(left)
+    right_coefficient, right_exponent = coefficient_fn(right)
     exponent = min(left_exponent, right_exponent)
     left_scaled = left_coefficient * (10 ** (left_exponent - exponent))
     right_scaled = right_coefficient * (10 ** (right_exponent - exponent))
-    return _decimal_from_coefficient(left_scaled + right_scaled, exponent)
+    return from_coefficient(left_scaled + right_scaled, exponent)
 
 
 def _decimal_subtract_exact(left: Decimal, right: Decimal) -> Decimal:
-    right_coefficient, right_exponent = _decimal_coefficient(right)
-    return _decimal_add_exact(
+    coefficient_fn = _decimal_coefficient
+    from_coefficient = _decimal_from_coefficient
+    add_exact = _decimal_add_exact
+    if (
+        coefficient_fn is not _CANONICAL_DECIMAL_COEFFICIENT
+        or coefficient_fn.__code__ is not _CANONICAL_DECIMAL_COEFFICIENT_CODE
+        or from_coefficient is not _CANONICAL_DECIMAL_FROM_COEFFICIENT
+        or from_coefficient.__code__ is not _CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE
+        or add_exact is not _CANONICAL_DECIMAL_ADD_EXACT
+        or add_exact.__code__ is not _CANONICAL_DECIMAL_ADD_EXACT_CODE
+    ):
+        raise ValueError("PAPER exact Decimal arithmetic dependency changed")
+    right_coefficient, right_exponent = coefficient_fn(right)
+    return add_exact(
         left,
-        _decimal_from_coefficient(-right_coefficient, right_exponent),
+        from_coefficient(-right_coefficient, right_exponent),
     )
 
 
 def _decimal_scale_bps_exact(value: Decimal, basis_points: int) -> Decimal:
     if type(basis_points) is not int or not 0 <= basis_points <= 10_000:
         raise ValueError("basis_points must be an int in 0..10000")
-    coefficient, exponent = _decimal_coefficient(value)
-    return _decimal_from_coefficient(coefficient * basis_points, exponent - 4)
+    coefficient_fn = _decimal_coefficient
+    from_coefficient = _decimal_from_coefficient
+    if (
+        coefficient_fn is not _CANONICAL_DECIMAL_COEFFICIENT
+        or coefficient_fn.__code__ is not _CANONICAL_DECIMAL_COEFFICIENT_CODE
+        or from_coefficient is not _CANONICAL_DECIMAL_FROM_COEFFICIENT
+        or from_coefficient.__code__ is not _CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE
+    ):
+        raise ValueError("PAPER exact Decimal arithmetic dependency changed")
+    coefficient, exponent = coefficient_fn(value)
+    return from_coefficient(coefficient * basis_points, exponent - 4)
 
 
 _CANONICAL_DECIMAL_ADD_EXACT = _decimal_add_exact

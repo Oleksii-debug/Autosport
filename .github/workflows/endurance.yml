@@ -38,6 +38,7 @@ on:
       - 'tests/test_endurance.py'
       - 'tests/test_runtime_resource_census.py'
       - 'tests/test_product_runtime_subscription_lifecycle.py'
+      - 'tests/test_product_runtime_resource_endurance.py'
       - 'tests/test_product_runtime.py'
       - 'tests/test_live_observation.py'
       - 'tests/test_replay_worker.py'
@@ -158,6 +159,7 @@ jobs:
           python -m pytest -q
           tests/test_runtime_resource_census.py
           tests/test_product_runtime_subscription_lifecycle.py
+          tests/test_product_runtime_resource_endurance.py
       - name: Run collector composed endurance gate
         run: >-
           python -m pytest -q

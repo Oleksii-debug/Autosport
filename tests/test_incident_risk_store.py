@@ -617,6 +617,20 @@ class IncidentRiskStoreTests(unittest.TestCase):
         ):
             self.store.load()
 
+    def test_oversized_store_is_rejected_before_reading(self) -> None:
+        import autosport.incident_risk_store as incident_risk_store
+
+        self.store.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.store.path.open("wb") as handle:
+            handle.seek(incident_risk_store._MAX_STORE_BYTES)
+            handle.write(b"\x00")
+
+        with self.assertRaisesRegex(
+            IncidentRiskStoreError,
+            "exceeds resource limit",
+        ):
+            self._store(self.workspace).load()
+
     def test_root_schema_and_truth_boundary_are_exact(self) -> None:
         snapshot = self.store.append(self._entry())
         payload = json.loads(

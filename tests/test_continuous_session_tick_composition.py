@@ -6091,3 +6091,92 @@ def test_invalidation_rejects_buffer_class_mutation_during_routing() -> None:
     assert type(buffer) is continuous_session.BoundedMirrorInvalidationBuffer
     assert buffer.pending_count == 0
     assert buffer.full_refresh_required is True
+
+def test_collector_failure_restores_dependency_index_class_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+        coordinator.dependency_index = index
+        coordinator.invalidation_buffer = (
+            continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        )
+
+        class MutatedIndex(continuous_session.FocusedMirrorDependencyIndex):
+            pass
+
+        class FailingCollector(_Collector):
+            def run_cycle(self):
+                index.__class__ = MutatedIndex
+                raise RuntimeError("collector failed after dependency type mutation")
+
+        coordinator.collector = FailingCollector()
+
+        with pytest.raises(
+            RuntimeError,
+            match="collector failed after dependency type mutation",
+        ):
+            coordinator.tick()
+
+        assert type(index) is continuous_session.FocusedMirrorDependencyIndex
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+
+def test_collector_failure_restores_lifecycle_class_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        lifecycle = continuous_session.ContinuousEventLifecycle(
+            root / "event_lifecycle.json"
+        )
+        coordinator.lifecycle = lifecycle
+
+        class MutatedLifecycle(continuous_session.ContinuousEventLifecycle):
+            pass
+
+        class FailingCollector(_Collector):
+            def run_cycle(self):
+                lifecycle.__class__ = MutatedLifecycle
+                raise RuntimeError("collector failed after lifecycle type mutation")
+
+        coordinator.collector = FailingCollector()
+
+        with pytest.raises(
+            RuntimeError,
+            match="collector failed after lifecycle type mutation",
+        ):
+            coordinator.tick()
+
+        assert type(lifecycle) is continuous_session.ContinuousEventLifecycle
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+
+def test_desktop_failure_restores_lifecycle_class_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        lifecycle = continuous_session.ContinuousEventLifecycle(
+            root / "event_lifecycle.json"
+        )
+        coordinator.lifecycle = lifecycle
+
+        class MutatedLifecycle(continuous_session.ContinuousEventLifecycle):
+            pass
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                lifecycle.__class__ = MutatedLifecycle
+                raise RuntimeError("desktop failed after lifecycle type mutation")
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+
+        with pytest.raises(
+            RuntimeError,
+            match="desktop failed after lifecycle type mutation",
+        ):
+            coordinator.tick()
+
+        assert type(lifecycle) is continuous_session.ContinuousEventLifecycle
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"

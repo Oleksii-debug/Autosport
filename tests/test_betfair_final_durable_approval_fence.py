@@ -938,3 +938,98 @@ def test_exact_client_without_constructor_binding_cannot_execute() -> None:
             )
 
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_gate_rebinding_after_outer_check_is_caught_before_first_gate_call(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        forged_calls: list[str] = []
+        original_enter = WorkspaceEconomicLock.__enter__
+
+        class ForgedGate:
+            def require(self, **kwargs):
+                del kwargs
+                forged_calls.append("require")
+                raise AssertionError("forged gate must never execute")
+
+        def mutate_after_outer_preflight(self):
+            entered = original_enter(self)
+            client._gate = ForgedGate()  # type: ignore[assignment]
+            return entered
+
+        monkeypatch.setattr(WorkspaceEconomicLock, "__enter__", mutate_after_outer_preflight)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="dependency binding changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-gate-toctou-before-first-gate",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert forged_calls == []
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_gate_rebinding_after_reservation_is_caught_before_final_gate_call(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_begin = betfair_execution.begin_supervised_attempt
+
+        class ForgedGate:
+            def require(self, **kwargs):
+                del kwargs
+                raise AssertionError("forged final gate must never execute")
+
+        def reserve_then_rebind(*args, **kwargs):
+            result = original_begin(*args, **kwargs)
+            client._gate = ForgedGate()  # type: ignore[assignment]
+            return result
+
+        monkeypatch.setattr(
+            betfair_execution,
+            "begin_supervised_attempt",
+            reserve_then_rebind,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="dependency binding changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-gate-toctou-before-final-gate",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        attempt = next(
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id == "attempt-gate-toctou-before-final-gate"
+        )
+        assert attempt.state is AttemptState.RESERVED
+        assert attempt.submitted_at is None
+        assert attempt.provider_evidence is None

@@ -255,6 +255,35 @@ def _close_process_handle(process: Any) -> bool:
     return True
 
 
+def _stop_process_bounded(process: Any) -> str | None:
+    """Best-effort bounded stop with explicit stop-vs-handle-close truth."""
+    for method_name in ("kill", "terminate"):
+        method = getattr(process, method_name, None)
+        if method is not None:
+            try:
+                method()
+            except Exception:
+                pass
+        try:
+            process.join(_HANDLER_TIMEOUT_REAP_GRACE_SECONDS)
+        except Exception:
+            pass
+        try:
+            alive = process.is_alive()
+        except Exception:
+            alive = None
+        if alive is False:
+            if _close_process_handle(process):
+                return None
+            return "HANDLE_CLOSE_FAILED"
+
+    # A platform/runtime state query may itself fail even after a successful stop.
+    # A successful close is sufficient proof that the process is no longer running.
+    if _close_process_handle(process):
+        return None
+    return "STOP_FAILED"
+
+
 class SkillRegistry:
     """Durable exact-version registry with fail-closed invocation semantics."""
     def __init__(self, path: str | Path) -> None:
@@ -459,38 +488,46 @@ class SkillRegistry:
             if not _close_process_handle(process):
                 return None,"HANDLER_START_HANDLE_CLOSE_FAILED"
             return None,"HANDLER_START_"+exc.__class__.__name__.upper()
-        sender.close()
-        process.join(timeout_seconds)
-        if process.is_alive():
-            # The timeout is an execution-authority boundary, not the start of
-            # another multi-second wait.  Force-stop the isolated child first,
-            # then spend only a small bounded grace reaping its process handle.
-            # In particular, do not let Windows spawn/termination bookkeeping
-            # turn a 1-second skill timeout into a 3+ second caller stall.
-            try:
-                if hasattr(process, "kill"):
-                    process.kill()
-                else:
-                    process.terminate()
-            except (OSError, ValueError):
-                # A concurrent process exit can race the stop request.  Reap
-                # whatever state remains below before deciding whether a
-                # terminate fallback is still required.
-                pass
-            process.join(_HANDLER_TIMEOUT_REAP_GRACE_SECONDS)
-            if process.is_alive() and hasattr(process, "terminate"):
-                try:
-                    process.terminate()
-                except (OSError, ValueError):
-                    pass
-                process.join(_HANDLER_TIMEOUT_REAP_GRACE_SECONDS)
-            if process.is_alive():
-                receiver.close()
-                return None,"HANDLER_TIMEOUT_STOP_FAILED"
-            close_ok = _close_process_handle(process)
+        try:
+            sender.close()
+        except Exception:
+            stop_error = _stop_process_bounded(process)
             receiver.close()
-            if not close_ok:
+            if stop_error == "HANDLE_CLOSE_FAILED":
+                return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+            if stop_error == "STOP_FAILED":
+                return None,"HANDLER_PROCESS_STOP_FAILED"
+            return None,"HANDLER_RESULT_PIPE_CLOSE_FAILED"
+        try:
+            process.join(timeout_seconds)
+        except Exception:
+            stop_error = _stop_process_bounded(process)
+            receiver.close()
+            if stop_error == "HANDLE_CLOSE_FAILED":
+                return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+            if stop_error == "STOP_FAILED":
+                return None,"HANDLER_PROCESS_STOP_FAILED"
+            return None,"HANDLER_PROCESS_JOIN_FAILED"
+        try:
+            alive = process.is_alive()
+        except Exception:
+            stop_error = _stop_process_bounded(process)
+            receiver.close()
+            if stop_error == "HANDLE_CLOSE_FAILED":
+                return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+            if stop_error == "STOP_FAILED":
+                return None,"HANDLER_PROCESS_STOP_FAILED"
+            return None,"HANDLER_PROCESS_STATE_UNAVAILABLE"
+        if alive:
+            # The timeout is an execution-authority boundary, not the start of
+            # another multi-second wait. Force-stop the isolated child first,
+            # then spend only a small bounded grace reaping its process handle.
+            stop_error = _stop_process_bounded(process)
+            receiver.close()
+            if stop_error == "HANDLE_CLOSE_FAILED":
                 return None,"HANDLER_TIMEOUT_HANDLE_CLOSE_FAILED"
+            if stop_error == "STOP_FAILED":
+                return None,"HANDLER_TIMEOUT_STOP_FAILED"
             return None,"HANDLER_TIMEOUT"
         try:
             has_result = receiver.poll()

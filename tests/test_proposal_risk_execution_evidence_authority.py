@@ -2815,6 +2815,68 @@ class ProductProposalRiskTerminalPayoffEvaluationTests(unittest.TestCase):
         finally:
             helper.__code__ = original_code
 
+    def test_portfolio_locked_capital_calculator_cell_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        helper = (
+            terminal_payoff_authority
+            ._portfolio_module
+            ._CANONICAL_LOCKED_CAPITAL_FOR_TICKET
+        )
+        calculator = (
+            terminal_payoff_authority
+            ._portfolio_module
+            .locked_capital_for_exchange_side
+        )
+        closure = helper.__closure__
+        self.assertIsNotNone(closure)
+        cells = [
+            cell
+            for cell in closure
+            if cell.cell_contents is calculator
+        ]
+        self.assertEqual(len(cells), 1)
+        cell = cells[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = lambda **_kwargs: Decimal("0")
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
+    def test_portfolio_exchange_multiply_cell_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        calculator = (
+            terminal_payoff_authority
+            ._portfolio_module
+            .locked_capital_for_exchange_side
+        )
+        closure = calculator.__closure__
+        self.assertIsNotNone(closure)
+        cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "_multiply_exact"
+        ]
+        self.assertEqual(len(cells), 1)
+        cell = cells[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = lambda _left, _right: Decimal("0")
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
     def test_paperbook_settlement_method_code_mutation_is_rejected(self) -> None:
         bindings = self._bindings()
         self._issue_mapping_parent(bindings)
@@ -4786,6 +4848,56 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
         finally:
             cash_floor_authority._risk_module.PaperBook = original
 
+
+    def test_cash_floor_rejects_locked_capital_calculator_cell_mutation(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        helper = cash_floor_authority._risk_module._CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL
+        calculator = cash_floor_authority._risk_module.locked_capital_for_exchange_side
+        closure = helper.__closure__
+        self.assertIsNotNone(closure)
+        cells = [
+            cell
+            for cell in closure
+            if cell.cell_contents is calculator
+        ]
+        self.assertEqual(len(cells), 1)
+        cell = cells[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = lambda **_kwargs: Decimal("0")
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
+    def test_cash_floor_rejects_exchange_multiply_cell_mutation(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        calculator = cash_floor_authority._risk_module.locked_capital_for_exchange_side
+        closure = calculator.__closure__
+        self.assertIsNotNone(closure)
+        cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "_multiply_exact"
+        ]
+        self.assertEqual(len(cells), 1)
+        cell = cells[0]
+        original = cell.cell_contents
+        try:
+            cell.cell_contents = lambda _left, _right: Decimal("0")
+            with self.assertRaisesRegex(
+                ProductProposalRiskCounterfactualCashFloorError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
 
     def test_cash_floor_rejects_json_encoder_substitution(self) -> None:
         bindings = self._bindings()

@@ -380,6 +380,43 @@ def test_pathological_operational_checkpoint_nesting_is_normalized() -> None:
             raise AssertionError("pathological nested sidecar was accepted")
 
 
+def test_operational_checkpoint_ignores_rebound_class_constants(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_ERROR_SCHEMA",
+            "attacker.schema",
+        )
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_ERROR_VERSION",
+            999,
+        )
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_ERROR_FIELDS",
+            {"attacker"},
+        )
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_MAX_ERROR_CHECKPOINT_BYTES",
+            1,
+        )
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_MAX_ERROR_CODE_CHARS",
+            1,
+        )
+
+        reopened = _state_with_history(root, _SMALL_HISTORY)
+        assert reopened._read_error_checkpoint()["last_error_code"] == (
+            "SYNTHETIC_PROVIDER_FAILURE"
+        )
+
 def test_operational_checkpoint_symlink_is_rejected_before_read() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

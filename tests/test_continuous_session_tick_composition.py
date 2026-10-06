@@ -929,3 +929,93 @@ def test_tick_keeps_collector_run_callable_across_clock_callback() -> None:
 
         assert result.cycle_index == 1
 
+def test_tick_keeps_invalidation_bound_methods_after_provider_rebinding() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                self.calls += 1
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class Index:
+            def __init__(self) -> None:
+                self.ids = {"input-old"}
+                self.affected_calls = 0
+                self.register_calls = 0
+                self.unregister_calls = 0
+
+            @property
+            def input_ids(self):
+                return tuple(sorted(self.ids))
+
+            def affected_inputs(self, _batch):
+                self.affected_calls += 1
+                return ()
+
+            def register(self, input_id: str, **_selectors):
+                self.register_calls += 1
+                self.ids.add(input_id)
+
+            def unregister(self, input_id: str):
+                self.unregister_calls += 1
+                self.ids.discard(input_id)
+                return True
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                register_input,
+                retire_input,
+                **_kwargs,
+            ):
+                register_input("input-new", source_ids="provider-a")
+                retire_input("input-old")
+                return ("input-new",)
+
+        buffer = Buffer()
+        index = Index()
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = index
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        def attacker(*_args, **_kwargs):
+            raise AssertionError("provider-time rebound invalidation method executed")
+
+        def rebind() -> None:
+            buffer.drain = attacker  # type: ignore[method-assign]
+            index.affected_inputs = attacker  # type: ignore[method-assign]
+            index.register = attacker  # type: ignore[method-assign]
+            index.unregister = attacker  # type: ignore[method-assign]
+
+        coordinator.collector = _Collector(callback=rebind)
+
+        result = coordinator.tick()
+
+        assert result.registered_input_ids == ("input-new",)
+        assert result.retired_input_ids == ("input-old",)
+        assert buffer.calls == 1
+        assert index.affected_calls == 1
+        assert index.register_calls == 1
+        assert index.unregister_calls == 1
+        assert index.input_ids == ("input-new",)
+

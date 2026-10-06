@@ -2721,6 +2721,30 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _invalidation_buffer_type: type[BoundedMirrorInvalidationBuffer] = (
             BoundedMirrorInvalidationBuffer
         ),
+        _invalidation_drain_method: Callable[..., MirrorInvalidationBatch] = (
+            BoundedMirrorInvalidationBuffer.drain
+        ),
+        _invalidation_drain_method_code: object = (
+            BoundedMirrorInvalidationBuffer.drain.__code__
+        ),
+        _pending_count_descriptor: object = (
+            BoundedMirrorInvalidationBuffer.__dict__["pending_count"]
+        ),
+        _pending_count_getter: Callable[[BoundedMirrorInvalidationBuffer], int] = (
+            BoundedMirrorInvalidationBuffer.pending_count.fget
+        ),
+        _pending_count_getter_code: object = (
+            BoundedMirrorInvalidationBuffer.pending_count.fget.__code__
+        ),
+        _full_refresh_descriptor: object = (
+            BoundedMirrorInvalidationBuffer.__dict__["full_refresh_required"]
+        ),
+        _full_refresh_getter: Callable[[BoundedMirrorInvalidationBuffer], bool] = (
+            BoundedMirrorInvalidationBuffer.full_refresh_required.fget
+        ),
+        _full_refresh_getter_code: object = (
+            BoundedMirrorInvalidationBuffer.full_refresh_required.fget.__code__
+        ),
         _force_full_refresh: Callable[[BoundedMirrorInvalidationBuffer], None] = (
             BoundedMirrorInvalidationBuffer.force_full_refresh
         ),
@@ -2767,6 +2791,35 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "continuous-session invalidation routing authority is unavailable"
             )
+        if type(invalidation_buffer) is _invalidation_buffer_type:
+            pending_descriptor = _invalidation_buffer_type.__dict__.get(
+                "pending_count"
+            )
+            full_refresh_descriptor = _invalidation_buffer_type.__dict__.get(
+                "full_refresh_required"
+            )
+            if (
+                BoundedMirrorInvalidationBuffer is not _invalidation_buffer_type
+                or getattr(drain_invalidation, "__self__", None)
+                is not invalidation_buffer
+                or getattr(drain_invalidation, "__func__", None)
+                is not _invalidation_drain_method
+                or getattr(_invalidation_drain_method, "__code__", None)
+                is not _invalidation_drain_method_code
+                or pending_descriptor is not _pending_count_descriptor
+                or getattr(pending_descriptor, "fget", None)
+                is not _pending_count_getter
+                or getattr(_pending_count_getter, "__code__", None)
+                is not _pending_count_getter_code
+                or full_refresh_descriptor is not _full_refresh_descriptor
+                or getattr(full_refresh_descriptor, "fget", None)
+                is not _full_refresh_getter
+                or getattr(_full_refresh_getter, "__code__", None)
+                is not _full_refresh_getter_code
+            ):
+                raise ContinuousSessionError(
+                    "canonical invalidation buffer dispatch authority changed"
+                )
         if (
             type(max_batches) is not int
             or max_batches <= 0
@@ -3120,8 +3173,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         matching_state_before_backlog = capture_matching_key_state()
         matching_keys_before_backlog = matching_keys_authority()
-        pending_count = invalidation_buffer.pending_count
-        pending_full_refresh = invalidation_buffer.full_refresh_required
+        if type(invalidation_buffer) is _invalidation_buffer_type:
+            pending_count = _pending_count_getter(invalidation_buffer)
+            pending_full_refresh = _full_refresh_getter(invalidation_buffer)
+        else:
+            pending_count = invalidation_buffer.pending_count
+            pending_full_refresh = invalidation_buffer.full_refresh_required
         if (
             type(pending_count) is not int
             or pending_count < 0

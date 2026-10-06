@@ -812,6 +812,82 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
             loop.close()
 
+    def test_actionability_provider_health_requires_every_component_horizon(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            provider_a = self._event(selection="selection-a", sequence=1)
+            provider_b = replace(
+                self._event(selection="selection-b", sequence=1),
+                source_id="provider-b",
+            )
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((provider_a, provider_b))
+            finally:
+                seed_store.close()
+
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_failure(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                error=ConnectionError("provider-a failed"),
+            )
+            health_store.record_success(
+                "provider-b",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="provider-b-healthy",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=_EmptyProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input(
+                "input-a",
+                selection_ids=("selection-a", "selection-b"),
+            )
+            captured = loop._capture_input_views(("input-a",), clock.value)
+            self.assertEqual(
+                {boundary.source_id for boundary in loop._input_health_boundaries["input-a"]},
+                {"provider-a", "provider-b"},
+            )
+            self.assertEqual(
+                {event.source_id for event in captured["input-a"].events},
+                {"provider-b"},
+            )
+
+            loop._input_health_boundaries["input-a"] = tuple(
+                boundary
+                for boundary in loop._input_health_boundaries["input-a"]
+                if boundary.source_id == "provider-b"
+            )
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "horizons do not match current-view component sources",
+            ):
+                loop._derive_actionability_wait_evidence(
+                    ("input-a",),
+                    clock.value,
+                    captured_snapshots=captured,
+                )
+            loop.close()
 
     def test_committed_health_horizon_tamper_conflicts_with_decision_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -3015,9 +3015,13 @@ class PersistentLiveDecisionLoop:
                     raise LiveDecisionProgressError(
                         "actionability provider-health evidence lacks input horizons"
                     )
-                if not set(source_ids).issubset(local_boundaries):
+                component_source_ids = {
+                    component.source_id for component in diagnostic.components
+                }
+                if set(source_ids) != component_source_ids:
                     raise LiveDecisionProgressError(
-                        "actionability provider-health evidence lacks replay horizons"
+                        "actionability provider-health horizons do not match "
+                        "current-view component sources"
                     )
                 for source_id in source_ids:
                     health = self._health_gate.provider_health(

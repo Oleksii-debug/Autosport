@@ -226,5 +226,35 @@ _messages.update(
     }
 )
 
+# Incident/model-risk register presentation keys are emitted by the canonical
+# read model in incident_risk_operator / incident_risk_register. Keep their
+# Ukrainian presentation in this existing data-only Windows resource so the
+# read model never becomes a parallel localization authority.
+_messages.update(
+    {
+        "ui.risk_register.state.unavailable": "Докази журналу інцидентів недоступні.",
+        "ui.risk_register.state.empty": "Зареєстрованих інцидентів або модельних ризиків немає.",
+        "ui.risk_register.state.available": "Журнал інцидентів і модельних ризиків доступний.",
+        "ui.risk_register.kind.incident": "Інцидент",
+        "ui.risk_register.kind.model_risk": "Модельний ризик",
+        "ui.risk_register.severity.low": "Низька важливість",
+        "ui.risk_register.severity.medium": "Середня важливість",
+        "ui.risk_register.severity.high": "Висока важливість",
+        "ui.risk_register.severity.critical": "Критична важливість",
+        "ui.risk_register.status.open": "Відкрито",
+        "ui.risk_register.status.acknowledged": "Підтверджено ознайомлення",
+        "ui.risk_register.status.mitigating": "Триває зменшення ризику",
+        "ui.risk_register.status.resolved": "Вирішено",
+        "ui.risk_register.status.superseded": "Замінено новішим записом",
+        "ui.risk_register.evidence.unverified": "Докази не перевірені",
+        "ui.risk_register.evidence.partial": "Докази часткові",
+        "ui.risk_register.evidence.verified": "Докази перевірені",
+        "ui.risk_register.next_action.none": "Додаткова дія оператора не потрібна",
+        "ui.risk_register.next_action.verify_mitigation": "Перевірити докази зменшення ризику",
+        "ui.risk_register.next_action.review": "Переглянути інцидент і пов’язані докази",
+        "ui.risk_register.next_action.monitor": "Продовжити спостереження",
+    }
+)
+
 WINDOWS_SURFACE_CONTENT_UK_UA: Mapping[str, str] = MappingProxyType(_messages)
 del _messages

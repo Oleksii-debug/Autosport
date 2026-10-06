@@ -4636,6 +4636,85 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "continuous-session invalidation buffer structure changed during tick"
                 )
 
+        def recover_invalidation_buffer_semantics() -> bool:
+            if type(invalidation_buffer) is not _invalidation_buffer_type:
+                return False
+            # Recovery must not call a validator or method whose Python code may
+            # itself have been mutated by the failing callback. Inspect exact
+            # built-in containers/scalars directly and degrade any malformed
+            # incremental truth to one conservative full refresh.
+            with invalidation_buffer_lock:
+                dirty = getattr(
+                    invalidation_buffer,
+                    "_dirty",
+                    missing_coordinator_authority,
+                )
+                max_dirty_keys = getattr(
+                    invalidation_buffer,
+                    "_max_dirty_keys",
+                    missing_coordinator_authority,
+                )
+                full_refresh_required = getattr(
+                    invalidation_buffer,
+                    "_full_refresh_required",
+                    missing_coordinator_authority,
+                )
+                invalid = (
+                    type(dirty) is not dict
+                    or type(max_dirty_keys) is not int
+                    or max_dirty_keys <= 0
+                    or type(full_refresh_required) is not bool
+                    or (
+                        type(dirty) is dict
+                        and type(max_dirty_keys) is int
+                        and len(dirty) > max_dirty_keys
+                    )
+                    or (
+                        full_refresh_required is True
+                        and type(dirty) is dict
+                        and bool(dirty)
+                    )
+                    or (
+                        type(dirty) is dict
+                        and any(
+                            type(key) is not tuple
+                            or len(key) != 2
+                            or any(
+                                type(part) is not str
+                                or not part
+                                or part.strip() != part
+                                for part in key
+                            )
+                            or value is not None
+                            for key, value in dirty.items()
+                        )
+                    )
+                )
+                if not invalid:
+                    return False
+                invalidation_dirty_storage.clear()
+                object.__setattr__(
+                    invalidation_buffer,
+                    "_dirty",
+                    invalidation_dirty_storage,
+                )
+                object.__setattr__(
+                    invalidation_buffer,
+                    "_max_dirty_keys",
+                    invalidation_max_dirty_keys,
+                )
+                object.__setattr__(
+                    invalidation_buffer,
+                    "_full_refresh_required",
+                    True,
+                )
+                object.__setattr__(
+                    invalidation_buffer,
+                    "_lock",
+                    invalidation_buffer_lock,
+                )
+                return True
+
         def require_invalidation_buffer_dispatch_authority() -> None:
             if type(invalidation_buffer) is not _invalidation_buffer_type:
                 return
@@ -5097,7 +5176,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             invalidation_structure_was_rebound = (
                 restore_invalidation_buffer_structure_authority()
             )
+            invalidation_semantics_recovered = recover_invalidation_buffer_semantics()
             restore_economic_context()
+            if invalidation_semantics_recovered:
+                try:
+                    exc.add_note(
+                        "malformed canonical invalidation state was promoted "
+                        "to a full-refresh recovery fence"
+                    )
+                except BaseException:
+                    pass
             if lifecycle_type_was_changed:
                 try:
                     exc.add_note(
@@ -5285,7 +5373,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     invalidation_structure_was_rebound = (
                         restore_invalidation_buffer_structure_authority()
                     )
+                    invalidation_semantics_recovered = (
+                        recover_invalidation_buffer_semantics()
+                    )
                     restore_economic_context()
+                    if invalidation_semantics_recovered:
+                        try:
+                            exc.add_note(
+                                "malformed canonical invalidation state was promoted "
+                                "to a full-refresh recovery fence"
+                            )
+                        except BaseException:
+                            pass
                     if invalidation_structure_was_rebound:
                         try:
                             exc.add_note(
@@ -5794,7 +5893,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 invalidation_structure_was_rebound = (
                     restore_invalidation_buffer_structure_authority()
                 )
+                invalidation_semantics_recovered = recover_invalidation_buffer_semantics()
                 restore_economic_context()
+                if invalidation_semantics_recovered:
+                    try:
+                        exc.add_note(
+                            "malformed canonical invalidation state was promoted "
+                            "to a full-refresh recovery fence"
+                        )
+                    except BaseException:
+                        pass
                 if lifecycle_type_was_changed:
                     try:
                         exc.add_note(

@@ -175,6 +175,89 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
 
         self.assertEqual(formatted, [])
 
+    def _attempt_payload(self) -> dict[str, object]:
+        return {
+            "attempt_id": "attempt-durable",
+            "run_id": "run-durable",
+            "plan_id": "plan-durable",
+            "action_id": "resource-action",
+            "sequence": 0,
+            "bookmaker_id": "paper-venue",
+            "account_id": "paper-account",
+            "event_id": "event-1",
+            "market_id": "market-1",
+            "selection_id": "selection-1",
+            "side": "BACK",
+            "decision_quote_id": "quote-1",
+            "decision_odds": "2.50",
+            "requested_stake": "10.00",
+            "decision_observed_at": "2026-10-05T00:00:00.100000+00:00",
+            "execution_observed_at": "2026-10-05T00:00:00.200000+00:00",
+            "delay_ms": 100,
+            "quote_age_ms": 100,
+            "outcome": "ACCEPTED",
+            "execution_odds": "2.40",
+            "execution_stake": "10.00",
+            "suspended": False,
+            "evidence_grade": "EMPIRICAL",
+            "evidence_source": "captured-paper-observation-v1",
+            "evidence_id": "paper-evidence-1",
+            "evidence_sha256": "a" * 64,
+            "model_fingerprint": "b" * 64,
+            "reason": "durable Decimal parser authority regression",
+        }
+
+    def test_attempt_reload_ignores_rebound_module_decimal_constructor(self) -> None:
+        payload = self._attempt_payload()
+        sentinel = object()
+        previous = legacy.__dict__.get("Decimal", sentinel)
+        calls: list[object] = []
+
+        def forged_decimal(value: object) -> Decimal:
+            calls.append(value)
+            raise AssertionError("rebound module Decimal executed")
+
+        legacy.Decimal = forged_decimal
+        try:
+            attempt = PaperLegAttempt.from_dict(payload)
+        finally:
+            if previous is sentinel:
+                del legacy.Decimal
+            else:
+                legacy.Decimal = previous
+
+        self.assertEqual(calls, [])
+        self.assertEqual(attempt.decision_odds, Decimal("2.50"))
+        self.assertEqual(attempt.requested_stake, Decimal("10.00"))
+        self.assertEqual(attempt.execution_odds, Decimal("2.40"))
+        self.assertEqual(attempt.execution_stake, Decimal("10.00"))
+
+    def test_attempt_reload_bounds_decimal_before_module_constructor_dispatch(self) -> None:
+        payload = self._attempt_payload()
+        payload["decision_odds"] = "1E+8192"
+        sentinel = object()
+        previous = legacy.__dict__.get("Decimal", sentinel)
+        calls: list[object] = []
+
+        def forged_decimal(value: object) -> Decimal:
+            calls.append(value)
+            raise AssertionError("rebound module Decimal executed")
+
+        legacy.Decimal = forged_decimal
+        try:
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "invalid attempt payload",
+            ):
+                PaperLegAttempt.from_dict(payload)
+        finally:
+            if previous is sentinel:
+                del legacy.Decimal
+            else:
+                legacy.Decimal = previous
+
+        self.assertEqual(calls, [])
+
     def test_reload_rejects_oversized_evidence_under_same_resource_law(self) -> None:
         payload = evidence().to_dict()
         payload["accepted_stake"] = "1E+8192"

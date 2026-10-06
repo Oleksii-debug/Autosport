@@ -441,5 +441,38 @@ class RuntimeResourceCoverageTruthTests(unittest.TestCase):
             worker._thread.join(5.0)
 
 
+    def test_runtime_temp_artifact_probe_detects_only_transient_suffixes(self) -> None:
+        namespace = self._runner_namespace()
+        probe = namespace["_runtime_temp_artifacts"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "stable.json").write_text("{}", encoding="utf-8")
+            (root / ".state.abc.tmp").write_text("partial", encoding="utf-8")
+            nested = root / "nested"
+            nested.mkdir()
+            (nested / "payload.partial").write_text("partial", encoding="utf-8")
+            (nested / "cache.staging").mkdir()
+
+            residuals = probe(root)
+
+        self.assertEqual(
+            residuals,
+            (
+                ".state.abc.tmp",
+                "nested/cache.staging",
+                "nested/payload.partial",
+            ),
+        )
+
+    def test_runtime_temp_artifact_probe_is_empty_for_missing_root(self) -> None:
+        namespace = self._runner_namespace()
+        probe = namespace["_runtime_temp_artifacts"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing"
+            self.assertEqual(probe(missing), ())
+
+
 if __name__ == "__main__":
     unittest.main()

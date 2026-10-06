@@ -754,7 +754,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             latest = JsonlDecisionLedger(
                 workspace / "decisions.jsonl"
             ).verified_records()[-1]
-            self.assertEqual(latest.payload["schema_version"], 4)
+            self.assertEqual(latest.payload["schema_version"], 5)
             self.assertEqual(latest.payload["gate"], "actionability_wait")
             wait = latest.to_dict()["payload"]["actionability_wait_evidence"]
             self.assertEqual(
@@ -7935,7 +7935,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             latest = JsonlDecisionLedger(
                 workspace / "decisions.jsonl"
             ).verified_records()[-1]
-            self.assertEqual(latest.payload["schema_version"], 4)
+            self.assertEqual(latest.payload["schema_version"], 5)
             self.assertEqual(latest.payload["gate"], "actionability_wait")
             wait = latest.to_dict()["payload"]["actionability_wait_evidence"]
             self.assertEqual(len(wait), 1)
@@ -7946,6 +7946,63 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 ["matching_component_change"],
             )
             self.assertEqual(wait[0]["provider_health"], [])
+            loop.close()
+
+    def test_wait_reason_transition_at_same_cut_gets_new_decision_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            future = self._event(
+                sequence=1,
+                observed=self.START + timedelta(seconds=3),
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(), (future,)]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+            second = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [])
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 2)
+            self.assertNotEqual(records[0].decision_id, records[1].decision_id)
+            self.assertEqual(
+                records[0].payload["market_state_sha256"],
+                records[1].payload["market_state_sha256"],
+            )
+            self.assertEqual(
+                records[0].payload["plan_sha256"],
+                records[1].payload["plan_sha256"],
+            )
+            first_wait = records[0].to_dict()["payload"][
+                "actionability_wait_evidence"
+            ]
+            second_wait = records[1].to_dict()["payload"][
+                "actionability_wait_evidence"
+            ]
+            self.assertEqual(first_wait[0]["wait_reasons"], ["no_components"])
+            self.assertEqual(
+                first_wait[0]["recheck_triggers"],
+                ["matching_component_change"],
+            )
+            self.assertEqual(
+                second_wait[0]["wait_reasons"],
+                ["future_causality"],
+            )
+            self.assertEqual(
+                second_wait[0]["recheck_triggers"],
+                ["causally_admissible_observation"],
+            )
             loop.close()
 
     def test_freshness_expiry_recomputes_without_market_delta(self) -> None:
@@ -7975,7 +8032,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             latest = JsonlDecisionLedger(
                 workspace / "decisions.jsonl"
             ).verified_records()[-1]
-            self.assertEqual(latest.payload["schema_version"], 4)
+            self.assertEqual(latest.payload["schema_version"], 5)
             self.assertEqual(latest.payload["gate"], "actionability_wait")
             wait = latest.to_dict()["payload"]["actionability_wait_evidence"]
             self.assertEqual(wait[0]["input_id"], "input-a")
@@ -8021,7 +8078,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             records = ledger.verified_records()
             self.assertEqual(len(records), 2)
             wait_id = records[-1].decision_id
-            self.assertEqual(records[-1].payload["schema_version"], 4)
+            self.assertEqual(records[-1].payload["schema_version"], 5)
             first.close()
 
             resumed_observer = _DurableObserver(workspace, [()])

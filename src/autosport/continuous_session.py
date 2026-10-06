@@ -5692,6 +5692,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 if final_invalidation_snapshot is not None:
                     pending_full_refresh, pending_keys = final_invalidation_snapshot
                     backlog = bool(pending_full_refresh or pending_keys)
+                require_state_identity()
+                require_dependency_index_identity()
+                require_tick_dependency_routing_authority(
+                    "dependency routing authority changed during final invalidation publication"
+                )
+                require_economic_context()
                 effects_invalidation_baseline = None
                 committed_last_success_at = state._last_success_at
             except Exception as exc:

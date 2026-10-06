@@ -707,8 +707,6 @@ class _ContinuousSessionState:
         _text_validator_code: object = _text.__code__,
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
-        _text_validator: Callable[[object, str], str] = _text,
-        _text_validator_code: object = _text.__code__,
     ) -> dict[str, Any]:
         if (
             getattr(_strict_json_loads, "__code__", None) is not _strict_json_loads_code
@@ -961,6 +959,8 @@ class _ContinuousSessionState:
         _version: int = _CONTINUOUS_SESSION_VERSION,
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
+        _text_validator: Callable[[object, str], str] = _text,
+        _text_validator_code: object = _text.__code__,
     ) -> dict[str, Any]:
         if (
             getattr(_strict_json_loads, "__code__", None) is not _strict_json_loads_code
@@ -970,6 +970,9 @@ class _ContinuousSessionState:
             or _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
+            or _text is not _text_validator
+            or getattr(_text_validator, "__code__", None)
+            is not _text_validator_code
         ):
             raise ContinuousSessionError(
                 "canonical session-reader code identity changed"

@@ -257,7 +257,12 @@ def _parse_json_object(raw: str, *, what: str) -> dict[str, Any]:
         )
     except PaperExecutionIntegrityError:
         raise
-    except (_CANONICAL_JSON_DECODE_ERROR, UnicodeDecodeError) as exc:
+    except (
+        _CANONICAL_JSON_DECODE_ERROR,
+        UnicodeDecodeError,
+        RecursionError,
+        OverflowError,
+    ) as exc:
         raise PaperExecutionIntegrityError(f"invalid {what} JSON") from exc
     if type(value) is not dict:
         raise PaperExecutionIntegrityError(f"{what} must be a JSON object")

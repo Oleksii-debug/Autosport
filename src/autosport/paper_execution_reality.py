@@ -90,10 +90,18 @@ def _build_decimal_from_coefficient():
     decimal_type = Decimal
     resource_validator = _impl._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
     resource_validator_code = resource_validator.__code__
+    input_int_max_bits = _impl._CANONICAL_DECIMAL_INPUT_INT_MAX_BITS
+    input_exponent_abs_limit = _impl._CANONICAL_DECIMAL_INPUT_TEXT_LIMIT
 
     def decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
         if getattr(resource_validator, "__code__", None) is not resource_validator_code:
             raise ValueError("PAPER Decimal resource authority changed")
+        if type(coefficient) is not int or type(exponent) is not int:
+            raise ValueError("decimal coefficient and exponent must be exact ints")
+        if coefficient.bit_length() > input_int_max_bits:
+            raise ValueError("decimal coefficient exceeds resource limit")
+        if abs(exponent) > input_exponent_abs_limit:
+            raise ValueError("decimal exponent exceeds resource limit")
         sign = 1 if coefficient < 0 else 0
         magnitude = decimal_type(abs(coefficient))
         digits = magnitude.as_tuple().digits

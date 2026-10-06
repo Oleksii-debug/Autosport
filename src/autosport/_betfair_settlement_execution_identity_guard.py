@@ -75,8 +75,23 @@ _LEDGER_DISPATCH_NAMES = (
 _LEDGER_DISPATCH = {
     name: vars(_LEDGER_TYPE).get(name) for name in _LEDGER_DISPATCH_NAMES
 }
+
+
+def _raw_dispatch_code(value):
+    """Return executable code for an exact raw class descriptor.
+
+    vars(type) deliberately returns classmethod/staticmethod descriptor objects rather
+    than bound callables. Preserve that exact descriptor identity as the authority
+    surface while separately pinning the wrapped function's executable identity.
+    """
+
+    if type(value) in {classmethod, staticmethod}:
+        value = value.__func__
+    return getattr(value, "__code__", None)
+
+
 _LEDGER_DISPATCH_CODE = {
-    name: getattr(value, "__code__", None)
+    name: _raw_dispatch_code(value)
     for name, value in _LEDGER_DISPATCH.items()
 }
 
@@ -141,7 +156,7 @@ def _require_dispatch() -> None:
         or _settlement.ExecutionLedgerError is not _LEDGER_ERROR
         or any(
             vars(_LEDGER_TYPE).get(name) is not expected
-            or getattr(expected, "__code__", None) is not _LEDGER_DISPATCH_CODE[name]
+            or _raw_dispatch_code(expected) is not _LEDGER_DISPATCH_CODE[name]
             for name, expected in _LEDGER_DISPATCH.items()
         )
     ):

@@ -74,6 +74,39 @@ class ParlayApiIdentityIngressTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderPayloadError, "non-empty trimmed string"):
             self._read(event)
 
+    def test_colon_bearing_bookmaker_key_cannot_alias_market_identity_components(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["bookmakers"][0]["key"] = "book:a"
+        with self.assertRaisesRegex(
+            ProviderPayloadError,
+            "bookmaker key must not contain reserved source-scope delimiter",
+        ):
+            self._read(event)
+
+    def test_colon_bearing_market_key_cannot_alias_bookmaker_identity_components(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["bookmakers"][0]["markets"][0]["key"] = "a:h2h"
+        with self.assertRaisesRegex(
+            ProviderPayloadError,
+            "market key must not contain reserved source-scope delimiter",
+        ):
+            self._read(event)
+
+    def test_bookmaker_market_component_collision_fails_before_quotes_escape(self):
+        first = copy.deepcopy(_BASE_EVENT)
+        first["bookmakers"][0]["key"] = "book:a"
+        first["bookmakers"][0]["markets"][0]["key"] = "h2h"
+        second = copy.deepcopy(_BASE_EVENT)
+        second["bookmakers"][0]["key"] = "book"
+        second["bookmakers"][0]["markets"][0]["key"] = "a:h2h"
+        second["bookmakers"][0]["markets"][0]["outcomes"][0]["name"] = "Player B"
+
+        with self.assertRaisesRegex(
+            ProviderPayloadError,
+            "source-scope delimiter",
+        ):
+            self._read_events([first, second])
+
     def test_non_string_market_key_is_not_stringified_into_identity(self):
         event = copy.deepcopy(_BASE_EVENT)
         event["bookmakers"][0]["markets"][0]["key"] = 7

@@ -1207,9 +1207,16 @@ class _ContinuousSessionState:
                 )
             seen_delta_ids.add(delta.delta_id)
             if previous_epoch == delta.stream_epoch and previous_position is not None:
-                if delta.cursor_position <= previous_position:
+                if delta.cursor_position < previous_position:
                     raise ContinuousSessionError(
-                        "source-state projection positions must increase within an epoch"
+                        "source-state projection position moved backwards within an epoch"
+                    )
+                if (
+                    delta.cursor_position == previous_position
+                    and delta.revision_of is None
+                ):
+                    raise ContinuousSessionError(
+                        "equal source-state projection position requires a revision"
                     )
             previous_epoch = delta.stream_epoch
             previous_position = delta.cursor_position

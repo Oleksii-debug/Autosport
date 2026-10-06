@@ -401,3 +401,22 @@ def test_provenance_operations_ignore_rebound_snapshot_helpers(monkeypatch) -> N
     )
     assert contract_called is False
     assert provenance_called is False
+
+def test_decision_identity_ignores_rebound_bound_implementation(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    expected = evidence.decision_identity
+    called = False
+
+    def forged(*args: object, **kwargs: object) -> str:
+        nonlocal called
+        called = True
+        raise AssertionError("rebound decision identity implementation executed")
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_decision_identity_bound",
+        forged,
+    )
+
+    assert evidence.decision_identity == expected
+    assert called is False

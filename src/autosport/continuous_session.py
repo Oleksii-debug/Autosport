@@ -1204,6 +1204,7 @@ class _ContinuousSessionState:
         seen_delta_ids: set[str] = set()
         previous_epoch: str | None = None
         previous_position: int | None = None
+        previous_delta: CollectorDelta | None = None
         for delta in deltas:
             if type(delta) is not CollectorDelta:
                 raise TypeError("deltas must contain exact CollectorDelta values")
@@ -1222,15 +1223,22 @@ class _ContinuousSessionState:
                     raise ContinuousSessionError(
                         "source-state projection position moved backwards within an epoch"
                     )
-                if (
-                    delta.cursor_position == previous_position
-                    and delta.revision_of is None
-                ):
-                    raise ContinuousSessionError(
-                        "equal source-state projection position requires a revision"
-                    )
+                if delta.cursor_position == previous_position:
+                    if delta.revision_of is None:
+                        raise ContinuousSessionError(
+                            "equal source-state projection position requires a revision"
+                        )
+                    if previous_delta is None or delta.revision_of != previous_delta.delta_id:
+                        raise ContinuousSessionError(
+                            "equal source-state projection revision must target the previous delta"
+                        )
+                    if delta.revision_number != previous_delta.revision_number + 1:
+                        raise ContinuousSessionError(
+                            "equal source-state projection revision_number must advance exactly one step"
+                        )
             previous_epoch = delta.stream_epoch
             previous_position = delta.cursor_position
+            previous_delta = delta
 
         def mutate(raw: dict[str, Any]) -> bool:
             if (

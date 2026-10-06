@@ -22,6 +22,7 @@ from autosport.betfair_marketbook_attempt_history import (
 )
 from autosport.betfair_marketbook_batch_transport import (
     MarketBookBatchAdmissionError,
+    MarketBookBatchAttemptExecution,
     MarketBookBatchTransportError,
     MarketBookBatchTransportResult,
     append_market_book_transport_attempt,
@@ -496,6 +497,41 @@ def test_successful_projection_read_releases_local_concurrency_lease():
     assert result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
     assert len(transport.calls) == 1
     assert concurrency_gate.snapshot().active == ()
+
+
+def test_direct_attempt_execution_cannot_claim_unrecorded_or_mismatched_outcome():
+    plan = _plan(market_ids=("1.001",))
+    empty = MarketBookAttemptHistory(plan, ())
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="requires an appended canonical history record",
+    ):
+        MarketBookBatchAttemptExecution(
+            empty,
+            MarketBookAttemptOutcome.TRANSPORT_FAILURE,
+            None,
+        )
+
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    recorded = append_market_book_transport_attempt(
+        empty,
+        issued,
+        attempt_id="attempt-recorded",
+        required=True,
+    )
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="does not match latest history record",
+    ):
+        MarketBookBatchAttemptExecution(
+            recorded,
+            MarketBookAttemptOutcome.TRANSPORT_FAILURE,
+            None,
+        )
 
 
 def test_attempt_executor_records_rate_denial_as_required_gap():

@@ -257,6 +257,58 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             store.require_current(hostile)
 
 
+    def test_constructor_rejects_path_dependency_rebinding_before_execution(self) -> None:
+        import autosport.economic_session as economic_session
+
+        original_path = economic_session.Path
+        path_type = economic_session._PATH_TYPE
+        original_expanduser = path_type.expanduser
+        original_resolve = path_type.resolve
+
+        class HostilePath:
+            def __new__(cls, *args, **kwargs):
+                raise AssertionError("rebound session Path constructor executed")
+
+        def hostile_expanduser(self, *args, **kwargs):
+            raise AssertionError("rebound session Path.expanduser executed")
+
+        def hostile_resolve(self, *args, **kwargs):
+            raise AssertionError("rebound session Path.resolve executed")
+
+        mutations = (
+            ("module Path", "module", HostilePath),
+            ("Path.expanduser", "expanduser", hostile_expanduser),
+            ("Path.resolve", "resolve", hostile_resolve),
+        )
+
+        for label, target, replacement in mutations:
+            with self.subTest(label=label):
+                try:
+                    if target == "module":
+                        economic_session.Path = replacement
+                    elif target == "expanduser":
+                        path_type.expanduser = replacement
+                    else:
+                        path_type.resolve = replacement
+
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "Path (constructor|expanduser|resolve) authority changed",
+                    ):
+                        ProductEconomicSessionStore(
+                            self.workspace,
+                            authority_root=self.authority_root,
+                            _test_clock=self.clock,
+                        )
+                finally:
+                    if target == "module":
+                        economic_session.Path = original_path
+                    elif target == "expanduser":
+                        path_type.expanduser = original_expanduser
+                    else:
+                        path_type.resolve = original_resolve
+
+
     def test_instance_configuration_rebinding_fails_closed(self) -> None:
         store = self._store()
         store.current()

@@ -61,6 +61,18 @@ def _validate_canonical_invalidation_buffer_state(
         or type(full_refresh_required) is not bool
         or len(dirty) > max_dirty_keys
         or (full_refresh_required and bool(dirty))
+        or any(
+            type(key) is not tuple
+            or len(key) != 2
+            or any(
+                type(part) is not str
+                or not part
+                or part.strip() != part
+                for part in key
+            )
+            or value is not None
+            for key, value in dirty.items()
+        )
     ):
         raise ContinuousSessionError(
             "canonical invalidation buffer state is invalid"
@@ -2188,7 +2200,6 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "canonical invalidation buffer subtype is not supported"
             )
         if type(invalidation_buffer) is _invalidation_buffer_type:
-            _invalidation_state_validator(invalidation_buffer)
             pending_descriptor = _invalidation_buffer_type.__dict__.get(
                 "pending_count"
             )
@@ -3120,7 +3131,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "canonical invalidation state validation authority changed"
                 )
-            _invalidation_state_validator(invalidation_buffer)
+            invalidation_validation_lock = invalidation_buffer._lock
+            with invalidation_validation_lock:
+                if (
+                    type(invalidation_buffer) is not _invalidation_buffer_type
+                    or invalidation_buffer._lock is not invalidation_validation_lock
+                ):
+                    raise ContinuousSessionError(
+                        "canonical invalidation routing state authority changed"
+                    )
+                _invalidation_state_validator(invalidation_buffer)
             pending_descriptor = _invalidation_buffer_type.__dict__.get(
                 "pending_count"
             )
@@ -3542,8 +3562,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             "canonical dependency index type changed before backlog inspection"
         )
         if type(invalidation_buffer) is _invalidation_buffer_type:
-            pending_count = _pending_count_getter(invalidation_buffer)
-            pending_full_refresh = _full_refresh_getter(invalidation_buffer)
+            invalidation_backlog_lock = invalidation_buffer._lock
+            with invalidation_backlog_lock:
+                if (
+                    invalidation_buffer._lock is not invalidation_backlog_lock
+                    or type(invalidation_buffer) is not _invalidation_buffer_type
+                ):
+                    raise ContinuousSessionError(
+                        "canonical invalidation backlog state authority changed"
+                    )
+                _invalidation_state_validator(invalidation_buffer)
+                pending_count = len(invalidation_buffer._dirty)
+                pending_full_refresh = (
+                    invalidation_buffer._full_refresh_required
+                )
         else:
             pending_count = invalidation_buffer.pending_count
             pending_full_refresh = invalidation_buffer.full_refresh_required
@@ -4308,11 +4340,19 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         invalidation_buffer_lock: object | None = None
         invalidation_max_dirty_keys: object | None = None
         if type(invalidation_buffer) is _invalidation_buffer_type:
-            _invalidation_state_validator(invalidation_buffer)
-            invalidation_buffer_mirror = invalidation_buffer._mirror
-            invalidation_dirty_storage = invalidation_buffer._dirty
             invalidation_buffer_lock = invalidation_buffer._lock
-            invalidation_max_dirty_keys = invalidation_buffer._max_dirty_keys
+            with invalidation_buffer_lock:
+                if (
+                    type(invalidation_buffer) is not _invalidation_buffer_type
+                    or invalidation_buffer._lock is not invalidation_buffer_lock
+                ):
+                    raise ContinuousSessionError(
+                        "canonical invalidation buffer state authority changed"
+                    )
+                _invalidation_state_validator(invalidation_buffer)
+                invalidation_buffer_mirror = invalidation_buffer._mirror
+                invalidation_dirty_storage = invalidation_buffer._dirty
+                invalidation_max_dirty_keys = invalidation_buffer._max_dirty_keys
         dependency_index = self.dependency_index
         if (
             isinstance(dependency_index, _dependency_index_type)
@@ -4997,12 +5037,21 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     require_invalidation_buffer_structure_authority()
                     require_invalidation_buffer_dispatch_authority()
                     if type(invalidation_buffer) is _invalidation_buffer_type:
-                        pending_count = _invalidation_pending_getter(
-                            invalidation_buffer
-                        )
-                        pending_full_refresh = _invalidation_full_refresh_getter(
-                            invalidation_buffer
-                        )
+                        with invalidation_buffer_lock:
+                            if (
+                                invalidation_buffer._lock
+                                is not invalidation_buffer_lock
+                                or type(invalidation_buffer)
+                                is not _invalidation_buffer_type
+                            ):
+                                raise ContinuousSessionError(
+                                    "canonical invalidation backlog state authority changed"
+                                )
+                            _invalidation_state_validator(invalidation_buffer)
+                            pending_count = len(invalidation_buffer._dirty)
+                            pending_full_refresh = (
+                                invalidation_buffer._full_refresh_required
+                            )
                     else:
                         pending_count = invalidation_buffer.pending_count
                         pending_full_refresh = invalidation_buffer.full_refresh_required

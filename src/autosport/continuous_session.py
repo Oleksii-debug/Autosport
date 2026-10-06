@@ -5645,6 +5645,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     effects_invalidation_baseline,
                     message="success publication consumed pending invalidations",
                 )
+                final_invalidation_snapshot = invalidation_backlog_snapshot()
+                if final_invalidation_snapshot is not None:
+                    pending_full_refresh, pending_keys = final_invalidation_snapshot
+                    backlog = bool(pending_full_refresh or pending_keys)
                 effects_invalidation_baseline = None
                 committed_last_success_at = state._last_success_at
             except Exception as exc:

@@ -1963,6 +1963,31 @@ class PaperBook:
     @property
     @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
+    def committed_capital(self) -> Decimal:
+        try:
+            with localcontext(_paper_decimal_context()) as context:
+                total = Decimal("0")
+                for ticket in self.tickets.values():
+                    if ticket.status is TicketStatus.OPEN:
+                        if len(ticket.legs) != 1 or ticket.legs[0].exchange_side == "back":
+                            total += ticket.stake
+                        else:
+                            total += _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                                ticket.stake,
+                                ticket.legs[0],
+                            )
+                if context.flags[Inexact]:
+                    raise ValueError("PaperBook committed capital loses Decimal precision")
+        except DecimalException as exc:
+            raise ValueError(
+                "PaperBook committed capital arithmetic is not representable"
+            ) from exc
+        self._require_finite(total, "committed_capital")
+        return total
+
+    @property
+    @_serialized_paperbook_operation
+    @_guard_paperbook_runtime_authority
     def committed_stake(self) -> Decimal:
         try:
             with localcontext(_paper_decimal_context()) as context:
@@ -2127,6 +2152,56 @@ class PaperBook:
             raise ValueError("PaperBook settlement contains unknown void quote_key")
         if winning_quote_keys & void_quote_keys:
             raise ValueError("PaperBook settlement quote_key cannot be both winning and void")
+
+        if len(ticket.legs) == 1 and ticket.legs[0].exchange_side == "lay":
+            leg = ticket.legs[0]
+            locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                ticket.stake,
+                leg,
+            )
+            if leg.quote_key in void_quote_keys:
+                status = TicketStatus.VOID
+                payout = locked_capital
+            elif leg.quote_key in winning_quote_keys:
+                status = TicketStatus.LOST
+                payout = Decimal("0")
+            else:
+                status = TicketStatus.WON
+                try:
+                    with localcontext(_paper_decimal_context()) as context:
+                        payout = locked_capital + ticket.stake
+                        if context.flags[Inexact]:
+                            raise ValueError(
+                                "PaperBook LAY payout loses Decimal precision"
+                            )
+                except DecimalException as exc:
+                    raise ValueError(
+                        "PaperBook LAY settlement arithmetic is not representable"
+                    ) from exc
+            cls._require_finite(
+                payout,
+                f"settlement payout for ticket {ticket.ticket_id}",
+            )
+            try:
+                with localcontext(_paper_decimal_context()) as context:
+                    new_balance = balance + payout
+                    if context.flags[Inexact]:
+                        raise ValueError(
+                            "PaperBook LAY balance credit loses Decimal precision"
+                        )
+            except DecimalException as exc:
+                raise ValueError(
+                    "PaperBook LAY settlement arithmetic is not representable"
+                ) from exc
+            cls._require_finite(
+                new_balance,
+                f"balance after settling ticket {ticket.ticket_id}",
+            )
+            if payout != 0 and new_balance == balance:
+                raise ValueError(
+                    "PaperBook settlement payout loses all Decimal balance effect"
+                )
+            return status, payout, new_balance
 
         effective_legs = tuple(
             leg for leg in ticket.legs if leg.quote_key not in void_quote_keys
@@ -2605,10 +2680,21 @@ class PaperBook:
                 if ticket_id in opened:
                     raise ValueError("PaperBook lifecycle opens a ticket more than once")
                 try:
-                    replay_balance = cls._debit_balance(replay_balance, ticket.stake)
+                    locked_capital = (
+                        _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                            ticket.stake,
+                            ticket.legs[0],
+                        )
+                        if len(ticket.legs) == 1
+                        else ticket.stake
+                    )
+                    replay_balance = cls._debit_balance(
+                        replay_balance,
+                        locked_capital,
+                    )
                 except ValueError as exc:
                     raise ValueError(
-                        f"PaperBook lifecycle stake for ticket {ticket_id} was not affordable"
+                        f"PaperBook lifecycle locked capital for ticket {ticket_id} was not affordable"
                     ) from exc
                 opened.add(ticket_id)
                 open_order.append(ticket_id)
@@ -2719,12 +2805,41 @@ class PaperBook:
             if len(quote_keys) != len(set(quote_keys)):
                 raise ValueError("PaperBook snapshot ticket contains duplicate quote_key leg")
 
-            if ticket.status in {TicketStatus.OPEN, TicketStatus.LOST} and ticket.payout != 0:
-                raise ValueError("PaperBook snapshot open/lost ticket payout must be zero")
-            if ticket.status is TicketStatus.VOID and ticket.payout != ticket.stake:
-                raise ValueError("PaperBook snapshot void ticket payout must equal stake")
-            if ticket.status is TicketStatus.WON and ticket.payout <= ticket.stake:
-                raise ValueError("PaperBook snapshot won ticket payout must exceed stake")
+            is_lay = len(ticket.legs) == 1 and ticket.legs[0].exchange_side == "lay"
+            if is_lay:
+                locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                    ticket.stake,
+                    ticket.legs[0],
+                )
+                if ticket.status in {TicketStatus.OPEN, TicketStatus.LOST}:
+                    expected_payout = Decimal("0")
+                elif ticket.status is TicketStatus.VOID:
+                    expected_payout = locked_capital
+                elif ticket.status is TicketStatus.WON:
+                    try:
+                        with localcontext(_paper_decimal_context()) as context:
+                            expected_payout = locked_capital + ticket.stake
+                            if context.flags[Inexact]:
+                                raise ValueError(
+                                    "PaperBook LAY payout witness loses Decimal precision"
+                                )
+                    except DecimalException as exc:
+                        raise ValueError(
+                            "PaperBook LAY payout witness is not representable"
+                        ) from exc
+                else:
+                    raise ValueError("PaperBook snapshot ticket status is unsupported")
+                if ticket.payout != expected_payout:
+                    raise ValueError(
+                        "PaperBook snapshot LAY payout is inconsistent with locked-capital economics"
+                    )
+            else:
+                if ticket.status in {TicketStatus.OPEN, TicketStatus.LOST} and ticket.payout != 0:
+                    raise ValueError("PaperBook snapshot open/lost ticket payout must be zero")
+                if ticket.status is TicketStatus.VOID and ticket.payout != ticket.stake:
+                    raise ValueError("PaperBook snapshot void ticket payout must equal stake")
+                if ticket.status is TicketStatus.WON and ticket.payout <= ticket.stake:
+                    raise ValueError("PaperBook snapshot won ticket payout must exceed stake")
 
         cls._validate_lifecycle_reachability(book)
 

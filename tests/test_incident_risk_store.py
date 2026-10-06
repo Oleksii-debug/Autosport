@@ -671,6 +671,27 @@ class IncidentRiskStoreTests(unittest.TestCase):
 
         self.assertFalse(self.store.path.exists())
 
+    def test_duplicate_append_rejects_tamper_before_fingerprint_dispatch(self) -> None:
+        first = self._entry()
+        self.store.append(first)
+        duplicate = self._entry()
+
+        class ExplodingStatus:
+            @property
+            def value(self):
+                raise AssertionError("tampered status property executed")
+
+        object.__setattr__(duplicate, "status", ExplodingStatus())
+
+        with self.assertRaisesRegex(
+            IncidentRiskStoreError,
+            "persistence rejects an invalid IncidentRiskEntry snapshot",
+        ):
+            self.store.append(duplicate)
+
+        reopened = self._store(self.workspace).load()
+        self.assertEqual(reopened.history(first.entry_id), (first,))
+
     def test_root_schema_and_truth_boundary_are_exact(self) -> None:
         snapshot = self.store.append(self._entry())
         payload = json.loads(

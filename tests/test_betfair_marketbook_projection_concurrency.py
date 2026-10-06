@@ -828,3 +828,45 @@ def test_projection_restart_validation_ignores_rebound_dto_validators(monkeypatc
 
     with pytest.raises(ValueError, match="generation must be a positive"):
         gate_type(state=state)
+
+
+def test_projection_snapshot_is_detached_from_live_lease_authority() -> None:
+    value = gate()
+    first = begin_projected(value, "r0")
+    assert first.lease_generation is not None
+
+    snapshot = value.snapshot()
+    exposed = snapshot.active[0]
+    object.__setattr__(exposed, "generation", exposed.generation + 100)
+
+    live = value.snapshot()
+    assert live.active[0].generation == first.lease_generation
+    value.complete(
+        "r0",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(seconds=1),
+    )
+    assert value.snapshot().active == ()
+
+
+def test_projection_restart_detaches_imported_lease_authority() -> None:
+    source = gate()
+    first = begin_projected(source, "r0")
+    assert first.lease_generation is not None
+    state = source.snapshot()
+
+    restored = BetfairMarketBookProjectionConcurrencyGate(state=state)
+    imported = state.active[0]
+    object.__setattr__(imported, "request_id", "forged-after-restart")
+    object.__setattr__(imported, "generation", imported.generation + 100)
+
+    live = restored.snapshot()
+    assert len(live.active) == 1
+    assert live.active[0].request_id == "r0"
+    assert live.active[0].generation == first.lease_generation
+    restored.complete(
+        "r0",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(seconds=1),
+    )
+    assert restored.snapshot().active == ()

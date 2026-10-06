@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from autosport.betfair_request_budget import (
     BetfairAdmissionDecision,
+    BetfairRequestBudgetOwner,
     BetfairRequestBudgetPolicy,
     BetfairRequestBudgetState,
     BetfairRequestIntent,
     BetfairRequestOperation,
     BetfairRequestPriority,
-    admit_betfair_request,
+    release_betfair_request,
 )
 
 
@@ -29,7 +30,6 @@ def _market(request_id: str, market_id: str) -> BetfairRequestIntent:
         operation=BetfairRequestOperation.LIST_MARKET_BOOK,
         priority=BetfairRequestPriority.EXECUTION_READ,
         market_ids=(market_id,),
-        market_data_weight_per_market=1,
     )
 
 
@@ -47,15 +47,14 @@ def test_stale_state_cannot_double_admit_last_market_data_slot() -> None:
     state = BetfairRequestBudgetState(in_flight_market_data=0)
     policy = _policy()
 
-    first = admit_betfair_request(
+    owner = BetfairRequestBudgetOwner(state)
+    first = owner.reserve(
         _market("market-a", "1.100"),
-        state=state,
         policy=policy,
         now_monotonic_ns=1,
     )
-    second = admit_betfair_request(
+    second = owner.reserve(
         _market("market-b", "1.200"),
-        state=state,
         policy=policy,
         now_monotonic_ns=1,
     )
@@ -76,15 +75,14 @@ def test_stale_state_cannot_double_admit_reserved_shared_order_capacity() -> Non
     state = BetfairRequestBudgetState(in_flight_shared_order_reads=0)
     policy = _policy()
 
-    first = admit_betfair_request(
+    owner = BetfairRequestBudgetOwner(state)
+    first = owner.reserve(
         _ordinary_current_orders("orders-a"),
-        state=state,
         policy=policy,
         now_monotonic_ns=1,
     )
-    second = admit_betfair_request(
+    second = owner.reserve(
         _ordinary_current_orders("orders-b"),
-        state=state,
         policy=policy,
         now_monotonic_ns=1,
     )
@@ -97,3 +95,55 @@ def test_stale_state_cannot_double_admit_reserved_shared_order_capacity() -> Non
         "ordinary shared-order reads must not both consume the single non-reserved "
         "slot when they race from the same immutable state"
     )
+
+
+def test_reservation_release_is_exact_and_cannot_underflow() -> None:
+    policy = _policy()
+    intent = _market("market-release", "1.300")
+    owner = BetfairRequestBudgetOwner()
+
+    admitted = owner.reserve(intent, policy=policy, now_monotonic_ns=10)
+    assert admitted.decision is BetfairAdmissionDecision.ADMIT
+    reserved = owner.snapshot()
+    assert reserved.in_flight_market_data == 1
+    assert reserved.in_flight_request_ids == frozenset({"market-release"})
+    assert len(reserved.recent_market_book_dispatches) == 1
+
+    released = owner.release(intent)
+    assert released.in_flight_market_data == 0
+    assert released.in_flight_request_ids == frozenset()
+
+    import pytest
+    with pytest.raises(Exception, match="no in-flight reservation"):
+        release_betfair_request(released, intent=intent)
+
+
+def test_owner_reservation_counts_toward_rolling_market_rate_limit() -> None:
+    policy = BetfairRequestBudgetPolicy(
+        shared_order_read_pending_limit=2,
+        shared_order_read_reconciliation_reserve=1,
+        cleared_orders_pending_limit=2,
+        market_data_pending_limit=2,
+        mutation_pending_limit=1,
+        read_backoff_base_ms=100,
+        read_backoff_max_ms=800,
+    )
+    owner = BetfairRequestBudgetOwner()
+    start = 1_000_000_000
+
+    for offset in range(5):
+        intent = _market(f"rate-{offset}", "1.400")
+        result = owner.reserve(
+            intent,
+            policy=policy,
+            now_monotonic_ns=start + offset,
+        )
+        assert result.decision is BetfairAdmissionDecision.ADMIT
+        owner.release(intent)
+
+    sixth = owner.reserve(
+        _market("rate-sixth", "1.400"),
+        policy=policy,
+        now_monotonic_ns=start + 10,
+    )
+    assert sixth.decision is BetfairAdmissionDecision.THROTTLE

@@ -389,7 +389,9 @@ class EconomicGoalStore:
         path_stat = path.stat
         path_open = path.open
 
-        def path_exists() -> bool:
+        def path_exists(
+            _error_type=EconomicGoalContractError,
+        ) -> bool:
             try:
                 path_stat()
             except FileNotFoundError:

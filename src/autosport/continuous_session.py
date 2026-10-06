@@ -556,29 +556,36 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "operational error observed_cycles_completed must be non-negative"
             )
-        if raw["observed_last_success_at"] is not None:
-            _instant(
-                raw["observed_last_success_at"],
-                "operational error observed_last_success_at",
-            )
-        observed_state = raw["observed_state"]
-        if type(observed_state) is not str or observed_state not in {
-            "RUNNING",
-            "PAUSED",
-            "STOPPED",
-        }:
-            raise ContinuousSessionError(
-                "operational error observed_state is unsupported"
-            )
-        if raw["last_error_code"] is not None:
-            error_code = _text(
-                raw["last_error_code"],
-                "operational error last_error_code",
-            )
-            if len(error_code) > _max_code_chars:
-                raise ContinuousSessionError(
-                    "operational error last_error_code exceeds resource limit"
+        try:
+            if raw["observed_last_success_at"] is not None:
+                _instant(
+                    raw["observed_last_success_at"],
+                    "operational error observed_last_success_at",
                 )
+            observed_state = raw["observed_state"]
+            if type(observed_state) is not str or observed_state not in {
+                "RUNNING",
+                "PAUSED",
+                "STOPPED",
+            }:
+                raise ContinuousSessionError(
+                    "operational error observed_state is unsupported"
+                )
+            if raw["last_error_code"] is not None:
+                error_code = _text(
+                    raw["last_error_code"],
+                    "operational error last_error_code",
+                )
+                if len(error_code) > _max_code_chars:
+                    raise ContinuousSessionError(
+                        "operational error last_error_code exceeds resource limit"
+                    )
+        except ContinuousSessionError:
+            raise
+        except ValueError as exc:
+            raise ContinuousSessionError(
+                "continuous session operational error checkpoint contains invalid field"
+            ) from exc
         return raw
 
     def _write_error_checkpoint(

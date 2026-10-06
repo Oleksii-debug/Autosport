@@ -1027,12 +1027,20 @@ class _ContinuousSessionState:
             raw = self._read()
             if _error_checkpoint_present(self):
                 error_checkpoint = _read_error_checkpoint(self)
-                marker_matches = (
+                same_generation = (
                     error_checkpoint["observed_generation"] == raw["generation"]
+                )
+                marker_matches = (
+                    same_generation
                     and error_checkpoint["observed_cycles_completed"] == raw["cycles_completed"]
                     and error_checkpoint["observed_last_success_at"] == raw["last_success_at"]
                     and error_checkpoint["observed_state"] == raw["state"]
                 )
+                if same_generation and not marker_matches:
+                    raise ContinuousSessionError(
+                        "same-generation operational error checkpoint markers "
+                        "conflict with canonical session state"
+                    )
                 if marker_matches and error_checkpoint["last_error_code"] is not None:
                     durable_error = raw["last_error_code"]
                     checkpoint_error = error_checkpoint["last_error_code"]

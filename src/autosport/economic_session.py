@@ -102,6 +102,26 @@ def _economic_session_lock_scope(
     _setattr=_OBJECT_SETATTR,
     _method_type=_METHOD_TYPE,
 ):
+    if (
+        _lock_type is _WORKSPACE_LOCK_TYPE
+        and (
+            _WORKSPACE_LOCK_NEW_CODE is not None
+            and getattr(_new, "__code__", None) is not _WORKSPACE_LOCK_NEW_CODE
+        )
+    ):
+        raise EconomicSessionIntegrityError(
+            "economic-session lock constructor authority changed"
+        )
+    if (
+        _lock_type is _WORKSPACE_LOCK_TYPE
+        and (
+            _WORKSPACE_LOCK_INIT_CODE is not None
+            and getattr(_init, "__code__", None) is not _WORKSPACE_LOCK_INIT_CODE
+        )
+    ):
+        raise EconomicSessionIntegrityError(
+            "economic-session lock initializer authority changed"
+        )
     if _lock_type is _WORKSPACE_LOCK_TYPE:
         lock = _new(_lock_type)
         _init(lock, workspace)
@@ -133,6 +153,14 @@ def _construct_economic_goal_store(
         EconomicGoalStore is not _type
         or _type.__new__ is not _new
         or _type.__init__ is not _init
+        or (
+            _ECONOMIC_GOAL_STORE_NEW_CODE is not None
+            and getattr(_new, "__code__", None) is not _ECONOMIC_GOAL_STORE_NEW_CODE
+        )
+        or (
+            _ECONOMIC_GOAL_STORE_INIT_CODE is not None
+            and getattr(_init, "__code__", None) is not _ECONOMIC_GOAL_STORE_INIT_CODE
+        )
     ):
         raise EconomicSessionIntegrityError(
             "economic-session EconomicGoalStore constructor authority changed"
@@ -159,6 +187,14 @@ def _construct_economic_authority(
         MonotonicWorkspaceAuthority is not _type
         or _type.__new__ is not _new
         or _type.__init__ is not _init
+        or (
+            _AUTHORITY_NEW_CODE is not None
+            and getattr(_new, "__code__", None) is not _AUTHORITY_NEW_CODE
+        )
+        or (
+            _AUTHORITY_INIT_CODE is not None
+            and getattr(_init, "__code__", None) is not _AUTHORITY_INIT_CODE
+        )
     ):
         raise EconomicSessionIntegrityError(
             "economic-session monotonic authority constructor changed"
@@ -706,11 +742,19 @@ class ProductEconomicSessionStore:
             raise EconomicSessionIntegrityError("workspace must resolve to an absolute path")
         self.state_path = self.workspace / ".autosport" / _STATE_FILE_NAME
         self.paperbook_path = self.workspace / "paper_book.json"
+        if _construct_economic_goal_store.__code__ is not _CONSTRUCT_ECONOMIC_GOAL_STORE_CODE:
+            raise EconomicSessionIntegrityError(
+                "economic-session EconomicGoalStore constructor helper authority changed"
+            )
         self.goal_store = _construct_economic_goal_store(self.workspace)
         self._clock = _PRODUCT_TIME_NS if _test_clock is None else _test_clock
         if not callable(self._clock):
             raise EconomicSessionIntegrityError("_test_clock must be callable")
         self._product_clock = _test_clock is None
+        if _construct_economic_authority.__code__ is not _CONSTRUCT_ECONOMIC_AUTHORITY_CODE:
+            raise EconomicSessionIntegrityError(
+                "economic-session monotonic authority constructor helper authority changed"
+            )
         self._authority = _construct_economic_authority(
             workspace=self.workspace,
             domain=_AUTHORITY_DOMAIN,
@@ -853,6 +897,13 @@ class ProductEconomicSessionStore:
             or _construct_economic_authority is not self._authority_constructor_witness
             or _AUTHORITY_TYPE.__new__ is not self._authority_new_witness
             or _AUTHORITY_TYPE.__init__ is not self._authority_init_witness
+            or _ECONOMIC_GOAL_STORE_NEW_CODE is not None and getattr(self._economic_goal_store_new_witness, "__code__", None) is not _ECONOMIC_GOAL_STORE_NEW_CODE
+            or _ECONOMIC_GOAL_STORE_INIT_CODE is not None and getattr(self._economic_goal_store_init_witness, "__code__", None) is not _ECONOMIC_GOAL_STORE_INIT_CODE
+            or _AUTHORITY_NEW_CODE is not None and getattr(self._authority_new_witness, "__code__", None) is not _AUTHORITY_NEW_CODE
+            or _AUTHORITY_INIT_CODE is not None and getattr(self._authority_init_witness, "__code__", None) is not _AUTHORITY_INIT_CODE
+            or _construct_economic_goal_store.__code__ is not _CONSTRUCT_ECONOMIC_GOAL_STORE_CODE
+            or _construct_economic_authority.__code__ is not _CONSTRUCT_ECONOMIC_AUTHORITY_CODE
+            or _economic_session_lock_scope.__code__ is not _ECONOMIC_SESSION_LOCK_SCOPE_CODE
             or _ECONOMIC_GOAL_LOAD is not self._economic_goal_load_witness
             or _AUTHORITY_RECOVER is not self._authority_recover_witness
             or _AUTHORITY_PREPARE is not self._authority_prepare_witness
@@ -867,6 +918,12 @@ class ProductEconomicSessionStore:
             or _WORKSPACE_LOCK_EXIT is not self._workspace_lock_exit_witness
             or _WORKSPACE_LOCK_ACQUIRE is not self._workspace_lock_acquire_witness
             or _WORKSPACE_LOCK_RELEASE is not self._workspace_lock_release_witness
+            or _WORKSPACE_LOCK_NEW_CODE is not None and getattr(self._workspace_lock_new_witness, "__code__", None) is not _WORKSPACE_LOCK_NEW_CODE
+            or _WORKSPACE_LOCK_INIT_CODE is not None and getattr(self._workspace_lock_init_witness, "__code__", None) is not _WORKSPACE_LOCK_INIT_CODE
+            or _WORKSPACE_LOCK_ENTER_CODE is not None and getattr(self._workspace_lock_enter_witness, "__code__", None) is not _WORKSPACE_LOCK_ENTER_CODE
+            or _WORKSPACE_LOCK_EXIT_CODE is not None and getattr(self._workspace_lock_exit_witness, "__code__", None) is not _WORKSPACE_LOCK_EXIT_CODE
+            or _WORKSPACE_LOCK_ACQUIRE_CODE is not None and getattr(self._workspace_lock_acquire_witness, "__code__", None) is not _WORKSPACE_LOCK_ACQUIRE_CODE
+            or _WORKSPACE_LOCK_RELEASE_CODE is not None and getattr(self._workspace_lock_release_witness, "__code__", None) is not _WORKSPACE_LOCK_RELEASE_CODE
             or _WORKSPACE_LOCK_TYPE.__new__ is not self._workspace_lock_new_witness
             or _WORKSPACE_LOCK_TYPE.__init__ is not self._workspace_lock_init_witness
             or _WORKSPACE_LOCK_TYPE.__enter__ is not self._workspace_lock_enter_witness

@@ -59,6 +59,11 @@ class RecoveryDecision(str, Enum):
     HEDGE_REVIEW_REQUIRED = "HEDGE_REVIEW_REQUIRED"
 
 
+_CANONICAL_EVIDENCE_GRADE_TYPE = EvidenceGrade
+_CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE = PaperAttemptOutcome
+_CANONICAL_RECOVERY_DECISION_TYPE = RecoveryDecision
+
+
 def _text(value: object, name: str) -> str:
     if type(value) is not str or not value or value.strip() != value or "\x00" in value:
         raise ValueError(f"{name} must be non-empty canonical text")
@@ -427,9 +432,9 @@ class PaperExecutionEvidenceRecord:
                 selection_id=raw["selection_id"],
                 side=raw["side"],
                 quote_id=raw["quote_id"],
-                outcome=PaperAttemptOutcome(raw["outcome"]),
+                outcome=_CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE(raw["outcome"]),
                 observed_at=raw["observed_at"],
-                evidence_grade=EvidenceGrade(raw["evidence_grade"]),
+                evidence_grade=_CANONICAL_EVIDENCE_GRADE_TYPE(raw["evidence_grade"]),
                 evidence_source=raw["evidence_source"],
                 accepted_odds=raw["accepted_odds"],
                 accepted_stake=raw["accepted_stake"],
@@ -674,7 +679,7 @@ class PaperLegAttempt:
                 execution_observed_at=raw["execution_observed_at"],
                 delay_ms=raw["delay_ms"],
                 quote_age_ms=raw["quote_age_ms"],
-                outcome=PaperAttemptOutcome(raw["outcome"]),
+                outcome=_CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE(raw["outcome"]),
                 execution_odds=(
                     None
                     if raw["execution_odds"] is None
@@ -686,7 +691,7 @@ class PaperLegAttempt:
                     else decimal_parser(raw["execution_stake"], "execution_stake")
                 ),
                 suspended=raw["suspended"],
-                evidence_grade=EvidenceGrade(raw["evidence_grade"]),
+                evidence_grade=_CANONICAL_EVIDENCE_GRADE_TYPE(raw["evidence_grade"]),
                 evidence_source=raw["evidence_source"],
                 evidence_id=raw["evidence_id"],
                 evidence_sha256=raw["evidence_sha256"],
@@ -1137,7 +1142,7 @@ class PaperExecutionLedger:
             if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
                 raise PaperExecutionIntegrityError("decimal parser authority changed")
             try:
-                recovery = RecoveryDecision(payload["recovery_decision"])
+                recovery = _CANONICAL_RECOVERY_DECISION_TYPE(payload["recovery_decision"])
                 pending = tuple(payload["pending_action_ids"])
                 exposure = decimal_parser(
                     payload["worst_case_exposure"],
@@ -1159,8 +1164,8 @@ class PaperExecutionLedger:
                 worst_case_exposure=exposure,
                 completed=True,
             )
-        known_exposure = Decimal("0")
-        worst_case = Decimal("0")
+        known_exposure = _CANONICAL_DECIMAL_TYPE("0")
+        worst_case = _CANONICAL_DECIMAL_TYPE("0")
         for attempt in attempts:
             if attempt.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
                 assert attempt.execution_stake is not None
@@ -1298,16 +1303,16 @@ def _synthetic_attempt(
                     config.max_slippage_bps + 1,
                 )
             )
-            odds_margin = action.requested_odds - Decimal("1")
-            execution_odds = Decimal("1") + (
-                odds_margin * (Decimal(10_000 - slippage_bps) / Decimal(10_000))
+            odds_margin = action.requested_odds - _CANONICAL_DECIMAL_TYPE("1")
+            execution_odds = _CANONICAL_DECIMAL_TYPE("1") + (
+                odds_margin * (_CANONICAL_DECIMAL_TYPE(10_000 - slippage_bps) / _CANONICAL_DECIMAL_TYPE(10_000))
             )
             execution_stake = action.requested_stake
             if outcome is PaperAttemptOutcome.PARTIAL:
                 execution_stake = (
                     action.requested_stake
-                    * Decimal(config.partial_fill_bps)
-                    / Decimal(10_000)
+                    * _CANONICAL_DECIMAL_TYPE(config.partial_fill_bps)
+                    / _CANONICAL_DECIMAL_TYPE(10_000)
                 )
 
     return PaperLegAttempt(
@@ -1541,8 +1546,8 @@ def execute_paper_plan(
         assert result is not None
         return result
 
-    known_exposure = Decimal("0")
-    worst_case_exposure = Decimal("0")
+    known_exposure = _CANONICAL_DECIMAL_TYPE("0")
+    worst_case_exposure = _CANONICAL_DECIMAL_TYPE("0")
     for prior in attempts:
         assert prior.outcome is PaperAttemptOutcome.ACCEPTED
         assert prior.execution_stake is not None

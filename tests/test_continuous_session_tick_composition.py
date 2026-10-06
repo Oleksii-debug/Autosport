@@ -5273,3 +5273,82 @@ def test_direct_invalidation_helper_rejects_canonical_buffer_drain_rebinding(
             max_items=250,
         )
 
+def test_collector_invalidation_buffer_rebind_is_restored_before_next_phase() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical = coordinator.invalidation_buffer
+        replacement = _InvalidationBuffer()
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop ran after invalidation buffer rebind")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after invalidation buffer rebind")
+
+        def rebind() -> None:
+            coordinator.invalidation_buffer = replacement
+
+        coordinator.collector = _Collector(callback=rebind)
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous-session invalidation buffer authority changed during tick",
+        ):
+            coordinator.tick()
+
+        assert coordinator.invalidation_buffer is canonical
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_collector_failure_restores_invalidation_buffer_rebind() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical = coordinator.invalidation_buffer
+        replacement = _InvalidationBuffer()
+
+        class FailingCollector(_Collector):
+            def run_cycle(self):
+                coordinator.invalidation_buffer = replacement
+                raise RuntimeError("collector failed after rebind")
+
+        coordinator.collector = FailingCollector()
+
+        with pytest.raises(RuntimeError, match="collector failed after rebind"):
+            coordinator.tick()
+
+        assert coordinator.invalidation_buffer is canonical
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+
+def test_desktop_failure_restores_invalidation_buffer_rebind() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical = coordinator.invalidation_buffer
+        replacement = _InvalidationBuffer()
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                coordinator.invalidation_buffer = replacement
+                raise RuntimeError("desktop failed after rebind")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(RuntimeError, match="desktop failed after rebind"):
+            coordinator.tick()
+
+        assert coordinator.invalidation_buffer is canonical
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+

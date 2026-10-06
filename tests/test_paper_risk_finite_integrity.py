@@ -263,5 +263,30 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         self.assertTrue(policy.evaluate(PaperBook("100"), "10").allowed)
 
 
+    def test_open_lay_uses_liability_for_committed_risk_exposure(self) -> None:
+        book = PaperBook("100")
+        lay_leg = TicketLeg(
+            "event-1",
+            "market-1",
+            "selection-1",
+            Decimal("3.00"),
+            exchange_side="lay",
+            market_semantics_id="exchange.match.odds.v1",
+        )
+        book.open_ticket(
+            [lay_leg],
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+
+        state = self._permissive_policy()._book_state(book)
+
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(state[1], Decimal("80"))
+        self.assertEqual(state[2], Decimal("20"))
+        self.assertEqual(state[3], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

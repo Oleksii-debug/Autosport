@@ -1162,3 +1162,104 @@ def test_tick_rejects_class_rebound_failure_publication(
             match="canonical coordinator running-fence authority changed",
         ):
             coordinator.tick()
+
+
+def test_tick_ignores_instance_shadowed_success_publication() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path, state = _state(root)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+        coordinator.causal_view = continuous_session.CausalView.AS_KNOWN_AT_DECISION
+        coordinator.required_history = None
+        coordinator.market_store = object()
+        coordinator.settlement_learning_handoff = None
+
+        class SuccessfulCycle:
+            provider_unavailable = False
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+        class Collector:
+            def run_cycle(self):
+                return SuccessfulCycle()
+
+        class DesktopConsumer:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = DesktopConsumer()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = type(
+            "DependencyIndexStub",
+            (),
+            {"input_ids": frozenset()},
+        )()
+        coordinator._refresh_source_state_projection = (  # type: ignore[method-assign]
+            lambda: state.snapshot()
+        )
+        coordinator._drain_invalidations = (  # type: ignore[method-assign]
+            lambda: ((), False, False)
+        )
+        coordinator._settlement_resolutions = (  # type: ignore[method-assign]
+            lambda **_kwargs: ()
+        )
+
+        def attacker_record_success(**_kwargs):
+            return 999999
+
+        state.record_success = attacker_record_success  # type: ignore[method-assign]
+
+        result = coordinator.tick()
+
+        assert result.cycle_index == 1
+        durable = json.loads(path.read_text(encoding="utf-8"))
+        assert durable["generation"] == 1
+        assert durable["cycles_completed"] == 1
+        assert durable["last_success_at"] == _AT
+
+
+def test_tick_rejects_class_rebound_success_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+
+        class Collector:
+            def run_cycle(self):
+                raise AssertionError(
+                    "collector ran after success publication authority changed"
+                )
+
+        coordinator.collector = Collector()
+
+        def attacker_record_success(
+            _self: continuous_session._ContinuousSessionState,
+            **_kwargs,
+        ) -> int:
+            return 999999
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "record_success",
+            attacker_record_success,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical coordinator running-fence authority changed",
+        ):
+            coordinator.tick()

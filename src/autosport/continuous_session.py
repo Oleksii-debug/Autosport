@@ -2653,6 +2653,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             ["_ContinuousSessionState"], _ContinuousSessionFailurePublication
         ] = _ContinuousSessionState.record_failure,
         _record_failure_method_code: object = _ContinuousSessionState.record_failure.__code__,
+        _record_success_method: Callable[..., int] = _ContinuousSessionState.record_success,
+        _record_success_method_code: object = _ContinuousSessionState.record_success.__code__,
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
     ) -> ContinuousTickResult:
@@ -2665,6 +2667,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             or type(self._state).record_failure is not _record_failure_method
             or getattr(_record_failure_method, "__code__", None)
             is not _record_failure_method_code
+            or type(self._state).record_success is not _record_success_method
+            or getattr(_record_success_method, "__code__", None)
+            is not _record_success_method_code
             or _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
@@ -2832,7 +2837,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         at=now,
                     )
 
-                cycle_index = self._state.record_success(
+                cycle_index = _record_success_method(
+                    self._state,
                     at=now,
                     full_refresh=full_refresh,
                     settlement_evidence=resolutions,

@@ -4559,3 +4559,158 @@ def test_tick_rejects_settlement_reconcile_matched_key_mutation() -> None:
 
         assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
 
+def test_tick_rejects_dependency_matches_dispatch_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop delivery ran after dependency dispatch mutation")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after dependency dispatch mutation")
+
+        def mutate() -> None:
+            monkeypatch.setattr(
+                continuous_session.FocusedMirrorDependency,
+                "matches",
+                lambda self, event: False,
+            )
+
+        coordinator.collector = _Collector(callback=mutate)
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical dependency lifecycle dispatch authority changed",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_dependency_equality_dispatch_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop delivery ran after dependency dispatch mutation")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after dependency dispatch mutation")
+
+        def mutate() -> None:
+            monkeypatch.setattr(
+                continuous_session.FocusedMirrorDependency,
+                "__eq__",
+                lambda self, other: True,
+            )
+
+        coordinator.collector = _Collector(callback=mutate)
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical dependency lifecycle dispatch authority changed",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_matching_keys_dispatch_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop delivery ran after routing reader mutation")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after routing reader mutation")
+
+        def mutate() -> None:
+            monkeypatch.setattr(
+                continuous_session.FocusedMirrorDependencyIndex,
+                "matching_keys",
+                lambda self, input_id: (),
+            )
+
+        coordinator.collector = _Collector(callback=mutate)
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical dependency lifecycle dispatch authority changed",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_provider_unavailable_tick_rejects_dependency_reader_dispatch_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class ProviderUnavailableCollector(_Collector):
+            def run_cycle(self):
+                if self.callback is not None:
+                    self.callback()
+                return type(
+                    "UnavailableCycle",
+                    (),
+                    {
+                        "provider_unavailable": True,
+                        "source_id": "provider-a",
+                        "committed_delta_ids": (),
+                    },
+                )()
+
+        def mutate() -> None:
+            monkeypatch.setattr(
+                continuous_session.FocusedMirrorDependencyIndex,
+                "_dependency",
+                lambda self, input_id: self._dependencies[input_id],
+            )
+
+        coordinator.collector = ProviderUnavailableCollector(callback=mutate)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical dependency lifecycle dispatch authority changed",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+

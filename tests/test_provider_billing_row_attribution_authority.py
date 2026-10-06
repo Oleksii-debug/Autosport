@@ -270,7 +270,7 @@ def _caller_modified_evidence(
     provider_owner = "caller-selected-owner"
     payload = {
         "schema": "autosport.provider_billing_row_attribution",
-        "schema_version": 1,
+        "schema_version": 2,
         "venue_id": evidence.venue_id,
         "provider_owner": provider_owner,
         "app_id": evidence.app_id,
@@ -288,6 +288,8 @@ def _caller_modified_evidence(
             "amount_sign": evidence.row_amount_sign,
             "item_class": evidence.row_item_class,
             "item_class_data_sha256": evidence.row_item_class_data_sha256,
+            "provider_charge_class": evidence.row_provider_charge_class,
+            "provider_transaction_id": evidence.row_provider_transaction_id,
         },
         "attribution_state": "UNPROVEN",
         "missing_authorities": list(evidence.missing_authorities),
@@ -318,6 +320,8 @@ def _caller_modified_evidence(
         row_amount_sign=evidence.row_amount_sign,
         row_item_class=evidence.row_item_class,
         row_item_class_data_sha256=evidence.row_item_class_data_sha256,
+        row_provider_charge_class=evidence.row_provider_charge_class,
+        row_provider_transaction_id=evidence.row_provider_transaction_id,
         attribution_state="UNPROVEN",
         missing_authorities=evidence.missing_authorities,
         evidence_sha256=digest,

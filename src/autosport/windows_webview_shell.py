@@ -1331,8 +1331,16 @@ class AutosportWebController:
                 )
                 self._ok(self.product_runtime_status)
             elif product_message.kind == "TICK" and product_message.tick is not None:
-                prior_source_status = self.product_runtime_source_status
-                prior_source_attention = self._product_runtime_source_attention_required
+                prior_source_status = getattr(
+                    self,
+                    "product_runtime_source_status",
+                    "",
+                )
+                prior_source_attention = getattr(
+                    self,
+                    "_product_runtime_source_attention_required",
+                    None,
+                )
                 if not self._bind_product_runtime_identity(
                     workspace=Path(self._active_workspace),
                     session_id=product_message.tick.session_id,

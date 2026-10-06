@@ -3114,6 +3114,34 @@ def test_settlement_resolution_collection_rejects_callback_phase_mutation() -> N
         raise AssertionError("callback lifecycle phase mutation was accepted")
 
 
+def test_settlement_resolution_detaches_authority_mapping_before_validation(
+    monkeypatch,
+) -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    original = _resolution(outcome="win")
+    coordinator = _resolution_coordinator((record,), (original,))
+    canonical_validate = continuous_session.SettlementResolution.validate
+
+    def validate_then_mutate_authority(
+        self: continuous_session.SettlementResolution,
+        *,
+        as_of: str,
+    ) -> None:
+        canonical_validate(self, as_of=as_of)
+        original.quote_outcomes["quote-1"] = "attacker-invalid"
+
+    monkeypatch.setattr(
+        continuous_session.SettlementResolution,
+        "validate",
+        validate_then_mutate_authority,
+    )
+
+    collected = coordinator._settlement_resolutions(as_of=_AT)
+
+    assert original.quote_outcomes == {"quote-1": "attacker-invalid"}
+    assert collected[0].quote_outcomes == {"quote-1": "win"}
+
+
 def test_collected_settlement_resolution_is_detached_from_authority_mutation() -> None:
     record = _ResolutionRecord("provider-a:event-1", "settlement-1")
     original = _resolution(outcome="win")

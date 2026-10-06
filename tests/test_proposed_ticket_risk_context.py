@@ -543,6 +543,76 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
                 proposal_ts="2026-09-16T15:00:02+00:00",
             )
 
+    def test_risk_candidate_hash_binds_market_semantics_identity(self) -> None:
+        policy = self._permissive_policy()
+        base_leg = TicketLeg(
+            event_id="event-semantics",
+            market_id="market-semantics",
+            selection_id="selection-semantics",
+            locked_odds=Decimal("2"),
+            sport="soccer",
+            exchange_side="back",
+            market_semantics_id="soccer:h2h:v1",
+        )
+        revised_leg = TicketLeg(
+            event_id=base_leg.event_id,
+            market_id=base_leg.market_id,
+            selection_id=base_leg.selection_id,
+            locked_odds=base_leg.locked_odds,
+            sport=base_leg.sport,
+            exchange_side=base_leg.exchange_side,
+            market_semantics_id="soccer:h2h:v2",
+        )
+        base_quote = MarketEvent(
+            event_id=base_leg.event_id,
+            market_id=base_leg.market_id,
+            selection_id=base_leg.selection_id,
+            decimal_odds=Decimal("2.10"),
+            observed_ts="2026-09-16T15:00:00+00:00",
+            source_id="provider-semantics",
+            sequence=1,
+            source_ts="2026-09-16T14:59:59+00:00",
+            ingest_ts="2026-09-16T15:00:01+00:00",
+            sport="soccer",
+            exchange_side="back",
+            market_semantics_id="soccer:h2h:v1",
+        )
+        revised_quote = MarketEvent(
+            event_id=base_quote.event_id,
+            market_id=base_quote.market_id,
+            selection_id=base_quote.selection_id,
+            decimal_odds=base_quote.decimal_odds,
+            observed_ts=base_quote.observed_ts,
+            source_id=base_quote.source_id,
+            sequence=base_quote.sequence,
+            source_ts=base_quote.source_ts,
+            ingest_ts=base_quote.ingest_ts,
+            sport=base_quote.sport,
+            exchange_side=base_quote.exchange_side,
+            market_semantics_id="soccer:h2h:v2",
+        )
+        first = ProposedTicketRiskContext(
+            legs=(base_leg,),
+            quotes=(base_quote,),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+        second = ProposedTicketRiskContext(
+            legs=(revised_leg,),
+            quotes=(revised_quote,),
+            bankroll_id=first.bankroll_id,
+            currency=first.currency,
+            proposal_ts=first.proposal_ts,
+        )
+
+        first_sha = policy.risk_of_ruin_candidate_sha256(first)
+        second_sha = policy.risk_of_ruin_candidate_sha256(second)
+
+        self.assertIsNotNone(first_sha)
+        self.assertIsNotNone(second_sha)
+        self.assertNotEqual(first_sha, second_sha)
+
     def test_lay_liability_drives_aggregate_committed_capital_limit(self) -> None:
         policy = PaperRiskPolicy(
             max_ticket_fraction=Decimal("1"),

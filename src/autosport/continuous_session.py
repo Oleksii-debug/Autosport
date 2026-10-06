@@ -50,6 +50,7 @@ def _bind_canonical_settlement_engine(method):
     canonical_engine_type = SettlementEngine
     canonical_resolution_validate = SettlementResolution.validate
     canonical_replace = replace
+    canonical_paper_book_save = PaperBook.save
 
     def guarded(self, *args, **kwargs):
         if "_settlement_engine_type" in kwargs:
@@ -58,9 +59,12 @@ def _bind_canonical_settlement_engine(method):
             raise TypeError("settlement validator origin is internal product authority")
         if "_replace" in kwargs:
             raise TypeError("settlement copy authority is internal product authority")
+        if "_paper_book_save" in kwargs:
+            raise TypeError("settlement persistence authority is internal product authority")
         kwargs["_settlement_engine_type"] = canonical_engine_type
         kwargs["_resolution_validate"] = canonical_resolution_validate
         kwargs["_replace"] = canonical_replace
+        kwargs["_paper_book_save"] = canonical_paper_book_save
         return method(self, *args, **kwargs)
 
     guarded.__name__ = method.__name__
@@ -1845,6 +1849,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _settlement_engine_type: type[SettlementEngine],
         _resolution_validate: Callable[..., None],
         _replace: Callable[..., SettlementResolution],
+        _paper_book_save: Callable[..., None],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if not resolutions:
             return (), ()
@@ -1859,6 +1864,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         if replace is not _replace:
             raise ContinuousSessionError(
                 "settlement consumer copy authority changed"
+            )
+        if PaperBook.save is not _paper_book_save:
+            raise ContinuousSessionError(
+                "settlement consumer persistence authority changed"
             )
         if type(resolutions) is not tuple:
             raise TypeError("resolutions must be an exact tuple")
@@ -1939,7 +1948,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     engine.record(scoped)
             settled = tuple(engine.settle_ready(book))
             if settled:
-                book.save(self.paper_book_path)
+                _paper_book_save(book, self.paper_book_path)
 
         return settled, tuple(unique)
 

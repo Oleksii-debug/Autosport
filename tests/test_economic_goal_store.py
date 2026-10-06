@@ -1674,3 +1674,35 @@ def test_payload_encoder_rejects_bound_keyword_default_rebinding() -> None:
     finally:
         operation.__kwdefaults__ = original_kwdefaults
 
+
+def test_goal_store_field_order_authority_ignores_runtime_rebinding(monkeypatch) -> None:
+    contract = _goal()
+
+    canonical_snapshot = economic_goal_store._snapshot_economic_goal_contract(contract)
+    canonical_payload = economic_goal_store.economic_goal_to_payload(contract)
+
+    monkeypatch.setattr(
+        economic_goal_store,
+        "_CONTRACT_KEYS_ORDERED",
+        tuple(reversed(economic_goal_store._CONTRACT_KEYS_ORDERED)),
+    )
+
+    rebound_snapshot = economic_goal_store._snapshot_economic_goal_contract(contract)
+    rebound_payload = economic_goal_store.economic_goal_to_payload(contract)
+
+    assert rebound_snapshot == canonical_snapshot
+    assert rebound_payload == canonical_payload
+
+
+def test_goal_store_field_order_authority_does_not_accept_forged_shape(monkeypatch) -> None:
+    contract = _goal()
+    forged = ("goal_id",)
+
+    monkeypatch.setattr(economic_goal_store, "_CONTRACT_KEYS_ORDERED", forged)
+
+    snapshot = economic_goal_store._snapshot_economic_goal_contract(contract)
+    payload = economic_goal_store.economic_goal_to_payload(contract)
+
+    assert snapshot == contract
+    assert payload["contract"]["goal_id"] == contract.goal_id
+    assert payload["contract"]["currency"] == contract.currency

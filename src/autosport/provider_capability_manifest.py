@@ -188,8 +188,53 @@ def _profile_state(
     raise ProviderCapabilityManifestError("canonical profile returned an unknown state")
 
 
+class _SealedProviderManifestAuthorityType(type):
+    """Block runtime rebinding/deletion of provider-manifest authority dispatch.
+
+    The manifest objects are consumed as technical-truth and hard-safety DTOs. Their
+    validation, query and safety methods therefore cannot remain mutable class dispatch:
+    rebinding supports or real_money_execution after import would turn ordinary
+    Python monkeypatching into an authority-widening path.
+    """
+
+    _SEALED_NAMES = frozenset(
+        {
+            "__init__",
+            "__post_init__",
+            "__setattr__",
+            "__delattr__",
+            "_validate_facts",
+            "_validate_dependencies",
+            "evidence_id",
+            "integration_kind",
+            "manifest_sha256",
+            "manifest_id",
+            "state_of",
+            "supports",
+            "provider_write_authorized",
+            "execution_authorized",
+            "real_money_execution",
+            "to_canonical_dict",
+        }
+    )
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        if name in cls._SEALED_NAMES and name in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__}.{name} is sealed provider-manifest authority"
+            )
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if name in cls._SEALED_NAMES and name in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__}.{name} is sealed provider-manifest authority"
+            )
+        super().__delattr__(name)
+
+
 @dataclass(frozen=True, slots=True)
-class ProviderCapabilityEvidenceRef:
+class ProviderCapabilityEvidenceRef(metaclass=_SealedProviderManifestAuthorityType):
     """Secret-free structural reference; possession does not confer evidence authority."""
 
     kind: str
@@ -224,7 +269,7 @@ class ProviderCapabilityEvidenceRef:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderCapabilityManifestFact:
+class ProviderCapabilityManifestFact(metaclass=_SealedProviderManifestAuthorityType):
     """One explicit manifest fact.
 
     Canonical-profile facts cannot carry caller evidence.  Extension evidence refs are
@@ -330,7 +375,7 @@ class ProviderCapabilityManifestFact:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderCapabilityManifest:
+class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType):
     """Versioned complete capability projection for one exact provider profile."""
 
     manifest_ref: str

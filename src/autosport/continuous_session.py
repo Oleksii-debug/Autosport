@@ -417,7 +417,7 @@ class _ContinuousSessionState:
         # then silently adopt the winner's identity.
         with _durable_path_lock(self.path):
             if _path_exists(self.path):
-                raw = self._read()
+                raw = _read_method(self)
             else:
                 resolved_id = _text(
                     session_id or str(uuid.uuid4()),
@@ -448,7 +448,7 @@ class _ContinuousSessionState:
                         "source_state_projection_backlog": False,
                     },
                 )
-                raw = self._read()
+                raw = _read_method(self)
 
             existing_source = raw["source_id"]
             if existing_source != self.source_id:
@@ -1096,6 +1096,8 @@ class _ContinuousSessionState:
         _read_error_checkpoint_code: object = _read_error_checkpoint.__code__,
         _durable_path_lock: Callable[..., Any] = durable_path_lock,
         _durable_path_lock_code: object = durable_path_lock.__code__,
+        _read_method: Callable[["_ContinuousSessionState"], dict[str, Any]] = _read,
+        _read_method_code: object = _read.__code__,
     ) -> ContinuousSessionStatus:
         if (
             type(self)._error_checkpoint_present is not _error_checkpoint_present
@@ -1107,6 +1109,8 @@ class _ContinuousSessionState:
             or durable_path_lock is not _durable_path_lock
             or getattr(_durable_path_lock, "__code__", None)
             is not _durable_path_lock_code
+            or type(self)._read is not _read_method
+            or getattr(_read_method, "__code__", None) is not _read_method_code
         ):
             raise ContinuousSessionError(
                 "canonical operational-checkpoint snapshot authority changed"
@@ -1117,7 +1121,7 @@ class _ContinuousSessionState:
         # returning a main image and sidecar image observed on opposite sides of
         # a concurrent state/success/failure transaction.
         with _durable_path_lock(self.path):
-            raw = self._read()
+            raw = _read_method(self)
             if _error_checkpoint_present(self):
                 error_checkpoint = _read_error_checkpoint(self)
                 if error_checkpoint["observed_generation"] > raw["generation"]:
@@ -1177,6 +1181,8 @@ class _ContinuousSessionState:
             ["_ContinuousSessionState"], tuple[int, int, int, int, int]
         ] = _checkpoint_identity_token,
         _checkpoint_identity_token_code: object = _checkpoint_identity_token.__code__,
+        _read_method: Callable[["_ContinuousSessionState"], dict[str, Any]] = _read,
+        _read_method_code: object = _read.__code__,
     ) -> SessionState:
         if (
             durable_path_lock is not _durable_path_lock
@@ -1185,6 +1191,8 @@ class _ContinuousSessionState:
             or type(self)._checkpoint_identity_token is not _checkpoint_identity_token
             or getattr(_checkpoint_identity_token, "__code__", None)
             is not _checkpoint_identity_token_code
+            or type(self)._read is not _read_method
+            or getattr(_read_method, "__code__", None) is not _read_method_code
         ):
             raise ContinuousSessionError(
                 "canonical bounded session-state authority changed"

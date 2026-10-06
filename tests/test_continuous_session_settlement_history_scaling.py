@@ -3042,6 +3042,26 @@ def test_settlement_resolution_collection_rejects_callback_reference_mutation_on
         raise AssertionError("callback mutation returning None was accepted")
 
 
+def test_settlement_resolution_collection_rejects_callback_phase_mutation() -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    coordinator = _resolution_coordinator((record,), (_resolution(),))
+
+    class MutatingAuthority:
+        def resolve(self, live_record: object, *, as_of: str) -> None:
+            assert as_of == _AT
+            live_record.phase = continuous_session.EventPhase.ACTIVE
+            return None
+
+    coordinator.outcome_authority = MutatingAuthority()
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "mutated lifecycle settlement identity" in str(exc)
+    else:
+        raise AssertionError("callback lifecycle phase mutation was accepted")
+
+
 def test_collected_settlement_resolution_is_detached_from_authority_mutation() -> None:
     record = _ResolutionRecord("provider-a:event-1", "settlement-1")
     original = _resolution(outcome="win")

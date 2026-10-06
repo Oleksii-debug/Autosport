@@ -2144,3 +2144,81 @@ def test_record_success_requires_exact_boolean_full_refresh() -> None:
             assert "full_refresh must be boolean" in str(exc)
         else:
             raise AssertionError("non-boolean full_refresh was accepted")
+
+
+def test_record_success_rejects_future_settlement_evidence() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        evidence = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-future",
+            settlement_ref="provider-result:future",
+            quote_outcomes={"quote-future": "win"},
+            evidence_id="receipt-future",
+            evidence_sha256="c" * 64,
+            available_at="2026-09-22T06:22:00+00:00",
+        )
+        before = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+
+        try:
+            state.record_success(
+                at="2026-09-22T06:21:00+00:00",
+                full_refresh=False,
+                settlement_evidence=(evidence,),
+            )
+        except ValueError as exc:
+            assert "not causally available" in str(exc)
+        else:
+            raise AssertionError("future settlement evidence was accepted")
+
+        after = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        assert after == before
+
+
+def test_record_success_rejects_non_tuple_settlement_evidence() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        try:
+            state.record_success(
+                at="2026-09-22T06:21:00+00:00",
+                full_refresh=False,
+                settlement_evidence=[],  # type: ignore[arg-type]
+            )
+        except TypeError as exc:
+            assert "exact tuple" in str(exc)
+        else:
+            raise AssertionError("non-tuple settlement evidence was accepted")
+
+
+def test_record_success_rejects_noncanonical_resolution_type() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        class DerivedResolution(continuous_session.SettlementResolution):
+            pass
+
+        evidence = DerivedResolution(
+            event_identity="provider-a:event-derived",
+            settlement_ref="provider-result:derived",
+            quote_outcomes={"quote-derived": "win"},
+            evidence_id="receipt-derived",
+            evidence_sha256="d" * 64,
+            available_at=_AT,
+        )
+        try:
+            state.record_success(
+                at="2026-09-22T06:21:00+00:00",
+                full_refresh=False,
+                settlement_evidence=(evidence,),
+            )
+        except TypeError as exc:
+            assert "exact SettlementResolution" in str(exc)
+        else:
+            raise AssertionError("derived settlement resolution was accepted")

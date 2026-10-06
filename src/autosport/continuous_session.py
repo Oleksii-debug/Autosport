@@ -285,6 +285,8 @@ class _ContinuousSessionState:
     _VERSION = 2
     _ERROR_SCHEMA = "autosport.continuous_session.operational_error"
     _ERROR_VERSION = 1
+    _MAX_ERROR_CHECKPOINT_BYTES = 16 * 1024
+    _MAX_ERROR_CODE_CHARS = 512
     _ERROR_FIELDS = {
         "schema",
         "schema_version",
@@ -382,8 +384,16 @@ class _ContinuousSessionState:
 
     def _read_error_checkpoint(self) -> dict[str, Any]:
         try:
-            raw = strict_json_loads(self._error_path.read_text(encoding="utf-8"))
-        except (OSError, TypeError, ValueError) as exc:
+            with self._error_path.open("rb") as handle:
+                encoded = handle.read(self._MAX_ERROR_CHECKPOINT_BYTES + 1)
+            if len(encoded) > self._MAX_ERROR_CHECKPOINT_BYTES:
+                raise ContinuousSessionError(
+                    "continuous session operational error checkpoint exceeds resource limit"
+                )
+            raw = strict_json_loads(encoded.decode("utf-8"))
+        except ContinuousSessionError:
+            raise
+        except (OSError, UnicodeDecodeError, TypeError, ValueError) as exc:
             raise ContinuousSessionError(
                 "cannot verify continuous session operational error checkpoint"
             ) from exc
@@ -414,24 +424,45 @@ class _ContinuousSessionState:
                 "operational error observed_last_success_at",
             )
         if raw["last_error_code"] is not None:
-            _text(raw["last_error_code"], "operational error last_error_code")
+            error_code = _text(
+                raw["last_error_code"],
+                "operational error last_error_code",
+            )
+            if len(error_code) > self._MAX_ERROR_CODE_CHARS:
+                raise ContinuousSessionError(
+                    "operational error last_error_code exceeds resource limit"
+                )
         return raw
 
     def _write_error_checkpoint(self, code: str | None) -> None:
         if code is not None:
             code = _text(code, "code")
-        atomic_write_json(
-            self._error_path,
-            {
-                "schema": self._ERROR_SCHEMA,
-                "schema_version": self._ERROR_VERSION,
-                "session_id": self._session_id,
-                "source_id": self.source_id,
-                "observed_cycles_completed": self._cycles_completed,
-                "observed_last_success_at": self._last_success_at,
-                "last_error_code": code,
-            },
-        )
+            if len(code) > self._MAX_ERROR_CODE_CHARS:
+                raise ValueError("code exceeds operational error resource limit")
+        payload = {
+            "schema": self._ERROR_SCHEMA,
+            "schema_version": self._ERROR_VERSION,
+            "session_id": self._session_id,
+            "source_id": self.source_id,
+            "observed_cycles_completed": self._cycles_completed,
+            "observed_last_success_at": self._last_success_at,
+            "last_error_code": code,
+        }
+        encoded = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        if len(encoded) > self._MAX_ERROR_CHECKPOINT_BYTES:
+            raise ContinuousSessionError(
+                "continuous session operational error checkpoint exceeds resource limit"
+            )
+        atomic_write_json(self._error_path, payload)
 
     @staticmethod
     def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:

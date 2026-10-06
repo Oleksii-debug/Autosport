@@ -372,3 +372,36 @@ def test_provenance_verification_uses_canonical_contract_snapshot_after_capture(
     )
 
     assert goal.bankroll_id == "mutated-after-snapshot"
+
+
+def test_decision_identity_uses_isolated_provenance_snapshot() -> None:
+    evidence = provenance_for(_goal())
+    expected = evidence.decision_identity
+    canonical_snapshotter = economic_goal_provenance_module._snapshot_provenance
+
+    def snapshot_then_mutate(provenance):
+        snapshot = canonical_snapshotter(provenance)
+        object.__setattr__(evidence, "goal_id", "mutated-after-snapshot")
+        object.__setattr__(evidence, "revision", 999)
+        return snapshot
+
+    actual = economic_goal_provenance_module._decision_identity_bound(
+        evidence,
+        _snapshotter=snapshot_then_mutate,
+    )
+
+    assert actual == expected
+    assert evidence.goal_id == "mutated-after-snapshot"
+    assert evidence.revision == 999
+
+
+def test_decision_identity_ignores_rebound_snapshotter_alias(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    expected = evidence.decision_identity
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound provenance snapshotter executed")
+
+    monkeypatch.setattr(economic_goal_provenance_module, "_snapshot_provenance", forged)
+
+    assert evidence.decision_identity == expected

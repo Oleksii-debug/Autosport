@@ -13,7 +13,6 @@ install_trusted_clock()
 import autosport.betfair_execution_confirmation as confirmation_runtime
 import autosport.betfair_supervised_execution as betfair_execution_runtime
 import autosport.supervised_confirmation as confirmation_store_runtime
-import autosport.supervised_execution as supervised_execution
 from autosport.betfair_execution_confirmation import (
     CONFIRMATION_FILENAME,
     betfair_execution_confirmation_spec,

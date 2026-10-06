@@ -200,7 +200,6 @@ def test_operator_state_transition_does_not_resurrect_stale_failure_overlay() ->
         assert state.snapshot().last_error_code is None
 
 
-
 @pytest.mark.parametrize(
     ("method_name", "replacement"),
     (
@@ -236,3 +235,59 @@ def test_record_failure_rejects_rebound_checkpoint_reader_dispatch(
             assert not sidecar_path.exists()
         else:
             assert sidecar_path.read_bytes() == sidecar_before
+
+
+@pytest.mark.parametrize(
+    ("method_name", "replacement"),
+    (
+        ("_error_checkpoint_present", lambda self: False),
+        ("_read_error_checkpoint", lambda self: {}),
+    ),
+)
+def test_snapshot_rejects_rebound_checkpoint_reader_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    replacement: object,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _path, state = _state(Path(directory))
+        state.record_failure(code="ProviderUnavailableError")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            method_name,
+            replacement,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical operational-checkpoint snapshot authority changed",
+        ):
+            state.snapshot()
+
+
+@pytest.mark.parametrize(
+    ("method_name", "replacement"),
+    (
+        ("_read_error_checkpoint_bytes", lambda self, **kwargs: b"{}"),
+        ("_bounded_descriptor_read", lambda descriptor, limit: b"{}"),
+        ("_file_identity", lambda info: (0, 0)),
+    ),
+)
+def test_checkpoint_reader_rejects_rebound_nested_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    replacement: object,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _path, state = _state(Path(directory))
+        state.record_failure(code="ProviderUnavailableError")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            method_name,
+            replacement,
+        )
+
+        with pytest.raises(continuous_session.ContinuousSessionError):
+            state._read_error_checkpoint()

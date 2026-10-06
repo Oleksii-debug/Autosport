@@ -34,6 +34,45 @@ def test_settlement_store_rejects_symlink_journal_on_reload(tmp_path: Path) -> N
     assert target.read_bytes() == b""
 
 
+def test_settlement_writer_lock_rejects_symlink_alias(tmp_path: Path) -> None:
+    path = tmp_path / "settlement.jsonl"
+    lock_path = path.with_name(path.name + ".writer.lock")
+    target = tmp_path / "foreign-lock-target"
+    target.write_bytes(b"")
+    try:
+        lock_path.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable on this platform: {exc}")
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="writer lock integrity check failed",
+    ):
+        settlement.BetfairSettlementRevisionStore(path)
+
+    assert target.read_bytes() == b""
+
+
+def test_settlement_writer_lock_rejects_hard_link_alias(tmp_path: Path) -> None:
+    path = tmp_path / "settlement.jsonl"
+    lock_path = path.with_name(path.name + ".writer.lock")
+    lock_path.write_bytes(b"\0")
+    alias = tmp_path / "writer-lock-alias"
+    try:
+        os.link(lock_path, alias)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"hard-link creation unavailable on this platform: {exc}")
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="writer lock integrity check failed",
+    ):
+        settlement.BetfairSettlementRevisionStore(path)
+
+    assert lock_path.read_bytes() == b"\0"
+    assert alias.read_bytes() == b"\0"
+
+
 def test_settlement_store_rejects_hard_link_alias_on_reload(tmp_path: Path) -> None:
     path = tmp_path / "settlement.jsonl"
     path.write_bytes(b"")

@@ -728,8 +728,15 @@ class BetfairSupervisedPlaceOrdersClient:
             raise BetfairPlaceOrdersAmbiguous(
                 "placeOrders transport returned non-bytes response"
             )
+        # Revalidate the entire client dependency binding after provider return.
+        # A response can only carry provider-origin authority when its local
+        # observation timestamp is also product-owned; caller/test clocks remain
+        # valid for structural responses but cannot mint durable provider truth.
+        _canonical_place_client_preflight(self)
+        observation_clock_authoritative = observed_clock is _now
         provider_origin_authoritative = (
             origin_candidate
+            and observation_clock_authoritative
             and type(self._transport) is UrllibBetfairHttpTransport
             and self._transport is transport
             and object.__getattribute__(transport, "__dict__")

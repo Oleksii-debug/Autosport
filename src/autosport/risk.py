@@ -97,8 +97,15 @@ _CANONICAL_MARKET_EVENT_TO_DICT = MarketEvent.to_dict
 _CANONICAL_MARKET_EVENT_FROM_DICT = MarketEvent.from_dict
 _CANONICAL_TICKET_LEG_QUOTE_KEY = vars(TicketLeg)["quote_key"].fget
 _CANONICAL_MARKET_EVENT_QUOTE_KEY = vars(MarketEvent)["quote_key"].fget
-if _CANONICAL_TICKET_LEG_QUOTE_KEY is None or _CANONICAL_MARKET_EVENT_QUOTE_KEY is None:
-    raise RuntimeError("canonical quote-key property roots are unavailable")
+_CANONICAL_TICKET_LEG_SETTLEMENT_KEY = vars(TicketLeg)["settlement_key"].fget
+_CANONICAL_MARKET_EVENT_SETTLEMENT_KEY = vars(MarketEvent)["settlement_key"].fget
+if (
+    _CANONICAL_TICKET_LEG_QUOTE_KEY is None
+    or _CANONICAL_MARKET_EVENT_QUOTE_KEY is None
+    or _CANONICAL_TICKET_LEG_SETTLEMENT_KEY is None
+    or _CANONICAL_MARKET_EVENT_SETTLEMENT_KEY is None
+):
+    raise RuntimeError("canonical quote/settlement-key property roots are unavailable")
 
 # Capture the exact PaperBook economic/state graph consumed by risk. These bound
 # roots prevent later class-attribute rebinding from redirecting validation or
@@ -500,6 +507,7 @@ class ProposedTicketRiskContext:
             raise ValueError("proposed ticket context requires a non-empty tuple of legs")
 
         leg_keys: set[str] = set()
+        leg_settlement_keys: set[str] = set()
         for leg in self.legs:
             try:
                 _validate_proposed_ticket_leg(leg)
@@ -509,11 +517,18 @@ class ProposedTicketRiskContext:
             if leg_key in leg_keys:
                 raise ValueError("proposed ticket context contains duplicate leg identity")
             leg_keys.add(leg_key)
+            settlement_key = _CANONICAL_TICKET_LEG_SETTLEMENT_KEY(leg)
+            if settlement_key in leg_settlement_keys:
+                raise ValueError(
+                    "proposed ticket context contains duplicate settlement identity"
+                )
+            leg_settlement_keys.add(settlement_key)
 
         if type(self.quotes) is not tuple:
             raise ValueError("proposed ticket quotes must be a tuple")
 
         quote_keys: set[str] = set()
+        quote_settlement_keys: set[str] = set()
         for quote in self.quotes:
             if type(quote) is not MarketEvent:
                 raise ValueError("proposed ticket context contains an invalid quote")
@@ -539,10 +554,20 @@ class ProposedTicketRiskContext:
             if quote_key in quote_keys:
                 raise ValueError("proposed ticket context contains duplicate quote identity")
             quote_keys.add(quote_key)
+            settlement_key = _CANONICAL_MARKET_EVENT_SETTLEMENT_KEY(quote)
+            if settlement_key in quote_settlement_keys:
+                raise ValueError(
+                    "proposed ticket context contains duplicate quote settlement identity"
+                )
+            quote_settlement_keys.add(settlement_key)
 
         if quote_keys and quote_keys != leg_keys:
             raise ValueError(
                 "proposed ticket quote evidence must cover every proposed leg exactly once"
+            )
+        if quote_settlement_keys and quote_settlement_keys != leg_settlement_keys:
+            raise ValueError(
+                "proposed ticket quote evidence must match leg market settlement semantics exactly"
             )
 
         if type(self.provider_accounts) is not tuple:

@@ -518,7 +518,8 @@ def test_save_uses_detached_replayed_snapshot_after_validation(
         resolver=lambda candidate_id: facts(candidate_id),
         evaluated_at_ns=1000,
     )
-    expected = candidate
+    expected_authority_id = candidate.authority_id
+    expected_authority_digest = candidate.authority_digest
     store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
     canonical_named_temporary = pre_evaluation_evidence.tempfile.NamedTemporaryFile
 
@@ -535,6 +536,8 @@ def test_save_uses_detached_replayed_snapshot_after_validation(
 
     loaded = store.load()
     assert candidate.session_id == "mutated-after-replay"
-    assert loaded == expected
     assert loaded.session_id == "canonical"
+    assert loaded.authority_id == expected_authority_id
+    assert loaded.authority_digest == expected_authority_digest
+    assert loaded != candidate
 

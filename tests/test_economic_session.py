@@ -379,6 +379,100 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         finally:
             ProductEconomicSessionStore.current = original_current
 
+    def test_direct_current_rejects_class_authority_method_rebinding_without_dispatch(self) -> None:
+        for name in (
+            "current",
+            "require_current",
+            "transition_to_current_goal",
+            "_publish_new",
+            "_evidence",
+            "_require_configuration_authority",
+        ):
+            with self.subTest(name=name):
+                store = ProductEconomicSessionStore(
+                    self.workspace,
+                    authority_root=self.authority_root,
+                )
+                original = ProductEconomicSessionStore.__dict__[name]
+                called = False
+
+                def hostile(*_args, **_kwargs):
+                    nonlocal called
+                    called = True
+                    raise AssertionError(
+                        f"rebound economic-session method {name} executed"
+                    )
+
+                setattr(ProductEconomicSessionStore, name, hostile)
+                try:
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.current()
+                    self.assertFalse(called)
+                finally:
+                    setattr(ProductEconomicSessionStore, name, original)
+
+    def test_constructor_rejects_preexisting_class_authority_method_rebinding(self) -> None:
+        for name in (
+            "current",
+            "require_current",
+            "transition_to_current_goal",
+            "_publish_new",
+            "_evidence",
+            "_require_configuration_authority",
+        ):
+            with self.subTest(name=name):
+                original = ProductEconomicSessionStore.__dict__[name]
+                called = False
+
+                def hostile(*_args, **_kwargs):
+                    nonlocal called
+                    called = True
+                    raise AssertionError(
+                        f"preexisting rebound economic-session method {name} executed"
+                    )
+
+                setattr(ProductEconomicSessionStore, name, hostile)
+                try:
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "store method authority changed",
+                    ):
+                        ProductEconomicSessionStore(
+                            self.workspace,
+                            authority_root=self.authority_root,
+                        )
+                    self.assertFalse(called)
+                finally:
+                    setattr(ProductEconomicSessionStore, name, original)
+
+    def test_require_current_direct_lookup_uses_captured_descriptor(self) -> None:
+        store = ProductEconomicSessionStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+        evidence = store.current()
+        original = ProductEconomicSessionStore.require_current
+        called = False
+
+        def hostile(*_args, **_kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("rebound require_current executed")
+
+        ProductEconomicSessionStore.require_current = hostile
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.require_current(evidence)
+            self.assertFalse(called)
+        finally:
+            ProductEconomicSessionStore.require_current = original
+
     def test_transition_rejects_rebound_product_session_equality(self) -> None:
         store = self._store()
         first = store.current()

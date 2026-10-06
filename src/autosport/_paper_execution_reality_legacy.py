@@ -145,6 +145,14 @@ def _decimal_text(
     return _formatter(value, "f")
 
 
+_CANONICAL_DECIMAL_PARSER = _decimal
+_CANONICAL_DECIMAL_PARSER_CODE = _decimal.__code__
+_CANONICAL_DECIMAL_PREFLIGHT = _preflight_decimal_text_fields
+_CANONICAL_DECIMAL_PREFLIGHT_CODE = _preflight_decimal_text_fields.__code__
+_CANONICAL_DECIMAL_TEXT_FORMATTER = _decimal_text
+_CANONICAL_DECIMAL_TEXT_FORMATTER_CODE = _decimal_text.__code__
+
+
 def _canonical(value: Any) -> str:
     try:
         return json.dumps(
@@ -297,7 +305,13 @@ class PaperExecutionEvidenceRecord:
     suspended: bool = False
     reason: str = "observed execution evidence"
 
-    def __post_init__(self, _decimal_parser=_decimal) -> None:
+    def __post_init__(
+        self,
+        _decimal_parser=_CANONICAL_DECIMAL_PARSER,
+        _decimal_parser_code=_CANONICAL_DECIMAL_PARSER_CODE,
+    ) -> None:
+        if _decimal_parser.__code__ is not _decimal_parser_code:
+            raise ValueError("decimal parser authority changed")
         for name in (
             "action_id",
             "bookmaker_id",
@@ -332,9 +346,15 @@ class PaperExecutionEvidenceRecord:
 
     def to_dict(
         self,
-        _preflight=_preflight_decimal_text_fields,
-        _decimal_formatter=_decimal_text,
+        _preflight=_CANONICAL_DECIMAL_PREFLIGHT,
+        _preflight_code=_CANONICAL_DECIMAL_PREFLIGHT_CODE,
+        _decimal_formatter=_CANONICAL_DECIMAL_TEXT_FORMATTER,
+        _decimal_formatter_code=_CANONICAL_DECIMAL_TEXT_FORMATTER_CODE,
     ) -> dict[str, Any]:
+        if _preflight.__code__ is not _preflight_code:
+            raise ValueError("decimal preflight authority changed")
+        if _decimal_formatter.__code__ is not _decimal_formatter_code:
+            raise ValueError("decimal formatter authority changed")
         _preflight(self.accepted_odds, self.accepted_stake)
         return {
             "action_id": self.action_id,
@@ -449,7 +469,13 @@ class ObservedPaperExecution:
     suspended: bool = False
     reason: str = "observed execution evidence"
 
-    def __post_init__(self, _decimal_parser=_decimal) -> None:
+    def __post_init__(
+        self,
+        _decimal_parser=_CANONICAL_DECIMAL_PARSER,
+        _decimal_parser_code=_CANONICAL_DECIMAL_PARSER_CODE,
+    ) -> None:
+        if _decimal_parser.__code__ is not _decimal_parser_code:
+            raise ValueError("decimal parser authority changed")
         _text(self.action_id, "action_id")
         _timestamp(self.observed_at, "observed_at")
         if not isinstance(self.outcome, PaperAttemptOutcome):
@@ -508,7 +534,13 @@ class PaperLegAttempt:
     model_fingerprint: str
     reason: str
 
-    def __post_init__(self, _decimal_parser=_decimal) -> None:
+    def __post_init__(
+        self,
+        _decimal_parser=_CANONICAL_DECIMAL_PARSER,
+        _decimal_parser_code=_CANONICAL_DECIMAL_PARSER_CODE,
+    ) -> None:
+        if _decimal_parser.__code__ is not _decimal_parser_code:
+            raise ValueError("decimal parser authority changed")
         for name in (
             "attempt_id",
             "run_id",
@@ -579,9 +611,15 @@ class PaperLegAttempt:
 
     def to_dict(
         self,
-        _preflight=_preflight_decimal_text_fields,
-        _decimal_formatter=_decimal_text,
+        _preflight=_CANONICAL_DECIMAL_PREFLIGHT,
+        _preflight_code=_CANONICAL_DECIMAL_PREFLIGHT_CODE,
+        _decimal_formatter=_CANONICAL_DECIMAL_TEXT_FORMATTER,
+        _decimal_formatter_code=_CANONICAL_DECIMAL_TEXT_FORMATTER_CODE,
     ) -> dict[str, Any]:
+        if _preflight.__code__ is not _preflight_code:
+            raise ValueError("decimal preflight authority changed")
+        if _decimal_formatter.__code__ is not _decimal_formatter_code:
+            raise ValueError("decimal formatter authority changed")
         _preflight(
             self.decision_odds,
             self.requested_stake,
@@ -687,7 +725,13 @@ class PaperExecutionRun:
     worst_case_exposure: Decimal
     completed: bool
 
-    def __post_init__(self, _decimal_parser=_decimal) -> None:
+    def __post_init__(
+        self,
+        _decimal_parser=_CANONICAL_DECIMAL_PARSER,
+        _decimal_parser_code=_CANONICAL_DECIMAL_PARSER_CODE,
+    ) -> None:
+        if _decimal_parser.__code__ is not _decimal_parser_code:
+            raise ValueError("decimal parser authority changed")
         for name in ("run_id", "trigger_id", "plan_id", "plan_fingerprint", "model_fingerprint"):
             _text(getattr(self, name), name)
         _timestamp(self.started_at, "started_at")
@@ -1045,8 +1089,11 @@ class PaperExecutionLedger:
         pending_action_ids: tuple[str, ...],
         recovery_decision: RecoveryDecision,
         worst_case_exposure: Decimal,
-        _decimal_formatter=_decimal_text,
+        _decimal_formatter=_CANONICAL_DECIMAL_TEXT_FORMATTER,
+        _decimal_formatter_code=_CANONICAL_DECIMAL_TEXT_FORMATTER_CODE,
     ) -> None:
+        if _decimal_formatter.__code__ is not _decimal_formatter_code:
+            raise ValueError("decimal formatter authority changed")
         payload = {
             "pending_action_ids": list(pending_action_ids),
             "recovery_decision": recovery_decision.value,

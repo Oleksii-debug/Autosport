@@ -355,6 +355,58 @@ def test_payload_encoder_rejects_bound_default_rebinding() -> None:
         operation.__defaults__ = original_defaults
 
 
+def test_payload_encoder_rejects_nested_snapshotter_default_rebinding() -> None:
+    contract = _goal()
+    operation = economic_goal_store_module._BOUND_ECONOMIC_GOAL_TO_PAYLOAD
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+    snapshotter = original_defaults[0]
+    snapshot_defaults = snapshotter.__defaults__
+    assert snapshot_defaults is not None
+
+    snapshotter.__defaults__ = (
+        object,
+        *snapshot_defaults[1:],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="payload encoder nested defaults authority changed",
+        ):
+            economic_goal_to_payload(contract)
+    finally:
+        snapshotter.__defaults__ = snapshot_defaults
+        operation.__defaults__ = original_defaults
+
+
+def test_store_successor_rejects_nested_lock_scope_default_rebinding(tmp_path) -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(previous)
+
+    operation = economic_goal_store_module._BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+    lock_scope = original_defaults[-1]
+    lock_defaults = lock_scope.__defaults__
+    assert lock_defaults is not None
+
+    lock_scope.__defaults__ = (
+        object,
+        *lock_defaults[1:],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="economic-goal store write nested defaults authority changed",
+        ):
+            store.persist_automatic_successor(candidate)
+    finally:
+        lock_scope.__defaults__ = lock_defaults
+        operation.__defaults__ = original_defaults
+
+
 def test_payload_decoder_rejects_bound_nested_default_rebinding() -> None:
     payload = economic_goal_to_payload(_goal())
     operation = economic_goal_store_module._BOUND_ECONOMIC_GOAL_FROM_PAYLOAD

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from autosport import continuous_session
+from autosport.market_mirror import MarketMirror
 
 
 _AT = "2026-10-06T00:00:00+00:00"
@@ -3358,4 +3359,310 @@ def test_tick_restores_state_after_learning_prepare_rebinding() -> None:
         assert coordinator._state is canonical_state
         assert canonical_state.snapshot().last_error_code == "ContinuousSessionError"
         assert replacement_state.snapshot().last_error_code is None
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "selectors",
+        "matched_keys",
+        "mirror",
+        "dependency_store",
+        "matched_key_store",
+        "lock",
+    ),
+)
+def test_tick_rejects_lifecycle_routing_tamper_outside_callbacks(
+    mutation: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("existing", source_ids="provider-a")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                if mutation == "selectors":
+                    assert index.unregister("existing")
+                    index.register("existing", source_ids="provider-b")
+                elif mutation == "matched_keys":
+                    index._matched_keys["existing"].add(
+                        ("provider-a", "quote-attacker")
+                    )
+                elif mutation == "mirror":
+                    index._mirror = MarketMirror()
+                elif mutation == "dependency_store":
+                    index._dependencies = dict(index._dependencies)
+                elif mutation == "matched_key_store":
+                    index._matched_keys = dict(index._matched_keys)
+                else:
+                    index._lock = object()
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = index
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="lifecycle changed dependency routing authority outside "
+            "coordinator callbacks",
+        ):
+            coordinator.tick()
+
+        assert coordinator.dependency_index is index
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
+@pytest.mark.parametrize("mutation", ("selectors", "matched_keys"))
+def test_tick_rejects_post_registration_lifecycle_routing_tamper(
+    mutation: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                *_args,
+                register_input,
+                **_kwargs,
+            ):
+                register_input("new", source_ids="provider-a")
+                if mutation == "selectors":
+                    assert index.unregister("new")
+                    index.register("new", source_ids="provider-b")
+                else:
+                    index._matched_keys["new"].add(
+                        ("provider-a", "quote-attacker")
+                    )
+                return ("new",)
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = index
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="lifecycle changed dependency routing authority outside "
+            "coordinator callbacks",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
+def test_tick_rejects_dependency_index_object_rebinding_and_restores_it() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        original = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        replacement = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        coordinator.dependency_index = original
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.collector = _Collector(
+            callback=lambda: setattr(
+                coordinator,
+                "dependency_index",
+                replacement,
+            )
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency index authority changed during tick",
+        ):
+            coordinator.tick()
+
+        assert coordinator.dependency_index is original
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
+def test_tick_restores_dependency_index_when_collector_rebinds_then_fails() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        original = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        replacement = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        coordinator.dependency_index = original
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        def rebind_then_fail() -> None:
+            coordinator.dependency_index = replacement
+            raise RuntimeError("collector exploded after dependency rebind")
+
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.collector = _Collector(callback=rebind_then_fail)
+
+        with pytest.raises(
+            RuntimeError,
+            match="collector exploded after dependency rebind",
+        ):
+            coordinator.tick()
+
+        assert coordinator.dependency_index is original
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+
+def test_tick_restores_dependency_index_when_lifecycle_rebinds_then_fails() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        original = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        replacement = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        coordinator.dependency_index = original
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                coordinator.dependency_index = replacement
+                raise RuntimeError("lifecycle exploded after dependency rebind")
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            RuntimeError,
+            match="lifecycle exploded after dependency rebind",
+        ):
+            coordinator.tick()
+
+        assert coordinator.dependency_index is original
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+
+def test_tick_accepts_exact_lifecycle_dependency_transition_with_routing_state() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("old", source_ids="provider-a")
+        index.register("stay", source_ids="provider-a")
+        index._matched_keys["stay"].add(("provider-a", "quote-stay"))
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                *_args,
+                register_input,
+                retire_input,
+                **_kwargs,
+            ):
+                retire_input("old")
+                register_input("new", source_ids="provider-a")
+                return ("new",)
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = index
+
+        result = coordinator.tick()
+
+        assert result.registered_input_ids == ("new",)
+        assert result.retired_input_ids == ("old",)
+        assert index.input_ids == ("stay", "new")
+        assert index.matching_keys("stay") == (("provider-a", "quote-stay"),)
+
+
+@pytest.mark.parametrize("helper", ("dependency", "matching_keys"))
+def test_tick_rejects_lifecycle_verifier_rebinding_after_callback(
+    monkeypatch,
+    helper: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("existing", source_ids="provider-a")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                if helper == "dependency":
+                    def hostile_dependency(*_args, **_kwargs):
+                        raise AssertionError("rebound dependency reader executed")
+
+                    monkeypatch.setattr(
+                        continuous_session.FocusedMirrorDependencyIndex,
+                        "_dependency",
+                        hostile_dependency,
+                    )
+                else:
+                    def hostile_matching_keys(*_args, **_kwargs):
+                        raise AssertionError("rebound matching-keys reader executed")
+
+                    monkeypatch.setattr(
+                        continuous_session.FocusedMirrorDependencyIndex,
+                        "matching_keys",
+                        hostile_matching_keys,
+                    )
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = index
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="lifecycle changed dependency routing authority outside "
+            "coordinator callbacks",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
 

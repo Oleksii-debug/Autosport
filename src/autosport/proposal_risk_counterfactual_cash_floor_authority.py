@@ -21,6 +21,7 @@ from .proposal_risk_terminal_component_provenance_authority import (
 from .proposal_risk_terminal_payoff_authority import (
     ProductProposalRiskTerminalPayoffEvaluation,
     ProductProposalRiskTerminalPayoffEvaluationError,
+    _candidate_tickets,
     resolve_product_proposal_risk_terminal_payoff_evaluation,
 )
 from .proposal_risk_target_authority import (
@@ -53,6 +54,16 @@ _PAYOFF_RESOLVER = resolve_product_proposal_risk_terminal_payoff_evaluation
 _PAYOFF_RESOLVER_CODE = getattr(_PAYOFF_RESOLVER, "__code__", None)
 _TARGET_RESOLVER = resolve_product_proposal_risk_target
 _TARGET_RESOLVER_CODE = getattr(_TARGET_RESOLVER, "__code__", None)
+_TARGET_TICKET_RESOLVER = _candidate_tickets
+_TARGET_TICKET_RESOLVER_CODE = getattr(_TARGET_TICKET_RESOLVER, "__code__", None)
+_RISK_LOCKED_CAPITAL_FOR_PROPOSAL = (
+    _risk_module._CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL
+)
+_RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CODE = getattr(
+    _RISK_LOCKED_CAPITAL_FOR_PROPOSAL,
+    "__code__",
+    None,
+)
 
 _BOOK_LOAD_DESCRIPTOR = PaperBook.__dict__["load"]
 _BOOK_LOAD_FUNCTION = _BOOK_LOAD_DESCRIPTOR.__func__
@@ -427,6 +438,52 @@ def _current_base_book(
             "base cash balance cannot be negative"
         )
     return book
+
+
+def _target_capital_vector(
+    target: ProductProposalRiskTarget,
+) -> tuple[Decimal, ...]:
+    try:
+        tickets = _TARGET_TICKET_RESOLVER(target)
+    except (ArithmeticError, RuntimeError, TypeError, ValueError) as exc:
+        raise ProductProposalRiskCounterfactualCashFloorError(
+            "target tickets cannot be reconstructed for capital reservation"
+        ) from exc
+    if (
+        type(tickets) is not tuple
+        or len(tickets) != len(target.evaluated_stakes)
+    ):
+        raise ProductProposalRiskCounterfactualCashFloorError(
+            "target ticket vector lost evaluated-stake cardinality"
+        )
+    values: list[Decimal] = []
+    for index, (ticket, stake_raw) in enumerate(
+        zip(tickets, target.evaluated_stakes)
+    ):
+        stake = _decimal(stake_raw, f"evaluated_stakes[{index}]")
+        if stake < 0:
+            raise ProductProposalRiskCounterfactualCashFloorError(
+                "evaluated target stake cannot be negative"
+            )
+        if stake.is_zero():
+            capital = Decimal("0")
+        else:
+            try:
+                capital = _RISK_LOCKED_CAPITAL_FOR_PROPOSAL(
+                    stake,
+                    ticket.legs,
+                )
+            except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
+                raise ProductProposalRiskCounterfactualCashFloorError(
+                    "target capital-at-risk vector is invalid"
+                ) from exc
+        capital = _decimal(capital, f"evaluated_capital_at_risk[{index}]")
+        if capital < 0:
+            raise ProductProposalRiskCounterfactualCashFloorError(
+                "target capital at risk cannot be negative"
+            )
+        values.append(capital)
+    return tuple(values)
 
 
 def _open_target_stakes(

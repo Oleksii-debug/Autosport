@@ -3045,3 +3045,44 @@ def test_ticket_leg_settlement_key_changes_when_semantics_is_mutated() -> None:
         market_semantics_id="exchange.match.odds.v2",
     ).quote_key
     assert leg.settlement_key != original
+
+
+def test_schema8_preserves_provider_provenance_and_settlement_time(tmp_path) -> None:
+    path = tmp_path / "schema8-provider-roundtrip.json"
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_lay_leg(semantics="exchange.match.odds.v3")],
+        "10",
+        reason="provider-bound",
+        placed_at=_TS,
+        provider_source_ids=("betfair-live",),
+        provider_accounts=(("betfair", "account-1"),),
+        bankroll_id="bankroll-live",
+        currency="USD",
+    )
+    book.settle(
+        ticket.ticket_id,
+        set(),
+        settled_at="2026-10-05T00:05:00+00:00",
+    )
+    book.save(path)
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["schema_version"] == 8
+    persisted = raw["tickets"][0]
+    assert persisted["provider_source_ids"] == ["betfair-live"]
+    assert persisted["provider_accounts"] == [
+        {"source_id": "betfair", "account_id": "account-1"}
+    ]
+    assert persisted["bankroll_id"] == "bankroll-live"
+    assert persisted["currency"] == "USD"
+    assert persisted["settled_at"] == "2026-10-05T00:05:00+00:00"
+
+    reopened = PaperBook.load(path)
+    restored = reopened.tickets[ticket.ticket_id]
+    assert restored.provider_source_ids == ("betfair-live",)
+    assert restored.provider_accounts == (("betfair", "account-1"),)
+    assert restored.bankroll_id == "bankroll-live"
+    assert restored.currency == "USD"
+    assert restored.settled_at == "2026-10-05T00:05:00+00:00"
+    assert restored.legs[0].market_semantics_id == "exchange.match.odds.v3"

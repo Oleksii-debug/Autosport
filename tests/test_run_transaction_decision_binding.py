@@ -101,7 +101,7 @@ class RunTransactionDecisionBindingTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RunTransactionError,
-                "retained terminal PaperBook semantic validation failed",
+                "staged PaperBook semantic validation failed",
             ):
                 tx.stage_outputs(book, ledger_path)
 
@@ -380,7 +380,7 @@ class RunTransactionDecisionBindingTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RunTransactionError,
-                "staged PaperBook semantic validation failed",
+                "canonical retained terminal PaperBook semantic validation failed",
             ):
                 tx.commit()
 

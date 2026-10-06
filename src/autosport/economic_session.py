@@ -72,7 +72,7 @@ _WORKSPACE_LOCK_RELEASE: Final = WorkspaceEconomicLock.release
 _WORKSPACE_LOCK_RELEASE_CODE: Final = getattr(_WORKSPACE_LOCK_RELEASE, "__code__", None)
 _OBJECT_SETATTR: Final = object.__setattr__
 _METHOD_TYPE: Final = MethodType
-_PAPERBOOK_LOAD = PaperBook.load
+_PAPERBOOK_LOAD_BYTES = PaperBook.load_bytes
 _PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
 _ECONOMIC_GOAL_LOAD = EconomicGoalStore.load
 _ECONOMIC_GOAL_STORE_TYPE: Final = EconomicGoalStore
@@ -548,14 +548,14 @@ def _opening_paperbook_sha256(
     path: Path,
     *,
     _read=_read_regular_bytes,
-    _load=_PAPERBOOK_LOAD,
+    _load_bytes=_PAPERBOOK_LOAD_BYTES,
     _validate=_PAPERBOOK_VALIDATE_LOADED_STATE,
     _sha256=hashlib.sha256,
     _limit=_MAX_PAPERBOOK_BYTES,
 ) -> str:
     before = _read(path, limit=_limit, label="canonical PaperBook")
     try:
-        book = _load(path)
+        book = _load_bytes(before)
         _validate(book)
     except (OSError, TypeError, ValueError) as exc:
         raise EconomicSessionIntegrityError(
@@ -767,7 +767,7 @@ _ECONOMIC_SESSION_CODE_AUTHORITIES: Final = tuple(
         ("MonotonicWorkspaceAuthority.recover", _AUTHORITY_RECOVER),
         ("MonotonicWorkspaceAuthority.prepare", _AUTHORITY_PREPARE),
         ("MonotonicWorkspaceAuthority.commit", _AUTHORITY_COMMIT),
-        ("PaperBook.load", _PAPERBOOK_LOAD),
+        ("PaperBook.load_bytes", _PAPERBOOK_LOAD_BYTES),
         ("PaperBook._validate_loaded_state", _PAPERBOOK_VALIDATE_LOADED_STATE),
         ("clock_instant", _clock_instant),
         ("parse_instant", _parse_instant),
@@ -1009,7 +1009,7 @@ class ProductEconomicSessionStore:
         self._workspace_lock_exit_witness = _WORKSPACE_LOCK_EXIT
         self._workspace_lock_acquire_witness = _WORKSPACE_LOCK_ACQUIRE
         self._workspace_lock_release_witness = _WORKSPACE_LOCK_RELEASE
-        self._paperbook_load_witness = _PAPERBOOK_LOAD
+        self._paperbook_load_bytes_witness = _PAPERBOOK_LOAD_BYTES
         self._paperbook_validate_witness = _PAPERBOOK_VALIDATE_LOADED_STATE
         self._economic_goal_load_witness = _ECONOMIC_GOAL_LOAD
         self._authority_recover_witness = _AUTHORITY_RECOVER
@@ -1122,7 +1122,7 @@ class ProductEconomicSessionStore:
             or _AUTHORITY_RECOVER is not self._authority_recover_witness
             or _AUTHORITY_PREPARE is not self._authority_prepare_witness
             or _AUTHORITY_COMMIT is not self._authority_commit_witness
-            or _PAPERBOOK_LOAD is not self._paperbook_load_witness
+            or _PAPERBOOK_LOAD_BYTES is not self._paperbook_load_bytes_witness
             or _PAPERBOOK_VALIDATE_LOADED_STATE is not self._paperbook_validate_witness
             or _WORKSPACE_LOCK_TYPE is not self._workspace_lock_type_witness
             or _economic_session_lock_scope is not self._workspace_lock_scope_witness
@@ -1164,7 +1164,7 @@ class ProductEconomicSessionStore:
             or MonotonicWorkspaceAuthority.recover is not self._authority_recover_witness
             or MonotonicWorkspaceAuthority.prepare is not self._authority_prepare_witness
             or MonotonicWorkspaceAuthority.commit is not self._authority_commit_witness
-            or PaperBook.load is not self._paperbook_load_witness
+            or PaperBook.load_bytes is not self._paperbook_load_bytes_witness
             or PaperBook._validate_loaded_state is not self._paperbook_validate_witness
             or _PRODUCT_ECONOMIC_SESSION_TYPE is not self._product_economic_session_type_witness
             or ProductEconomicSession is not self._product_economic_session_type_witness

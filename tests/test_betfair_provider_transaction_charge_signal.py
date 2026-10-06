@@ -286,5 +286,7 @@ def test_transaction_charge_signal_does_not_mint_intent_allocation() -> None:
         "ALLOCATION_RULE",
     )
     assert evidence.source_evidence_sha256 == observation.evidence_sha256
+    assert evidence.row_provider_charge_class == "BETFAIR_TRANSACTION_CHARGE"
+    assert evidence.row_provider_transaction_id == 200000488391954
     assert not hasattr(evidence, "allocated_amount")
     assert not hasattr(evidence, "allocation_fraction")

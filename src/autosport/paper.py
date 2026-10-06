@@ -831,6 +831,19 @@ def _guard_paperbook_runtime_authority(method):
         name: getattr(dependency, "__code__", None)
         for name, dependency in runtime_module_dependencies.items()
     }
+    runtime_authority_closure_witnesses = {}
+    for name in (
+        "_CANONICAL_MARKET_SEMANTICS_IDENTITY",
+        "_CANONICAL_LOCKED_CAPITAL_FOR_TICKET",
+    ):
+        dependency = runtime_module_dependencies[name]
+        closure = dependency.__closure__
+        runtime_authority_closure_witnesses[name] = (
+            closure,
+            None
+            if closure is None
+            else tuple(cell.cell_contents for cell in closure),
+        )
 
     def require_runtime_module_dependencies() -> None:
         for name, dependency in runtime_module_dependencies.items():
@@ -846,6 +859,30 @@ def _guard_paperbook_runtime_authority(method):
                 raise ValueError(
                     f"PaperBook runtime module dependency authority changed: {name}"
                 )
+            closure_witness = runtime_authority_closure_witnesses.get(name)
+            if closure_witness is None:
+                continue
+            expected_closure, expected_values = closure_witness
+            if dependency.__closure__ is not expected_closure:
+                raise ValueError(
+                    f"PaperBook runtime module dependency closure changed: {name}"
+                )
+            if expected_values is not None:
+                current_closure = dependency.__closure__
+                if (
+                    current_closure is None
+                    or len(current_closure) != len(expected_values)
+                    or any(
+                        cell.cell_contents is not expected
+                        for cell, expected in zip(
+                            current_closure,
+                            expected_values,
+                        )
+                    )
+                ):
+                    raise ValueError(
+                        f"PaperBook runtime module dependency closure changed: {name}"
+                    )
 
     @wraps(method)
     def guarded(self, *args, **kwargs):

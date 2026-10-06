@@ -255,11 +255,19 @@ class EconomicSessionMismatchError(EconomicSessionError):
 
 
 
-def _is_sha256(value: object, *, _hex=_HEX) -> bool:
+def _is_sha256(
+    value: object,
+    *,
+    _hex=_HEX,
+    _type=type,
+    _str=str,
+    _len=len,
+    _all=all,
+) -> bool:
     return (
-        type(value) is str
-        and len(value) == 64
-        and all(character in _hex for character in value)
+        _type(value) is _str
+        and _len(value) == 64
+        and _all(character in _hex for character in value)
     )
 
 
@@ -269,8 +277,10 @@ def _parse_instant(
     *,
     _fromisoformat=datetime.fromisoformat,
     _utc=timezone.utc,
+    _type=type,
+    _str=str,
 ) -> datetime:
-    if type(value) is not str or not value or value != value.strip():
+    if _type(value) is not _str or not value or value != value.strip():
         raise EconomicSessionIntegrityError("started_at must be canonical text")
     try:
         parsed = _fromisoformat(value.replace("Z", "+00:00"))
@@ -401,11 +411,19 @@ class ProductEconomicSession:
         return False
 
 
-def _is_transition_id(value: object, *, _hex=_HEX) -> bool:
+def _is_transition_id(
+    value: object,
+    *,
+    _hex=_HEX,
+    _type=type,
+    _str=str,
+    _len=len,
+    _all=all,
+) -> bool:
     return (
-        type(value) is str
-        and len(value) == 32
-        and all(character in _hex for character in value)
+        _type(value) is _str
+        and _len(value) == 32
+        and _all(character in _hex for character in value)
     )
 
 
@@ -646,6 +664,12 @@ def _decode_state(
     _parse=_parse_instant,
     _payload=_state_payload,
     _canonical=_canonical_json_bytes,
+    _type=type,
+    _dict=dict,
+    _frozenset=frozenset,
+    _str=str,
+    _int=int,
+    _bool=bool,
 ) -> dict[str, object]:
     try:
         parsed = _load_json(raw.decode("utf-8"))
@@ -653,7 +677,7 @@ def _decode_state(
         raise EconomicSessionIntegrityError(
             "economic-session state is not strict UTF-8 JSON"
         ) from exc
-    if type(parsed) is not dict or frozenset(parsed) != _keys:
+    if _type(parsed) is not _dict or _frozenset(parsed) != _keys:
         raise EconomicSessionIntegrityError("economic-session state schema keys mismatch")
     if (
         parsed["schema"] != _schema
@@ -661,17 +685,17 @@ def _decode_state(
         or parsed["workspace_instance_id"] != workspace_instance_id
         or not _transition_validator(parsed["transition_id"])
         or not _session_validator(parsed["session_id"])
-        or type(parsed["goal_id"]) is not str
+        or _type(parsed["goal_id"]) is not _str
         or not parsed["goal_id"]
-        or type(parsed["goal_revision"]) is not int
+        or _type(parsed["goal_revision"]) is not _int
         or parsed["goal_revision"] < 1
-        or type(parsed["bankroll_id"]) is not str
+        or _type(parsed["bankroll_id"]) is not _str
         or not parsed["bankroll_id"]
-        or type(parsed["currency"]) is not str
+        or _type(parsed["currency"]) is not _str
         or not parsed["currency"]
         or not _sha_validator(parsed["goal_contract_sha256"])
         or not _sha_validator(parsed["opening_paperbook_sha256"])
-        or type(parsed["product_clock_authoritative"]) is not bool
+        or _type(parsed["product_clock_authoritative"]) is not _bool
         or (
             (
                 parsed["predecessor_session_id"],
@@ -682,7 +706,7 @@ def _decode_state(
             and (
                 not _session_validator(parsed["predecessor_session_id"])
                 or not _sha_validator(parsed["predecessor_state_sha256"])
-                or type(parsed["predecessor_ended_at"]) is not str
+                or _type(parsed["predecessor_ended_at"]) is not _str
                 or not parsed["predecessor_ended_at"]
             )
         )
@@ -697,30 +721,30 @@ def _decode_state(
             )
     canonical = _payload(
         workspace_instance_id=workspace_instance_id,
-        session_id=str(parsed["session_id"]),
-        goal_id=str(parsed["goal_id"]),
-        goal_revision=int(parsed["goal_revision"]),
-        bankroll_id=str(parsed["bankroll_id"]),
-        currency=str(parsed["currency"]),
-        goal_contract_sha256=str(parsed["goal_contract_sha256"]),
-        started_at=str(parsed["started_at"]),
-        opening_paperbook_sha256=str(parsed["opening_paperbook_sha256"]),
-        product_clock_authoritative=bool(parsed["product_clock_authoritative"]),
+        session_id=_str(parsed["session_id"]),
+        goal_id=_str(parsed["goal_id"]),
+        goal_revision=_int(parsed["goal_revision"]),
+        bankroll_id=_str(parsed["bankroll_id"]),
+        currency=_str(parsed["currency"]),
+        goal_contract_sha256=_str(parsed["goal_contract_sha256"]),
+        started_at=_str(parsed["started_at"]),
+        opening_paperbook_sha256=_str(parsed["opening_paperbook_sha256"]),
+        product_clock_authoritative=_bool(parsed["product_clock_authoritative"]),
         transition_id=str(parsed["transition_id"]),
         predecessor_session_id=(
             None
             if parsed["predecessor_session_id"] is None
-            else str(parsed["predecessor_session_id"])
+            else _str(parsed["predecessor_session_id"])
         ),
         predecessor_state_sha256=(
             None
             if parsed["predecessor_state_sha256"] is None
-            else str(parsed["predecessor_state_sha256"])
+            else _str(parsed["predecessor_state_sha256"])
         ),
         predecessor_ended_at=(
             None
             if parsed["predecessor_ended_at"] is None
-            else str(parsed["predecessor_ended_at"])
+            else _str(parsed["predecessor_ended_at"])
         ),
     )
     if parsed != canonical or raw != _canonical(canonical):

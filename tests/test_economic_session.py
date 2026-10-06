@@ -164,6 +164,56 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                 workspace_instance_id=store._authority.workspace_instance_id,
             )
 
+    def test_durable_decoder_uses_captured_builtin_authority(self) -> None:
+        import autosport.economic_session as economic_session
+
+        store = self._store()
+        expected = store.current()
+        raw = store.state_path.read_bytes()
+        workspace_instance_id = store._authority.workspace_instance_id
+        names = (
+            "type",
+            "dict",
+            "frozenset",
+            "str",
+            "int",
+            "bool",
+            "len",
+            "all",
+        )
+        missing = object()
+        originals = {
+            name: economic_session.__dict__.get(name, missing)
+            for name in names
+        }
+        calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("rebound builtin alias executed")
+
+        try:
+            for name in names:
+                setattr(economic_session, name, hostile)
+            payload = economic_session._decode_state(
+                raw,
+                workspace_instance_id=workspace_instance_id,
+            )
+        finally:
+            for name, original in originals.items():
+                if original is missing:
+                    economic_session.__dict__.pop(name, None)
+                else:
+                    setattr(economic_session, name, original)
+
+        self.assertEqual(payload["session_id"], expected.session_id)
+        self.assertEqual(
+            payload["goal_contract_sha256"],
+            expected.goal_contract_sha256,
+        )
+        self.assertEqual(calls, 0)
+
     def test_evidence_rejects_noncanonical_session_identifier(self) -> None:
         evidence = self._store().current()
 

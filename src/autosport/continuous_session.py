@@ -926,12 +926,17 @@ class _ContinuousSessionState:
         ),
         _schema: str = _CONTINUOUS_SESSION_SCHEMA,
         _version: int = _CONTINUOUS_SESSION_VERSION,
+        _instant_validator: Callable[[object, str], datetime] = _instant,
+        _instant_validator_code: object = _instant.__code__,
     ) -> dict[str, Any]:
         if (
             getattr(_strict_json_loads, "__code__", None) is not _strict_json_loads_code
             or getattr(_path_read_text, "__code__", None) is not _path_read_text_code
             or getattr(_validate_settlement_evidence, "__code__", None)
             is not _validate_settlement_evidence_code
+            or _instant is not _instant_validator
+            or getattr(_instant_validator, "__code__", None)
+            is not _instant_validator_code
         ):
             raise ContinuousSessionError(
                 "canonical session-reader code identity changed"
@@ -986,12 +991,12 @@ class _ContinuousSessionState:
             last_success_at = (
                 None
                 if raw["last_success_at"] is None
-                else _instant(raw["last_success_at"], "last_success_at")
+                else _instant_validator(raw["last_success_at"], "last_success_at")
             )
             last_full_refresh_at = (
                 None
                 if raw["last_full_refresh_at"] is None
-                else _instant(raw["last_full_refresh_at"], "last_full_refresh_at")
+                else _instant_validator(raw["last_full_refresh_at"], "last_full_refresh_at")
             )
             if (cycles == 0) != (last_success_at is None):
                 raise ContinuousSessionError(

@@ -888,6 +888,7 @@ del _RISK_TURNOVER_RESOLVE_BOUND
 _SESSION_SCHEMA: Final = "autosport.risk.paper-session-turnover-evidence"
 _SESSION_SCHEMA_VERSION: Final = 1
 _SESSION_SCOPE_CLASS: Final = "ECONOMIC_SESSION"
+_ECONOMIC_SESSION_REQUIRE_CURRENT = ProductEconomicSessionStore.require_current
 
 
 class PaperSessionTurnoverEvidenceError(RuntimeError):
@@ -1084,7 +1085,7 @@ class PaperSessionTurnoverResolver(metaclass=_PaperSessionTurnoverResolverMeta):
             _PAPERBOOK_VALIDATE_LOADED_STATE(durable_book)
             goal = _ECONOMIC_GOAL_LOAD(goal_store)
             provenance = provenance_for(goal)
-            current_session = ProductEconomicSessionStore.require_current(
+            current_session = _ECONOMIC_SESSION_REQUIRE_CURRENT(
                 session_store,
                 session_evidence,
             )

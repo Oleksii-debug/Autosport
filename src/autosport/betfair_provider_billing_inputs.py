@@ -79,6 +79,7 @@ def _build_capability():
     transaction_charge_description_prefix = (
         "Bet Txn Charge for over 5000 per hour on "
     )
+    statement_locale = "en"
 
     def required_text(value: object, field: str) -> str:
         if (
@@ -196,6 +197,7 @@ def _build_capability():
         statement_to: str | None,
     ) -> dict[str, object]:
         params: dict[str, object] = {
+            "locale": statement_locale,
             "fromRecord": from_record,
             "recordCount": record_count,
         }

@@ -137,7 +137,17 @@ def _decision_identity_bound(
     _, _, goal_id, revision, _, contract_sha256 = after
     return f"{goal_id}@{revision}:{contract_sha256}"
 
+def _bind_decision_identity(operation):
+    def bound(self: EconomicGoalProvenance) -> str:
+        return operation(self)
+
+    return property(bound)
+
+
 EconomicGoalProvenance.__post_init__ = _validate_provenance_bound
+EconomicGoalProvenance.decision_identity = _bind_decision_identity(
+    _decision_identity_bound
+)
 
 _CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
 _CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__

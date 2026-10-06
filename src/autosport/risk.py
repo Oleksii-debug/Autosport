@@ -37,13 +37,31 @@ def _make_locked_capital_authority():
 
     def calculate(ticket: PaperTicket) -> Decimal:
         require_calculator()
-        if type(ticket) is not PaperTicket or type(ticket.legs) is not tuple:
+        if (
+            type(ticket) is not PaperTicket
+            or type(ticket.stake) is not Decimal
+            or not ticket.stake.is_finite()
+            or ticket.stake < Decimal("0")
+            or type(ticket.legs) is not tuple
+            or not ticket.legs
+        ):
             raise ValueError("risk ticket must be canonical")
+        for leg in ticket.legs:
+            if (
+                type(leg) is not TicketLeg
+                or type(leg.locked_odds) is not Decimal
+                or not leg.locked_odds.is_finite()
+                or leg.locked_odds <= Decimal("1")
+                or leg.exchange_side not in {None, "back", "lay"}
+            ):
+                raise ValueError("risk ticket leg must be canonical")
         if any(leg.exchange_side == "lay" for leg in ticket.legs):
-            if len(ticket.legs) != 1 or type(ticket.legs[0]) is not TicketLeg:
+            if len(ticket.legs) != 1:
                 raise ValueError(
                     "risk LAY exposure requires exactly one canonical single-leg ticket"
                 )
+            if ticket.stake.is_zero():
+                return Decimal("0")
             return calculator(
                 stake=ticket.stake,
                 odds=ticket.legs[0].locked_odds,
@@ -56,7 +74,13 @@ def _make_locked_capital_authority():
         legs: tuple[TicketLeg, ...],
     ) -> Decimal:
         require_calculator()
-        if type(stake) is not Decimal or type(legs) is not tuple or not legs:
+        if (
+            type(stake) is not Decimal
+            or not stake.is_finite()
+            or stake < Decimal("0")
+            or type(legs) is not tuple
+            or not legs
+        ):
             raise ValueError("risk proposal exposure must use canonical stake and legs")
         for leg in legs:
             if (

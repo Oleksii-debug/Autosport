@@ -191,7 +191,7 @@ _OPERATOR_SECRET_PATTERNS: Final = (
     re.compile(r"(?i)\b(?:bearer|basic|token)\s+[A-Za-z0-9._~+/=-]+"),
     # URI userinfo commonly appears in database/proxy DSNs copied into incident
     # text. Remove the credential-bearing prefix while retaining host/path context.
-    re.compile(r"(?i)\b(?:[a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@"),
+    re.compile(r"(?i)\b(?:[a-z][a-z0-9+.-]*://)[^\s/@]+@"),
     re.compile(r'''(?i)\b(?:api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer[_-]?token|client[_-]?secret|secret[_-]?key|secret[_-]?access[_-]?key|session[_-]?token|security[_-]?token|access[_-]?key[_-]?id|password|passwd|pwd|token)\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)'''),
     re.compile(r"-----BEGIN [^\r\n-]*PRIVATE KEY-----[\s\S]*?-----END [^\r\n-]*PRIVATE KEY-----"),
     re.compile(r"\b(?:AKIA|ASIA|AIDA|AROA|AGPA|ANPA|ANVA|ASCA)[0-9A-Z]{16}\b"),

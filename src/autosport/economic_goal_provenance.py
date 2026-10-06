@@ -319,30 +319,19 @@ def _snapshot_provenance(
     _provenance_type=_CANONICAL_PROVENANCE_TYPE,
     _builder=_build_provenance,
     _error_type=EconomicGoalProvenanceError,
+    _snapshot=_canonical_provenance_snapshot,
 ) -> EconomicGoalProvenance:
     if type(provenance) is not _provenance_type:
         raise _error_type("provenance must be EconomicGoalProvenance")
+    values = _snapshot(provenance)
     return _builder(
-        schema=provenance.schema,
-        schema_version=provenance.schema_version,
-        goal_id=provenance.goal_id,
-        revision=provenance.revision,
-        bankroll_id=provenance.bankroll_id,
-        contract_sha256=provenance.contract_sha256,
+        schema=values[0],
+        schema_version=values[1],
+        goal_id=values[2],
+        revision=values[3],
+        bankroll_id=values[4],
+        contract_sha256=values[5],
     )
-
-def _decision_identity_bound(
-    self: EconomicGoalProvenance,
-    _snapshotter=_snapshot_provenance,
-) -> str:
-    snapshot = _snapshotter(self)
-    return (
-        f"{snapshot.goal_id}@{snapshot.revision}:"
-        f"{snapshot.contract_sha256}"
-    )
-
-
-EconomicGoalProvenance.decision_identity = property(_decision_identity_bound)
 
 
 def _canonical_json(
@@ -391,24 +380,35 @@ def _provenance_for_bound(
     _schema=PROVENANCE_SCHEMA,
     _schema_version=PROVENANCE_SCHEMA_VERSION,
     _goal_error=EconomicGoalContractError,
+    _contract_snapshot=_canonical_contract_snapshot,
 ) -> EconomicGoalProvenance:
     """Derive immutable provenance identity without introducing another authority."""
 
     if type(contract) is not _goal_type:
         raise _goal_error("provenance requires an EconomicGoalContract")
     _goal_validator(contract)
-    payload = _payload_encoder(contract)
-    snapshot = _payload_decoder(payload)
-    provenance = _provenance_builder(
+    before = _contract_snapshot(contract)
+    _goal_validator(contract)
+    after = _contract_snapshot(contract)
+    if before != after:
+        raise _goal_error("economic goal changed during provenance derivation")
+    values = dict(zip(_PROVENANCE_CONTRACT_FIELD_NAMES, after))
+    contract_sha256 = _contract_sha256(contract)
+    final_snapshot = _contract_snapshot(contract)
+    if after != final_snapshot:
+        raise _goal_error("economic goal changed during provenance derivation")
+    provenance = _provenance_type(
         schema=_schema,
         schema_version=_schema_version,
-        goal_id=snapshot.goal_id,
-        revision=snapshot.revision,
-        bankroll_id=snapshot.bankroll_id,
-        contract_sha256=_contract_sha256(snapshot),
+        goal_id=values["goal_id"],
+        revision=values["revision"],
+        bankroll_id=values["bankroll_id"],
+        contract_sha256=contract_sha256,
     )
     _provenance_validator(provenance)
     return provenance
+
+
 
 
 def _verify_provenance_bound(
@@ -424,6 +424,8 @@ def _verify_provenance_bound(
     _contract_sha256=_contract_sha256_bound,
     _goal_error=EconomicGoalContractError,
     _provenance_error=EconomicGoalProvenanceError,
+    _contract_snapshot=_canonical_contract_snapshot,
+    _provenance_snapshot=_canonical_provenance_snapshot,
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
@@ -431,18 +433,66 @@ def _verify_provenance_bound(
         raise _goal_error("provenance verification requires an EconomicGoalContract")
     if type(provenance) is not _provenance_type:
         raise _provenance_error("provenance must be EconomicGoalProvenance")
+
     _goal_validator(contract)
-    contract_snapshot = _payload_decoder(_payload_encoder(contract))
-    evidence = _provenance_snapshotter(provenance)
-    if evidence.goal_id != contract_snapshot.goal_id:
+    contract_before = _contract_snapshot(contract)
+    _provenance_validator(provenance)
+    provenance_before = _provenance_snapshot(provenance)
+
+    _goal_validator(contract)
+    contract_after = _contract_snapshot(contract)
+    _provenance_validator(provenance)
+    provenance_after = _provenance_snapshot(provenance)
+
+    if contract_before != contract_after:
+        raise _goal_error("economic goal changed during provenance verification")
+    if provenance_before != provenance_after:
+        raise _provenance_error("economic-goal provenance changed during verification")
+
+    _, _, goal_id, revision, bankroll_id = contract_after[:5]
+    proven_goal_id = provenance_after[2]
+    proven_revision = provenance_after[3]
+    proven_bankroll_id = provenance_after[4]
+    proven_contract_sha256 = provenance_after[5]
+
+    if proven_goal_id != goal_id:
         raise _provenance_error("provenance goal_id mismatch")
-    if evidence.revision != contract_snapshot.revision:
+    if proven_revision != revision:
         raise _provenance_error("provenance revision mismatch")
-    if evidence.bankroll_id != contract_snapshot.bankroll_id:
+    if proven_bankroll_id != bankroll_id:
         raise _provenance_error("provenance bankroll_id mismatch")
-    actual = _contract_sha256(contract_snapshot)
-    if evidence.contract_sha256 != actual:
+    actual = _contract_sha256(contract)
+    final_contract_snapshot = _contract_snapshot(contract)
+    if contract_after != final_contract_snapshot:
+        raise _goal_error("economic goal changed during provenance verification")
+    if proven_contract_sha256 != actual:
         raise _provenance_error("provenance contract_sha256 mismatch")
+
+
+# Public authority-bearing operations intentionally expose no injectable helper
+# parameters.  The closures capture the already-bound canonical implementations,
+# so rebinding module aliases cannot redirect dispatch and callers cannot supply
+# forged validator/hash/type dependencies through hidden keyword arguments.
+def _bind_contract_operation(operation):
+    def bound(contract: EconomicGoalContract):
+        return operation(contract)
+
+    return bound
+
+
+def _bind_provenance_verifier(operation):
+    def bound(
+        contract: EconomicGoalContract,
+        provenance: EconomicGoalProvenance,
+    ) -> None:
+        operation(contract, provenance)
+
+    return bound
+
+
+contract_sha256 = _bind_contract_operation(_contract_sha256_bound)
+provenance_for = _bind_contract_operation(_provenance_for_bound)
+verify_provenance = _bind_provenance_verifier(_verify_provenance_bound)
 
 
 def _make_provenance_authority(operation, label: str):

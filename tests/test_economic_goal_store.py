@@ -1309,3 +1309,24 @@ def test_owner_initialization_rejects_dangling_symlink_entry(tmp_path) -> None:
         store.initialize_owner(_goal())
 
     assert store.path.is_symlink()
+
+
+def test_payload_encoder_serializes_isolated_snapshot_after_source_mutation() -> None:
+    goal = _goal()
+    canonical_snapshotter = economic_goal_store_module._snapshot_economic_goal_contract
+
+    def snapshot_then_mutate(contract):
+        snapshot = canonical_snapshotter(contract)
+        object.__setattr__(goal, "max_stake_fraction", Decimal("0.99"))
+        object.__setattr__(goal, "blocked_sports", frozenset())
+        return snapshot
+
+    payload = economic_goal_store_module._BOUND_ECONOMIC_GOAL_TO_PAYLOAD(
+        goal,
+        _snapshotter=snapshot_then_mutate,
+    )
+    body = payload["contract"]
+    assert type(body) is dict
+    assert body["max_stake_fraction"] == "0.02"
+    assert body["blocked_sports"] == ["football"]
+    assert goal.max_stake_fraction == Decimal("0.99")

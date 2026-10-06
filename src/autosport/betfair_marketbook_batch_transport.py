@@ -821,7 +821,7 @@ _install_transport_result_authority()
 del _install_transport_result_authority
 
 
-def execute_market_book_batch_attempt(
+def _execute_market_book_batch_attempt(
     client: _base.BetfairReadOnlyClient,
     history: MarketBookAttemptHistory,
     *,
@@ -832,6 +832,10 @@ def execute_market_book_batch_attempt(
     scheduled_at: datetime,
     rate_gate: BetfairMarketBookPerMarketRateGate,
     concurrency_gate: BetfairMarketBookProjectionConcurrencyGate,
+    read_batch: Callable[..., MarketBookBatchTransportResult],
+    append_response: Callable[..., MarketBookAttemptHistory],
+    append_nonresponse: Callable[..., MarketBookAttemptHistory],
+    execution_type: type[MarketBookBatchAttemptExecution],
 ) -> MarketBookBatchAttemptExecution:
     """Execute one admitted read and durably classify its structural attempt truth."""
 
@@ -856,7 +860,7 @@ def execute_market_book_batch_attempt(
     _canonical_batch(frozen_history.plan, batch_id)
 
     try:
-        result = read_market_book_batch(
+        result = read_batch(
             client,
             frozen_history.plan,
             batch_id=batch_id,
@@ -867,46 +871,46 @@ def execute_market_book_batch_attempt(
         )
     except MarketBookBatchAdmissionError as exc:
         outcome = exc.outcome
-        updated = _append_nonresponse_attempt(
+        updated = append_nonresponse(
             frozen_history,
             batch_id=batch_id,
             attempt_id=attempt,
             required=required,
             outcome=outcome,
         )
-        return MarketBookBatchAttemptExecution(updated, outcome, None)
+        return execution_type(updated, outcome, None)
     except (MarketBookPostDispatchFailure, _transport.BetfairMarketBookTransportError):
         outcome = MarketBookAttemptOutcome.TRANSPORT_FAILURE
-        updated = _append_nonresponse_attempt(
+        updated = append_nonresponse(
             frozen_history,
             batch_id=batch_id,
             attempt_id=attempt,
             required=required,
             outcome=outcome,
         )
-        return MarketBookBatchAttemptExecution(updated, outcome, None)
+        return execution_type(updated, outcome, None)
     except _transport.BetfairMarketBookProviderError:
         outcome = MarketBookAttemptOutcome.PROVIDER_FAILURE
-        updated = _append_nonresponse_attempt(
+        updated = append_nonresponse(
             frozen_history,
             batch_id=batch_id,
             attempt_id=attempt,
             required=required,
             outcome=outcome,
         )
-        return MarketBookBatchAttemptExecution(updated, outcome, None)
+        return execution_type(updated, outcome, None)
     except _transport.BetfairMarketBookProtocolError:
         outcome = MarketBookAttemptOutcome.PARSE_FAILURE
-        updated = _append_nonresponse_attempt(
+        updated = append_nonresponse(
             frozen_history,
             batch_id=batch_id,
             attempt_id=attempt,
             required=required,
             outcome=outcome,
         )
-        return MarketBookBatchAttemptExecution(updated, outcome, None)
+        return execution_type(updated, outcome, None)
 
-    updated = append_market_book_transport_attempt(
+    updated = append_response(
         frozen_history,
         result,
         attempt_id=attempt,
@@ -917,4 +921,46 @@ def execute_market_book_batch_attempt(
         if result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
         else MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
     )
-    return MarketBookBatchAttemptExecution(updated, outcome, result)
+    return execution_type(updated, outcome, result)
+
+
+def _install_attempt_executor() -> None:
+    core = _execute_market_book_batch_attempt
+    canonical_read_batch = read_market_book_batch
+    canonical_append_response = append_market_book_transport_attempt
+    canonical_append_nonresponse = _append_nonresponse_attempt
+    canonical_execution_type = MarketBookBatchAttemptExecution
+
+    def execute_market_book_batch_attempt(
+        client: _base.BetfairReadOnlyClient,
+        history: MarketBookAttemptHistory,
+        *,
+        batch_id: str,
+        attempt_id: str,
+        required: bool,
+        request_id: str,
+        scheduled_at: datetime,
+        rate_gate: BetfairMarketBookPerMarketRateGate,
+        concurrency_gate: BetfairMarketBookProjectionConcurrencyGate,
+    ) -> MarketBookBatchAttemptExecution:
+        return core(
+            client,
+            history,
+            batch_id=batch_id,
+            attempt_id=attempt_id,
+            required=required,
+            request_id=request_id,
+            scheduled_at=scheduled_at,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+            read_batch=canonical_read_batch,
+            append_response=canonical_append_response,
+            append_nonresponse=canonical_append_nonresponse,
+            execution_type=canonical_execution_type,
+        )
+
+    globals()["execute_market_book_batch_attempt"] = execute_market_book_batch_attempt
+
+
+_install_attempt_executor()
+del _install_attempt_executor

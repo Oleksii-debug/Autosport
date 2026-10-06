@@ -714,6 +714,130 @@ def test_module_rebound_request_budget_cannot_replace_canonical_preflight(monkey
     assert len(transport.calls) == 1
 
 
+def test_attempt_executor_uses_sealed_read_delegate(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    called = False
+
+    def rebound_read(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("module rebound read must not replace executor delegate")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "read_market_book_batch",
+        rebound_read,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="attempt-sealed-read",
+        required=True,
+        request_id="sealed-read",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert called is False
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert len(transport.calls) == 1
+
+
+def test_attempt_executor_uses_sealed_response_append_delegate(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    called = False
+
+    def rebound_append(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("module rebound append must not replace executor delegate")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "append_market_book_transport_attempt",
+        rebound_append,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="attempt-sealed-append",
+        required=True,
+        request_id="sealed-append",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert called is False
+    assert execution.history.records[-1].attempt_id == "attempt-sealed-append"
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert len(transport.calls) == 1
+
+
+def test_attempt_executor_uses_sealed_nonresponse_and_execution_type(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    for _ in range(5):
+        assert rate_gate.reserve(("1.001",), scheduled_at=NOW).allowed is True
+    called_nonresponse = False
+    called_type = False
+
+    def rebound_nonresponse(*args, **kwargs):
+        nonlocal called_nonresponse
+        called_nonresponse = True
+        raise AssertionError("module rebound nonresponse append must not run")
+
+    def rebound_execution_type(*args, **kwargs):
+        nonlocal called_type
+        called_type = True
+        raise AssertionError("module rebound execution type must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "_append_nonresponse_attempt",
+        rebound_nonresponse,
+    )
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookBatchAttemptExecution",
+        rebound_execution_type,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="attempt-sealed-nonresponse",
+        required=True,
+        request_id="sealed-nonresponse",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert called_nonresponse is False
+    assert called_type is False
+    assert isinstance(execution, MarketBookBatchAttemptExecution)
+    assert execution.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert execution.history.required_gap_attempt_ids == (
+        "attempt-sealed-nonresponse",
+    )
+    assert transport.calls == []
+
+
 def test_invalid_client_fails_before_gate_mutation():
     plan = _plan()
     batch = plan.batches[0]

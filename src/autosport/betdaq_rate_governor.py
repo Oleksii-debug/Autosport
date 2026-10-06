@@ -51,6 +51,36 @@ _MIN_WINDOW_SECONDS: Final = 60.0
 _DEFAULT_COMBINED_PER_MINUTE: Final = 300
 _ANY_OTHER_RATE_POLICY_KEY: Final = "Any Other"
 _DEFAULT_ANY_OTHER_PER_MINUTE: Final = 100
+# Exact provider service operations without a stricter named CallsAndFees row.
+# They all consume ONE conservative shared Default Any Other=100/min axis.
+_ANY_OTHER_OPERATION_IDS: Final[tuple[str, ...]] = (
+    "CancelAllOrders",
+    "CancelAllOrdersOnMarket",
+    "CancelOrders",
+    "ChangeHeartbeatRegistration",
+    "DeregisterHeartbeat",
+    "GetAccountBalances",
+    "GetCurrentSelectionSequenceNumber",
+    "GetMarketInformation",
+    "GetOddsLadder",
+    "GetOrderDetails",
+    "GetSPEnabledMarketsInformation",
+    "ListAccountPostings",
+    "ListAccountPostingsById",
+    "ListBlacklistInformation",
+    "ListMarketWithdrawalHistory",
+    "ListSelectionsChangedSince",
+    "ListTaggedValues",
+    "ListTopLevelEvents",
+    "Pulse",
+    "RegisterHeartbeat",
+    "SuspendAllOrders",
+    "SuspendAllOrdersOnMarket",
+    "SuspendFromTrading",
+    "SuspendOrders",
+    "UnsuspendFromTrading",
+    "UnsuspendOrders",
+)
 # BETDAQ ListBlacklistInformation exposes RemainingMS as provider `int` milliseconds.
 # XML/WSDL `int` is the signed 32-bit domain; negative remaining time is invalid here.
 _BETDAQ_PROVIDER_INT_MAX: Final = 2_147_483_647
@@ -75,28 +105,25 @@ _OPERATION_TO_RATE_POLICY_KEY: Final[Mapping[str, str]] = MappingProxyType(
         "UpdateOrdersNoReceipt": "ChangeOrderNoReceipt",
         "GetEventSubTreeNoSelections": "GetEventSubTreeNoSelections",
         "GetEventSubTreeWithSelections": "GetEventSubTreeWithSelections",
-        "ListBlacklistInformation": _ANY_OTHER_RATE_POLICY_KEY,
         "ListBootstrapOrders": "ListBootstrapOrders",
         "GetPrices": "GetPrices",
-        "GetOddsLadder": _ANY_OTHER_RATE_POLICY_KEY,
         "ListOrdersChangedSince": "ListOrdersChangedSince",
         "ListSelectionTrades": "ListSelectionTrades",
+        **{
+            operation_id: _ANY_OTHER_RATE_POLICY_KEY
+            for operation_id in _ANY_OTHER_OPERATION_IDS
+        },
     }
 )
 _PROVIDER_API_NAME_TO_OPERATION_ID: Final[Mapping[str, str]] = MappingProxyType(
     {
-        "placeordersnoreceipt": "PlaceOrdersNoReceipt",
-        "placeorderswithreceipt": "PlaceOrdersWithReceipt",
-        "updateordersnoreceipt": "UpdateOrdersNoReceipt",
+        **{
+            operation_id.casefold(): operation_id
+            for operation_id in _OPERATION_TO_RATE_POLICY_KEY
+        },
+        # CallsAndFees retains the legacy rate-row label while SecureService
+        # exposes UpdateOrdersNoReceipt as the transport operation.
         "changeordernoreceipt": "UpdateOrdersNoReceipt",
-        "geteventsubtreenoselections": "GetEventSubTreeNoSelections",
-        "geteventsubtreewithselections": "GetEventSubTreeWithSelections",
-        "listblacklistinformation": "ListBlacklistInformation",
-        "listbootstraporders": "ListBootstrapOrders",
-        "getprices": "GetPrices",
-        "getoddsladder": "GetOddsLadder",
-        "listorderschangedsince": "ListOrdersChangedSince",
-        "listselectiontrades": "ListSelectionTrades",
     }
 )
 _POLICY_SOURCE_SHA256: Final = hashlib.sha256(
@@ -411,7 +438,7 @@ class BetdaqRatePolicy:
 
 def default_betdaq_rate_policy(
     *,
-    policy_revision: str = "betdaq-default-documented-v4",
+    policy_revision: str = "betdaq-default-documented-v5",
     safety_reserve_by_method: Mapping[str, int] | None = None,
     combined_safety_reserve: int = 0,
 ) -> BetdaqRatePolicy:

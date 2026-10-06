@@ -355,6 +355,16 @@ def test_json_decoder_ignores_rebound_parser_and_payload_decoder(monkeypatch) ->
 
 
 
+def test_store_ignores_rebound_canonical_filename(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(EconomicGoalStore, "FILE_NAME", "attacker.json")
+
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    assert (tmp_path / "economic_goal_contract.json").exists()
+    assert not (tmp_path / "attacker.json").exists()
+
+
 def test_store_captures_bound_path_method_witnesses(monkeypatch, tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
 

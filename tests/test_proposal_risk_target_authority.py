@@ -636,6 +636,28 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             "market-semantics-v1",
         )
 
+        records = JsonlDecisionLedger(
+            self.workspace / "decisions.jsonl"
+        ).verified_records()
+        target_records = [
+            record
+            for record in records
+            if record.action == "PROPOSAL_RISK_TARGET_PRECOMMIT"
+            and record.context_hash == issued.target_sha256
+        ]
+        self.assertEqual(len(target_records), 1)
+        durable_payload = target_records[0].payload
+        self.assertEqual(
+            durable_payload["schema"],
+            "autosport.proposal-risk-target-precommit.v2",
+        )
+        self.assertEqual(
+            durable_payload["candidate_contexts"][0]["legs"][0][
+                "market_semantics_id"
+            ],
+            "market-semantics-v1",
+        )
+
     def test_retry_is_idempotent_and_does_not_append_duplicate_target(self) -> None:
         first = self._issue()
         second = self._issue()

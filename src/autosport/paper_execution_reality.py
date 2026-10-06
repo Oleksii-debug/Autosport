@@ -310,6 +310,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             raise TypeError("recovery_decision must be exact RecoveryDecision")
         decimal_parser = _CANONICAL_DECIMAL_PARSER
         decimal_formatter = _CANONICAL_DECIMAL_TEXT_FORMATTER
+        derive_run_economics = _derive_run_economics
         if (
             decimal_parser is not _CANONICAL_DECIMAL_PARSER_IDENTITY
             or decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE
@@ -324,6 +325,14 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         ):
             raise PaperExecutionIntegrityError(
                 "PAPER Decimal formatter authority changed"
+            )
+        if (
+            derive_run_economics is not _CANONICAL_DERIVE_RUN_ECONOMICS
+            or derive_run_economics.__code__
+            is not _CANONICAL_DERIVE_RUN_ECONOMICS_CODE
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER run economics authority changed"
             )
         supplied_exposure = decimal_parser(
             worst_case_exposure,
@@ -360,7 +369,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     key=lambda item: item.sequence,
                 )
             )
-            derived = _derive_run_economics(tuple(action_ids_raw), attempts)
+            derived = derive_run_economics(tuple(action_ids_raw), attempts)
             if not derived.can_complete:
                 raise PaperExecutionStateError(
                     "run cannot complete before a terminal outcome or all actions ACCEPTED"
@@ -403,12 +412,21 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         observation_evidence_ids: Mapping[str, str],
     ) -> PaperExecutionRun | None:
         decimal_parser = _CANONICAL_DECIMAL_PARSER
+        derive_run_economics = _derive_run_economics
         if (
             decimal_parser is not _CANONICAL_DECIMAL_PARSER_IDENTITY
             or decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE
         ):
             raise PaperExecutionIntegrityError(
                 "PAPER Decimal parser authority changed"
+            )
+        if (
+            derive_run_economics is not _CANONICAL_DERIVE_RUN_ECONOMICS
+            or derive_run_economics.__code__
+            is not _CANONICAL_DERIVE_RUN_ECONOMICS_CODE
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER run economics authority changed"
             )
         events = self.events(run_id)
         if not events:
@@ -538,6 +556,20 @@ def _synthetic_attempt(
     started_at: str,
     suspended: bool,
 ) -> PaperLegAttempt:
+    decimal_add = _decimal_add_exact
+    decimal_subtract = _decimal_subtract_exact
+    decimal_scale = _decimal_scale_bps_exact
+    if (
+        decimal_add is not _CANONICAL_DECIMAL_ADD_EXACT
+        or decimal_add.__code__ is not _CANONICAL_DECIMAL_ADD_EXACT_CODE
+        or decimal_subtract is not _CANONICAL_DECIMAL_SUBTRACT_EXACT
+        or decimal_subtract.__code__ is not _CANONICAL_DECIMAL_SUBTRACT_EXACT_CODE
+        or decimal_scale is not _CANONICAL_DECIMAL_SCALE_BPS_EXACT
+        or decimal_scale.__code__ is not _CANONICAL_DECIMAL_SCALE_BPS_EXACT_CODE
+    ):
+        raise PaperExecutionIntegrityError(
+            "PAPER synthetic Decimal arithmetic authority changed"
+        )
     if action.side != "BACK":
         raise PaperExecutionStateError(
             "synthetic PAPER exposure model supports BACK only; non-BACK must use "
@@ -597,13 +629,13 @@ def _synthetic_attempt(
                     config.max_slippage_bps + 1,
                 )
             )
-            odds_margin = _decimal_subtract_exact(
+            odds_margin = decimal_subtract(
                 action.requested_odds,
                 _decimal_from_coefficient(1, 0),
             )
-            execution_odds = _decimal_add_exact(
+            execution_odds = decimal_add(
                 _decimal_from_coefficient(1, 0),
-                _decimal_scale_bps_exact(
+                decimal_scale(
                     odds_margin,
                     10_000 - slippage_bps,
                 ),

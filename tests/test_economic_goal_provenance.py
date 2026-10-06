@@ -160,3 +160,38 @@ def test_provenance_rejects_scalar_subclasses() -> None:
             bankroll_id="paper-main",
             contract_sha256="0" * 64,
         )
+
+
+def test_provenance_rejects_schema_subclass_before_comparison() -> None:
+    class TextSubclass(str):
+        comparisons = 0
+
+        def __eq__(self, other):
+            type(self).comparisons += 1
+            raise AssertionError("hostile comparison executed")
+
+    with pytest.raises(EconomicGoalProvenanceError, match="unsupported provenance schema"):
+        EconomicGoalProvenance(
+            schema=TextSubclass("autosport.economic_goal_provenance"),
+            schema_version=1,
+            goal_id="goal",
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
+        )
+    assert TextSubclass.comparisons == 0
+
+
+def test_provenance_operations_revalidate_post_construction_mutation() -> None:
+    goal = _goal()
+    provenance = provenance_for(goal)
+
+    object.__setattr__(goal, "max_stake_fraction", "0.01")
+    with pytest.raises(Exception):
+        contract_sha256(goal)
+
+    clean_goal = _goal()
+    clean_provenance = provenance_for(clean_goal)
+    object.__setattr__(clean_provenance, "revision", 0)
+    with pytest.raises(EconomicGoalProvenanceError):
+        verify_provenance(clean_goal, clean_provenance)

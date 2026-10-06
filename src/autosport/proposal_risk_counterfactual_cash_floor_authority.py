@@ -1192,6 +1192,7 @@ _HELPER_NAMES = (
     "_require_payoff",
     "_require_target",
     "_current_base_book",
+    "_target_capital_vector",
     "_open_target_stakes",
     "_member_cash_path",
     "_resolve_values",
@@ -1235,6 +1236,13 @@ def _require_dispatch() -> None:
         is not _PAYOFF_RESOLVER_CODE
         or resolve_product_proposal_risk_target is not _TARGET_RESOLVER
         or getattr(_TARGET_RESOLVER, "__code__", None) is not _TARGET_RESOLVER_CODE
+        or _candidate_tickets is not _TARGET_TICKET_RESOLVER
+        or getattr(_TARGET_TICKET_RESOLVER, "__code__", None)
+        is not _TARGET_TICKET_RESOLVER_CODE
+        or _risk_module._CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL
+        is not _RISK_LOCKED_CAPITAL_FOR_PROPOSAL
+        or getattr(_RISK_LOCKED_CAPITAL_FOR_PROPOSAL, "__code__", None)
+        is not _RISK_LOCKED_CAPITAL_FOR_PROPOSAL_CODE
         or PaperBook.__dict__.get("load") is not _BOOK_LOAD_DESCRIPTOR
         or _BOOK_LOAD_DESCRIPTOR.__func__ is not _BOOK_LOAD_FUNCTION
         or getattr(_BOOK_LOAD_FUNCTION, "__code__", None) is not _BOOK_LOAD_CODE

@@ -47,6 +47,33 @@ class SessionStoppedError(ContinuousSessionError):
     """Raised when work is attempted while the session is durably STOPPED."""
 
 
+def _validate_canonical_invalidation_buffer_state(
+    buffer: BoundedMirrorInvalidationBuffer,
+) -> None:
+    """Fail closed when the canonical invalidation buffer's internal truth is malformed."""
+    dirty = buffer._dirty
+    max_dirty_keys = buffer._max_dirty_keys
+    full_refresh_required = buffer._full_refresh_required
+    if (
+        type(dirty) is not dict
+        or type(max_dirty_keys) is not int
+        or max_dirty_keys <= 0
+        or type(full_refresh_required) is not bool
+        or len(dirty) > max_dirty_keys
+        or (full_refresh_required and bool(dirty))
+        or any(
+            type(key) is not tuple
+            or len(key) != 2
+            or any(type(part) is not str for part in key)
+            or value is not None
+            for key, value in dirty.items()
+        )
+    ):
+        raise ContinuousSessionError(
+            "canonical invalidation buffer state is invalid"
+        )
+
+
 _OUTCOME_AUTHORITY_UNSET: Final = object()
 
 
@@ -2132,6 +2159,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _full_refresh_getter_code: object = (
             BoundedMirrorInvalidationBuffer.full_refresh_required.fget.__code__
         ),
+        _invalidation_state_validator: Callable[
+            [BoundedMirrorInvalidationBuffer], None
+        ] = _validate_canonical_invalidation_buffer_state,
+        _invalidation_state_validator_code: object = (
+            _validate_canonical_invalidation_buffer_state.__code__
+        ),
         _replace: Callable[..., ContinuousSessionStatus] = replace,
         _replace_code: object = replace.__code__,
     ) -> ContinuousSessionStatus:
@@ -2142,6 +2175,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             or type(self.collector).status is not _collector_status_method
             or getattr(_collector_status_method, "__code__", None)
             is not _collector_status_method_code
+            or _validate_canonical_invalidation_buffer_state
+            is not _invalidation_state_validator
+            or getattr(_invalidation_state_validator, "__code__", None)
+            is not _invalidation_state_validator_code
             or replace is not _replace
             or getattr(_replace, "__code__", None) is not _replace_code
         ):
@@ -2158,6 +2195,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "canonical invalidation buffer subtype is not supported"
             )
         if type(invalidation_buffer) is _invalidation_buffer_type:
+            _invalidation_state_validator(invalidation_buffer)
             pending_descriptor = _invalidation_buffer_type.__dict__.get(
                 "pending_count"
             )
@@ -2888,6 +2926,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _force_full_refresh_code: object = (
             BoundedMirrorInvalidationBuffer.force_full_refresh.__code__
         ),
+        _invalidation_state_validator: Callable[
+            [BoundedMirrorInvalidationBuffer], None
+        ] = _validate_canonical_invalidation_buffer_state,
+        _invalidation_state_validator_code: object = (
+            _validate_canonical_invalidation_buffer_state.__code__
+        ),
     ) -> tuple[
         tuple[str, ...],
         bool,
@@ -2969,6 +3013,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "canonical invalidation buffer subtype is not supported"
             )
         if type(invalidation_buffer) is _invalidation_buffer_type:
+            if (
+                _validate_canonical_invalidation_buffer_state
+                is not _invalidation_state_validator
+                or getattr(_invalidation_state_validator, "__code__", None)
+                is not _invalidation_state_validator_code
+            ):
+                raise ContinuousSessionError(
+                    "canonical invalidation state validation authority changed"
+                )
+            _invalidation_state_validator(invalidation_buffer)
             pending_descriptor = _invalidation_buffer_type.__dict__.get(
                 "pending_count"
             )
@@ -3981,6 +4035,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _invalidation_full_refresh_getter_code: object = (
             BoundedMirrorInvalidationBuffer.full_refresh_required.fget.__code__
         ),
+        _invalidation_state_validator: Callable[
+            [BoundedMirrorInvalidationBuffer], None
+        ] = _validate_canonical_invalidation_buffer_state,
+        _invalidation_state_validator_code: object = (
+            _validate_canonical_invalidation_buffer_state.__code__
+        ),
         _lifecycle_type: type[ContinuousEventLifecycle] = ContinuousEventLifecycle,
         _lifecycle_register_eligible_method: Callable[..., tuple[str, ...]] = (
             ContinuousEventLifecycle.register_eligible
@@ -4051,6 +4111,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             or _dependency_index_type.matching_keys is not _matching_keys_reader
             or getattr(_matching_keys_reader, "__code__", None)
             is not _matching_keys_reader_code
+            or _validate_canonical_invalidation_buffer_state
+            is not _invalidation_state_validator
+            or getattr(_invalidation_state_validator, "__code__", None)
+            is not _invalidation_state_validator_code
         ):
             raise ContinuousSessionError(
                 "canonical coordinator running-fence authority changed"
@@ -4104,6 +4168,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         invalidation_buffer_lock: object | None = None
         invalidation_max_dirty_keys: object | None = None
         if type(invalidation_buffer) is _invalidation_buffer_type:
+            _invalidation_state_validator(invalidation_buffer)
             invalidation_buffer_mirror = invalidation_buffer._mirror
             invalidation_dirty_storage = invalidation_buffer._dirty
             invalidation_buffer_lock = invalidation_buffer._lock

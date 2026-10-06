@@ -588,3 +588,177 @@ def test_tick_rejects_reconcile_time_economic_path_rebinding_before_success() ->
         assert snapshot.cycles_completed == 0
         assert snapshot.last_error_code == "ContinuousSessionError"
 
+@pytest.mark.parametrize(
+    "delivered",
+    (
+        ["delta-1"],
+        ("",),
+        (" delta-1",),
+        (1,),
+    ),
+)
+def test_tick_rejects_invalid_desktop_delivery_ids(delivered: object) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return delivered
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="desktop consumer returned invalid delivered delta ids",
+        ):
+            coordinator.tick()
+
+
+@pytest.mark.parametrize(
+    ("max_batches", "max_items"),
+    (
+        (0, 250),
+        (True, 250),
+        (4, 0),
+        (4, True),
+    ),
+)
+def test_tick_rejects_invalid_invalidation_bounds(
+    max_batches: object,
+    max_items: object,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.max_invalidation_batches_per_tick = max_batches
+        coordinator.max_invalidation_items_per_batch = max_items
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous-session invalidation bounds are invalid",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_noncanonical_invalidation_batch() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class DerivedBatch(continuous_session.MirrorInvalidationBatch):
+            pass
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                return DerivedBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.invalidation_buffer = Buffer()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="invalidation buffer returned an invalid batch",
+        ):
+            coordinator.tick()
+
+
+@pytest.mark.parametrize(
+    "routed",
+    (
+        ["input-1"],
+        ("",),
+        (" input-1",),
+        (1,),
+    ),
+)
+def test_tick_rejects_invalid_affected_input_ids(routed: object) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class Index:
+            input_ids = ()
+
+            def affected_inputs(self, _batch):
+                return routed
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = Index()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency index returned invalid affected inputs",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_phantom_lifecycle_registration() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ("catalog:provider-a:event-1",)
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="lifecycle reported an input absent from dependency index",
+        ):
+            coordinator.tick()
+

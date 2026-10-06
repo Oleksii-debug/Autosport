@@ -4708,7 +4708,9 @@ class PersistentLiveDecisionLoop:
         | None = None,
     ) -> None:
         has_positive_stake = any(stake > 0 for stake in durable_plan.stakes)
-        execution_payload = existing.payload.get("paper_execution")
+        execution_payload = existing.to_dict()["payload"].get(
+            "paper_execution"
+        )
         if not has_positive_stake:
             if execution_payload is not None:
                 raise DecisionLedgerIntegrityError(

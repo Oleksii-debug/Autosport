@@ -818,7 +818,11 @@ class _ContinuousSessionState:
 
         updated = self._update(mutate)
         self._state = updated["state"]
-        if reason is not None and self._error_checkpoint_present():
+        # Any committed state transition supersedes an operational failure that
+        # was observed in the predecessor state.  Leaving that sidecar intact
+        # allows a later transition back to the same enum value to resurrect a
+        # stale failure because the bounded marker tuple becomes equal again.
+        if self._error_checkpoint_present():
             self._write_error_checkpoint(None)
 
     @staticmethod

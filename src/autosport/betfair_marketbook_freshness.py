@@ -32,6 +32,26 @@ class BetfairMarketBookFreshnessError(_base.BetfairReadOnlyError):
     """Raised when canonical MarketBook delay evidence cannot be obtained."""
 
 
+class BetfairMarketBookPreDispatchError(BetfairMarketBookFreshnessError):
+    """Raised before any MarketBook network dispatch can safely occur."""
+
+
+class BetfairMarketBookBudgetError(BetfairMarketBookPreDispatchError):
+    """Raised when exact listMarketBook wire params violate canonical request budget."""
+
+
+class BetfairMarketBookTransportError(BetfairMarketBookFreshnessError):
+    """Raised when a MarketBook network attempt cannot complete safely."""
+
+
+class BetfairMarketBookProtocolError(BetfairMarketBookFreshnessError):
+    """Raised when a MarketBook response is malformed or contradicts JSON-RPC."""
+
+
+class BetfairMarketBookProviderError(BetfairMarketBookFreshnessError):
+    """Raised when Betfair explicitly rejects listMarketBook through JSON-RPC."""
+
+
 @dataclass(frozen=True, slots=True)
 class _AuthenticatedApplicationKeyContext:
     """Secret-free provider metadata for the exact application key in use."""
@@ -343,11 +363,11 @@ def _market_book_request_budget(
     """Derive canonical request weight from the exact listMarketBook wire params."""
 
     if type(params) is not dict:
-        raise BetfairMarketBookFreshnessError(
+        raise BetfairMarketBookBudgetError(
             "listMarketBook params must be an exact mapping"
         )
     if "marketIds" not in params:
-        raise BetfairMarketBookFreshnessError(
+        raise BetfairMarketBookBudgetError(
             "listMarketBook params are missing marketIds"
         )
 
@@ -356,14 +376,14 @@ def _market_book_request_budget(
     best_prices_depth: object = None
     if price_projection is not None:
         if type(price_projection) is not dict:
-            raise BetfairMarketBookFreshnessError(
+            raise BetfairMarketBookBudgetError(
                 "priceProjection must be an exact mapping"
             )
         price_data = price_projection.get("priceData", ())
         overrides = price_projection.get("exBestOffersOverrides")
         if overrides is not None:
             if type(overrides) is not dict:
-                raise BetfairMarketBookFreshnessError(
+                raise BetfairMarketBookBudgetError(
                     "exBestOffersOverrides must be an exact mapping"
                 )
             best_prices_depth = overrides.get("bestPricesDepth")
@@ -377,11 +397,11 @@ def _market_book_request_budget(
         )
         allowed = budget.allowed
     except _request_budget.MarketBookBudgetError as exc:
-        raise BetfairMarketBookFreshnessError(
+        raise BetfairMarketBookBudgetError(
             "canonical listMarketBook request budget rejected the wire params"
         ) from exc
     if allowed is not True:
-        raise BetfairMarketBookFreshnessError(
+        raise BetfairMarketBookBudgetError(
             "listMarketBook request exceeds canonical Betfair request budget"
         )
     return budget
@@ -416,9 +436,9 @@ def _post_market_book_readonly(
 ) -> _MarketBookRpcResponse:
     """Canonical physical listMarketBook read boundary.
 
-    Request weight is always reconstructed from the exact wire-shaped params
-    before request-id allocation or transport.  Callers cannot supply or
-    override budget evidence.
+    Request weight is reconstructed from exact wire-shaped params before request-id
+    allocation or transport.  Failures after the physical POST boundary are typed so
+    retry/gap orchestration can preserve provider, transport, and protocol truth.
     """
 
     if type(client) is not _base.BetfairReadOnlyClient:
@@ -445,12 +465,12 @@ def _post_market_book_readonly(
             allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
-        raise BetfairMarketBookFreshnessError(
+        raise BetfairMarketBookPreDispatchError(
             "listMarketBook params must be canonical JSON data"
         ) from exc
 
     if client._credentials is not credentials:
-        raise BetfairMarketBookFreshnessError(
+        raise BetfairMarketBookPreDispatchError(
             "Betfair authenticated context changed before MarketBook transport"
         )
     headers = {
@@ -459,16 +479,25 @@ def _post_market_book_readonly(
         "X-Application": credentials.application_key,
         "X-Authentication": credentials.session_token,
     }
-    payload = client._transport.post(
-        _base.BETTING_JSON_RPC_ENDPOINT,
-        headers=headers,
-        body=body,
-        timeout_seconds=client._timeout_seconds,
-    )
+    try:
+        payload = client._transport.post(
+            _base.BETTING_JSON_RPC_ENDPOINT,
+            headers=headers,
+            body=body,
+            timeout_seconds=client._timeout_seconds,
+        )
+    except _base.BetfairReadOnlyError as exc:
+        raise BetfairMarketBookTransportError(str(exc)) from exc
+    except (TimeoutError, OSError) as exc:
+        raise BetfairMarketBookTransportError(
+            "Betfair MarketBook transport failed"
+        ) from exc
     if not isinstance(payload, bytes):
-        raise BetfairMarketBookFreshnessError("Betfair transport must return bytes")
+        raise BetfairMarketBookTransportError(
+            "Betfair transport must return bytes"
+        )
     if client._credentials is not credentials:
-        raise BetfairMarketBookFreshnessError(
+        raise BetfairMarketBookTransportError(
             "Betfair authenticated context changed during MarketBook transport"
         )
 
@@ -478,28 +507,37 @@ def _post_market_book_readonly(
         else client._observed_at()
     )
     source_payload_sha256 = sha256(payload).hexdigest()
-    decoded = _base._decode_json(payload)
-    envelope = _base._mapping(decoded, "JSON-RPC response")
+    try:
+        decoded = _base._decode_json(payload)
+        envelope = _base._mapping(decoded, "JSON-RPC response")
+    except _base.BetfairReadOnlyError as exc:
+        raise BetfairMarketBookProtocolError(str(exc)) from exc
+
     if envelope.get("jsonrpc") != "2.0":
-        raise BetfairMarketBookFreshnessError(
+        raise BetfairMarketBookProtocolError(
             "Betfair response has invalid jsonrpc version"
         )
     response_id = envelope.get("id")
     if type(response_id) is not int or response_id != request_id:
-        raise BetfairMarketBookFreshnessError(
+        raise BetfairMarketBookProtocolError(
             "Betfair response id does not match request id"
         )
     if "error" in envelope and envelope["error"] is not None:
         if "result" in envelope:
-            raise BetfairMarketBookFreshnessError(
+            raise BetfairMarketBookProtocolError(
                 "Betfair response contains both error and result"
             )
-        raise BetfairMarketBookFreshnessError(
+        raise BetfairMarketBookProviderError(
             "Betfair JSON-RPC returned an error for listMarketBook"
         )
     if "result" not in envelope:
-        raise BetfairMarketBookFreshnessError("Betfair response is missing result")
-    rows = tuple(_base._sequence(envelope["result"], "listMarketBook result"))
+        raise BetfairMarketBookProtocolError(
+            "Betfair response is missing result"
+        )
+    try:
+        rows = tuple(_base._sequence(envelope["result"], "listMarketBook result"))
+    except _base.BetfairReadOnlyError as exc:
+        raise BetfairMarketBookProtocolError(str(exc)) from exc
 
     application_context = (
         _authenticated_application_key_context(
@@ -510,8 +548,12 @@ def _post_market_book_readonly(
         else None
     )
     if client._credentials is not credentials:
-        raise BetfairMarketBookFreshnessError(
+        raise BetfairMarketBookTransportError(
             "Betfair authenticated context changed during MarketBook capture"
+        )
+    if network_origin and not _canonical_network_transport(client):
+        raise BetfairMarketBookTransportError(
+            "canonical Betfair transport changed during MarketBook capture"
         )
 
     return _MarketBookRpcResponse(

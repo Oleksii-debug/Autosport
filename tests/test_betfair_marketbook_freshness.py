@@ -476,3 +476,81 @@ def test_credential_rotation_between_capture_and_authority_registration_fails(mo
         match="changed before authority registration",
     ):
         read_market_book_delay(client, "1.234")
+
+
+def test_physical_boundary_classifies_transport_failure():
+    class RaisingTransport:
+        def post(self, url, *, headers, body, timeout_seconds):
+            raise betfair_account_readonly.BetfairReadOnlyError("network failed")
+
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        transport=RaisingTransport(),
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(
+        betfair_marketbook_freshness.BetfairMarketBookTransportError,
+        match="network failed",
+    ):
+        betfair_marketbook_freshness._post_market_book_readonly(
+            client,
+            params={"marketIds": ["1.234"]},
+            resolve_application_context=False,
+        )
+
+
+def test_physical_boundary_classifies_provider_rpc_error():
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "error": {"code": -32099, "message": "provider rejected"},
+            "id": 1,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    client, _ = _client(payload)
+
+    with pytest.raises(
+        betfair_marketbook_freshness.BetfairMarketBookProviderError,
+        match="JSON-RPC returned an error",
+    ):
+        betfair_marketbook_freshness._post_market_book_readonly(
+            client,
+            params={"marketIds": ["1.234"]},
+            resolve_application_context=False,
+        )
+
+
+def test_physical_boundary_classifies_malformed_provider_json():
+    client, _ = _client(b"{")
+
+    with pytest.raises(
+        betfair_marketbook_freshness.BetfairMarketBookProtocolError,
+        match="valid UTF-8 JSON",
+    ):
+        betfair_marketbook_freshness._post_market_book_readonly(
+            client,
+            params={"marketIds": ["1.234"]},
+            resolve_application_context=False,
+        )
+
+
+def test_physical_boundary_budget_denial_is_pre_dispatch():
+    market_ids = tuple(f"1.{index:03d}" for index in range(12))
+    client, transport = _client(_multi_payload(market_ids))
+
+    with pytest.raises(
+        betfair_marketbook_freshness.BetfairMarketBookBudgetError,
+        match="exceeds canonical Betfair request budget",
+    ):
+        betfair_marketbook_freshness._post_market_book_readonly(
+            client,
+            params={
+                "marketIds": list(market_ids),
+                "priceProjection": {"priceData": ["EX_ALL_OFFERS"]},
+            },
+            resolve_application_context=False,
+        )
+
+    assert transport.calls == []

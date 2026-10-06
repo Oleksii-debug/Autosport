@@ -2859,3 +2859,41 @@ def test_settlement_resolution_collection_normalizes_future_evidence_error() -> 
         assert "invalid settlement resolution" in str(exc)
     else:
         raise AssertionError("future settlement resolution was accepted")
+
+
+def test_collected_settlement_resolution_is_detached_from_authority_mutation() -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    original = _resolution(outcome="win")
+    coordinator = _resolution_coordinator((record,), (original,))
+
+    collected = coordinator._settlement_resolutions(as_of=_AT)
+    original.quote_outcomes["quote-1"] = "loss"
+
+    assert collected[0].quote_outcomes == {"quote-1": "win"}
+
+
+def test_learning_resolution_detach_does_not_mutate_canonical_tuple() -> None:
+    canonical = (_resolution(outcome="win"),)
+
+    detached = continuous_session.ContinuousSessionCoordinator._detached_settlement_resolutions(
+        canonical
+    )
+    detached[0].quote_outcomes["quote-1"] = "loss"
+
+    assert canonical[0].quote_outcomes == {"quote-1": "win"}
+    assert detached[0].quote_outcomes == {"quote-1": "loss"}
+
+
+def test_each_learning_resolution_detach_has_independent_quote_mapping() -> None:
+    canonical = (_resolution(outcome="win"),)
+
+    first = continuous_session.ContinuousSessionCoordinator._detached_settlement_resolutions(
+        canonical
+    )
+    second = continuous_session.ContinuousSessionCoordinator._detached_settlement_resolutions(
+        canonical
+    )
+    first[0].quote_outcomes["quote-1"] = "loss"
+
+    assert second[0].quote_outcomes == {"quote-1": "win"}
+    assert canonical[0].quote_outcomes == {"quote-1": "win"}

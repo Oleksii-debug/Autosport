@@ -848,8 +848,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             connection.execute("BEGIN IMMEDIATE")
             for raw_delta_id, event in events_by_delta_id.items():
                 delta_id = _text(raw_delta_id, "delta_id")
-                if not isinstance(event, MarketEvent):
-                    raise TypeError("legacy event payload must be MarketEvent")
+                if type(event) is not MarketEvent:
+                    raise TypeError("legacy event payload must be exact MarketEvent")
                 if event.source_id != source_id:
                     raise ValueError(
                         "legacy event payload source conflicts with migration authority"

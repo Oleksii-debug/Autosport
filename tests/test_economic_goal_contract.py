@@ -507,3 +507,25 @@ def test_transition_ignores_rebound_module_contract_type(monkeypatch) -> None:
 
     with pytest.raises(EconomicGoalContractError, match="must not increase"):
         validate_automatic_transition(previous, candidate)
+
+def test_contract_validation_ignores_rebound_snapshot_helper(monkeypatch) -> None:
+    goal = _goal()
+    called = False
+
+    def forged(*args: object, **kwargs: object) -> tuple[object, ...]:
+        nonlocal called
+        called = True
+        raise AssertionError("rebound contract snapshot helper executed")
+
+    monkeypatch.setattr(
+        economic_goal_module,
+        "_canonical_contract_snapshot",
+        forged,
+    )
+
+    EconomicGoalContract.__post_init__(goal)
+    validate_automatic_transition(
+        goal,
+        replace(goal, revision=2, max_stake_fraction=Decimal("0.01")),
+    )
+    assert called is False

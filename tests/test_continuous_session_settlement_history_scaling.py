@@ -82,6 +82,24 @@ def _settlement_digest_checks_for_unrelated_checkpoint(history_size: int) -> int
         return settlement_digest_checks
 
 
+def _settlement_digest_checks_for_repeated_failure(history_size: int) -> int:
+    with tempfile.TemporaryDirectory() as directory:
+        state = _state_with_history(Path(directory), history_size)
+        state.record_failure(code="FIRST_FAILURE")
+        original_sha256 = continuous_session._sha256
+        settlement_digest_checks = 0
+
+        def counting_sha256(value: object, field: str) -> str:
+            nonlocal settlement_digest_checks
+            if field.startswith("settlement_evidence "):
+                settlement_digest_checks += 1
+            return original_sha256(value, field)
+
+        with patch.object(continuous_session, "_sha256", counting_sha256):
+            state.record_failure(code="SECOND_FAILURE")
+        return settlement_digest_checks
+
+
 def _historical_receipts_rewritten_by_unrelated_checkpoint(history_size: int) -> int:
     with tempfile.TemporaryDirectory() as directory:
         state = _state_with_history(Path(directory), history_size)
@@ -100,6 +118,16 @@ def test_unrelated_checkpoint_validation_is_bounded_by_active_state_not_history(
     assert large <= small + _CONSTANT_SLACK, (
         "a no-new-settlement operational checkpoint revalidated work proportional "
         f"to historical settlement receipts: small={small}, large={large}"
+    )
+
+
+def test_repeated_failure_validation_stays_bounded_by_active_state() -> None:
+    small = _settlement_digest_checks_for_repeated_failure(_SMALL_HISTORY)
+    large = _settlement_digest_checks_for_repeated_failure(_LARGE_HISTORY)
+
+    assert large <= small + _CONSTANT_SLACK, (
+        "a repeated operational failure revalidated work proportional to "
+        f"historical settlement receipts: small={small}, large={large}"
     )
 
 

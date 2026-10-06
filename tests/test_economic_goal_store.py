@@ -648,10 +648,10 @@ def test_codec_ignores_rebound_size_bounds(monkeypatch) -> None:
 
 
 def test_store_path_exists_witness_ignores_rebound_error(monkeypatch, tmp_path) -> None:
-    def forged_stat(self):
-        raise PermissionError("stat blocked")
+    def forged_lstat(self):
+        raise PermissionError("lstat blocked")
 
-    monkeypatch.setattr(type(tmp_path), "stat", forged_stat)
+    monkeypatch.setattr(type(tmp_path), "lstat", forged_lstat)
     store = EconomicGoalStore(tmp_path)
     canonical_error = EconomicGoalContractError
     monkeypatch.setattr(economic_goal_store_module, "EconomicGoalContractError", RuntimeError)
@@ -1292,3 +1292,20 @@ def test_payload_decoder_revalidates_with_captured_contract_validator(monkeypatc
 
     with pytest.raises(EconomicGoalContractError, match="between 0 and 1"):
         economic_goal_from_payload(payload)
+
+
+def test_owner_initialization_rejects_dangling_symlink_entry(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    missing_target = tmp_path / "missing-target.json"
+    try:
+        store.path.symlink_to(missing_target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    assert store.path.is_symlink()
+    assert not store.path.exists()
+
+    with pytest.raises(EconomicGoalContractError, match="already exists"):
+        store.initialize_owner(_goal())
+
+    assert store.path.is_symlink()

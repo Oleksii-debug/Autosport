@@ -932,6 +932,7 @@ def build_autonomous_product_runtime(
             settlement_learning_handoff=settlement_learning_handoff,
             clock=resolved_clock,
             initial_bankroll=manifest.initial_bankroll,
+            prospective_collection=True,
         )
         runtime = AutonomousProductRuntime(
             workspace=root,

@@ -163,7 +163,23 @@ def test_each_ticket_opening_economic_identity_mutation_is_rejected(
         bankroll_id="paper-bankroll",
         currency="USD",
     )
-    object.__setattr__(ticket, field, replacement)
+
+    expected_balance = book.balance
+    if field == "stake":
+        # Keep visible lifecycle replay internally coherent so this case reaches
+        # the hidden product-issued opening witness instead of failing early.
+        object.__setattr__(ticket, field, replacement)
+        object.__setattr__(book, "balance", Decimal("89"))
+        expected_balance = Decimal("89")
+    elif field == "provider_source_ids":
+        object.__setattr__(ticket, field, replacement)
+        object.__setattr__(
+            ticket,
+            "provider_accounts",
+            (("another-provider", "account-2"),),
+        )
+    else:
+        object.__setattr__(ticket, field, replacement)
 
     with pytest.raises(
         ValueError,
@@ -171,8 +187,9 @@ def test_each_ticket_opening_economic_identity_mutation_is_rejected(
     ):
         _ = book.committed_stake
 
-    assert book.balance == Decimal("90")
+    assert book.balance == expected_balance
     assert ticket.status.value == "open"
+
 
 
 def test_leg_tuple_reordering_cannot_move_opening_authority() -> None:

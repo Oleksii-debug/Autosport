@@ -386,6 +386,10 @@ def append_market_book_transport_attempt(
         raise MarketBookBatchTransportError(
             "transport result is bound to another or mutated MarketBook plan"
         )
+    if history.plan.request_contract_id != result.request_contract_id:
+        raise MarketBookBatchTransportError(
+            "transport result is bound to another MarketBook request contract"
+        )
 
     _canonical_batch(history.plan, result.batch_id)
     previous = history.records[-1] if history.records else None
@@ -457,6 +461,15 @@ class MarketBookBatchAttemptExecution:
             raise TypeError("history must be an exact MarketBookAttemptHistory")
         if not isinstance(self.outcome, MarketBookAttemptOutcome):
             raise TypeError("outcome must be MarketBookAttemptOutcome")
+        if not self.history.records:
+            raise MarketBookBatchTransportError(
+                "attempt execution requires an appended canonical history record"
+            )
+        latest = self.history.records[-1]
+        if latest.outcome is not self.outcome:
+            raise MarketBookBatchTransportError(
+                "attempt execution outcome does not match latest history record"
+            )
         response_outcomes = {
             MarketBookAttemptOutcome.EXACT_RESPONSE,
             MarketBookAttemptOutcome.INCOMPLETE_RESPONSE,
@@ -467,6 +480,17 @@ class MarketBookBatchAttemptExecution:
                     "response outcome requires canonical transport result"
                 )
             self.result.assert_issued()
+            if latest.batch_id != self.result.batch_id:
+                raise MarketBookBatchTransportError(
+                    "attempt execution result is bound to another history batch"
+                )
+            if (
+                self.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+                and latest.exact_receipt != self.result.receipt
+            ):
+                raise MarketBookBatchTransportError(
+                    "attempt execution exact receipt does not match history"
+                )
         elif self.result is not None:
             raise MarketBookBatchTransportError(
                 "nonresponse outcome cannot carry transport result"

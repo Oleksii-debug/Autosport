@@ -162,6 +162,51 @@ def test_guard_ignores_rebound_builtin_dispatch(monkeypatch):
     assert accepted is not asserted
 
 
+def test_betfair_guard_ignores_rebound_builtin_dispatch_before_source_validation(
+    monkeypatch,
+):
+    attacker_called = False
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound Betfair guard builtin executed")
+
+    with canonical_applicable_cost_case() as case:
+        intent, plan, store, request, decision_at = case
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+
+        monkeypatch.setattr(guard, "type", hostile, raising=False)
+        monkeypatch.setattr(guard, "len", hostile, raising=False)
+        monkeypatch.setattr(guard, "enumerate", hostile, raising=False)
+        monkeypatch.setattr(guard, "zip", hostile, raising=False)
+
+        with pytest.raises(
+            cost.ProspectiveApplicableCostError,
+            match="slippage_evidence must be exact",
+        ):
+            guard.require_canonical_prospective_applicable_costs_with_betfair_standard_limit(
+                asserted,
+                intent=intent,
+                plan=plan,
+                router_store=store,
+                model_request_id=request.request_id,
+                decision_at=decision_at,
+                slippage_evidence=None,
+                ledger=None,
+                issuance_store=None,
+                runtime_profile=None,
+                execution_plan_id="source-validation-boundary",
+                action_id="source-validation-boundary",
+            )
+
+    assert attacker_called is False
+
+
 def test_guard_ignores_rebound_object_getattribute(monkeypatch):
     with canonical_applicable_cost_case() as case:
         canonical = _canonical(case)

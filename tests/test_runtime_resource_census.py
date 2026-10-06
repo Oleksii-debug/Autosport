@@ -521,5 +521,32 @@ class RuntimeResourceCoverageTruthTests(unittest.TestCase):
             )
 
 
+    @unittest.skipUnless(
+        __import__("sys").platform.startswith("linux"),
+        "Linux /proc fd ownership census",
+    )
+    def test_linux_workspace_fd_census_is_attributable_to_workspace(self) -> None:
+        namespace = self._runner_namespace()
+        census = namespace["_linux_workspace_open_handles"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            owned = root / "owned.txt"
+            owned.write_text("owned", encoding="utf-8")
+            external = Path(directory).parent / "autosport-external-fd-probe.txt"
+            external.write_text("external", encoding="utf-8")
+            try:
+                with owned.open("rb") as owned_handle, external.open("rb") as external_handle:
+                    self.assertIsNotNone(owned_handle)
+                    self.assertIsNotNone(external_handle)
+                    residuals = census(root)
+                    self.assertTrue(any("owned.txt" in item for item in residuals))
+                    self.assertFalse(any("autosport-external-fd-probe.txt" in item for item in residuals))
+
+                self.assertEqual(census(root), ())
+            finally:
+                external.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()

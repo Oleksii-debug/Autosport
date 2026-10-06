@@ -36,6 +36,11 @@ from .real_execution_ledger import (
     ExternalReceiptIdentity,
     RealExecutionLedger,
 )
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
 
 _SCHEMA = "autosport.betfair_settlement_revision"
 _SCHEMA_VERSION = 1
@@ -661,44 +666,34 @@ class BetfairSettlementRevisionStore:
 
     @contextmanager
     def _writer_lock(self) -> Iterator[None]:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self._writer_lock_path.open("a+b")
+        # Reuse the product's canonical crash-releasing, alias-safe workspace lock
+        # implementation while retaining this journal's existing sibling lock path.
+        lock = WorkspaceEconomicLock(self.path.parent)
+        lock.path = self._writer_lock_path
         try:
-            # Keep a stable lock file across restarts. The byte is only a lock
-            # target on Windows; ownership lives in the OS advisory lock, so a
-            # process crash cannot leave a permanently "owned" sentinel.
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"\0")
-                handle.flush()
-                os.fsync(handle.fileno())
-            handle.seek(0)
+            lock.acquire()
+        except WorkspaceEconomicLockBusyError as exc:
+            raise BetfairSettlementBusyError(
+                "settlement writer lock is held by another process"
+            ) from exc
+        except WorkspaceEconomicLockError as exc:
+            raise BetfairSettlementRevisionError(
+                "settlement writer lock integrity check failed"
+            ) from exc
+
+        try:
+            yield
+        except BaseException as primary:
+            # Preserve the settlement/provider failure if lock teardown also fails.
+            lock.__exit__(type(primary), primary, primary.__traceback__)
+            raise
+        else:
             try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(
-                        handle.fileno(),
-                        fcntl.LOCK_EX | fcntl.LOCK_NB,
-                    )
-            except OSError as exc:
-                raise BetfairSettlementBusyError(
-                    "settlement writer lock is held by another process"
+                lock.release()
+            except WorkspaceEconomicLockError as exc:
+                raise BetfairSettlementRevisionError(
+                    "settlement writer lock release failed"
                 ) from exc
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                if os.name == "nt":
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            handle.close()
 
     def _reload(self) -> None:
         previous_revisions = self._revisions

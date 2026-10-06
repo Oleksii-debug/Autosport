@@ -4247,7 +4247,7 @@ def test_success_generation_tombstone_fences_stale_failure_without_prior_sidecar
             raise AssertionError("stale pre-success instance returned a failure receipt")
 
 
-def test_projection_generation_tombstone_fences_stale_failure_publisher() -> None:
+def test_projection_checkpoint_identity_fences_stale_failure_publisher() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         stale = _state_with_history(root, _SMALL_HISTORY)
@@ -4263,17 +4263,12 @@ def test_projection_generation_tombstone_fences_stale_failure_publisher() -> Non
             backlog=False,
         )
 
-        canonical = json.loads(
-            (root / "continuous_session.json").read_text(encoding="utf-8")
-        )
-        sidecar = json.loads(
-            (root / "continuous_session.json.operational_error.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        assert sidecar["observed_generation"] == canonical["generation"]
-        assert sidecar["observed_state"] == canonical["state"]
-        assert sidecar["last_error_code"] is None
+        # Projection is not a successful session generation, so it must not
+        # manufacture a tombstone sidecar merely to fence a stale publisher.
+        # The canonical checkpoint identity token is the bounded stale-writer
+        # fence for projection-only checkpoint replacement.
+        error_path = root / "continuous_session.json.operational_error.json"
+        assert not error_path.exists()
 
         try:
             stale.record_failure(code="STALE_PRE_PROJECTION_FAILURE")

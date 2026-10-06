@@ -116,6 +116,8 @@ def test_terminal_invalidation_batch_observes_new_pending_backlog() -> None:
             )
 
     class Index:
+        input_ids = ()
+
         def affected_inputs(self, _batch):
             return ()
 
@@ -153,6 +155,8 @@ def test_terminal_invalidation_batch_observes_pending_full_refresh() -> None:
             )
 
     class Index:
+        input_ids = ()
+
         def affected_inputs(self, _batch):
             return ()
 
@@ -186,6 +190,8 @@ def test_last_has_more_remains_conservative_backlog_evidence() -> None:
             )
 
     class Index:
+        input_ids = ()
+
         def affected_inputs(self, _batch):
             return ()
 
@@ -228,6 +234,8 @@ def test_terminal_batch_rejects_noncanonical_backlog_state(
             )
 
     class Index:
+        input_ids = ()
+
         def affected_inputs(self, _batch):
             return ()
 
@@ -265,6 +273,8 @@ def test_invalidation_batch_rejects_duplicate_changed_keys() -> None:
             )
 
     class Index:
+        input_ids = ()
+
         def affected_inputs(self, _batch):
             return ()
 

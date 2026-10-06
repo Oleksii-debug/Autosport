@@ -21,7 +21,14 @@ from pathlib import Path
 from types import FunctionType
 from weakref import WeakKeyDictionary, ref
 
-from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
+from .domain import (
+    PaperTicket,
+    TicketLeg,
+    TicketStatus,
+    _canonical_semantic_identity,
+    utc_now_iso,
+)
+from .exchange_exposure import locked_capital_for_exchange_side
 from .forecasting import parse_iso_timestamp
 
 
@@ -29,11 +36,76 @@ _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
 _MAX_PAPER_DECIMAL_TEXT_CHARS = 512
-_PAPER_SNAPSHOT_SCHEMA_VERSION = 7
-_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
+_PAPER_SNAPSHOT_SCHEMA_VERSION = 8
+_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8})
 _SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
+
+
+def _make_paperbook_market_semantics_authority():
+    validator = _canonical_semantic_identity
+    validator_code = validator.__code__
+
+    def require(value: object, field_name: str) -> str:
+        if validator.__code__ is not validator_code:
+            raise ValueError("PaperBook market-semantics identity authority changed")
+        result = validator(value, field_name)
+        if validator.__code__ is not validator_code:
+            raise ValueError("PaperBook market-semantics identity authority changed")
+        return result
+
+    return require
+
+
+def _make_paperbook_locked_capital_authority():
+    calculator = locked_capital_for_exchange_side
+    calculator_code = calculator.__code__
+
+    def calculate(ticket: PaperTicket) -> Decimal:
+        if calculator.__code__ is not calculator_code:
+            raise ValueError("PaperBook exchange exposure authority changed")
+        if type(ticket) is not PaperTicket or type(ticket.legs) is not tuple:
+            raise ValueError("PaperBook ticket must be canonical before locked-capital calculation")
+        if len(ticket.legs) != 1:
+            if any(
+                type(leg) is TicketLeg
+                and leg.exchange_side == "lay"
+                for leg in ticket.legs
+            ):
+                raise ValueError(
+                    "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                )
+            result = calculator(
+                stake=ticket.stake,
+                odds=Decimal("2"),
+                exchange_side="BACK",
+            )
+            if result != ticket.stake:
+                raise ValueError("PaperBook BACK locked-capital authority changed")
+            return ticket.stake
+        leg = ticket.legs[0]
+        if type(leg) is not TicketLeg:
+            raise ValueError("PaperBook ticket leg must be canonical before locked-capital calculation")
+        side = leg.exchange_side
+        if side is None:
+            side = "back"
+        result = calculator(
+            stake=ticket.stake,
+            odds=leg.locked_odds,
+            exchange_side=side,
+        )
+        if calculator.__code__ is not calculator_code:
+            raise ValueError("PaperBook exchange exposure authority changed")
+        return result
+
+    return calculate
+
+
+_CANONICAL_MARKET_SEMANTICS_IDENTITY = _make_paperbook_market_semantics_authority()
+_CANONICAL_LOCKED_CAPITAL_FOR_TICKET = _make_paperbook_locked_capital_authority()
+del _make_paperbook_market_semantics_authority
+del _make_paperbook_locked_capital_authority
 
 
 def _make_paperbook_type_authority():
@@ -106,6 +178,7 @@ _CANONICAL_TICKET_LEG_OPENING_FIELDS: Final = (
     TicketLeg.__dict__["locked_odds"],
     TicketLeg.__dict__["sport"],
     TicketLeg.__dict__["exchange_side"],
+    TicketLeg.__dict__["market_semantics_id"],
 )
 
 
@@ -139,6 +212,7 @@ def _ticket_opening_commitment(
             locked_odds,
             sport,
             exchange_side,
+            market_semantics_id,
         ) = tuple(descriptor.__get__(leg, _leg_type) for descriptor in _leg_fields)
         leg_commitments.append(
             (
@@ -148,6 +222,7 @@ def _ticket_opening_commitment(
                 locked_odds,
                 sport,
                 exchange_side,
+                market_semantics_id,
             )
         )
 

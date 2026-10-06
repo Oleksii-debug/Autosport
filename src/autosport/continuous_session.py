@@ -2680,6 +2680,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _register_input_method_code: object = _register_input.__code__,
         _retire_input_method: Callable[..., None] = _retire_input,
         _retire_input_method_code: object = _retire_input.__code__,
+        _detached_settlement_resolutions_method: Callable[
+            [tuple[SettlementResolution, ...]],
+            tuple[SettlementResolution, ...],
+        ] = _detached_settlement_resolutions.__func__,
+        _detached_settlement_resolutions_method_code: object = (
+            _detached_settlement_resolutions.__func__.__code__
+        ),
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
     ) -> ContinuousTickResult:
@@ -2715,6 +2722,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             or type(self)._retire_input is not _retire_input_method
             or getattr(_retire_input_method, "__code__", None)
             is not _retire_input_method_code
+            or type(self)._detached_settlement_resolutions
+            is not _detached_settlement_resolutions_method
+            or getattr(
+                _detached_settlement_resolutions_method,
+                "__code__",
+                None,
+            )
+            is not _detached_settlement_resolutions_method_code
             or _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
@@ -2867,7 +2882,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     if prepare is not None:
                         prepare(
                             paper_book_path=self.paper_book_path,
-                            resolutions=self._detached_settlement_resolutions(
+                            resolutions=_detached_settlement_resolutions_method(
                                 resolutions
                             ),
                             at=now,
@@ -2876,7 +2891,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 if self.settlement_learning_handoff is not None:
                     self.settlement_learning_handoff.reconcile_after_settlement(
                         paper_book_path=self.paper_book_path,
-                        resolutions=self._detached_settlement_resolutions(
+                        resolutions=_detached_settlement_resolutions_method(
                             resolutions
                         ),
                         settled_ticket_ids=settled,

@@ -43,6 +43,20 @@ class RiskOfRuinEvidenceCanonicalityTests(unittest.TestCase):
         values.update(overrides)
         return values
 
+    @staticmethod
+    def _vector_kwargs(**overrides):
+        values = RiskOfRuinEvidenceCanonicalityTests._kwargs()
+        del values["candidate_sha256"]
+        del values["evaluated_stake"]
+        values.update(
+            {
+                "candidate_vector_sha256": "e" * 64,
+                "evaluated_stakes": (Decimal("10"),),
+            }
+        )
+        values.update(overrides)
+        return values
+
     def test_risk_of_ruin_rejects_signed_zero_upper_bound(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
@@ -56,8 +70,7 @@ class RiskOfRuinEvidenceCanonicalityTests(unittest.TestCase):
             "must not use a signed-zero Decimal representation",
         ):
             RiskOfRuinVectorEvidence(
-                **self._kwargs(
-                    candidate_vector_sha256="e" * 64,
+                **self._vector_kwargs(
                     evaluated_stakes=(Decimal("-0"), Decimal("10")),
                 )
             )
@@ -67,9 +80,8 @@ class RiskOfRuinEvidenceCanonicalityTests(unittest.TestCase):
             "must not use a signed-zero Decimal representation",
         ):
             RiskOfRuinVectorEvidence(
-                **self._kwargs(
+                **self._vector_kwargs(
                     candidate_vector_sha256="f" * 64,
-                    evaluated_stakes=(Decimal("10"),),
                     upper_bound=Decimal("-0"),
                 )
             )

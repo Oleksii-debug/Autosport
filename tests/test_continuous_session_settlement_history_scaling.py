@@ -354,3 +354,26 @@ def test_operational_checkpoint_serialized_bytes_remain_bounded() -> None:
             state._read_error_checkpoint()["last_error_code"]
             == "e" * state._MAX_ERROR_CODE_CHARS
         )
+
+
+def test_pathological_operational_checkpoint_nesting_is_normalized() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        error_path = root / "continuous_session.json.operational_error.json"
+        nested = (
+            '{"schema":"autosport.continuous_session.operational_error",'
+            '"schema_version":1,"session_id":"session-history-scaling",'
+            '"source_id":"provider-a","observed_cycles_completed":4,'
+            '"observed_last_success_at":"' + _AT + '",'
+            '"last_error_code":' + ("[" * 1500) + '"x"' + ("]" * 1500) + "}"
+        )
+        assert len(nested.encode("utf-8")) < state._MAX_ERROR_CHECKPOINT_BYTES
+        error_path.write_text(nested, encoding="utf-8")
+
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "cannot verify" in str(exc)
+        else:
+            raise AssertionError("pathological nested sidecar was accepted")

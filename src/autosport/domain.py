@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field
@@ -14,6 +15,8 @@ from typing import Any
 _MAX_SERIALIZED_METADATA_NESTING = 64
 _SEMANTIC_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._:/-")
 _RESERVED_SEMANTIC_IDENTITIES = frozenset({"unknown", "mixed", "unspecified"})
+_CANONICAL_SEMANTIC_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._:/-")
+_CANONICAL_RESERVED_SEMANTIC_IDENTITIES = frozenset({"unknown", "mixed", "unspecified"})
 _EXCHANGE_SIDES = frozenset({"back", "lay"})
 
 
@@ -43,23 +46,32 @@ def _require_utf8_encodable(value: str, field_name: str) -> str:
     return value
 
 
+_CANONICAL_REQUIRE_UTF8_ENCODABLE = _require_utf8_encodable
+
+
 def _canonical_string_value(value: object, field_name: str) -> str:
     if type(value) is not str or not value or value.strip() != value:
         raise ValueError(f"{field_name} must be a non-empty trimmed string")
-    return _require_utf8_encodable(value, field_name)
+    return _CANONICAL_REQUIRE_UTF8_ENCODABLE(value, field_name)
+
+
+_CANONICAL_STRING_VALUE = _canonical_string_value
 
 
 def _canonical_semantic_identity(value: object, field_name: str) -> str:
-    identity = _canonical_string_value(value, field_name)
+    identity = _CANONICAL_STRING_VALUE(value, field_name)
     if identity != identity.lower():
         raise ValueError(f"{field_name} must be a lowercase canonical semantic identity")
-    if any(character not in _SEMANTIC_ID_CHARS for character in identity):
+    if any(character not in _CANONICAL_SEMANTIC_ID_CHARS for character in identity):
         raise ValueError(
             f"{field_name} must use lowercase ASCII letters, digits, '.', '_', ':', '/', or '-' only"
         )
-    if identity in _RESERVED_SEMANTIC_IDENTITIES:
+    if identity in _CANONICAL_RESERVED_SEMANTIC_IDENTITIES:
         raise ValueError(f"{field_name} must not use reserved identity {identity!r}")
     return identity
+
+
+_CANONICAL_SEMANTIC_IDENTITY = _canonical_semantic_identity
 
 
 def _timezone_aware_iso8601_value(value: object, field_name: str) -> str:
@@ -131,7 +143,7 @@ def _encoded_sport_identity(kind: str, *components: object) -> str:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    token = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    token = _CANONICAL_SETTLEMENT_B64ENCODE(payload).decode("ascii").rstrip("=")
     return f"sport-v2-{token}"
 
 
@@ -189,6 +201,39 @@ def _quote_identity(
         market_id,
         selection_id,
     )
+
+
+def _market_settlement_key(
+    quote_key: object,
+    market_semantics_id: object,
+    _utf8=_CANONICAL_REQUIRE_UTF8_ENCODABLE,
+    _semantic_identity=_CANONICAL_SEMANTIC_IDENTITY,
+    _json_dumps=json.dumps,
+    _sha256=hashlib.sha256,
+) -> str:
+    if type(quote_key) is not str or not quote_key:
+        raise ValueError("settlement quote_key must be non-empty canonical text")
+    _utf8(quote_key, "settlement quote_key")
+    if market_semantics_id is None:
+        return quote_key
+    semantics = _semantic_identity(
+        market_semantics_id,
+        "market_semantics_id",
+    )
+    payload = _json_dumps(
+        ["market-settlement-v1", quote_key, semantics],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "market-semantics-v1-" + _sha256(payload).hexdigest()
+
+_CANONICAL_SETTLEMENT_JSON_DUMPS = json.dumps
+_CANONICAL_SETTLEMENT_B64ENCODE = base64.urlsafe_b64encode
+_CANONICAL_SETTLEMENT_SHA256 = hashlib.sha256
+_CANONICAL_SETTLEMENT_SEMANTIC_IDENTITY = _CANONICAL_SEMANTIC_IDENTITY
+_CANONICAL_SETTLEMENT_UTF8 = _CANONICAL_REQUIRE_UTF8_ENCODABLE
+_CANONICAL_MARKET_SETTLEMENT_KEY = _market_settlement_key
 
 
 def _optional_canonical_timestamp(raw: dict[str, Any], field_name: str) -> str | None:
@@ -334,6 +379,16 @@ class MarketEvent:
         )
 
     @property
+    def settlement_key(
+        self,
+        _key=_CANONICAL_MARKET_SETTLEMENT_KEY,
+    ) -> str:
+        return _key(
+            self.quote_key,
+            self.market_semantics_id,
+        )
+
+    @property
     def dedupe_key(self) -> str:
         if self.exchange_side is not None:
             canonical_side = _canonical_exchange_side(self.exchange_side)
@@ -457,12 +512,18 @@ class TicketLeg:
     locked_odds: Decimal
     sport: str | None = None
     exchange_side: str | None = None
+    market_semantics_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.sport is not None:
             _canonical_sport_value(self.sport)
         if self.exchange_side is not None:
             _canonical_exchange_side(self.exchange_side)
+        if self.market_semantics_id is not None:
+            _CANONICAL_SEMANTIC_IDENTITY(
+                self.market_semantics_id,
+                "market_semantics_id",
+            )
 
     @property
     def quote_key(self) -> str:
@@ -473,6 +534,22 @@ class TicketLeg:
             self.sport,
             self.exchange_side,
         )
+
+    @property
+    def settlement_key(
+        self,
+        _key=_CANONICAL_MARKET_SETTLEMENT_KEY,
+    ) -> str:
+        return _key(
+            self.quote_key,
+            self.market_semantics_id,
+        )
+
+    @property
+    def settlement_identity(self) -> tuple[str, str | None]:
+        """Exact quote plus canonical decision-time market-rule identity."""
+
+        return self.quote_key, self.market_semantics_id
 
 
 @dataclass(slots=True)

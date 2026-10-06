@@ -173,6 +173,7 @@ _CANONICAL_STORE_FILE_NAME: Final = "economic_goal_contract.json"
 
 _STORE_BINDINGS_BY_ID: Final = {}
 
+
 def _resolve_store_binding(
     store: object,
     _bindings=_STORE_BINDINGS_BY_ID,
@@ -370,8 +371,16 @@ class EconomicGoalStore:
         path = workspace_path / _file_name
         self.workspace = workspace_path
         self.path = path
-        _bindings[id(self)] = (
-            _weakref_ref(self),
+        store_id = id(self)
+
+        def release_binding(store_ref) -> None:
+            entry = _bindings.get(store_id)
+            if entry is not None and entry[0] is store_ref:
+                _bindings.pop(store_id, None)
+
+        store_ref = _weakref_ref(self, release_binding)
+        _bindings[store_id] = (
+            store_ref,
             workspace_path,
             path,
             path.exists,

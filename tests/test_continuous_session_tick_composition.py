@@ -6571,14 +6571,19 @@ def test_tick_reports_post_drain_invalidation_backlog(
         coordinator.lifecycle = Lifecycle()
 
         result = coordinator.tick()
+        status = coordinator.status()
 
         assert result.invalidation_backlog is True
         if injection_mode == "dirty":
             assert buffer.pending_count == 1
             assert buffer.full_refresh_required is False
+            assert status.invalidation_pending_count == 1
+            assert status.invalidation_full_refresh_required is False
         else:
             assert buffer.pending_count == 0
             assert buffer.full_refresh_required is True
+            assert status.invalidation_pending_count == 0
+            assert status.invalidation_full_refresh_required is True
 
 
 def test_tick_reports_invalidation_added_during_settlement_reconciliation() -> None:
@@ -6615,7 +6620,10 @@ def test_tick_reports_invalidation_added_during_settlement_reconciliation() -> N
         coordinator.settlement_learning_handoff = Handoff()
 
         result = coordinator.tick()
+        status = coordinator.status()
 
         assert result.invalidation_backlog is True
         assert buffer.pending_count == 1
         assert buffer.full_refresh_required is False
+        assert status.invalidation_pending_count == 1
+        assert status.invalidation_full_refresh_required is False

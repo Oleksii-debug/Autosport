@@ -1686,6 +1686,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             return ()
         resolutions: list[SettlementResolution] = []
         evidence_by_id: dict[str, SettlementResolution] = {}
+        outcome_by_settlement: dict[tuple[str, str], dict[str, str]] = {}
         for record in self.lifecycle.records():
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
                 continue
@@ -1733,6 +1734,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 resolution,
                 quote_outcomes=dict(resolution.quote_outcomes),
             )
+            settlement_key = (
+                resolution.event_identity,
+                resolution.settlement_ref,
+            )
+            existing_outcomes = outcome_by_settlement.get(settlement_key)
+            if (
+                existing_outcomes is not None
+                and existing_outcomes != resolution.quote_outcomes
+            ):
+                raise ContinuousSessionError(
+                    "outcome authority returned conflicting settlement outcomes"
+                )
+            outcome_by_settlement.setdefault(
+                settlement_key,
+                dict(resolution.quote_outcomes),
+            )
             existing = evidence_by_id.get(resolution.evidence_id)
             if existing is not None:
                 if existing != resolution:
@@ -1778,11 +1795,28 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         if type(resolutions) is not tuple:
             raise TypeError("resolutions must be an exact tuple")
         unique: dict[str, SettlementResolution] = {}
+        outcome_by_settlement: dict[tuple[str, str], dict[str, str]] = {}
         for resolution in resolutions:
             if type(resolution) is not SettlementResolution:
                 raise ContinuousSessionError(
                     "settlement consumer requires exact SettlementResolution values"
                 )
+            settlement_key = (
+                resolution.event_identity,
+                resolution.settlement_ref,
+            )
+            existing_outcomes = outcome_by_settlement.get(settlement_key)
+            if (
+                existing_outcomes is not None
+                and existing_outcomes != resolution.quote_outcomes
+            ):
+                raise ContinuousSessionError(
+                    "settlement consumer received conflicting settlement outcomes"
+                )
+            outcome_by_settlement.setdefault(
+                settlement_key,
+                dict(resolution.quote_outcomes),
+            )
             existing = unique.get(resolution.evidence_id)
             if existing is not None:
                 if existing != resolution:

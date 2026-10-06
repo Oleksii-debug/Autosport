@@ -75,7 +75,7 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
     def test_oversized_decimal_input_text_is_rejected_before_decimal_parse(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
-            "must be a finite Decimal",
+            "decimal input text exceeds resource limit",
         ):
             evidence(odds="1" * 8193)
 
@@ -84,7 +84,7 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "must be a finite Decimal",
+            "decimal integer input exceeds resource limit",
         ):
             legacy._decimal(huge, "value")
 

@@ -309,6 +309,43 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                         path_type.resolve = original_resolve
 
 
+    def test_lock_lifecycle_rebinding_fails_before_session_io(self) -> None:
+        import autosport.economic_session as economic_session
+
+        lifecycle = (
+            ("__new__", lambda _lock, *_args: AssertionError("hostile lock __new__ executed")),
+            ("__init__", lambda _lock, *_args: AssertionError("hostile lock __init__ executed")),
+            ("__enter__", lambda _lock: AssertionError("hostile lock __enter__ executed")),
+            ("__exit__", lambda _lock, *_args: AssertionError("hostile lock __exit__ executed")),
+            ("acquire", lambda _lock: AssertionError("hostile lock acquire executed")),
+            ("release", lambda _lock: AssertionError("hostile lock release executed")),
+        )
+
+        for method_name, factory in lifecycle:
+            with self.subTest(method=method_name):
+                store = self._store()
+                store.current()
+                lock_type = economic_session._WORKSPACE_LOCK_TYPE
+                original = getattr(lock_type, method_name)
+
+                def hostile(*_args, _factory=factory, **_kwargs):
+                    error = _factory(None)
+                    raise error
+
+                try:
+                    if method_name == "__new__":
+                        setattr(lock_type, method_name, staticmethod(hostile))
+                    else:
+                        setattr(lock_type, method_name, hostile)
+
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.current()
+                finally:
+                    setattr(lock_type, method_name, original)
+
     def test_instance_configuration_rebinding_fails_closed(self) -> None:
         store = self._store()
         store.current()

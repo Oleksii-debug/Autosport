@@ -963,3 +963,83 @@ def test_status_rejects_rebound_truth_authority(
         ):
             coordinator.status()
 
+def test_source_projection_refresh_ignores_instance_shadowed_state_dispatch() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _, state = _state(root)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.collector = type(
+            "CollectorStub",
+            (),
+            {
+                "source_id": "provider-a",
+                "config": type("ConfigStub", (), {"max_items": 1})(),
+                "delta_store": type(
+                    "DeltaStoreStub",
+                    (),
+                    {
+                        "deltas_after_commit": lambda _self, **_kwargs: (),
+                    },
+                )(),
+            },
+        )()
+
+        def attacker_snapshot() -> object:
+            raise AssertionError("instance-shadowed projection snapshot executed")
+
+        def attacker_projection(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("instance-shadowed projection publisher executed")
+
+        state.snapshot = attacker_snapshot  # type: ignore[method-assign]
+        state.record_source_projection = attacker_projection  # type: ignore[method-assign]
+
+        snapshot = coordinator._refresh_source_state_projection()
+        assert snapshot.source_state_delta_id is None
+
+
+@pytest.mark.parametrize("method_name", ("snapshot", "record_source_projection"))
+def test_source_projection_refresh_rejects_class_rebound_state_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _, state = _state(root)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.collector = type(
+            "CollectorStub",
+            (),
+            {
+                "source_id": "provider-a",
+                "config": type("ConfigStub", (), {"max_items": 1})(),
+                "delta_store": type(
+                    "DeltaStoreStub",
+                    (),
+                    {
+                        "deltas_after_commit": lambda _self, **_kwargs: (),
+                    },
+                )(),
+            },
+        )()
+
+        def attacker(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("class-rebound projection state authority executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            method_name,
+            attacker,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical source-projection coordinator authority changed",
+        ):
+            coordinator._refresh_source_state_projection()
+

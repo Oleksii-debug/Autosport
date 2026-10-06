@@ -1201,10 +1201,9 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "source-state projection backlog requires at least one delta"
             )
-        seen_delta_ids: set[str] = set()
+        seen_deltas: dict[str, CollectorDelta] = {}
         previous_epoch: str | None = None
         previous_position: int | None = None
-        previous_delta: CollectorDelta | None = None
         for delta in deltas:
             if type(delta) is not CollectorDelta:
                 raise TypeError("deltas must contain exact CollectorDelta values")
@@ -1213,41 +1212,50 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "source-state projection delta belongs to another source"
                 )
-            if delta.delta_id in seen_delta_ids:
+            if delta.delta_id in seen_deltas:
                 raise ContinuousSessionError(
                     "source-state projection delta ids must be unique"
                 )
-            if (
-                previous_delta is None
-                and delta.revision_of is not None
-                and expected_after_delta_id is not _EXPECTED_PROJECTION_UNSET
-                and delta.revision_of != expected_after_delta_id
-            ):
-                raise ContinuousSessionError(
-                    "first source-state projection revision must target the expected predecessor"
-                )
-            seen_delta_ids.add(delta.delta_id)
+
+            # deltas_after_commit() is an append/commit-order transport. A lawful
+            # correction can therefore arrive after newer source positions and
+            # legitimately move the projected cursor position backwards. Only an
+            # unqualified non-revision regression is invalid here; revision
+            # ancestry itself remains the canonical CollectorDeltaStore authority.
             if previous_epoch == delta.stream_epoch and previous_position is not None:
-                if delta.cursor_position < previous_position:
+                if delta.cursor_position < previous_position and delta.revision_of is None:
                     raise ContinuousSessionError(
                         "source-state projection position moved backwards within an epoch"
                     )
-                if delta.cursor_position == previous_position:
-                    if delta.revision_of is None:
+                if delta.cursor_position == previous_position and delta.revision_of is None:
+                    raise ContinuousSessionError(
+                        "equal source-state projection position requires a revision"
+                    )
+
+            # When the revised predecessor is present in this same transport
+            # batch, preserve the collector's exact local ancestry invariants.
+            # A predecessor from an earlier batch cannot be reconstructed from
+            # the session checkpoint alone and must not be confused with the
+            # transport predecessor (expected_after_delta_id).
+            if delta.revision_of is not None:
+                revised = seen_deltas.get(delta.revision_of)
+                if revised is not None:
+                    if revised.stream_epoch != delta.stream_epoch:
                         raise ContinuousSessionError(
-                            "equal source-state projection position requires a revision"
+                            "source-state projection revision epoch does not match predecessor"
                         )
-                    if previous_delta is None or delta.revision_of != previous_delta.delta_id:
+                    if revised.cursor_position != delta.cursor_position:
                         raise ContinuousSessionError(
-                            "equal source-state projection revision must target the previous delta"
+                            "source-state projection revision position does not match predecessor"
                         )
-                    if delta.revision_number != previous_delta.revision_number + 1:
+                    if delta.revision_number != revised.revision_number + 1:
                         raise ContinuousSessionError(
-                            "equal source-state projection revision_number must advance exactly one step"
+                            "source-state projection revision_number must advance exactly one step"
                         )
+
+            seen_deltas[delta.delta_id] = delta
             previous_epoch = delta.stream_epoch
             previous_position = delta.cursor_position
-            previous_delta = delta
 
         def mutate(raw: dict[str, Any]) -> bool:
             if (

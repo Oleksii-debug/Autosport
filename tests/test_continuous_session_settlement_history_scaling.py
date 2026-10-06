@@ -3042,8 +3042,6 @@ def test_provider_unavailable_tick_uses_bounded_failure_publication() -> None:
             (),
             {"run_cycle": lambda _self: ProviderUnavailableCycle()},
         )()
-        coordinator._require_running = lambda: None
-
         def forbidden_reader():
             raise AssertionError(
                 "provider-unavailable tick must not read the full settlement history"
@@ -4276,3 +4274,54 @@ def test_projection_generation_tombstone_fences_stale_failure_publisher() -> Non
         else:
             raise AssertionError("stale pre-projection instance returned a failure receipt")
 
+
+
+def test_bounded_running_guard_refreshes_external_pause_state() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        stale = _state_with_history(root, _LARGE_HISTORY)
+        current = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        current.set_state(
+            continuous_session.SessionState.PAUSED,
+            reason="OPERATOR_PAUSE",
+        )
+
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = stale
+
+        try:
+            coordinator._require_running()
+        except continuous_session.SessionPausedError:
+            pass
+        else:
+            raise AssertionError(
+                "bounded running guard ignored an external durable PAUSE"
+            )
+
+        assert stale._state == continuous_session.SessionState.PAUSED.value
+        assert stale._generation == current.snapshot().cycles_completed * 0 + 1
+
+
+def test_bounded_running_guard_skips_full_history_when_checkpoint_unchanged() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _LARGE_HISTORY)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+
+        def forbidden_reader():
+            raise AssertionError(
+                "unchanged running guard must not read retained settlement history"
+            )
+
+        with patch.object(state, "_read", forbidden_reader):
+            coordinator._require_running()

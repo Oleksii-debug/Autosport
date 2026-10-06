@@ -485,6 +485,8 @@ def _read_regular_bytes(
         descriptor = _open(path)
     except OSError as exc:
         raise EconomicSessionIntegrityError(f"cannot safely open {label}") from exc
+
+    primary_error: BaseException | None = None
     try:
         opened = _fstat(descriptor)
         if (
@@ -522,8 +524,24 @@ def _read_regular_bytes(
         ):
             raise EconomicSessionIntegrityError(f"{label} changed while being read")
         return b"".join(chunks)
+    except EconomicSessionIntegrityError as exc:
+        primary_error = exc
+        raise
+    except OSError as exc:
+        wrapped = EconomicSessionIntegrityError(f"cannot safely read {label}")
+        primary_error = wrapped
+        raise wrapped from exc
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
-        _close(descriptor)
+        try:
+            _close(descriptor)
+        except OSError as exc:
+            if primary_error is None:
+                raise EconomicSessionIntegrityError(
+                    f"cannot close {label} descriptor"
+                ) from exc
 
 
 def _opening_paperbook_sha256(

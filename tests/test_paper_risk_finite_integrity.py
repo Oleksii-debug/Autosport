@@ -2,6 +2,7 @@ import unittest
 from decimal import Decimal, localcontext
 
 from autosport.domain import TicketLeg
+import autosport.risk as risk_module
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
 
@@ -261,6 +262,54 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         self.assertEqual(policy.max_committed_fraction, Decimal("0.90"))
         self.assertEqual(policy.minimum_cash_reserve_fraction, Decimal("0.10"))
         self.assertTrue(policy.evaluate(PaperBook("100"), "10").allowed)
+
+
+
+    def test_open_lay_uses_liability_for_committed_risk_exposure(self) -> None:
+        book = PaperBook("100")
+        lay_leg = TicketLeg(
+            "event-1",
+            "market-1",
+            "selection-1",
+            Decimal("3.00"),
+            exchange_side="lay",
+            market_semantics_id="exchange.match.odds.v1",
+        )
+        book.open_ticket([lay_leg], "10", placed_at="2026-10-06T00:00:00+00:00")
+
+        state = self._permissive_policy()._book_state(book)
+
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(state[1], Decimal("80"))
+        self.assertEqual(state[2], Decimal("20"))
+        self.assertEqual(state[3], 1)
+
+
+    def test_lay_risk_authority_rejects_calculator_code_drift(self) -> None:
+        calculator = risk_module.locked_capital_for_exchange_side
+        original_code = calculator.__code__
+        try:
+            def hostile(*_args, **_kwargs):
+                raise AssertionError("mutated risk calculator executed")
+
+            calculator.__code__ = hostile.__code__
+            book = PaperBook("100")
+            lay_leg = TicketLeg(
+                "event-1",
+                "market-1",
+                "selection-1",
+                Decimal("3.00"),
+                exchange_side="lay",
+                market_semantics_id="exchange.match.odds.v1",
+            )
+            book.open_ticket([lay_leg], "10", placed_at="2026-10-06T00:00:00+00:00")
+
+            state = self._permissive_policy()._book_state(book)
+
+            self.assertIsNone(state)
+        finally:
+            calculator.__code__ = original_code
 
 
 if __name__ == "__main__":

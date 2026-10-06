@@ -326,48 +326,138 @@ def _canonical_network_transport(client: _base.BetfairReadOnlyClient) -> bool:
     return True
 
 
-def _read_market_book_delay(
-    client: _base.BetfairReadOnlyClient,
-    market_id: str,
-) -> BetfairMarketBookDelayObservation:
-    if type(client) is not _base.BetfairReadOnlyClient:
-        raise TypeError("client must be an exact BetfairReadOnlyClient")
-    market = _base._required_text(market_id, "market_id")
+@dataclass(frozen=True, slots=True)
+class _MarketBookRpcResponse:
+    rows: tuple[object, ...]
+    observed_at: str
+    request_payload_sha256: str
+    source_payload_sha256: str
+    request_budget: _request_budget.MarketBookRequestBudget
+    network_origin: bool
+    application_context: _AuthenticatedApplicationKeyContext | None
+
+
+def _market_book_request_budget(
+    params: object,
+) -> _request_budget.MarketBookRequestBudget:
+    """Derive canonical request weight from the exact listMarketBook wire params."""
+
+    if type(params) is not dict:
+        raise BetfairMarketBookFreshnessError(
+            "listMarketBook params must be an exact mapping"
+        )
+    if "marketIds" not in params:
+        raise BetfairMarketBookFreshnessError(
+            "listMarketBook params are missing marketIds"
+        )
+
+    price_projection = params.get("priceProjection")
+    price_data: object = ()
+    best_prices_depth: object = None
+    if price_projection is not None:
+        if type(price_projection) is not dict:
+            raise BetfairMarketBookFreshnessError(
+                "priceProjection must be an exact mapping"
+            )
+        price_data = price_projection.get("priceData", ())
+        overrides = price_projection.get("exBestOffersOverrides")
+        if overrides is not None:
+            if type(overrides) is not dict:
+                raise BetfairMarketBookFreshnessError(
+                    "exBestOffersOverrides must be an exact mapping"
+                )
+            best_prices_depth = overrides.get("bestPricesDepth")
+
     try:
-        request_budget = _request_budget.MarketBookRequestBudget(
-            market_ids=(market,),
-            price_data=(),
-            best_prices_depth=None,
+        budget = _request_budget.MarketBookRequestBudget(
+            market_ids=params["marketIds"],
+            price_data=price_data,
+            best_prices_depth=best_prices_depth,
             operation="listMarketBook",
         )
-        budget_allowed = request_budget.allowed
+        allowed = budget.allowed
     except _request_budget.MarketBookBudgetError as exc:
         raise BetfairMarketBookFreshnessError(
-            "canonical listMarketBook request budget rejected the request"
+            "canonical listMarketBook request budget rejected the wire params"
         ) from exc
-    if budget_allowed is not True:
+    if allowed is not True:
         raise BetfairMarketBookFreshnessError(
             "listMarketBook request exceeds canonical Betfair request budget"
         )
+    return budget
+
+
+def _canonical_market_book_params(
+    params: dict[str, object],
+    budget: _request_budget.MarketBookRequestBudget,
+) -> dict[str, object]:
+    canonical = dict(params)
+    canonical["marketIds"] = list(budget.market_ids)
+    price_projection = canonical.get("priceProjection")
+    if price_projection is not None:
+        projection = dict(price_projection)
+        if "priceData" in projection:
+            projection["priceData"] = list(budget.price_data)
+        overrides = projection.get("exBestOffersOverrides")
+        if overrides is not None:
+            canonical_overrides = dict(overrides)
+            if "bestPricesDepth" in canonical_overrides:
+                canonical_overrides["bestPricesDepth"] = budget.best_prices_depth
+            projection["exBestOffersOverrides"] = canonical_overrides
+        canonical["priceProjection"] = projection
+    return canonical
+
+
+def _post_market_book_readonly(
+    client: _base.BetfairReadOnlyClient,
+    *,
+    params: object,
+    resolve_application_context: bool,
+) -> _MarketBookRpcResponse:
+    """Canonical physical listMarketBook read boundary.
+
+    Request weight is always reconstructed from the exact wire-shaped params
+    before request-id allocation or transport.  Callers cannot supply or
+    override budget evidence.
+    """
+
+    if type(client) is not _base.BetfairReadOnlyClient:
+        raise TypeError("client must be an exact BetfairReadOnlyClient")
+    if type(resolve_application_context) is not bool:
+        raise TypeError("resolve_application_context must be exact bool")
+
+    request_budget = _market_book_request_budget(params)
+    canonical_params = _canonical_market_book_params(params, request_budget)
     network_origin = _canonical_network_transport(client)
     credentials = client._credentials
     request_id = client._next_request_id()
-    body = json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "method": _LIST_MARKET_BOOK,
-            "params": {"marketIds": list(request_budget.market_ids)},
-            "id": request_id,
-        },
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    try:
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": _LIST_MARKET_BOOK,
+                "params": canonical_params,
+                "id": request_id,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise BetfairMarketBookFreshnessError(
+            "listMarketBook params must be canonical JSON data"
+        ) from exc
+
+    if client._credentials is not credentials:
+        raise BetfairMarketBookFreshnessError(
+            "Betfair authenticated context changed before MarketBook transport"
+        )
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "X-Application": client._credentials.application_key,
-        "X-Authentication": client._credentials.session_token,
+        "X-Application": credentials.application_key,
+        "X-Authentication": credentials.session_token,
     }
     payload = client._transport.post(
         _base.BETTING_JSON_RPC_ENDPOINT,
@@ -377,6 +467,10 @@ def _read_market_book_delay(
     )
     if not isinstance(payload, bytes):
         raise BetfairMarketBookFreshnessError("Betfair transport must return bytes")
+    if client._credentials is not credentials:
+        raise BetfairMarketBookFreshnessError(
+            "Betfair authenticated context changed during MarketBook transport"
+        )
 
     observed_at = (
         datetime.now(timezone.utc).isoformat()
@@ -405,13 +499,50 @@ def _read_market_book_delay(
         )
     if "result" not in envelope:
         raise BetfairMarketBookFreshnessError("Betfair response is missing result")
+    rows = tuple(_base._sequence(envelope["result"], "listMarketBook result"))
 
-    rows = _base._sequence(envelope["result"], "listMarketBook result")
-    if len(rows) != 1:
+    application_context = (
+        _authenticated_application_key_context(
+            client,
+            credentials=credentials,
+        )
+        if network_origin and resolve_application_context
+        else None
+    )
+    if client._credentials is not credentials:
+        raise BetfairMarketBookFreshnessError(
+            "Betfair authenticated context changed during MarketBook capture"
+        )
+
+    return _MarketBookRpcResponse(
+        rows=rows,
+        observed_at=observed_at,
+        request_payload_sha256=sha256(body).hexdigest(),
+        source_payload_sha256=source_payload_sha256,
+        request_budget=request_budget,
+        network_origin=network_origin,
+        application_context=application_context,
+    )
+
+
+def _read_market_book_delay(
+    client: _base.BetfairReadOnlyClient,
+    market_id: str,
+) -> BetfairMarketBookDelayObservation:
+    if type(client) is not _base.BetfairReadOnlyClient:
+        raise TypeError("client must be an exact BetfairReadOnlyClient")
+    market = _base._required_text(market_id, "market_id")
+    response = _post_market_book_readonly(
+        client,
+        params={"marketIds": [market]},
+        resolve_application_context=True,
+    )
+
+    if len(response.rows) != 1:
         raise BetfairMarketBookFreshnessError(
             "listMarketBook must return exactly the requested market"
         )
-    row = _base._mapping(rows[0], "listMarketBook[0]")
+    row = _base._mapping(response.rows[0], "listMarketBook[0]")
     returned_market = _base._provider_text(row, "marketId", "market_id")
     if returned_market != market:
         raise BetfairMarketBookFreshnessError(
@@ -427,19 +558,7 @@ def _read_market_book_delay(
             "isMarketDataDelayed must be bool"
         )
 
-    application_context = (
-        _authenticated_application_key_context(
-            client,
-            credentials=credentials,
-        )
-        if network_origin
-        else None
-    )
-    if network_origin and client._credentials is not credentials:
-        raise BetfairMarketBookFreshnessError(
-            "Betfair authenticated context changed during MarketBook capture"
-        )
-
+    application_context = response.application_context
     return BetfairMarketBookDelayObservation(
         venue_id=client._venue_id,
         configured_account_ref=client._account_id,
@@ -447,8 +566,8 @@ def _read_market_book_delay(
         adapter_version=_base.ADAPTER_VERSION,
         market_id=market,
         is_market_data_delayed=delayed,
-        observed_at=observed_at,
-        source_payload_sha256=source_payload_sha256,
+        observed_at=response.observed_at,
+        source_payload_sha256=response.source_payload_sha256,
         authenticated_context_sha256=(
             None
             if application_context is None

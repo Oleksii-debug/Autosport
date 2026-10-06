@@ -72,6 +72,17 @@ def _payload(
     ).encode("utf-8")
 
 
+def _multi_payload(market_ids, *, request_id: int = 1) -> bytes:
+    return json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "result": [{"marketId": market_id} for market_id in market_ids],
+            "id": request_id,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def _client(payload: bytes) -> tuple[BetfairReadOnlyClient, FakeTransport]:
     transport = FakeTransport(payload)
     client = BetfairReadOnlyClient(
@@ -127,6 +138,75 @@ def test_canonical_request_budget_blocks_transport_before_dispatch(monkeypatch):
         match="exceeds canonical Betfair request budget",
     ):
         read_market_book_delay(client, "1.234")
+
+    assert transport.calls == []
+
+
+def test_physical_marketbook_boundary_rejects_overweight_wire_params_before_transport():
+    market_ids = tuple(f"1.{index:03d}" for index in range(12))
+    client, transport = _client(_multi_payload(market_ids))
+
+    with pytest.raises(
+        BetfairMarketBookFreshnessError,
+        match="exceeds canonical Betfair request budget",
+    ):
+        betfair_marketbook_freshness._post_market_book_readonly(
+            client,
+            params={
+                "marketIds": list(market_ids),
+                "priceProjection": {"priceData": ["EX_ALL_OFFERS"]},
+            },
+            resolve_application_context=False,
+        )
+
+    assert transport.calls == []
+
+
+def test_physical_marketbook_boundary_accepts_exact_200_point_depth_request():
+    market_ids = tuple(f"1.{index:03d}" for index in range(12))
+    payload = _multi_payload(market_ids)
+    client, transport = _client(payload)
+
+    response = betfair_marketbook_freshness._post_market_book_readonly(
+        client,
+        params={
+            "marketIds": list(market_ids),
+            "priceProjection": {
+                "priceData": ["EX_BEST_OFFERS"],
+                "exBestOffersOverrides": {"bestPricesDepth": 10},
+            },
+        },
+        resolve_application_context=False,
+    )
+
+    assert response.request_budget.total_points == 200
+    assert tuple(row["marketId"] for row in response.rows) == market_ids
+    assert response.source_payload_sha256 == sha256(payload).hexdigest()
+    assert len(transport.calls) == 1
+    request = json.loads(transport.calls[0]["body"])
+    assert request["params"]["marketIds"] == list(market_ids)
+    assert request["params"]["priceProjection"]["exBestOffersOverrides"]["bestPricesDepth"] == 10
+
+
+def test_physical_marketbook_boundary_extracts_depth_for_over_limit_rejection():
+    market_ids = tuple(f"1.{index:03d}" for index in range(13))
+    client, transport = _client(_multi_payload(market_ids))
+
+    with pytest.raises(
+        BetfairMarketBookFreshnessError,
+        match="exceeds canonical Betfair request budget",
+    ):
+        betfair_marketbook_freshness._post_market_book_readonly(
+            client,
+            params={
+                "marketIds": list(market_ids),
+                "priceProjection": {
+                    "priceData": ["EX_BEST_OFFERS"],
+                    "exBestOffersOverrides": {"bestPricesDepth": 10},
+                },
+            },
+            resolve_application_context=False,
+        )
 
     assert transport.calls == []
 

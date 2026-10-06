@@ -2269,6 +2269,10 @@ def _projection_delta(
     position: int | None = None,
     revision_of: str | None = None,
     revision_number: int = 0,
+    gap_state: continuous_session.GapState = continuous_session.GapState.NONE,
+    sync_state: continuous_session.SyncState = continuous_session.SyncState.READY,
+    gap_from_cursor: str | None = None,
+    gap_to_cursor: str | None = None,
 ) -> continuous_session.CollectorDelta:
     resolved_position = index if position is None else position
     return continuous_session.CollectorDelta(
@@ -2290,8 +2294,10 @@ def _projection_delta(
         desktop_available_at=_AT,
         revision_of=revision_of,
         revision_number=revision_number,
-        gap_state=continuous_session.GapState.NONE,
-        sync_state=continuous_session.SyncState.READY,
+        gap_state=gap_state,
+        sync_state=sync_state,
+        gap_from_cursor=gap_from_cursor,
+        gap_to_cursor=gap_to_cursor,
     )
 
 
@@ -2558,6 +2564,75 @@ def test_source_projection_rejects_equal_position_revision_number_jump() -> None
             assert "advance exactly one step" in str(exc)
         else:
             raise AssertionError("equal-position revision number jump was accepted")
+
+        assert state.path.read_bytes() == before
+
+
+def test_source_projection_late_gap_recovery_clears_original_gap() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        state.record_source_projection(
+            deltas=(
+                _projection_delta(
+                    1,
+                    delta_id="gap-delta",
+                    position=5,
+                    gap_state=continuous_session.GapState.DETECTED,
+                    sync_state=continuous_session.SyncState.GAP_DETECTED,
+                    gap_from_cursor="cursor-4",
+                    gap_to_cursor="cursor-5",
+                ),
+                _projection_delta(2, delta_id="newer-delta", position=6),
+                _projection_delta(
+                    3,
+                    delta_id="gap-recovery",
+                    position=5,
+                    revision_of="gap-delta",
+                    revision_number=1,
+                    gap_state=continuous_session.GapState.RECOVERED,
+                    sync_state=continuous_session.SyncState.RECOVERED,
+                    gap_from_cursor="cursor-4",
+                    gap_to_cursor="cursor-5",
+                ),
+            ),
+            backlog=False,
+        )
+
+        snapshot = state.snapshot()
+        assert snapshot.source_state_delta_id == "gap-recovery"
+        assert snapshot.source_unresolved_gap_delta_ids == ()
+        assert snapshot.source_gap_state == continuous_session.GapState.RECOVERED.value
+        assert snapshot.source_sync_state == continuous_session.SyncState.RECOVERED.value
+
+
+def test_source_projection_rejects_same_batch_revision_identity_mismatch() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        before = state.path.read_bytes()
+        base = _projection_delta(1, delta_id="base-delta", position=5)
+        revision = replace(
+            _projection_delta(
+                2,
+                delta_id="revision-delta",
+                position=5,
+                revision_of="base-delta",
+                revision_number=1,
+            ),
+            event_id="different-event",
+        )
+
+        try:
+            state.record_source_projection(
+                deltas=(base, revision),
+                backlog=False,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "revision event does not match predecessor" in str(exc)
+        else:
+            raise AssertionError("same-batch revision identity mismatch was accepted")
 
         assert state.path.read_bytes() == before
 

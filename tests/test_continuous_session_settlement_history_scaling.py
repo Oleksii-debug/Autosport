@@ -1881,6 +1881,53 @@ def test_restart_rejects_same_generation_failure_marker_conflicts() -> None:
                 )
 
 
+def test_restart_rejects_future_generation_failure_checkpoint() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+        sidecar_path = root / "continuous_session.json.operational_error.json"
+        corrupted = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        corrupted["observed_generation"] += 1
+        sidecar_path.write_text(
+            json.dumps(corrupted, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            continuous_session._ContinuousSessionState(
+                root / "continuous_session.json",
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "generation is ahead of canonical session bootstrap state" in str(exc)
+        else:
+            raise AssertionError("future-generation failure checkpoint survived restart")
+
+
+def test_snapshot_rejects_future_generation_failure_checkpoint() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+        sidecar_path = root / "continuous_session.json.operational_error.json"
+        corrupted = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        corrupted["observed_generation"] += 1
+        sidecar_path.write_text(
+            json.dumps(corrupted, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            state.snapshot()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "generation is ahead of canonical session state" in str(exc)
+        else:
+            raise AssertionError("future-generation failure checkpoint was ignored")
+
+
 def test_snapshot_rejects_same_generation_failure_marker_conflicts() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

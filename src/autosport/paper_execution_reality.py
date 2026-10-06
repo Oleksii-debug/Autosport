@@ -28,6 +28,15 @@ _CANONICAL_TEXT_VALIDATOR = _impl._CANONICAL_TEXT_VALIDATOR
 _CANONICAL_DECIMAL_PARSER = _impl._CANONICAL_DECIMAL_PARSER
 _CANONICAL_DECIMAL_TEXT_FORMATTER = _impl._CANONICAL_DECIMAL_TEXT_FORMATTER
 _CANONICAL_CANONICALIZER = _impl._CANONICAL_CANONICALIZER
+_CANONICAL_TIMESTAMP_PARSER = _impl._CANONICAL_TIMESTAMP_PARSER
+_CANONICAL_TIMESTAMP_FORMATTER = _impl._CANONICAL_TIMESTAMP_FORMATTER
+_CANONICAL_DETERMINISTIC_INT = _impl._CANONICAL_DETERMINISTIC_INT
+_CANONICAL_MILLISECONDS = _impl._milliseconds
+_CANONICAL_TIMEDELTA = _impl.timedelta
+_CANONICAL_ATTEMPT_ID = _impl._attempt_id
+_CANONICAL_VERIFY_OBSERVATION_AUTHORITY = _impl._verify_observation_authority
+_CANONICAL_RUN_ID = _impl._run_id
+_CANONICAL_OBSERVED_ATTEMPT = _impl._observed_attempt
 _CANONICAL_OS_FSYNC = os.fsync
 _MAX_DURABLE_EVENT_LINE_CHARS = _impl._MAX_DURABLE_EVENT_LINE_CHARS
 
@@ -416,19 +425,19 @@ def _synthetic_attempt(
             "synthetic PAPER exposure model supports BACK only; non-BACK must use "
             "explicit empirical/configured execution evidence"
         )
-    start = _impl._timestamp(started_at, "started_at")
+    start = _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at")
     delay_span = config.max_delay_ms - config.min_delay_ms
     delay_ms = config.min_delay_ms
     if delay_span:
-        delay_ms += _impl._deterministic_int(
+        delay_ms += _CANONICAL_DETERMINISTIC_INT(
             f"{config.seed}:{run_id}:{action.action_id}",
             "delay",
             delay_span + 1,
         )
-    execution_time = start + _impl.timedelta(milliseconds=delay_ms)
-    decision_time = _impl._timestamp(action.quote_observed_at, "quote_observed_at")
-    quote_age_ms = _impl._milliseconds(execution_time - decision_time, "quote age")
-    expires = _impl._timestamp(action.expires_at, "expires_at")
+    execution_time = start + _CANONICAL_TIMEDELTA(milliseconds=delay_ms)
+    decision_time = _CANONICAL_TIMESTAMP_PARSER(action.quote_observed_at, "quote_observed_at")
+    quote_age_ms = _CANONICAL_MILLISECONDS(execution_time - decision_time, "quote age")
+    expires = _CANONICAL_TIMESTAMP_PARSER(action.expires_at, "expires_at")
     execution_odds: Decimal | None = None
     execution_stake: Decimal | None = None
 
@@ -442,7 +451,7 @@ def _synthetic_attempt(
         outcome = PaperAttemptOutcome.REJECTED
         reason = "decision quote exceeded configured PAPER freshness bound"
     else:
-        bucket = _impl._deterministic_int(
+        bucket = _CANONICAL_DETERMINISTIC_INT(
             f"{config.seed}:{run_id}:{action.action_id}",
             "outcome",
             10_000,
@@ -464,7 +473,7 @@ def _synthetic_attempt(
             slippage_bps = (
                 0
                 if config.max_slippage_bps == 0
-                else _impl._deterministic_int(
+                else _CANONICAL_DETERMINISTIC_INT(
                     f"{config.seed}:{run_id}:{action.action_id}",
                     "slippage",
                     config.max_slippage_bps + 1,
@@ -489,7 +498,7 @@ def _synthetic_attempt(
                 )
 
     return PaperLegAttempt(
-        attempt_id=_impl._attempt_id(run_id, action, sequence),
+        attempt_id=_CANONICAL_ATTEMPT_ID(run_id, action, sequence),
         run_id=run_id,
         plan_id=plan.plan_id,
         action_id=action.action_id,
@@ -504,7 +513,7 @@ def _synthetic_attempt(
         decision_odds=action.requested_odds,
         requested_stake=action.requested_stake,
         decision_observed_at=action.quote_observed_at,
-        execution_observed_at=_impl._timestamp_text(execution_time),
+        execution_observed_at=_CANONICAL_TIMESTAMP_FORMATTER(execution_time),
         delay_ms=delay_ms,
         quote_age_ms=quote_age_ms,
         outcome=outcome,
@@ -538,8 +547,8 @@ def execute_paper_plan(
         raise TypeError("config must be PaperExecutionModelConfig")
     if not isinstance(ledger, PaperExecutionLedger):
         raise TypeError("ledger must be PaperExecutionLedger")
-    trigger_id = _impl._text(trigger_id, "trigger_id")
-    _impl._timestamp(started_at, "started_at")
+    trigger_id = _CANONICAL_TEXT_VALIDATOR(trigger_id, "trigger_id")
+    _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at")
     if observations is None:
         observations = {}
     if not isinstance(observations, Mapping):
@@ -562,14 +571,14 @@ def execute_paper_plan(
     observation_evidence_ids: dict[str, str] = {}
     for action_id, observation in observations.items():
         assert evidence_registry is not None
-        _impl._verify_observation_authority(
+        _CANONICAL_VERIFY_OBSERVATION_AUTHORITY(
             action=action_by_id[action_id],
             observation=observation,
             registry=evidence_registry,
         )
         observation_evidence_ids[action_id] = observation.evidence_id
 
-    run_id = _impl._run_id(plan, trigger_id, config)
+    run_id = _CANONICAL_RUN_ID(plan, trigger_id, config)
     ledger.reserve_run(
         run_id=run_id,
         trigger_id=trigger_id,
@@ -633,7 +642,7 @@ def execute_paper_plan(
             )
         observation = observations.get(action.action_id)
         if observation is not None:
-            attempt = _impl._observed_attempt(
+            attempt = _CANONICAL_OBSERVED_ATTEMPT(
                 run_id=run_id,
                 plan=plan,
                 action=action,

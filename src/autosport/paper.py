@@ -52,6 +52,7 @@ _CANONICAL_PAPER_PATH_CONSTRUCTOR = Path
 _CANONICAL_PAPER_PATH_TYPE = type(Path("."))
 _CANONICAL_PAPER_PATH_RESOLVE = Path.resolve
 _CANONICAL_PAPER_PATH_MKDIR = Path.mkdir
+_CANONICAL_PAPER_PATH_EXISTS = Path.exists
 _CANONICAL_PAPER_PATH_UNLINK = Path.unlink
 _CANONICAL_TICKET_STATUS_TYPE = TicketStatus
 _CANONICAL_TICKET_STATUS_OPEN = TicketStatus.OPEN
@@ -74,6 +75,7 @@ _CANONICAL_OS_FDOPEN = os.fdopen
 _CANONICAL_OS_SAMEOPENFILE = os.path.sameopenfile
 _CANONICAL_STAT_ISREG = stat.S_ISREG
 _CANONICAL_OS_RDONLY = os.O_RDONLY
+_CANONICAL_OS_RDWR = os.O_RDWR
 _CANONICAL_OS_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _CANONICAL_OS_NAME = os.name
 
@@ -553,7 +555,22 @@ class PaperBook:
         _CANONICAL_VALIDATE_LOADED_STATE(self)
         _CANONICAL_REQUIRE_OPENING_AUTHORITY(self)
         _CANONICAL_REQUIRE_CAUSAL_AUTHORITY(self)
-        return sum((t.stake for t in self.tickets.values() if t.status is _CANONICAL_TICKET_STATUS_OPEN), _CANONICAL_PAPER_DECIMAL_TYPE("0"))
+        try:
+            with _CANONICAL_LOCALCONTEXT(
+                _CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()
+            ) as context:
+                total = _CANONICAL_PAPER_DECIMAL_TYPE("0")
+                for ticket in self.tickets.values():
+                    if ticket.status is _CANONICAL_TICKET_STATUS_OPEN:
+                        total += ticket.stake
+                if context.flags[_CANONICAL_INEXACT_SIGNAL]:
+                    raise ValueError("PaperBook committed stake loses Decimal precision")
+        except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+            raise ValueError(
+                "PaperBook committed stake arithmetic is not representable"
+            ) from exc
+        _CANONICAL_REQUIRE_FINITE(total, "committed_stake")
+        return total
 
     @classmethod
     def _canonical_decimal_input(cls, value: object, label: str) -> Decimal:
@@ -697,7 +714,9 @@ class PaperBook:
 
         status = _CANONICAL_TICKET_STATUS_VOID if not effective_legs else _CANONICAL_TICKET_STATUS_WON
         try:
-            with _CANONICAL_LOCALCONTEXT(_CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()):
+            with _CANONICAL_LOCALCONTEXT(
+                _CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()
+            ) as context:
                 effective_odds = _CANONICAL_PAPER_DECIMAL_TYPE("1")
                 for leg in effective_legs:
                     effective_odds *= leg.locked_odds
@@ -708,7 +727,12 @@ class PaperBook:
                         "PaperBook winning settlement payout must exceed stake after canonical Decimal rounding"
                     )
                 new_balance = balance + payout
-                _CANONICAL_REQUIRE_FINITE(new_balance, f"balance after settling ticket {ticket.ticket_id}")
+                _CANONICAL_REQUIRE_FINITE(
+                    new_balance,
+                    f"balance after settling ticket {ticket.ticket_id}",
+                )
+                if context.flags[_CANONICAL_INEXACT_SIGNAL]:
+                    raise ValueError("PaperBook settlement arithmetic loses Decimal precision")
                 if payout != 0 and new_balance == balance:
                     raise ValueError("PaperBook settlement payout loses all Decimal balance effect")
         except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
@@ -806,6 +830,36 @@ class PaperBook:
                 "PaperBook snapshot path cannot be canonically resolved"
             ) from exc
 
+    @staticmethod
+    def _fsync_snapshot_directory(directory: Path) -> None:
+        """Persist a published snapshot directory entry where supported."""
+        if _CANONICAL_OS_NAME == "nt":
+            return
+        descriptor = _CANONICAL_OS_OPEN(
+            directory,
+            _CANONICAL_OS_RDONLY | _CANONICAL_OS_DIRECTORY,
+        )
+        try:
+            _CANONICAL_OS_FSYNC(descriptor)
+        finally:
+            _CANONICAL_OS_CLOSE(descriptor)
+
+    @classmethod
+    def _ensure_snapshot_parent_durable(cls, directory: Path) -> None:
+        """Create missing snapshot directories and persist each published entry."""
+        missing: list[Path] = []
+        cursor = directory
+        while not _CANONICAL_PAPER_PATH_EXISTS(cursor):
+            missing.append(cursor)
+            parent = cursor.parent
+            if parent == cursor:
+                break
+            cursor = parent
+
+        _CANONICAL_PAPER_PATH_MKDIR(directory, parents=True, exist_ok=True)
+        for created in reversed(missing):
+            _CANONICAL_FSYNC_SNAPSHOT_DIRECTORY(created.parent)
+
     @_serialized_paperbook_operation
     def save(self, path: str | Path) -> None:
         if type(self) is not __class__:
@@ -818,7 +872,6 @@ class PaperBook:
         _CANONICAL_REQUIRE_OPENING_AUTHORITY(self)
         _CANONICAL_REQUIRE_CAUSAL_AUTHORITY(self)
         destination = _CANONICAL_SNAPSHOT_PATH(path)
-        _CANONICAL_PAPER_PATH_MKDIR(destination.parent, parents=True, exist_ok=True)
         raw = {
             "schema_version": _CANONICAL_PAPER_SNAPSHOT_SCHEMA_VERSION,
             "initial_bankroll": str(self.initial_bankroll),
@@ -881,6 +934,10 @@ class PaperBook:
                 "PaperBook snapshot exceeds the canonical byte-size limit"
             )
 
+        # Structural/economic/authority/serialization validation is complete.
+        # Only now may this operation publish new filesystem directory entries.
+        _CANONICAL_ENSURE_SNAPSHOT_PARENT_DURABLE(destination.parent)
+
         temporary: Path | None = None
         try:
             with _CANONICAL_NAMED_TEMPORARY_FILE(
@@ -897,13 +954,18 @@ class PaperBook:
                 handle.flush()
                 _CANONICAL_OS_FSYNC(handle.fileno())
             _CANONICAL_OS_REPLACE(temporary, destination)
+            temporary = None
 
             published_descriptor: int | None = None
             directory_descriptor: int | None = None
             try:
                 published_descriptor = _CANONICAL_OS_OPEN(
                     destination,
-                    _CANONICAL_OS_RDONLY,
+                    (
+                        _CANONICAL_OS_RDWR
+                        if _CANONICAL_OS_NAME == "nt"
+                        else _CANONICAL_OS_RDONLY
+                    ),
                 )
                 _CANONICAL_OS_FSYNC(published_descriptor)
                 if _CANONICAL_OS_NAME != "nt":
@@ -1427,6 +1489,26 @@ class PaperBook:
                 raise ValueError(
                     "ticket leg market_semantics_id is unsupported before schema 8"
                 )
+            expected_leg_fields = {
+                "event_id",
+                "market_id",
+                "selection_id",
+                "locked_odds",
+            }
+            if schema_version is not None and schema_version >= 6:
+                expected_leg_fields.add("sport")
+            if schema_version is not None and schema_version >= 7:
+                expected_leg_fields.add("exchange_side")
+            if schema_version is not None and schema_version >= 8:
+                expected_leg_fields.add("market_semantics_id")
+            unexpected_leg_fields = set(raw_leg) - expected_leg_fields
+            if unexpected_leg_fields:
+                version_label = (
+                    "legacy" if schema_version is None else f"schema {schema_version}"
+                )
+                raise ValueError(
+                    f"PaperBook snapshot {version_label} ticket leg contains unexpected fields"
+                )
             market_semantics_id = (
                 _CANONICAL_REQUIRED_SNAPSHOT_FIELD(
                     raw_leg,
@@ -1509,6 +1591,23 @@ class PaperBook:
             or schema_version not in _CANONICAL_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS
         ):
             raise ValueError("unsupported PaperBook snapshot schema_version")
+        expected_root_fields = (
+            {"initial_bankroll", "balance", "tickets"}
+            if is_legacy
+            else {
+                "schema_version",
+                "initial_bankroll",
+                "balance",
+                "tickets",
+                "lifecycle",
+            }
+        )
+        unexpected_root_fields = set(raw) - expected_root_fields
+        if unexpected_root_fields:
+            version_label = "legacy" if is_legacy else f"schema {schema_version}"
+            raise ValueError(
+                f"PaperBook snapshot {version_label} root contains unexpected fields"
+            )
 
         initial_bankroll = _CANONICAL_PARSE_SNAPSHOT_DECIMAL(
             _CANONICAL_REQUIRED_SNAPSHOT_FIELD(raw, "initial_bankroll", "root"),
@@ -1526,6 +1625,29 @@ class PaperBook:
         for item in tickets_raw:
             if type(item) is not dict:
                 raise ValueError("PaperBook snapshot ticket must be an object")
+            expected_ticket_fields = {
+                "ticket_id",
+                "stake",
+                "legs",
+                "placed_at",
+                "status",
+                "payout",
+                "strategy_reason",
+            }
+            if not is_legacy and schema_version >= 3:
+                expected_ticket_fields.update(
+                    {"provider_source_ids", "bankroll_id", "currency"}
+                )
+            if not is_legacy and schema_version >= 4:
+                expected_ticket_fields.add("provider_accounts")
+            if not is_legacy and schema_version >= 5:
+                expected_ticket_fields.add("settled_at")
+            unexpected_ticket_fields = set(item) - expected_ticket_fields
+            if unexpected_ticket_fields:
+                version_label = "legacy" if is_legacy else f"schema {schema_version}"
+                raise ValueError(
+                    f"PaperBook snapshot {version_label} ticket contains unexpected fields"
+                )
             ticket_id = _CANONICAL_REQUIRE_CANONICAL_TEXT(
                 _CANONICAL_REQUIRED_SNAPSHOT_FIELD(item, "ticket_id", "ticket"),
                 "snapshot ticket_id",
@@ -1742,6 +1864,8 @@ _CANONICAL_NORMALIZE_RESOLUTION_KEYS = PaperBook._normalize_resolution_keys
 _CANONICAL_VALIDATE_SETTLED_AT = PaperBook._validate_settled_at
 _CANONICAL_SETTLEMENT_RESULT = PaperBook._settlement_result
 _CANONICAL_SNAPSHOT_PATH = PaperBook._canonical_snapshot_path
+_CANONICAL_FSYNC_SNAPSHOT_DIRECTORY = PaperBook._fsync_snapshot_directory
+_CANONICAL_ENSURE_SNAPSHOT_PARENT_DURABLE = PaperBook._ensure_snapshot_parent_durable
 _CANONICAL_FROM_RAW_SNAPSHOT = PaperBook._from_raw_snapshot
 _CANONICAL_LIFECYCLE_TO_JSON = PaperBook._lifecycle_to_json
 _CANONICAL_PARSE_SNAPSHOT_DECIMAL = PaperBook._parse_snapshot_decimal

@@ -29,6 +29,18 @@ STARTED_AT = "2026-09-20T06:00:00.100000+00:00"
 EXPIRES_AT = "2026-09-20T06:01:00+00:00"
 
 
+class _HostileExchangeSide(str):
+    comparisons = 0
+
+    def __hash__(self) -> int:
+        type(self).comparisons += 1
+        return super().__hash__()
+
+    def __eq__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__eq__(other)
+
+
 def action(
     action_id: str,
     *,
@@ -106,6 +118,7 @@ def evidence(
     *,
     odds: str | None = None,
     stake: str | None = None,
+    grade: EvidenceGrade = EvidenceGrade.CONFIGURED,
 ):
     return PaperExecutionEvidenceRecord(
         action_id=current.action_id,
@@ -118,7 +131,7 @@ def evidence(
         quote_id=current.quote_id,
         outcome=outcome,
         observed_at=STARTED_AT,
-        evidence_grade=EvidenceGrade.CONFIGURED,
+        evidence_grade=grade,
         evidence_source="fixture-observation",
         accepted_odds=odds,
         accepted_stake=stake,
@@ -154,24 +167,277 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         )
         return book, ledger, runtime
 
-    def test_paper_value_lay_fails_before_execution_or_book_mutation(self):
+    def test_recovery_dispatch_rejects_mutated_action_side_without_hooks(self):
         with tempfile.TemporaryDirectory() as tmp:
-            book, _ledger, runtime = self.runtime(tmp)
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("recovery-hostile-side", side="BACK")
+            current_prepared = prepared(runtime, current)
+            _HostileExchangeSide.comparisons = 0
+            object.__setattr__(
+                current,
+                "side",
+                _HostileExchangeSide("LAY"),
+            )
+
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,
-                "LAY PAPER adoption is unavailable",
+                "canonical ExecutionAction side authority",
+            ):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=book,
+                    prepared=current_prepared,
+                    trigger_id="recovery-hostile-side",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(ledger.events(), [])
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_paper_value_rejects_mutated_side_subclass_without_comparison_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            event = market_event("back")
+            _HostileExchangeSide.comparisons = 0
+            object.__setattr__(
+                event,
+                "exchange_side",
+                _HostileExchangeSide("lay"),
+            )
+            events_before = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "exact canonical string",
             ):
                 runtime.prepare_paper_value_action(
-                    event=market_event("lay"),
+                    event=event,
                     stake=Decimal("10.00"),
-                    decision_id="decision-lay",
+                    decision_id="decision-hostile-side",
                     account_id="paper-account",
                     bankroll_id="paper-bankroll",
                     currency="EUR",
                 )
 
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(len(ledger.events()), events_before)
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_paper_value_lay_prepares_canonical_lay_without_book_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            prepared_lay = runtime.prepare_paper_value_action(
+                event=market_event("lay"),
+                stake=Decimal("10.00"),
+                decision_id="decision-lay",
+                account_id="paper-account",
+                bankroll_id="paper-bankroll",
+                currency="EUR",
+            )
+
+            self.assertEqual(prepared_lay.execution_plan.actions[0].side, "LAY")
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_paper_value_lay_executes_through_empirical_attempt_into_paperbook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            prepared_lay = runtime.prepare_paper_value_action(
+                event=market_event("lay"),
+                stake=Decimal("10.00"),
+                decision_id="decision-lay-e2e",
+                account_id="paper-account",
+                bankroll_id="paper-bankroll",
+                currency="EUR",
+            )
+            current = prepared_lay.execution_plan.actions[0]
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds=str(current.requested_odds),
+                stake=str(current.requested_stake),
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            result = runtime.execute(
+                prepared=prepared_lay,
+                trigger_id="trigger-lay-e2e",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(result.run.attempts[0].side, "LAY")
+            self.assertEqual(len(result.ticket_ids), 1)
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("2.50"))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("85.00"))
+            self.assertEqual(book.committed_capital, Decimal("15.00"))
+
+    def test_empirical_accepted_lay_materializes_liability_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("lay-adoption", odds="5.00", stake="10.00", side="LAY")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            first = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-adoption",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+            second = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-adoption",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(first.run, second.run)
+            self.assertEqual(first.ticket_ids, second.ticket_ids)
+            self.assertEqual(len(book.tickets), 1)
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("5.00"))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("60.00"))
+            self.assertEqual(book.committed_capital, Decimal("40.00"))
+
+    def test_empirical_accepted_lay_liability_uses_accepted_odds_not_requested_odds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action(
+                "lay-accepted-odds-move",
+                odds="5.00",
+                stake="10.00",
+                side="LAY",
+            )
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="4.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            result = runtime.execute(
+                prepared=prepared(runtime, current),
+                trigger_id="trigger-lay-accepted-odds-move",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(result.run.worst_case_exposure, Decimal("30.00"))
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("4.00"))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("70.00"))
+            self.assertEqual(book.committed_capital, Decimal("30.00"))
+
+    def test_empirical_accepted_lay_restart_reuses_same_durable_exposure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            book_path = Path(tmp) / "paper-book.json"
+            current = action("lay-restart", odds="5.00", stake="10.00", side="LAY")
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            first = runtime.execute(
+                prepared=prepared(runtime, current),
+                trigger_id="trigger-lay-restart",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            reloaded_book = PaperBook.load(book_path)
+            restarted = PaperExecutionAdoptionRuntime(
+                book=reloaded_book,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=book_path,
+            )
+            second = restarted.execute(
+                prepared=prepared(restarted, current),
+                trigger_id="trigger-lay-restart",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(first.run, second.run)
+            self.assertEqual(first.ticket_ids, second.ticket_ids)
+            self.assertEqual(len(reloaded_book.tickets), 1)
+            ticket = next(iter(reloaded_book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(reloaded_book.balance, Decimal("60.00"))
+            self.assertEqual(reloaded_book.committed_capital, Decimal("40.00"))
+
+    def test_empirical_partial_lay_materializes_only_partial_liability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("lay-partial", odds="5.00", stake="10.00", side="LAY")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.PARTIAL,
+                odds="4.50",
+                stake="4.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            result = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-partial",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(len(result.ticket_ids), 1)
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("4.50"))
+            self.assertEqual(ticket.stake, Decimal("4.00"))
+            self.assertEqual(book.balance, Decimal("86.00"))
+            self.assertEqual(book.committed_capital, Decimal("14.00"))
 
     def test_paper_value_back_and_legacy_side_remain_back_compatible(self):
         for exchange_side in ("back", None):
@@ -187,24 +453,24 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 )
                 self.assertEqual(current.execution_plan.actions[0].side, "BACK")
 
-    def test_materializer_rejects_non_back_action_before_attempt_adoption(self):
+    def test_materializer_rejects_noncanonical_action_side_before_attempt_adoption(self):
         with tempfile.TemporaryDirectory() as tmp:
             _book, _ledger, runtime = self.runtime(tmp)
             binding = PaperExposureBinding(
-                action_id="lay-action",
+                action_id="bad-side-action",
                 sport="soccer",
                 bankroll_id="paper-bankroll",
                 currency="EUR",
             )
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,
-                "PaperBook materialization supports BACK execution only",
+                "canonical BACK or LAY",
             ):
                 runtime._materialize_attempt(
                     attempt=object(),
-                    action=action("lay-action", side="LAY"),
+                    action=action("bad-side-action", side="SIDEWAYS"),
                     binding=binding,
-                    decision_id="decision-lay",
+                    decision_id="decision-bad-side",
                 )
 
     def test_moved_accepted_quote_materializes_execution_truth_once(self):

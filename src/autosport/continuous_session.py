@@ -350,18 +350,62 @@ class _ContinuousSessionState:
         _version: int = _CONTINUOUS_SESSION_VERSION,
         _atomic_write_json: Callable[..., Any] = atomic_write_json,
         _atomic_write_json_code: object = atomic_write_json.__code__,
+        _durable_path_lock: Callable[..., Any] = durable_path_lock,
+        _durable_path_lock_code: object = durable_path_lock.__code__,
     ) -> None:
-        if getattr(_atomic_write_json, "__code__", None) is not _atomic_write_json_code:
+        if (
+            getattr(_atomic_write_json, "__code__", None) is not _atomic_write_json_code
+            or durable_path_lock is not _durable_path_lock
+            or getattr(_durable_path_lock, "__code__", None)
+            is not _durable_path_lock_code
+        ):
             raise ContinuousSessionError(
-                "canonical session writer code identity changed"
+                "canonical session bootstrap authority changed"
             )
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.source_id = _text(source_id, "source_id")
         self._clock = clock
 
-        if self.path.exists():
-            raw = self._read()
+        # Bootstrap is a read/create/read transaction on the canonical session
+        # path.  Without this fence, two processes can both observe absence and
+        # publish different session identities; the losing constructor could
+        # then silently adopt the winner's identity.
+        with _durable_path_lock(self.path):
+            if self.path.exists():
+                raw = self._read()
+            else:
+                resolved_id = _text(
+                    session_id or str(uuid.uuid4()),
+                    "session_id",
+                )
+                started_at = clock()
+                _instant(started_at, "started_at")
+                _atomic_write_json(
+                    self.path,
+                    {
+                        "schema": _schema,
+                        "schema_version": _version,
+                        "session_id": resolved_id,
+                        "source_id": self.source_id,
+                        "state": SessionState.RUNNING.value,
+                        "started_at": started_at,
+                        "generation": 0,
+                        "cycles_completed": 0,
+                        "last_success_at": None,
+                        "last_error_code": None,
+                        "last_full_refresh_at": None,
+                        "settlement_evidence": [],
+                        "source_gap_state": None,
+                        "source_sync_state": None,
+                        "source_state_delta_id": None,
+                        "source_unresolved_gap_delta_ids": [],
+                        "source_projection_stream_epoch": None,
+                        "source_state_projection_backlog": False,
+                    },
+                )
+                raw = self._read()
+
             existing_source = raw["source_id"]
             if existing_source != self.source_id:
                 raise ContinuousSessionError(
@@ -373,37 +417,6 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "durable session_id does not match configured session"
                 )
-        else:
-            resolved_id = _text(
-                session_id or str(uuid.uuid4()),
-                "session_id",
-            )
-            started_at = clock()
-            _instant(started_at, "started_at")
-            _atomic_write_json(
-                self.path,
-                {
-                    "schema": _schema,
-                    "schema_version": _version,
-                    "session_id": resolved_id,
-                    "source_id": self.source_id,
-                    "state": SessionState.RUNNING.value,
-                    "started_at": started_at,
-                    "generation": 0,
-                    "cycles_completed": 0,
-                    "last_success_at": None,
-                    "last_error_code": None,
-                    "last_full_refresh_at": None,
-                    "settlement_evidence": [],
-                    "source_gap_state": None,
-                    "source_sync_state": None,
-                    "source_state_delta_id": None,
-                    "source_unresolved_gap_delta_ids": [],
-                    "source_projection_stream_epoch": None,
-                    "source_state_projection_backlog": False,
-                },
-            )
-            raw = self._read()
 
         self._session_id = raw["session_id"]
         self._generation = raw["generation"]

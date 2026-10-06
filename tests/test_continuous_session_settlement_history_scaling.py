@@ -2168,8 +2168,8 @@ def test_record_success_rejects_future_settlement_evidence() -> None:
                 full_refresh=False,
                 settlement_evidence=(evidence,),
             )
-        except ValueError as exc:
-            assert "not causally available" in str(exc)
+        except continuous_session.ContinuousSessionError as exc:
+            assert "invalid for success cutoff" in str(exc)
         else:
             raise AssertionError("future settlement evidence was accepted")
 

@@ -1130,16 +1130,23 @@ def _guard_paperbook_constructor_authority(method):
     runtime_helper_authority = _require_paperbook_runtime_helper_authority
     runtime_helper_authority_code = runtime_helper_authority.__code__
     runtime_module_globals = globals()
+    constructor_error_type = ValueError
     constructor_module_dependencies = {
         "Decimal": Decimal,
         "DecimalException": DecimalException,
         "_MAX_PAPER_DECIMAL_TEXT_CHARS": _MAX_PAPER_DECIMAL_TEXT_CHARS,
+        "str": str,
+        "int": int,
+        "float": float,
+        "type": type,
+        "len": len,
+        "ValueError": ValueError,
     }
 
     def require_constructor_module_dependencies() -> None:
         for name, dependency in constructor_module_dependencies.items():
-            if runtime_module_globals.get(name) is not dependency:
-                raise ValueError(
+            if runtime_module_globals.get(name, dependency) is not dependency:
+                raise constructor_error_type(
                     f"PaperBook constructor module dependency changed: {name}"
                 )
 

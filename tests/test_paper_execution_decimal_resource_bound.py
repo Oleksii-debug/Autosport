@@ -1259,3 +1259,90 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_public_ledger_complete_run_rejects_rebound_decimal_parser(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            original = public_paper._CANONICAL_DECIMAL_PARSER
+            called = False
+
+            def forged(*args, **kwargs):
+                nonlocal called
+                called = True
+                return Decimal("0")
+
+            public_paper._CANONICAL_DECIMAL_PARSER = forged
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "PAPER Decimal parser authority changed",
+                ):
+                    ledger.complete_run(
+                        run_id="run-facade-parser-rebind",
+                        pending_action_ids=(),
+                        recovery_decision=RecoveryDecision.NONE,
+                        worst_case_exposure=Decimal("0"),
+                    )
+                self.assertFalse(called)
+                self.assertEqual(ledger.events("run-facade-parser-rebind"), [])
+            finally:
+                public_paper._CANONICAL_DECIMAL_PARSER = original
+
+    def test_public_ledger_complete_run_rejects_rebound_decimal_formatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            original = public_paper._CANONICAL_DECIMAL_TEXT_FORMATTER
+            called = False
+
+            def forged(*args, **kwargs):
+                nonlocal called
+                called = True
+                return "0"
+
+            public_paper._CANONICAL_DECIMAL_TEXT_FORMATTER = forged
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "PAPER Decimal formatter authority changed",
+                ):
+                    ledger.complete_run(
+                        run_id="run-facade-formatter-rebind",
+                        pending_action_ids=(),
+                        recovery_decision=RecoveryDecision.NONE,
+                        worst_case_exposure=Decimal("0"),
+                    )
+                self.assertFalse(called)
+                self.assertEqual(ledger.events("run-facade-formatter-rebind"), [])
+            finally:
+                public_paper._CANONICAL_DECIMAL_TEXT_FORMATTER = original
+
+    def test_public_ledger_load_rejects_rebound_decimal_parser_before_empty_return(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            original = public_paper._CANONICAL_DECIMAL_PARSER
+            called = False
+
+            def forged(*args, **kwargs):
+                nonlocal called
+                called = True
+                return Decimal("0")
+
+            public_paper._CANONICAL_DECIMAL_PARSER = forged
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "PAPER Decimal parser authority changed",
+                ):
+                    ledger.load_run(
+                        run_id="run-facade-load-rebind",
+                        trigger_id="trigger",
+                        plan=None,  # type: ignore[arg-type]
+                        config=None,  # type: ignore[arg-type]
+                        started_at="2026-10-05T00:00:00+00:00",
+                        observation_evidence_ids={},
+                    )
+                self.assertFalse(called)
+            finally:
+                public_paper._CANONICAL_DECIMAL_PARSER = original
+

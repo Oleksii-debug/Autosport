@@ -627,3 +627,98 @@ def test_reader_rejects_runtime_timestamp_validator_rebinding(
 
         assert path.read_bytes() == before
 
+@pytest.mark.parametrize("operation", ("pause", "stop", "resume"))
+def test_operator_controls_ignore_instance_shadowed_set_state(
+    operation: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+
+        if operation == "resume":
+            state.set_state(
+                continuous_session.SessionState.PAUSED,
+                reason="OPERATOR_PAUSE",
+            )
+
+        def attacker_set_state(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("instance-shadowed operator state writer executed")
+
+        state.set_state = attacker_set_state  # type: ignore[method-assign]
+
+        if operation == "pause":
+            coordinator.pause()
+            expected = continuous_session.SessionState.PAUSED
+        elif operation == "stop":
+            coordinator.stop("OPERATOR_STOP")
+            expected = continuous_session.SessionState.STOPPED
+        else:
+            coordinator.resume()
+            expected = continuous_session.SessionState.RUNNING
+
+        durable = json.loads(path.read_text(encoding="utf-8"))
+        assert durable["state"] == expected.value
+
+
+def test_resume_does_not_use_full_snapshot_precheck() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+        state.set_state(
+            continuous_session.SessionState.PAUSED,
+            reason="OPERATOR_PAUSE",
+        )
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+
+        def attacker_snapshot() -> object:
+            raise AssertionError("resume performed a full snapshot precheck")
+
+        state.snapshot = attacker_snapshot  # type: ignore[method-assign]
+        coordinator.resume()
+
+        assert state.bounded_state() is continuous_session.SessionState.RUNNING
+
+
+@pytest.mark.parametrize("method_name", ("set_state", "bounded_state"))
+def test_operator_controls_reject_class_rebound_state_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        if method_name == "bounded_state":
+            state.set_state(
+                continuous_session.SessionState.PAUSED,
+                reason="OPERATOR_PAUSE",
+            )
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        before = path.read_bytes()
+
+        def attacker(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("class-rebound operator control authority executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            method_name,
+            attacker,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical coordinator operator-control authority changed",
+        ):
+            if method_name == "bounded_state":
+                coordinator.resume()
+            else:
+                coordinator.pause()
+
+        assert path.read_bytes() == before
+

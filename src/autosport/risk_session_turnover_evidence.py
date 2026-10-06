@@ -24,6 +24,18 @@ _SCHEMA: Final = "autosport.risk.paper-session-turnover-evidence"
 _SCHEMA_VERSION: Final = 1
 _METRIC_CLASS: Final = "PAPER_ACCEPTED_TURNOVER"
 _SCOPE_CLASS: Final = "ECONOMIC_SESSION"
+_HEX: Final = frozenset("0123456789abcdef")
+
+_SESSION_CURRENT = ProductEconomicSessionStore.current
+_SESSION_CURRENT_CODE = ProductEconomicSessionStore.current.__code__
+_GOAL_LOAD = EconomicGoalStore.load
+_GOAL_LOAD_CODE = EconomicGoalStore.load.__code__
+_PAPER_LOAD = PaperBook.load
+_PAPER_LOAD_CODE = PaperBook.load.__func__.__code__ if isinstance(PaperBook.__dict__.get("load"), classmethod) else PaperBook.load.__code__
+_PAPER_VALIDATE = PaperBook._validate_loaded_state
+_PAPER_VALIDATE_CODE = PaperBook._validate_loaded_state.__code__
+_PROVENANCE_FOR = provenance_for
+_PROVENANCE_FOR_CODE = provenance_for.__code__
 
 
 class PaperSessionTurnoverEvidenceError(RuntimeError):
@@ -192,6 +204,83 @@ class PaperSessionTurnoverEvidence:
     metric_class: str = _METRIC_CLASS
     scope_class: str = _SCOPE_CLASS
 
+    def __post_init__(self) -> None:
+        text_fields = (
+            "session_id", "session_state_sha256", "session_started_at",
+            "goal_id", "goal_contract_sha256", "bankroll_id", "currency",
+            "constituent_sha256", "evidence_sha256", "schema",
+            "metric_class", "scope_class",
+        )
+        for name in text_fields:
+            value = object.__getattribute__(self, name)
+            if type(value) is not str or not value or value != value.strip():
+                raise PaperSessionTurnoverEvidenceError(
+                    f"{name} must be exact non-empty canonical text"
+                )
+        for name in (
+            "session_authority_generation", "goal_revision",
+            "constituent_count", "schema_version",
+        ):
+            value = object.__getattribute__(self, name)
+            if type(value) is not int:
+                raise PaperSessionTurnoverEvidenceError(
+                    f"{name} must use the exact built-in integer type"
+                )
+        for name in (
+            "initial_bankroll", "confirmed_turnover",
+            "turnover_cap", "residual_headroom",
+        ):
+            value = object.__getattribute__(self, name)
+            if type(value) is not Decimal or not value.is_finite() or value < 0:
+                raise PaperSessionTurnoverEvidenceError(
+                    f"{name} must be a non-negative finite exact Decimal"
+                )
+        if type(self.breached) is not bool:
+            raise PaperSessionTurnoverEvidenceError(
+                "breached must use the exact built-in boolean type"
+            )
+        if self.schema != _SCHEMA or self.schema_version != _SCHEMA_VERSION:
+            raise PaperSessionTurnoverEvidenceError(
+                "session turnover evidence schema identity is invalid"
+            )
+        if self.metric_class != _METRIC_CLASS or self.scope_class != _SCOPE_CLASS:
+            raise PaperSessionTurnoverEvidenceError(
+                "session turnover evidence metric/scope identity is invalid"
+            )
+        if self.session_authority_generation < 1 or self.goal_revision < 1:
+            raise PaperSessionTurnoverEvidenceError(
+                "session generation and goal revision must be positive"
+            )
+        if self.constituent_count < 0:
+            raise PaperSessionTurnoverEvidenceError(
+                "constituent_count must be non-negative"
+            )
+        if self.initial_bankroll <= 0:
+            raise PaperSessionTurnoverEvidenceError(
+                "initial_bankroll must be positive"
+            )
+        _instant(self.session_started_at, "session_started_at")
+        for name in (
+            "session_state_sha256", "goal_contract_sha256",
+            "constituent_sha256", "evidence_sha256",
+        ):
+            digest = object.__getattribute__(self, name)
+            if len(digest) != 64 or any(ch not in _HEX for ch in digest):
+                raise PaperSessionTurnoverEvidenceError(
+                    f"{name} must be canonical SHA-256"
+                )
+        expected_breached = self.confirmed_turnover > self.turnover_cap
+        if self.breached != expected_breached:
+            raise PaperSessionTurnoverEvidenceError(
+                "breach flag conflicts with turnover/cap truth"
+            )
+        if self.residual_headroom != _headroom(
+            self.turnover_cap, self.confirmed_turnover
+        ):
+            raise PaperSessionTurnoverEvidenceError(
+                "residual headroom conflicts with turnover/cap truth"
+            )
+
     @property
     def atomic_admission_authority(self) -> bool:
         return False
@@ -228,8 +317,23 @@ class PaperSessionTurnoverResolver:
                 "session must be canonical ProductEconomicSession"
             )
 
+        if (
+            ProductEconomicSessionStore.current is not _SESSION_CURRENT
+            or ProductEconomicSessionStore.current.__code__ is not _SESSION_CURRENT_CODE
+            or EconomicGoalStore.load is not _GOAL_LOAD
+            or EconomicGoalStore.load.__code__ is not _GOAL_LOAD_CODE
+            or PaperBook.load is not _PAPER_LOAD
+            or PaperBook._validate_loaded_state is not _PAPER_VALIDATE
+            or PaperBook._validate_loaded_state.__code__ is not _PAPER_VALIDATE_CODE
+            or provenance_for is not _PROVENANCE_FOR
+            or provenance_for.__code__ is not _PROVENANCE_FOR_CODE
+        ):
+            raise PaperSessionTurnoverEvidenceIncompleteError(
+                "session turnover dependency authority changed"
+            )
+
         try:
-            current = ProductEconomicSessionStore.current(session_store)
+            current = _SESSION_CURRENT(session_store)
         except Exception as exc:
             raise PaperSessionTurnoverEvidenceIncompleteError(
                 "economic session cannot be re-resolved"
@@ -240,10 +344,10 @@ class PaperSessionTurnoverResolver:
             )
 
         try:
-            goal = EconomicGoalStore.load(session_store.goal_store)
-            goal_provenance = provenance_for(goal)
-            book = PaperBook.load(session_store.paperbook_path)
-            PaperBook._validate_loaded_state(book)
+            goal = _GOAL_LOAD(session_store.goal_store)
+            goal_provenance = _PROVENANCE_FOR(goal)
+            book = _PAPER_LOAD(session_store.paperbook_path)
+            _PAPER_VALIDATE(book)
         except (OSError, ArithmeticError, AttributeError, TypeError, ValueError) as exc:
             raise PaperSessionTurnoverEvidenceIncompleteError(
                 "durable goal/PaperBook authority cannot be re-resolved"

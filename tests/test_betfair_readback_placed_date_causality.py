@@ -1,0 +1,294 @@
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+import json
+
+import pytest
+
+from betfair_execution_readback_test_support import semantic_execution_readback
+
+from autosport.betfair_account_readonly import (
+    BetfairReadOnlyClient,
+    BetfairSessionCredentials,
+)
+from autosport.bookmaker_capability import (
+    BookmakerCapability,
+    BookmakerCapabilityFact,
+    BookmakerCapabilityProfile,
+    BookmakerCapabilityState,
+)
+from autosport.real_execution_ledger import ExecutionAction
+from autosport.supervised_provider_evidence import (
+    ProviderEvidenceError,
+    VerifiedProviderEffectEvidence,
+    _evaluate_betfair_provider_state_semantics,
+)
+
+
+PROVIDER_REF = "c" * 32
+OBSERVED_AT = "2026-09-21T18:00:16+00:00"
+
+
+class _ReadbackTransport:
+    def __init__(self, responses: list[bytes]) -> None:
+        self.responses = list(responses)
+
+    def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
+        del url, headers, body, timeout_seconds
+        if not self.responses:
+            raise AssertionError("unexpected Betfair readback call")
+        return self.responses.pop(0)
+
+
+def _rpc_result(result: object, request_id: int) -> bytes:
+    return json.dumps(
+        {"jsonrpc": "2.0", "result": result, "id": request_id},
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _action() -> ExecutionAction:
+    return ExecutionAction(
+        action_id="action-placed-date-causality",
+        bookmaker_id="betfair",
+        account_id="acct-1",
+        event_id="event-1",
+        market_id="1.234",
+        selection_id="42",
+        side="BACK",
+        requested_odds=Decimal("2.0"),
+        requested_stake=Decimal("10"),
+        quote_id="quote-placed-date-causality",
+        quote_observed_at="2026-09-21T18:00:00+00:00",
+        expires_at="2026-09-21T18:10:00+00:00",
+    )
+
+
+def _profile() -> BookmakerCapabilityProfile:
+    return BookmakerCapabilityProfile(
+        venue_id="betfair",
+        account_id="acct-1",
+        adapter_id="betfair-exchange-jsonrpc-readonly",
+        adapter_version="1",
+        profile_version=1,
+        facts=(
+            BookmakerCapabilityFact(
+                BookmakerCapability.BET_READBACK,
+                BookmakerCapabilityState.SUPPORTED,
+            ),
+        ),
+        observed_at="2026-09-21T17:59:00+00:00",
+        source_ref="betfair://profile/placed-date-causality-test",
+        source_payload_sha256="a" * 64,
+    )
+
+
+def _capture(action: ExecutionAction, *, placed_date: str):
+    current_order = {
+        "betId": "bet-placed-date-causality",
+        "marketId": action.market_id,
+        "selectionId": int(action.selection_id),
+        "side": action.side,
+        "status": "EXECUTABLE",
+        "placedDate": placed_date,
+        "priceSize": {
+            "price": 2.0,
+            "size": 10.0,
+        },
+        "averagePriceMatched": 2.0,
+        "sizeMatched": 1.0,
+        "sizeRemaining": 9.0,
+        "customerOrderRef": PROVIDER_REF,
+    }
+    responses = [
+        _rpc_result(
+            [{"marketId": action.market_id, "event": {"id": action.event_id}}],
+            1,
+        ),
+        _rpc_result(
+            {"currentOrders": [current_order], "moreAvailable": False},
+            2,
+        ),
+    ]
+    for request_id in range(3, 7):
+        responses.append(
+            _rpc_result(
+                {"clearedOrders": [], "moreAvailable": False},
+                request_id,
+            )
+        )
+
+    return semantic_execution_readback(
+        responses,
+        action_id=action.action_id,
+        market_id=action.market_id,
+        provider_order_ref=PROVIDER_REF,
+        account_id=action.account_id,
+    )
+
+
+
+def _capture_cleared(
+    action: ExecutionAction,
+    *,
+    placed_date: str,
+    settled_date: str,
+):
+    cleared_order = {
+        "betId": "bet-placed-date-causality",
+        "eventId": action.event_id,
+        "marketId": action.market_id,
+        "selectionId": int(action.selection_id),
+        "side": action.side,
+        "placedDate": placed_date,
+        "settledDate": settled_date,
+        "priceRequested": 2.0,
+        "priceMatched": 2.0,
+        "sizeSettled": 10.0,
+        "profit": 10.0,
+        "customerOrderRef": PROVIDER_REF,
+    }
+    responses = [
+        _rpc_result(
+            [{"marketId": action.market_id, "event": {"id": action.event_id}}],
+            1,
+        ),
+        _rpc_result(
+            {"currentOrders": [], "moreAvailable": False},
+            2,
+        ),
+        _rpc_result(
+            {"clearedOrders": [cleared_order], "moreAvailable": False},
+            3,
+        ),
+    ]
+    for request_id in range(4, 7):
+        responses.append(
+            _rpc_result(
+                {"clearedOrders": [], "moreAvailable": False},
+                request_id,
+            )
+        )
+
+    return semantic_execution_readback(
+        responses,
+        action_id=action.action_id,
+        market_id=action.market_id,
+        provider_order_ref=PROVIDER_REF,
+        account_id=action.account_id,
+    )
+
+
+def _verify_cleared(
+    action: ExecutionAction,
+    *,
+    placed_date: str,
+    settled_date: str,
+):
+    profile = _profile()
+    capture = _capture_cleared(
+        action,
+        placed_date=placed_date,
+        settled_date=settled_date,
+    )
+    return _evaluate_betfair_provider_state_semantics(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=PROVIDER_REF,
+    )
+
+def _verify(action: ExecutionAction, *, placed_date: str):
+    profile = _profile()
+    capture = _capture(action, placed_date=placed_date)
+    return _evaluate_betfair_provider_state_semantics(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=PROVIDER_REF,
+    )
+
+
+def test_current_order_placed_after_quote_is_semantically_admissible() -> None:
+    action = _action()
+
+    evidence = _verify(
+        action,
+        placed_date="2026-09-21T18:00:01+00:00",
+    )
+
+    assert isinstance(evidence, VerifiedProviderEffectEvidence)
+    assert evidence.accepted_stake == Decimal("1.0")
+
+
+def test_current_order_placed_before_quote_fails_semantic_causality() -> None:
+    action = _action()
+
+    # An order attributed to this durable action cannot have been placed before
+    # the quote from which the action was formed.  Exact customerOrderRef and
+    # market/selection identity are not sufficient to make contradictory provider
+    # chronology causal execution evidence.
+    with pytest.raises(ProviderEvidenceError):
+        _verify(
+            action,
+            placed_date="2026-09-21T17:59:59+00:00",
+        )
+
+def test_current_order_placed_after_capture_fails_semantic_causality() -> None:
+    action = _action()
+
+    with pytest.raises(ProviderEvidenceError):
+        _verify(
+            action,
+            placed_date="2026-09-21T18:00:17+00:00",
+        )
+
+
+def test_current_order_placed_at_capture_boundary_is_semantically_admissible() -> None:
+    action = _action()
+
+    evidence = _verify(
+        action,
+        placed_date=OBSERVED_AT,
+    )
+
+    assert isinstance(evidence, VerifiedProviderEffectEvidence)
+
+
+def test_cleared_order_settlement_cannot_predate_placement() -> None:
+    action = _action()
+
+    with pytest.raises(ProviderEvidenceError):
+        _verify_cleared(
+            action,
+            placed_date="2026-09-21T18:00:05+00:00",
+            settled_date="2026-09-21T18:00:04+00:00",
+        )
+
+
+def test_cleared_order_settlement_cannot_postdate_capture() -> None:
+    action = _action()
+
+    with pytest.raises(ProviderEvidenceError):
+        _verify_cleared(
+            action,
+            placed_date="2026-09-21T18:00:05+00:00",
+            settled_date="2026-09-21T18:00:17+00:00",
+        )
+
+
+def test_cleared_order_equal_chronology_boundaries_are_semantically_admissible() -> None:
+    action = _action()
+
+    evidence = _verify_cleared(
+        action,
+        placed_date=OBSERVED_AT,
+        settled_date=OBSERVED_AT,
+    )
+
+    assert isinstance(evidence, VerifiedProviderEffectEvidence)
+    assert evidence.accepted_stake == Decimal("10.0")
+

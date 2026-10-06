@@ -15,6 +15,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+import weakref
 
 from .betfair_account_readonly import (
     BETTING_JSON_RPC_ENDPOINT,
@@ -37,13 +38,18 @@ from .workspace_lock import WorkspaceEconomicLock
 from .real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
+    EventType,
     ExecutionAction,
+    ExecutionStateError,
     ExternalAcknowledgement,
     RealExecutionLedger,
 )
+from . import supervised_execution as _supervised_execution_runtime
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedApproval,
+    _require_approval,
+    _require_durable_approval,
     begin_supervised_attempt,
 )
 
@@ -598,6 +604,7 @@ class BetfairSupervisedPlaceOrdersClient:
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
         execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None = None,
     ) -> BetfairPlaceExecutionReport:
         selection_id = _validate_betfair_place_action(action)
         self._gate.require(
@@ -652,6 +659,8 @@ class BetfairSupervisedPlaceOrdersClient:
             "X-Application": self._credentials.application_key,
             "X-Authentication": self._credentials.session_token,
         }
+        if _before_transport is not None:
+            _before_transport(request_sha256)
         try:
             payload = self._transport.post(
                 BETTING_JSON_RPC_ENDPOINT,
@@ -676,6 +685,212 @@ class BetfairSupervisedPlaceOrdersClient:
             provider_order_ref=provider_ref,
             observed_at=self._clock(),
         )
+
+
+def _build_canonical_place_action_dispatch():
+    """Capture the exact provider-write method before callers can shadow dispatch."""
+
+    client_type = BetfairSupervisedPlaceOrdersClient
+    object_getattribute = object.__getattribute__
+    original_init = client_type.__dict__.get("__init__")
+    if not callable(original_init) or getattr(original_init, "__code__", None) is None:
+        raise RuntimeError("canonical Betfair client constructor is unavailable")
+    original_init_code = original_init.__code__
+    bindings: weakref.WeakKeyDictionary[
+        BetfairSupervisedPlaceOrdersClient,
+        tuple[object, ...],
+    ] = weakref.WeakKeyDictionary()
+
+    def sealed_init(self, *args, **kwargs):
+        if (
+            client_type.__dict__.get("__init__") is not sealed_init
+            or original_init.__code__ is not original_init_code
+        ):
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair client constructor authority changed"
+            )
+        original_init(self, *args, **kwargs)
+        namespace = object_getattribute(self, "__dict__")
+        gate = namespace.get("_gate")
+        transport = namespace.get("_transport")
+        if gate is None or transport is None:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependencies were not initialized canonically"
+            )
+        gate_method = type(gate).__dict__.get("require")
+        transport_method = type(transport).__dict__.get("post")
+        if (
+            not callable(gate_method)
+            or getattr(gate_method, "__code__", None) is None
+            or not callable(transport_method)
+            or getattr(transport_method, "__code__", None) is None
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency dispatch is unavailable"
+            )
+        credentials = namespace.get("_credentials")
+        clock = namespace.get("_clock")
+        timeout_seconds = namespace.get("_timeout_seconds")
+        if credentials is None or clock is None or timeout_seconds is None:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client runtime dependencies were not initialized canonically"
+            )
+        gate_state = tuple(
+            object_getattribute(gate, name)
+            for name in (
+                "enabled",
+                "bookmaker_id",
+                "account_id",
+                "profile_sha256",
+                "authority_ref",
+                "authority_sha256",
+                "economic_goal_store",
+                "economic_goal_workspace",
+            )
+        )
+        credential_state = (
+            credentials,
+            object_getattribute(credentials, "application_key"),
+            object_getattribute(credentials, "session_token"),
+        )
+        bindings[self] = (
+            gate,
+            gate_method,
+            gate_state,
+            transport,
+            transport_method,
+            credential_state,
+            clock,
+            getattr(clock, "__code__", None),
+            timeout_seconds,
+        )
+
+    client_type.__init__ = sealed_init
+
+    place_action = client_type.__dict__.get("place_action")
+    if not callable(place_action) or getattr(place_action, "__code__", None) is None:
+        raise RuntimeError("canonical Betfair place_action dispatch is unavailable")
+    place_action_code = place_action.__code__
+    sealed_init_code = sealed_init.__code__
+
+    def preflight(client: BetfairSupervisedPlaceOrdersClient) -> None:
+        if (
+            type(client) is not client_type
+            or client_type.__dict__.get("__init__") is not sealed_init
+            or sealed_init.__code__ is not sealed_init_code
+            or client_type.__dict__.get("place_action") is not place_action
+            or place_action.__code__ is not place_action_code
+        ):
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair client dispatch changed"
+            )
+        namespace = object_getattribute(client, "__dict__")
+        if type(namespace) is not dict or "place_action" in namespace:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client shadows canonical place_action dispatch"
+            )
+        binding = bindings.get(client)
+        if binding is None:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client has no canonical dependency binding"
+            )
+        (
+            bound_gate,
+            gate_method,
+            gate_state,
+            bound_transport,
+            transport_method,
+            credential_state,
+            bound_clock,
+            bound_clock_code,
+            bound_timeout_seconds,
+        ) = binding
+        current_gate = namespace.get("_gate")
+        current_transport = namespace.get("_transport")
+        current_credentials = namespace.get("_credentials")
+        current_clock = namespace.get("_clock")
+        current_timeout_seconds = namespace.get("_timeout_seconds")
+        if (
+            current_gate is not bound_gate
+            or current_transport is not bound_transport
+            or current_credentials is not credential_state[0]
+            or current_clock is not bound_clock
+            or current_timeout_seconds != bound_timeout_seconds
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency binding changed"
+            )
+        current_gate_state = tuple(
+            object_getattribute(bound_gate, name)
+            for name in (
+                "enabled",
+                "bookmaker_id",
+                "account_id",
+                "profile_sha256",
+                "authority_ref",
+                "authority_sha256",
+                "economic_goal_store",
+                "economic_goal_workspace",
+            )
+        )
+        if current_gate_state != gate_state:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client gate authority state changed"
+            )
+        if (
+            object_getattribute(current_credentials, "application_key")
+            != credential_state[1]
+            or object_getattribute(current_credentials, "session_token")
+            != credential_state[2]
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client credential authority changed"
+            )
+        current_gate_method = type(bound_gate).__dict__.get("require")
+        current_transport_method = type(bound_transport).__dict__.get("post")
+        if (
+            current_gate_method is not gate_method
+            or getattr(gate_method, "__code__", None)
+            is not getattr(current_gate_method, "__code__", None)
+            or current_transport_method is not transport_method
+            or getattr(transport_method, "__code__", None)
+            is not getattr(current_transport_method, "__code__", None)
+            or getattr(bound_clock, "__code__", None) is not bound_clock_code
+            or "require" in getattr(bound_gate, "__dict__", {})
+            or "post" in getattr(bound_transport, "__dict__", {})
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency dispatch changed"
+            )
+
+    def dispatch(
+        client: BetfairSupervisedPlaceOrdersClient,
+        action: ExecutionAction,
+        *,
+        profile: BookmakerCapabilityProfile,
+        bound: BoundSupervisedExecutionPlan,
+        provider_order_ref: str,
+        execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None,
+    ) -> BetfairPlaceExecutionReport:
+        preflight(client)
+        return place_action(
+            client,
+            action,
+            profile=profile,
+            bound=bound,
+            provider_order_ref=provider_order_ref,
+            execution_workspace=execution_workspace,
+            _before_transport=_before_transport,
+        )
+
+    return dispatch, preflight
+
+
+_canonical_place_action_dispatch, _canonical_place_client_preflight = (
+    _build_canonical_place_action_dispatch()
+)
+del _build_canonical_place_action_dispatch
 
 
 def _mapping(
@@ -923,8 +1138,8 @@ def read_betfair_supervised_action_readback(
 ) -> BetfairExecutionReadbackEnvelope:
     """Query the exact durable provider order reference used by placeOrders."""
 
-    if not isinstance(client, BetfairReadOnlyClient):
-        raise TypeError("client must be BetfairReadOnlyClient")
+    if type(client) is not BetfairReadOnlyClient:
+        raise TypeError("client must be exact BetfairReadOnlyClient")
     saga = ledger.saga(bound.execution_plan.plan_id)
     action_id = saga.attempt_action_ids.get(attempt_id)
     if action_id is None:
@@ -940,14 +1155,149 @@ def read_betfair_supervised_action_readback(
         raise BetfairSupervisedExecutionError(
             "attempt lacks durable provider order reference"
         )
-    return client.read_execution_readback(
+    capture = client.read_execution_readback(
         action_id=action.action_id,
         provider_order_ref=provider_order_ref,
         market_id=action.market_id,
         page_size=page_size,
         max_pages=max_pages,
     )
+    try:
+        capture.assert_authoritative()
+    except BetfairReadOnlyError as exc:
+        raise BetfairSupervisedExecutionError(
+            "supervised Betfair readback lacks authenticated product origin"
+        ) from exc
+    return capture
 
+
+
+def _place_action_with_final_durable_authority(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    *,
+    action: ExecutionAction,
+    attempt_id: str,
+    profile: BookmakerCapabilityProfile,
+    client: BetfairSupervisedPlaceOrdersClient,
+    provider_order_ref: str,
+    execution_workspace: Path,
+) -> BetfairPlaceExecutionReport:
+    """Hold durable approval stable and fsync SUBMITTED at the provider boundary."""
+
+    def operation() -> BetfairPlaceExecutionReport:
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        if view.plan_fingerprint != bound.execution_plan.fingerprint:
+            raise ExecutionStateError(
+                "durable execution-plan fingerprint changed before final send"
+            )
+        attempts = [
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id == attempt_id
+        ]
+        if len(attempts) != 1:
+            raise ExecutionStateError(
+                "final supervised send requires one durable attempt"
+            )
+        attempt = attempts[0]
+        if (
+            attempt.state is not AttemptState.RESERVED
+            or attempt.attempt.action_id != action.action_id
+            or attempt.action != action
+        ):
+            raise ExecutionStateError(
+                "final supervised send requires the exact RESERVED action"
+            )
+        if attempt.provider_order_ref != provider_order_ref:
+            raise ExecutionStateError(
+                "final supervised send provider order reference drifted"
+            )
+
+        _require_durable_approval(ledger, bound, approval)
+        _validate_betfair_place_action(action)
+        _canonical_place_client_preflight(client)
+        client._gate.require(
+            action=action,
+            profile=profile,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
+        provider_ref = _text(provider_order_ref, "provider_order_ref")
+        if len(provider_ref) > 32 or any(
+            character not in "0123456789abcdef"
+            for character in provider_ref
+        ):
+            raise BetfairSupervisedExecutionError(
+                "provider_order_ref must be <=32 lowercase hex characters"
+            )
+
+        submitted = False
+        submitted_request_sha256: str | None = None
+
+        def authorize_and_submit(request_sha256: str) -> None:
+            nonlocal submitted, submitted_request_sha256
+            _sha(request_sha256, "submitted_request_sha256")
+            send_at = _supervised_execution_runtime._trusted_now()
+            _require_approval(bound, approval, send_at)
+            _require_durable_approval(ledger, bound, approval)
+            if _time(send_at, "final send time") < _time(
+                attempt.attempt.reserved_at,
+                "attempt reserved_at",
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "final send time precedes attempt reservation"
+                )
+            if _time(send_at, "final send time") >= _time(
+                action.expires_at,
+                "action expires_at",
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "placeOrders final send is at/after quote expiry"
+                )
+            ledger._append(
+                EventType.ATTEMPT_SUBMITTED,
+                bound.execution_plan.plan_id,
+                action.action_id,
+                attempt_id,
+                {
+                    "submitted_at": send_at,
+                    "request_sha256": request_sha256,
+                },
+            )
+            submitted_request_sha256 = request_sha256
+            submitted = True
+
+        try:
+            report = _canonical_place_action_dispatch(
+                client,
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref=provider_ref,
+                execution_workspace=execution_workspace,
+                _before_transport=authorize_and_submit,
+            )
+            if (
+                submitted_request_sha256 is None
+                or report.request_sha256 != submitted_request_sha256
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "placeOrders report request digest mismatches durable submission"
+                )
+            return report
+        except BetfairPlaceOrdersAmbiguous:
+            raise
+        except Exception as exc:
+            if not submitted:
+                raise
+            raise BetfairPlaceOrdersAmbiguous(
+                "placeOrders dispatch failed after durable submission; "
+                "authoritative readback required"
+            ) from exc
+
+    return ledger._mutate(operation)
 
 def execute_betfair_supervised_action(
     ledger: RealExecutionLedger,
@@ -964,16 +1314,15 @@ def execute_betfair_supervised_action(
 
     if not isinstance(ledger, RealExecutionLedger):
         raise TypeError("ledger must be RealExecutionLedger")
-    if not isinstance(
-        client,
-        BetfairSupervisedPlaceOrdersClient,
-    ):
+    if type(client) is not BetfairSupervisedPlaceOrdersClient:
         raise TypeError(
-            "client must be BetfairSupervisedPlaceOrdersClient"
+            "client must be exact BetfairSupervisedPlaceOrdersClient"
         )
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
-    now = clock or _now
+    # API compatibility only: execution-authority time is product-owned.
+    _ = clock
+    trusted_now = _supervised_execution_runtime._trusted_now
     execution_workspace = ledger.path.parent.resolve()
 
     # Serialize the current owner authority through the actual provider-write
@@ -986,6 +1335,7 @@ def execute_betfair_supervised_action(
     # held. This prevents a known local authority denial from being mislabeled
     # as provider-effect uncertainty.
     with WorkspaceEconomicLock(execution_workspace):
+        _canonical_place_client_preflight(client)
         client._gate.require(
             action=action,
             profile=profile,
@@ -1003,29 +1353,26 @@ def execute_betfair_supervised_action(
             attempt_id=attempt_id,
             provider_id=action.bookmaker_id,
         )
-        ledger.mark_submitted(
-            attempt_id,
-            submitted_at=now(),
-        )
         try:
-            report = client.place_action(
-                action,
+            report = _place_action_with_final_durable_authority(
+                ledger,
+                bound,
+                approval,
+                action=action,
+                attempt_id=attempt_id,
                 profile=profile,
-                bound=bound,
+                client=client,
                 provider_order_ref=provider_order_ref,
                 execution_workspace=execution_workspace,
             )
-        except (
-            BetfairPlaceOrdersAmbiguous,
-            BetfairSupervisedExecutionError,
-        ):
+        except BetfairPlaceOrdersAmbiguous:
             ledger.mark_unknown(
                 attempt_id,
                 reason=(
                     "betfair_placeOrders_ambiguous_effect_"
                     "requires_readback"
                 ),
-                observed_at=now(),
+                observed_at=trusted_now(),
             )
             return BetfairSupervisedExecutionResult(
                 PlaceOrdersOutcome.UNKNOWN,
@@ -1041,6 +1388,7 @@ def execute_betfair_supervised_action(
         evidence_id=evidence_id,
         observed_at=report.observed_at,
         source=f"betfair:placeOrders:{report.response_sha256}",
+        request_sha256=report.request_sha256,
     )
     outcome = _report_outcome(report, action)
     receipt = report.instruction.bet_id

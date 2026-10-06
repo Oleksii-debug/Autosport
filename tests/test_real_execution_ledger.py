@@ -1767,13 +1767,28 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ):
                 ledger.verify_integrity()
 
-    def test_existing_writer_lock_fails_closed(self):
+    def test_persistent_writer_lock_file_without_os_owner_is_reusable(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
-            ledger._lock_path.write_text("owner", encoding="utf-8")
-            with self.assertRaises(ExecutionLedgerBusyError):
-                ledger.reserve_plan(plan(action()))
+            ledger._lock_path.write_text("stale-process-marker", encoding="utf-8")
+
+            ledger.reserve_plan(plan(action()))
+
+            self.assertTrue(ledger._lock_path.exists())
+            self.assertEqual(ledger.verify_integrity(), 1)
+
+    def test_live_writer_lock_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            competing = RealExecutionLedger(path)
+
+            def while_writer_is_live():
+                with self.assertRaises(ExecutionLedgerBusyError):
+                    competing.reserve_plan(plan(action()))
+
+            ledger._mutate(while_writer_is_live)
 
     def test_rejected_ack_cannot_claim_accepted_money(self):
         with self.assertRaises(ValueError):
@@ -1918,6 +1933,224 @@ class RealExecutionLedgerTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ExecutionLedgerIntegrityError,
                 "not-found reconciliation attempt identity mismatch",
+            ):
+                restarted.verify_integrity()
+
+
+
+    def test_submitted_request_digest_survives_restart_in_verified_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-digest",
+                reserved_at=RESERVED_AT,
+            )
+            digest = "a" * 64
+            ledger.mark_submitted(
+                "try-digest",
+                submitted_at=SUBMITTED_AT,
+                request_sha256=digest,
+            )
+
+            restarted = RealExecutionLedger(path)
+            view = restarted.verified_execution_view("p1")
+
+            self.assertEqual(len(view.attempts), 1)
+            self.assertEqual(
+                view.attempts[0].submitted_request_sha256,
+                digest,
+            )
+            self.assertEqual(view.attempts[0].submitted_at, SUBMITTED_AT)
+
+    def test_legacy_submission_without_request_digest_remains_non_authoritative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-legacy-submit",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted(
+                "try-legacy-submit",
+                submitted_at=SUBMITTED_AT,
+            )
+
+            view = RealExecutionLedger(path).verified_execution_view("p1")
+
+            self.assertIsNone(view.attempts[0].submitted_request_sha256)
+
+
+
+    def test_provider_request_digest_binding_survives_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-provider-digest",
+                reserved_at=RESERVED_AT,
+            )
+            digest = "e" * 64
+            ledger.mark_submitted(
+                "try-provider-digest",
+                submitted_at=SUBMITTED_AT,
+                request_sha256=digest,
+            )
+            ledger.bind_provider_evidence(
+                attempt_id="try-provider-digest",
+                evidence_id="f" * 64,
+                observed_at=UNKNOWN_AT,
+                source="betfair:placeOrders:test-response",
+                request_sha256=digest,
+            )
+
+            view = RealExecutionLedger(path).verified_execution_view("p1")
+            attempt = view.attempts[0]
+
+            self.assertEqual(attempt.submitted_request_sha256, digest)
+            self.assertIsNotNone(attempt.provider_evidence)
+            self.assertEqual(
+                attempt.provider_evidence.request_sha256,
+                digest,
+            )
+
+    def test_provider_request_digest_mismatch_cannot_bind_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-provider-mismatch",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted(
+                "try-provider-mismatch",
+                submitted_at=SUBMITTED_AT,
+                request_sha256="1" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict,
+                "provider request evidence mismatches durable submission",
+            ):
+                ledger.bind_provider_evidence(
+                    attempt_id="try-provider-mismatch",
+                    evidence_id="2" * 64,
+                    observed_at=UNKNOWN_AT,
+                    source="betfair:placeOrders:test-response",
+                    request_sha256="3" * 64,
+                )
+
+            view = ledger.verified_execution_view("p1")
+            self.assertIsNone(view.attempts[0].provider_evidence)
+            self.assertEqual(
+                view.attempts[0].submitted_request_sha256,
+                "1" * 64,
+            )
+
+
+    def test_conflicting_submitted_request_digest_replay_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-conflicting-digest",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted(
+                "try-conflicting-digest",
+                submitted_at=SUBMITTED_AT,
+                request_sha256="c" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict,
+                "different request identity",
+            ):
+                ledger.mark_submitted(
+                    "try-conflicting-digest",
+                    submitted_at=SUBMITTED_AT,
+                    request_sha256="d" * 64,
+                )
+
+            view = ledger.verified_execution_view("p1")
+            self.assertEqual(
+                view.attempts[0].submitted_request_sha256,
+                "c" * 64,
+            )
+
+
+    def test_restart_rejects_hash_valid_invalid_submitted_request_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-tampered-submit",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted(
+                "try-tampered-submit",
+                submitted_at=SUBMITTED_AT,
+                request_sha256="b" * 64,
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            submitted = next(
+                envelope
+                for envelope in lines
+                if envelope["event"]["event_type"]
+                == EventType.ATTEMPT_SUBMITTED.value
+            )
+            submitted["event"]["payload"]["request_sha256"] = "not-a-sha256"
+
+            import hashlib
+
+            body = json.dumps(
+                submitted["event"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            submitted["sha256"] = hashlib.sha256(body.encode()).hexdigest()
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "ATTEMPT_SUBMITTED request digest is invalid",
             ):
                 restarted.verify_integrity()
 

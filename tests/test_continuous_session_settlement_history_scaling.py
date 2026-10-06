@@ -3451,3 +3451,36 @@ def test_settlement_resolution_collection_rejects_non_string_reference_before_eq
         assert "malformed settlement resolution fields" in str(exc)
     else:
         raise AssertionError("non-string settlement reference reached equality dispatch")
+
+
+def test_settlement_resolution_collection_rejects_runtime_replace_rebinding(monkeypatch) -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    coordinator = _resolution_coordinator((record,), (_resolution(),))
+
+    def attacker_replace(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("runtime-rebound dataclass replace executed")
+
+    monkeypatch.setattr(continuous_session, "replace", attacker_replace)
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "validator authority changed" in str(exc)
+    else:
+        raise AssertionError("runtime-rebound settlement copy authority was accepted")
+
+
+def test_settlement_consumer_rejects_runtime_replace_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    def attacker_replace(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("runtime-rebound settlement consumer copy executed")
+
+    monkeypatch.setattr(continuous_session, "replace", attacker_replace)
+
+    try:
+        coordinator._settle(resolutions=(_resolution(),))
+    except continuous_session.ContinuousSessionError as exc:
+        assert "copy authority changed" in str(exc)
+    else:
+        raise AssertionError("runtime-rebound settlement consumer copy was accepted")

@@ -576,6 +576,18 @@ def test_transition_snapshot_covers_every_captured_contract_slot(monkeypatch) ->
         monkeypatch.undo()
 
 
+def test_transition_snapshot_helper_ignores_rebound_snapshot_alias(monkeypatch) -> None:
+    goal = _goal(max_stake_fraction=Decimal("0.03"))
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound canonical contract snapshot executed")
+
+    monkeypatch.setattr(economic_goal_module, "_canonical_contract_snapshot", forged)
+
+    snapshot = economic_goal_module._snapshot_transition_contract(goal)
+    assert snapshot.max_stake_fraction == Decimal("0.03")
+
+
 def test_transition_snapshot_helper_ignores_rebound_contract_descriptors(monkeypatch) -> None:
     goal = _goal(max_stake_fraction=Decimal("0.03"))
 

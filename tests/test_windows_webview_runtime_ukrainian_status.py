@@ -600,3 +600,56 @@ def test_clean_stop_retires_current_run_identity_for_next_session(
         "session-2",
         "source-2",
     )
+
+
+def test_routine_runtime_tick_does_not_overwrite_global_live_status(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        _tick_message(provider_unavailable=False),
+    )
+    controller.status = "Оператор читає поточний стан."
+
+    controller._poll_workers()
+
+    assert "завершено цикл" in controller.product_runtime_status.casefold()
+    assert controller.status == "Оператор читає поточний стан."
+
+
+def test_runtime_source_attention_transition_uses_global_live_status(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        _tick_message(provider_unavailable=True),
+    )
+    controller.status = "Тривалий режим активний."
+
+    controller._poll_workers()
+
+    assert "недоступ" in controller.product_runtime_source_status.casefold()
+    assert controller.status == controller.product_runtime_source_status
+
+
+def test_runtime_source_recovery_transition_uses_global_live_status_once(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        _tick_message(provider_unavailable=True),
+    )
+    controller._poll_workers()
+    assert controller._product_runtime_source_attention_required is True
+
+    controller.product_worker = _QueuedProductWorker(
+        _tick_message(provider_unavailable=False),
+        busy=True,
+    )
+    controller.status = "Попередній стан потребував уваги."
+
+    controller._poll_workers()
+
+    assert controller._product_runtime_source_attention_required is False
+    assert controller.status == controller.product_runtime_source_status
+    assert "недоступ" not in controller.status.casefold()

@@ -2489,3 +2489,193 @@ def test_attempt_executor_rejects_invalid_batch_before_transport_after_rebound(m
     assert rebound_called is False
     assert transport.calls == []
 
+def test_attempt_executor_seals_admission_error_type(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    for _ in range(5):
+        assert rate_gate.reserve(("1.001",), scheduled_at=NOW).allowed is True
+    rebound_called = False
+
+    class ReboundAdmissionError(Exception):
+        def __init__(self, *args, **kwargs):
+            nonlocal rebound_called
+            rebound_called = True
+            super().__init__("rebound admission error")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookBatchAdmissionError",
+        ReboundAdmissionError,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="sealed-admission-type",
+        required=True,
+        request_id="sealed-admission-type",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert rebound_called is False
+    assert execution.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert execution.result is None
+    assert execution.history.required_gap_attempt_ids == ("sealed-admission-type",)
+    assert transport.calls == []
+
+
+def test_attempt_executor_seals_transport_exception_aliases(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+
+    class TimeoutTransport:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, url, *, headers, body, timeout_seconds):
+            self.calls += 1
+            raise TimeoutError("forced transport timeout")
+
+    transport = TimeoutTransport()
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: NOW,
+        venue_id="betfair-global",
+        account_id="configured-account",
+    )
+    rate_gate, concurrency_gate = _gates()
+
+    class ReboundTransportModule:
+        BetfairMarketBookTransportError = LookupError
+        BetfairMarketBookProviderError = LookupError
+        BetfairMarketBookProtocolError = LookupError
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "_transport",
+        ReboundTransportModule(),
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="sealed-transport-exception-alias",
+        required=True,
+        request_id="sealed-transport-exception-alias",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert transport.calls == 1
+    assert execution.outcome is MarketBookAttemptOutcome.TRANSPORT_FAILURE
+    assert execution.result is None
+    assert execution.history.required_gap_attempt_ids == (
+        "sealed-transport-exception-alias",
+    )
+
+
+def test_attempt_executor_seals_completeness_error_type(monkeypatch):
+    plan = _plan(market_ids=("1.001", "1.002"))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(("1.001", "1.001")))
+    rate_gate, concurrency_gate = _gates()
+    rebound_called = False
+
+    class ReboundCompletenessError(Exception):
+        def __init__(self, *args, **kwargs):
+            nonlocal rebound_called
+            rebound_called = True
+            super().__init__("rebound completeness error")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookCompletenessError",
+        ReboundCompletenessError,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="sealed-completeness-error",
+        required=True,
+        request_id="sealed-completeness-error",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert rebound_called is False
+    assert execution.outcome is MarketBookAttemptOutcome.PARSE_FAILURE
+    assert execution.result is None
+    assert execution.history.required_gap_attempt_ids == (
+        "sealed-completeness-error",
+    )
+    assert len(transport.calls) == 1
+
+
+def test_attempt_executor_seals_post_dispatch_failure_type(monkeypatch):
+    plan = _plan(market_ids=("1.001",), order_projection="EXECUTABLE")
+    batch = plan.batches[0]
+    rate_gate, concurrency_gate = _gates()
+    rebound_called = False
+
+    class LeaseDroppingTransport:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, url, *, headers, body, timeout_seconds):
+            self.calls += 1
+            with concurrency_gate._lock:
+                concurrency_gate._active.clear()
+            return _payload(batch.market_ids)
+
+    transport = LeaseDroppingTransport()
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: NOW,
+        venue_id="betfair-global",
+        account_id="configured-account",
+    )
+
+    class ReboundPostDispatchFailure(Exception):
+        def __init__(self, *args, **kwargs):
+            nonlocal rebound_called
+            rebound_called = True
+            super().__init__("rebound post-dispatch failure")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookPostDispatchFailure",
+        ReboundPostDispatchFailure,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="sealed-post-dispatch-type",
+        required=True,
+        request_id="sealed-post-dispatch-type",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert rebound_called is False
+    assert transport.calls == 1
+    assert execution.outcome is MarketBookAttemptOutcome.TRANSPORT_FAILURE
+    assert execution.result is None
+    assert execution.history.required_gap_attempt_ids == (
+        "sealed-post-dispatch-type",
+    )
+

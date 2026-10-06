@@ -2705,6 +2705,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
         ] = FocusedMirrorDependencyIndex._dependency,
         _dependency_reader_code: object = FocusedMirrorDependencyIndex._dependency.__code__,
+        _matching_keys_reader: Callable[..., tuple[object, ...]] = (
+            FocusedMirrorDependencyIndex.matching_keys
+        ),
+        _matching_keys_reader_code: object = FocusedMirrorDependencyIndex.matching_keys.__code__,
         _dependency_type: type[FocusedMirrorDependency] = FocusedMirrorDependency,
         _dependency_matches: Callable[[FocusedMirrorDependency, object], bool] = (
             FocusedMirrorDependency.matches
@@ -2819,6 +2823,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 FocusedMirrorDependencyIndex._dependency is not _dependency_reader
                 or getattr(_dependency_reader, "__code__", None)
                 is not _dependency_reader_code
+                or FocusedMirrorDependencyIndex.matching_keys
+                is not _matching_keys_reader
+                or getattr(_matching_keys_reader, "__code__", None)
+                is not _matching_keys_reader_code
             ):
                 raise ContinuousSessionError(
                     "canonical dependency routing reader authority changed"
@@ -2854,6 +2862,19 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if current != dependency_authority:
                 raise ContinuousSessionError(message)
 
+        def matching_keys_authority() -> tuple[
+            tuple[str, tuple[object, ...]], ...
+        ] | None:
+            if dependency_authority is None:
+                return None
+            return tuple(
+                (
+                    input_id,
+                    _matching_keys_reader(dependency_index, input_id),
+                )
+                for input_id in indexed_input_ids
+            )
+
         affected: list[str] = []
         full_refresh_required = False
         last_has_more = False
@@ -2863,6 +2884,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "dependency index input identity state changed between invalidation batches"
                 )
+            matching_keys_before_drain = matching_keys_authority()
             batch = drain_invalidation(max_items=max_items)
             if dependency_index.input_ids != indexed_input_ids:
                 raise ContinuousSessionError(
@@ -2871,6 +2893,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             require_dependency_authority(
                 "dependency index routing authority changed during invalidation drain"
             )
+            if matching_keys_authority() != matching_keys_before_drain:
+                raise ContinuousSessionError(
+                    "dependency index matched-key routing changed during invalidation drain"
+                )
             if (
                 type(batch) is not MirrorInvalidationBatch
                 or type(batch.changed_keys) is not tuple
@@ -2958,6 +2984,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if not batch_has_more:
                 break
 
+        matching_keys_before_backlog = matching_keys_authority()
         pending_count = invalidation_buffer.pending_count
         pending_full_refresh = invalidation_buffer.full_refresh_required
         if (
@@ -2975,6 +3002,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         require_dependency_authority(
             "dependency index routing authority changed during invalidation backlog inspection"
         )
+        if matching_keys_authority() != matching_keys_before_backlog:
+            raise ContinuousSessionError(
+                "dependency index matched-key routing changed during invalidation backlog inspection"
+            )
         backlog = last_has_more or pending_count > 0 or pending_full_refresh
         affected_ids = set(affected)
         ordered_affected = tuple(
@@ -4073,6 +4104,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         )
                     require_state_identity()
                     require_dependency_index_identity()
+                    require_tick_dependency_routing_authority(
+                        "dependency routing authority changed during provider-unavailable backlog inspection"
+                    )
                     failure = _record_failure_method(
                         state,
                         code="ProviderUnavailableError",

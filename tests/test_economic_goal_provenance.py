@@ -95,6 +95,27 @@ def test_decision_identity_rejects_provenance_mutation_between_snapshots() -> No
     assert mutated is True
 
 
+def test_decision_identity_public_property_cannot_be_rebound() -> None:
+    original = EconomicGoalProvenance.decision_identity
+
+    def forged_property(_instance):
+        raise AssertionError("rebound decision identity executed")
+
+    with pytest.raises(
+        TypeError,
+        match="provenance public authority binding is immutable",
+    ):
+        EconomicGoalProvenance.decision_identity = forged_property
+
+    assert EconomicGoalProvenance.decision_identity is original
+
+    with pytest.raises(
+        TypeError,
+        match="provenance public authority binding is immutable",
+    ):
+        del EconomicGoalProvenance.decision_identity
+
+
 def test_decision_identity_ignores_rebound_bound_implementation(monkeypatch) -> None:
     evidence = provenance_for(_goal())
     expected = evidence.decision_identity

@@ -582,8 +582,8 @@ class OperatorRiskProjection:
 
 
 def operator_projection(entry: IncidentRiskEntry) -> OperatorRiskProjection:
-    if not isinstance(entry, IncidentRiskEntry):
-        raise TypeError("operator projection requires an IncidentRiskEntry")
+    if type(entry) is not IncidentRiskEntry:
+        raise TypeError("operator projection requires an exact IncidentRiskEntry")
     return OperatorRiskProjection(
         entry_id=entry.entry_id,
         revision=entry.revision,
@@ -620,8 +620,8 @@ def operator_sort(entries: Iterable[IncidentRiskEntry]) -> tuple[IncidentRiskEnt
     """Put actionable/high-severity/newest entries first without mutating truth."""
 
     materialized = tuple(entries)
-    if any(not isinstance(entry, IncidentRiskEntry) for entry in materialized):
-        raise TypeError("operator_sort accepts only IncidentRiskEntry values")
+    if any(type(entry) is not IncidentRiskEntry for entry in materialized):
+        raise TypeError("operator_sort accepts only exact IncidentRiskEntry values")
 
     def key(entry: IncidentRiskEntry) -> tuple[int, int, int, str]:
         _, updated = _canonical_timestamp("updated_at", entry.updated_at)

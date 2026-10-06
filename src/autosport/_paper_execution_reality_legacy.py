@@ -651,6 +651,9 @@ class PaperLegAttempt:
         }
         if set(raw) != expected:
             raise PaperExecutionIntegrityError("attempt payload schema is invalid")
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+            raise PaperExecutionIntegrityError("decimal parser authority changed")
         try:
             return cls(
                 attempt_id=raw["attempt_id"],
@@ -665,15 +668,23 @@ class PaperLegAttempt:
                 selection_id=raw["selection_id"],
                 side=raw["side"],
                 decision_quote_id=raw["decision_quote_id"],
-                decision_odds=Decimal(raw["decision_odds"]),
-                requested_stake=Decimal(raw["requested_stake"]),
+                decision_odds=decimal_parser(raw["decision_odds"], "decision_odds"),
+                requested_stake=decimal_parser(raw["requested_stake"], "requested_stake"),
                 decision_observed_at=raw["decision_observed_at"],
                 execution_observed_at=raw["execution_observed_at"],
                 delay_ms=raw["delay_ms"],
                 quote_age_ms=raw["quote_age_ms"],
                 outcome=PaperAttemptOutcome(raw["outcome"]),
-                execution_odds=None if raw["execution_odds"] is None else Decimal(raw["execution_odds"]),
-                execution_stake=None if raw["execution_stake"] is None else Decimal(raw["execution_stake"]),
+                execution_odds=(
+                    None
+                    if raw["execution_odds"] is None
+                    else decimal_parser(raw["execution_odds"], "execution_odds")
+                ),
+                execution_stake=(
+                    None
+                    if raw["execution_stake"] is None
+                    else decimal_parser(raw["execution_stake"], "execution_stake")
+                ),
                 suspended=raw["suspended"],
                 evidence_grade=EvidenceGrade(raw["evidence_grade"]),
                 evidence_source=raw["evidence_source"],
@@ -682,7 +693,7 @@ class PaperLegAttempt:
                 model_fingerprint=raw["model_fingerprint"],
                 reason=raw["reason"],
             )
-        except (KeyError, ValueError, InvalidOperation, TypeError) as exc:
+        except (KeyError, ValueError, TypeError) as exc:
             raise PaperExecutionIntegrityError("invalid attempt payload") from exc
 
 
@@ -1122,11 +1133,18 @@ class PaperExecutionLedger:
             raise PaperExecutionIntegrityError("run has multiple completion events")
         if completions:
             payload = completions[0]["payload"]
+            decimal_parser = _CANONICAL_DECIMAL_PARSER
+            if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+                raise PaperExecutionIntegrityError("decimal parser authority changed")
             try:
                 recovery = RecoveryDecision(payload["recovery_decision"])
                 pending = tuple(payload["pending_action_ids"])
-                exposure = Decimal(payload["worst_case_exposure"])
-            except (KeyError, ValueError, InvalidOperation, TypeError) as exc:
+                exposure = decimal_parser(
+                    payload["worst_case_exposure"],
+                    "worst_case_exposure",
+                    allow_zero=True,
+                )
+            except (KeyError, ValueError, TypeError) as exc:
                 raise PaperExecutionIntegrityError("invalid completion payload") from exc
             return PaperExecutionRun(
                 run_id=run_id,

@@ -1554,3 +1554,27 @@ def test_operational_checkpoint_generation_marker_rejects_boolean() -> None:
             assert "observed_generation" in str(exc)
         else:
             raise AssertionError("boolean observed_generation was accepted")
+
+
+def test_non_superseding_source_projection_preserves_failure_generation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="PROVIDER_FAILURE")
+
+        state.record_source_projection(deltas=(), backlog=True)
+
+        snapshot = state.snapshot()
+        assert snapshot.last_error_code == "PROVIDER_FAILURE"
+        assert snapshot.source_state_projection_backlog is True
+
+        canonical = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        sidecar = json.loads(
+            (
+                root / "continuous_session.json.operational_error.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert canonical["generation"] == 0
+        assert sidecar["observed_generation"] == 0

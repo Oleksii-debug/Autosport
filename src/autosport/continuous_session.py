@@ -1041,14 +1041,23 @@ class _ContinuousSessionState:
 
         def mutate(raw: dict[str, Any]) -> bool:
             normalized_reason = None if reason is None else _text(reason, "reason")
-            if raw["state"] == state.value and (
-                normalized_reason is None
-                or raw["last_error_code"] == normalized_reason
+            if normalized_reason is not None:
+                desired_error = normalized_reason
+            elif state is SessionState.RUNNING:
+                # A successful operator resume establishes RUNNING as the
+                # current durable state; a stop/pause reason from the
+                # predecessor generation is no longer an active error.
+                desired_error = None
+            else:
+                desired_error = raw["last_error_code"]
+
+            if (
+                raw["state"] == state.value
+                and raw["last_error_code"] == desired_error
             ):
                 return False
             raw["state"] = state.value
-            if normalized_reason is not None:
-                raw["last_error_code"] = normalized_reason
+            raw["last_error_code"] = desired_error
             return True
 
         def finalize(_updated: dict[str, Any]) -> None:

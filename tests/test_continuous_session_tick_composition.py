@@ -4105,3 +4105,198 @@ def test_tick_preserves_genuine_durable_operator_control_before_callbacks(
         assert snapshot.state is state_value
         assert snapshot.last_error_code == "OPERATOR_CONTROL"
 
+
+
+def test_register_rejects_in_place_collateral_selector_mutation() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    existing = index.register("existing", source_ids="provider-a")
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        object.__setattr__(
+            existing,
+            "source_ids",
+            frozenset({"provider-b"}),
+        )
+        index.register(input_id, **selectors)
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="registration changed unrelated dependency selectors",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
+def test_retire_rejects_in_place_collateral_selector_mutation() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("old", source_ids="provider-a")
+    remaining = index.register("remaining", source_ids="provider-a")
+
+    def malicious_unregister(input_id: str) -> bool:
+        removed = index.unregister(input_id)
+        object.__setattr__(
+            remaining,
+            "source_ids",
+            frozenset({"provider-b"}),
+        )
+        return removed
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="retirement changed unrelated dependency selectors",
+    ):
+        coordinator._retire_input(
+            "old",
+            dependency_index=index,
+            unregister_input=malicious_unregister,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation_phase", "expected_message"),
+    (
+        (
+            "drain",
+            "routing authority changed during invalidation drain",
+        ),
+        (
+            "routing",
+            "routing authority changed during affected-input routing",
+        ),
+        (
+            "backlog",
+            "routing authority changed during invalidation backlog inspection",
+        ),
+    ),
+)
+def test_invalidation_rejects_in_place_dependency_selector_mutation(
+    mutation_phase: str,
+    expected_message: str,
+) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    dependency = index.register("input-a", source_ids="provider-a")
+
+    def mutate() -> None:
+        object.__setattr__(
+            dependency,
+            "source_ids",
+            frozenset({"provider-b"}),
+        )
+
+    class Buffer:
+        full_refresh_required = False
+
+        @property
+        def pending_count(self):
+            if mutation_phase == "backlog":
+                mutate()
+            return 0
+
+        def drain(self, *, max_items: int):
+            assert max_items == 250
+            if mutation_phase == "drain":
+                mutate()
+            return continuous_session.MirrorInvalidationBatch(
+                changed_keys=(),
+                full_refresh_required=False,
+                has_more=False,
+            )
+
+    def affected_inputs(_batch):
+        if mutation_phase == "routing":
+            mutate()
+        return ()
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match=expected_message,
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=Buffer(),
+            dependency_index=index,
+            drain_invalidation=Buffer().drain,
+            affected_inputs=affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+
+
+def test_tick_rejects_in_place_lifecycle_selector_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        dependency = index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                object.__setattr__(
+                    dependency,
+                    "source_ids",
+                    frozenset({"provider-b"}),
+                )
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="lifecycle changed dependency routing authority outside coordinator callbacks",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_in_place_mutation_after_lifecycle_registration_callback() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                *_args,
+                register_input,
+                **_kwargs,
+            ):
+                register_input("input-new", source_ids="provider-a")
+                dependency = index._dependency("input-new")
+                object.__setattr__(
+                    dependency,
+                    "source_ids",
+                    frozenset({"provider-b"}),
+                )
+                return ("input-new",)
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="lifecycle changed dependency routing authority outside coordinator callbacks",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"

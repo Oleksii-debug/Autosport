@@ -17,12 +17,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+from fractions import Fraction
+from threading import Lock
 from typing import Iterable
+
+from . import betfair_marketbook_request_budget as _marketbook_budget
 
 
 _ONE_SECOND_NS = 1_000_000_000
 _MAX_MARKET_BOOK_PER_MARKET_PER_SECOND = 5
-_MAX_MARKET_DATA_REQUEST_POINTS = 200
+_ORDER_PROJECTIONS = frozenset({"ALL", "EXECUTABLE", "EXECUTION_COMPLETE"})
+_MATCH_PROJECTIONS = frozenset(
+    {"NO_ROLLUP", "ROLLED_UP_BY_PRICE", "ROLLED_UP_BY_AVG_PRICE"}
+)
 
 
 class BetfairRequestBudgetError(ValueError):
@@ -186,8 +193,10 @@ class BetfairRequestIntent:
     operation: BetfairRequestOperation
     priority: BetfairRequestPriority
     market_ids: tuple[str, ...] = ()
-    market_data_weight_per_market: int | None = None
-    uses_order_projection: bool = False
+    price_data: tuple[str, ...] = ()
+    best_prices_depth: int | None = None
+    order_projection: str | None = None
+    match_projection: str | None = None
     dedupe_key: str | None = None
     reconciliation_for_request_id: str | None = None
 
@@ -208,8 +217,8 @@ class BetfairRequestIntent:
         )
         if len(normalized_markets) != len(set(normalized_markets)):
             raise BetfairRequestBudgetError("market_ids must not contain duplicates")
-        if type(self.uses_order_projection) is not bool:
-            raise BetfairRequestBudgetError("uses_order_projection must be bool")
+        if type(self.price_data) is not tuple:
+            raise BetfairRequestBudgetError("price_data must be a tuple")
         if self.dedupe_key is not None:
             _exact_text(self.dedupe_key, "dedupe_key")
         if self.reconciliation_for_request_id is not None:
@@ -219,34 +228,28 @@ class BetfairRequestIntent:
             )
 
         if self.operation is BetfairRequestOperation.LIST_MARKET_BOOK:
-            if not normalized_markets:
-                raise BetfairRequestBudgetError(
-                    "listMarketBook requires at least one market_id"
-                )
-            if self.market_data_weight_per_market is None:
-                raise BetfairRequestBudgetError(
-                    "listMarketBook requires market_data_weight_per_market"
-                )
-            weight = _positive_int(
-                self.market_data_weight_per_market,
-                "market_data_weight_per_market",
-            )
-            if weight * len(normalized_markets) > _MAX_MARKET_DATA_REQUEST_POINTS:
-                raise BetfairRequestBudgetError(
-                    "listMarketBook weighted request exceeds 200 points"
-                )
+            budget = self._canonical_market_book_budget()
+            assert budget is not None
+            object.__setattr__(self, "market_ids", budget.market_ids)
+            object.__setattr__(self, "price_data", budget.price_data)
+            object.__setattr__(self, "best_prices_depth", budget.best_prices_depth)
+            self._has_order_aware_projection()
         else:
             if self.market_ids:
                 raise BetfairRequestBudgetError(
                     "market_ids are only modeled for listMarketBook"
                 )
-            if self.market_data_weight_per_market is not None:
+            if self.price_data:
                 raise BetfairRequestBudgetError(
-                    "market_data_weight_per_market is only valid for listMarketBook"
+                    "price_data is only valid for listMarketBook"
                 )
-            if self.uses_order_projection:
+            if self.best_prices_depth is not None:
                 raise BetfairRequestBudgetError(
-                    "uses_order_projection is only valid for listMarketBook"
+                    "best_prices_depth is only valid for listMarketBook"
+                )
+            if self.order_projection is not None or self.match_projection is not None:
+                raise BetfairRequestBudgetError(
+                    "order/match projection is only valid for listMarketBook"
                 )
 
         if self.reconciliation_for_request_id is not None:
@@ -278,6 +281,43 @@ class BetfairRequestIntent:
                     "place/update/replace must use EXECUTION_MUTATION priority"
                 )
 
+    def _canonical_market_book_budget(
+        self,
+    ) -> _marketbook_budget.MarketBookRequestBudget | None:
+        if self.operation is not BetfairRequestOperation.LIST_MARKET_BOOK:
+            return None
+        try:
+            budget = _marketbook_budget.MarketBookRequestBudget(
+                market_ids=self.market_ids,
+                price_data=self.price_data,
+                best_prices_depth=self.best_prices_depth,
+                operation="listMarketBook",
+            )
+            allowed = budget.allowed
+        except _marketbook_budget.MarketBookBudgetError as exc:
+            raise BetfairRequestBudgetError(
+                "listMarketBook request does not have canonical provider budget semantics"
+            ) from exc
+        if allowed is not True:
+            raise BetfairRequestBudgetError(
+                "listMarketBook weighted request exceeds 200 points"
+            )
+        return budget
+
+    def _has_order_aware_projection(self) -> bool:
+        for value, field, allowed in (
+            (self.order_projection, "order_projection", _ORDER_PROJECTIONS),
+            (self.match_projection, "match_projection", _MATCH_PROJECTIONS),
+        ):
+            if value is None:
+                continue
+            candidate = _exact_text(value, field)
+            if candidate not in allowed:
+                raise BetfairRequestBudgetError(
+                    f"{field} is not a canonical Betfair projection value"
+                )
+        return self.order_projection is not None or self.match_projection is not None
+
     @property
     def is_read(self) -> bool:
         return self.operation in _READ_OPERATIONS
@@ -296,17 +336,21 @@ class BetfairRequestIntent:
         }:
             return BetfairRequestPool.SHARED_ORDER_READ
         if self.operation is BetfairRequestOperation.LIST_MARKET_BOOK:
-            if self.uses_order_projection:
+            if self._has_order_aware_projection():
                 return BetfairRequestPool.SHARED_ORDER_READ
             return BetfairRequestPool.MARKET_DATA
         return BetfairRequestPool.MUTATION
 
     @property
-    def total_market_data_points(self) -> int | None:
-        if self.operation is not BetfairRequestOperation.LIST_MARKET_BOOK:
+    def total_market_data_points(self) -> Fraction | None:
+        budget = self._canonical_market_book_budget()
+        if budget is None:
             return None
-        assert self.market_data_weight_per_market is not None
-        return self.market_data_weight_per_market * len(self.market_ids)
+        return budget.total_points
+
+    @property
+    def has_order_or_match_projection(self) -> bool:
+        return self._has_order_aware_projection()
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +389,7 @@ class BetfairRequestBudgetState:
     in_flight_cleared_orders: int = 0
     in_flight_market_data: int = 0
     in_flight_mutations: int = 0
+    in_flight_request_ids: frozenset[str] = frozenset()
     queued_noncritical_dedupe_keys: frozenset[str] = frozenset()
     unresolved_external_mutation_ids: frozenset[str] = frozenset()
     backoffs: tuple[BetfairPoolBackoff, ...] = ()
@@ -369,6 +414,12 @@ class BetfairRequestBudgetState:
             "cold_start_until_monotonic_ns",
         ):
             _nonnegative_int(getattr(self, field), field)
+        if type(self.in_flight_request_ids) is not frozenset:
+            raise BetfairRequestBudgetError(
+                "in_flight_request_ids must be a frozenset"
+            )
+        for request_id in self.in_flight_request_ids:
+            _exact_text(request_id, "in_flight_request_id")
         if type(self.queued_noncritical_dedupe_keys) is not frozenset:
             raise BetfairRequestBudgetError(
                 "queued_noncritical_dedupe_keys must be a frozenset"
@@ -507,7 +558,12 @@ def admit_betfair_request(
     policy: BetfairRequestBudgetPolicy,
     now_monotonic_ns: int,
 ) -> BetfairAdmission:
-    """Return a fail-closed budget decision without performing provider I/O."""
+    """Assess one request against an immutable state snapshot.
+
+    This function is deterministic advisory policy and does not reserve capacity.
+    Transport dispatchers that require concurrency/rate enforcement must use
+    BetfairRequestBudgetOwner.reserve(), which serializes assessment + reservation.
+    """
 
     if type(intent) is not BetfairRequestIntent:
         raise BetfairRequestBudgetError("intent must be an exact BetfairRequestIntent")
@@ -516,6 +572,12 @@ def admit_betfair_request(
     if type(policy) is not BetfairRequestBudgetPolicy:
         raise BetfairRequestBudgetError("policy must be an exact BetfairRequestBudgetPolicy")
     now = _nonnegative_int(now_monotonic_ns, "now_monotonic_ns")
+    if intent.request_id in state.in_flight_request_ids:
+        return BetfairAdmission(
+            BetfairAdmissionDecision.THROTTLE,
+            "request_id already has an in-flight reservation",
+        )
+
     if any(
         dispatch.dispatched_monotonic_ns > now
         for dispatch in state.recent_market_book_dispatches
@@ -564,7 +626,7 @@ def admit_betfair_request(
             BetfairRequestPriority.MONITORING,
             BetfairRequestPriority.BACKGROUND,
         }
-        and not intent.uses_order_projection
+        and not intent.has_order_or_match_projection
     ):
         return BetfairAdmission(
             BetfairAdmissionDecision.DEFER_STREAM_SUFFICIENT,
@@ -692,6 +754,120 @@ def record_market_book_dispatch(
         state,
         recent_market_book_dispatches=retained + appended,
     )
+
+
+def _pool_counter_field(pool: BetfairRequestPool) -> str:
+    return {
+        BetfairRequestPool.SHARED_ORDER_READ: "in_flight_shared_order_reads",
+        BetfairRequestPool.CLEARED_ORDERS: "in_flight_cleared_orders",
+        BetfairRequestPool.MARKET_DATA: "in_flight_market_data",
+        BetfairRequestPool.MUTATION: "in_flight_mutations",
+    }[pool]
+
+
+def _reserve_admitted_request(
+    state: BetfairRequestBudgetState,
+    *,
+    intent: BetfairRequestIntent,
+    now_monotonic_ns: int,
+) -> BetfairRequestBudgetState:
+    if intent.request_id in state.in_flight_request_ids:
+        raise BetfairRequestBudgetError("request_id already has an in-flight reservation")
+    field = _pool_counter_field(intent.request_pool)
+    reserved = replace(
+        state,
+        **{
+            field: getattr(state, field) + 1,
+            "in_flight_request_ids": state.in_flight_request_ids | {intent.request_id},
+        },
+    )
+    if intent.operation is BetfairRequestOperation.LIST_MARKET_BOOK:
+        reserved = record_market_book_dispatch(
+            reserved,
+            intent=intent,
+            now_monotonic_ns=now_monotonic_ns,
+        )
+    return reserved
+
+
+def release_betfair_request(
+    state: BetfairRequestBudgetState,
+    *,
+    intent: BetfairRequestIntent,
+) -> BetfairRequestBudgetState:
+    """Release one exact in-flight reservation after transport completion/abort."""
+
+    if type(state) is not BetfairRequestBudgetState:
+        raise BetfairRequestBudgetError("state must be an exact BetfairRequestBudgetState")
+    if type(intent) is not BetfairRequestIntent:
+        raise BetfairRequestBudgetError("intent must be an exact BetfairRequestIntent")
+    if intent.request_id not in state.in_flight_request_ids:
+        raise BetfairRequestBudgetError("request_id has no in-flight reservation")
+    field = _pool_counter_field(intent.request_pool)
+    current = getattr(state, field)
+    if current <= 0:
+        raise BetfairRequestBudgetError("in-flight pool counter cannot underflow")
+    return replace(
+        state,
+        **{
+            field: current - 1,
+            "in_flight_request_ids": state.in_flight_request_ids - {intent.request_id},
+        },
+    )
+
+
+class BetfairRequestBudgetOwner:
+    """Process-local serialized owner of provider-pressure reservation state.
+
+    The owner closes check-then-act races inside one process. It intentionally does
+    not claim cross-process/distributed coordination authority; callers must route a
+    provider account through one owner (or an external serialized equivalent).
+    """
+
+    def __init__(self, state: BetfairRequestBudgetState | None = None) -> None:
+        if state is None:
+            state = BetfairRequestBudgetState()
+        if type(state) is not BetfairRequestBudgetState:
+            raise BetfairRequestBudgetError(
+                "state must be an exact BetfairRequestBudgetState"
+            )
+        self._state = state
+        self._lock = Lock()
+
+    def snapshot(self) -> BetfairRequestBudgetState:
+        with self._lock:
+            return self._state
+
+    def reserve(
+        self,
+        intent: BetfairRequestIntent,
+        *,
+        policy: BetfairRequestBudgetPolicy,
+        now_monotonic_ns: int,
+    ) -> BetfairAdmission:
+        """Atomically assess and reserve one request before provider dispatch."""
+
+        with self._lock:
+            admission = admit_betfair_request(
+                intent,
+                state=self._state,
+                policy=policy,
+                now_monotonic_ns=now_monotonic_ns,
+            )
+            if admission.decision is BetfairAdmissionDecision.ADMIT:
+                self._state = _reserve_admitted_request(
+                    self._state,
+                    intent=intent,
+                    now_monotonic_ns=now_monotonic_ns,
+                )
+            return admission
+
+    def release(self, intent: BetfairRequestIntent) -> BetfairRequestBudgetState:
+        """Release one reservation and return the new immutable state snapshot."""
+
+        with self._lock:
+            self._state = release_betfair_request(self._state, intent=intent)
+            return self._state
 
 
 def record_read_backpressure(

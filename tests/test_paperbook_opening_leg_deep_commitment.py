@@ -136,6 +136,7 @@ def test_unchanged_leg_remains_authorized_after_trusted_restart(tmp_path) -> Non
         ("locked_odds", Decimal("3.00")),
         ("sport", "tennis"),
         ("exchange_side", None),
+        ("market_semantics_id", "exchange.match.odds.v2"),
     ],
 )
 def test_each_canonical_leg_identity_mutation_is_rejected(

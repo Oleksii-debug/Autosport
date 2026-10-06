@@ -652,6 +652,34 @@ def _decode_snapshot(text: str) -> IncidentRiskStoreSnapshot:
     return snapshot
 
 
+def _detached_persistence_entry(entry: IncidentRiskEntry) -> IncidentRiskEntry:
+    """Snapshot caller-owned frozen state before durable validation/publication.
+
+    A frozen dataclass can still be mutated with object.__setattr__. Persist only
+    a newly constructed canonical value, revalidate credential safety on that
+    detached value, and reject a caller object that changes while it is sampled.
+    """
+    if type(entry) is not IncidentRiskEntry:
+        raise IncidentRiskStoreError(
+            "persistence accepts exact IncidentRiskEntry values only"
+        )
+    try:
+        raw = entry.to_dict()
+        detached = IncidentRiskEntry.from_dict(raw)
+        validate_persistence_safe(detached)
+        if entry.to_dict() != raw:
+            raise IncidentRiskStoreError(
+                "incident/model-risk entry changed while taking persistence snapshot"
+            )
+    except IncidentRiskStoreError:
+        raise
+    except (IncidentRiskRegisterError, AttributeError, TypeError, ValueError) as exc:
+        raise IncidentRiskStoreError(
+            "persistence rejects an invalid or credential-bearing IncidentRiskEntry snapshot"
+        ) from exc
+    return detached
+
+
 class IncidentRiskStore:
     """Atomic restart-safe persistence for canonical incident/model-risk history."""
 
@@ -735,17 +763,7 @@ class IncidentRiskStore:
     ) -> IncidentRiskStoreSnapshot:
         """Atomically append one first revision or exact contiguous successor."""
 
-        if type(entry) is not IncidentRiskEntry:
-            raise IncidentRiskStoreError(
-                "persistence accepts exact IncidentRiskEntry values only"
-            )
-        try:
-            entry.__post_init__()
-            validate_persistence_safe(entry)
-        except (IncidentRiskRegisterError, TypeError, ValueError) as exc:
-            raise IncidentRiskStoreError(
-                "persistence rejects an invalid or credential-bearing IncidentRiskEntry snapshot"
-            ) from exc
+        entry = _detached_persistence_entry(entry)
 
         with durable_path_lock(self.path):
             before, observed_before = self._read_unlocked()

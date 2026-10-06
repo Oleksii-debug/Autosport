@@ -455,7 +455,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 key=lambda item: item.sequence,
             )
         )
-        derived = _derive_run_economics(
+        derived = derive_run_economics(
             tuple(action.action_id for action in plan.actions),
             attempts,
         )
@@ -642,7 +642,7 @@ def _synthetic_attempt(
             )
             execution_stake = action.requested_stake
             if outcome is _OUTCOME_PARTIAL:
-                execution_stake = _decimal_scale_bps_exact(
+                execution_stake = decimal_scale(
                     action.requested_stake,
                     config.partial_fill_bps,
                 )

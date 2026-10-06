@@ -694,6 +694,34 @@ def test_future_market_dispatch_history_fails_closed_instead_of_bypassing_limit(
         )
 
 
+def test_rate_history_recorders_reject_monotonic_clock_regression() -> None:
+    market = _market("market-clock")
+    market_state = record_market_book_dispatch(
+        BetfairRequestBudgetState(),
+        intent=market,
+        now_monotonic_ns=2_000,
+    )
+    with pytest.raises(BetfairRequestBudgetError, match="future clock state"):
+        record_market_book_dispatch(
+            market_state,
+            intent=market,
+            now_monotonic_ns=1_999,
+        )
+
+    mutation = _place("mutation-clock")
+    mutation_state = record_mutation_instruction_dispatch(
+        BetfairRequestBudgetState(),
+        intent=mutation,
+        now_monotonic_ns=2_000,
+    )
+    with pytest.raises(BetfairRequestBudgetError, match="future clock state"):
+        record_mutation_instruction_dispatch(
+            mutation_state,
+            intent=mutation,
+            now_monotonic_ns=1_999,
+        )
+
+
 def test_successful_read_clears_only_its_pool_backoff() -> None:
     policy = _policy()
     state = record_read_backpressure(

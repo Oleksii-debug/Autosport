@@ -915,6 +915,17 @@ def _build_canonical_place_action_dispatch():
         )
         for name in workspace_lock_method_names
     )
+    workspace_lock_init = canonical_workspace_lock_type.__dict__.get("__init__")
+    workspace_lock_init_defaults = getattr(workspace_lock_init, "__defaults__", None)
+    workspace_lock_init_kwdefaults = getattr(workspace_lock_init, "__kwdefaults__", None)
+    workspace_lock_init_kwdefault_items = (
+        tuple(workspace_lock_init_kwdefaults.items())
+        if workspace_lock_init_kwdefaults is not None
+        else ()
+    )
+    canonical_workspace_lock_file_name = canonical_workspace_lock_type.__dict__.get(
+        "FILE_NAME"
+    )
     canonical_profile_require_code = getattr(
         canonical_profile_require,
         "__code__",
@@ -1110,6 +1121,12 @@ def _build_canonical_place_action_dispatch():
         or not callable(canonical_provenance_for)
         or canonical_provenance_for_code is None
         or any(method is None or code is None for _, method, code in workspace_lock_methods)
+        or type(canonical_workspace_lock_file_name) is not str
+        or not canonical_workspace_lock_file_name
+        or (
+            workspace_lock_init_kwdefaults is not None
+            and type(workspace_lock_init_kwdefaults) is not dict
+        )
         or not callable(canonical_trusted_now)
         or canonical_trusted_now_code is None
         or not callable(canonical_bound_binding_sha256)
@@ -1368,6 +1385,22 @@ def _build_canonical_place_action_dispatch():
             is canonical_workspace_lock_getattribute
             and canonical_workspace_lock_type.__setattr__
             is canonical_workspace_lock_setattr
+            and canonical_workspace_lock_type.__dict__.get("FILE_NAME")
+            == canonical_workspace_lock_file_name
+            and workspace_lock_init.__defaults__ is workspace_lock_init_defaults
+            and workspace_lock_init.__kwdefaults__ is workspace_lock_init_kwdefaults
+            and (
+                workspace_lock_init_kwdefaults is None
+                or (
+                    len(workspace_lock_init_kwdefaults)
+                    == len(workspace_lock_init_kwdefault_items)
+                    and all(
+                        key in workspace_lock_init_kwdefaults
+                        and workspace_lock_init_kwdefaults[key] is value
+                        for key, value in workspace_lock_init_kwdefault_items
+                    )
+                )
+            )
             and EconomicGoalStore is canonical_goal_store_type
             and canonical_goal_store_type.__getattribute__
             is canonical_goal_store_getattribute

@@ -360,3 +360,39 @@ def test_contract_validation_ignores_rebound_public_helpers(monkeypatch) -> None
 
     candidate = replace(goal, revision=2, max_stake_fraction=Decimal("0.01"))
     validate_automatic_transition(goal, candidate)
+
+
+def test_automatic_transition_ignores_rebound_authority_guards(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.03"))
+
+    def forged(*args, **kwargs):
+        return None
+
+    for name in (
+        "_require_same",
+        "_require_cap_not_increased",
+        "_require_optional_cap_not_increased",
+        "_require_floor_not_decreased",
+        "_require_int_cap_not_increased",
+        "_require_restrictions_not_removed",
+        "_CANONICAL_CONTRACT_VALIDATOR",
+    ):
+        monkeypatch.setattr(economic_goal_module, name, forged)
+
+    with pytest.raises(EconomicGoalContractError, match="must not increase"):
+        validate_automatic_transition(previous, candidate)
+
+    with pytest.raises(EconomicGoalContractError, match="must not increase"):
+        previous.validate_automatic_successor(candidate)
+
+
+def test_automatic_transition_ignores_rebound_contract_type_and_error_bindings(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.03"))
+
+    monkeypatch.setattr(economic_goal_module, "_CANONICAL_CONTRACT_TYPE", object)
+    monkeypatch.setattr(economic_goal_module, "EconomicGoalContractError", RuntimeError)
+
+    with pytest.raises(EconomicGoalContractError, match="must not increase"):
+        validate_automatic_transition(previous, candidate)

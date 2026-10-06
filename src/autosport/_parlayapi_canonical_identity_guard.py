@@ -104,7 +104,22 @@ def _validate_stable_bookmaker_keys(events: list[dict[str, Any]]) -> None:
             provider._provider_identity(  # noqa: SLF001
                 bookmaker["key"],
                 field="bookmaker key",
+                allow_colon=False,
             )
+            markets = bookmaker.get("markets", [])
+            if not isinstance(markets, list):
+                raise provider.ProviderPayloadError("bookmaker markets must be a list")
+            for market in markets:
+                if not isinstance(market, dict):
+                    raise provider.ProviderPayloadError("market entries must be objects")
+                raw_market_key = market.get("key")
+                if raw_market_key is None or raw_market_key == "":
+                    raise provider.ProviderPayloadError("market is missing key")
+                provider._provider_identity(  # noqa: SLF001
+                    raw_market_key,
+                    field="market key",
+                    allow_colon=False,
+                )
 
 
 def _strict_snapshot_quotes(

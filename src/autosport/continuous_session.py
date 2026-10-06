@@ -439,9 +439,36 @@ class _ContinuousSessionState:
         self,
         *,
         _max_bytes: int = _CONTINUOUS_SESSION_ERROR_MAX_BYTES,
+        _os_open: Callable[..., int] = os.open,
+        _os_fstat: Callable[..., os.stat_result] = os.fstat,
+        _os_lseek: Callable[..., int] = os.lseek,
+        _os_read: Callable[..., bytes] = os.read,
+        _os_close: Callable[[int], None] = os.close,
+        _os_o_rdonly: int = os.O_RDONLY,
+        _os_o_binary: int = getattr(os, "O_BINARY", 0),
+        _os_o_nofollow: int = getattr(os, "O_NOFOLLOW", 0),
+        _os_o_nonblock: int = getattr(os, "O_NONBLOCK", 0),
+        _path_lstat: Callable[[Path], os.stat_result] = Path.lstat,
+        _path_lstat_code: object = Path.lstat.__code__,
     ) -> bytes:
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
+        if (
+            os.open is not _os_open
+            or os.fstat is not _os_fstat
+            or os.lseek is not _os_lseek
+            or os.read is not _os_read
+            or os.close is not _os_close
+            or Path.lstat is not _path_lstat
+            or getattr(Path.lstat, "__code__", None) is not _path_lstat_code
+            or os.O_RDONLY != _os_o_rdonly
+            or getattr(os, "O_BINARY", 0) != _os_o_binary
+            or getattr(os, "O_NOFOLLOW", 0) != _os_o_nofollow
+            or getattr(os, "O_NONBLOCK", 0) != _os_o_nonblock
+        ):
+            raise ContinuousSessionError(
+                "canonical operational-checkpoint filesystem authority changed"
+            )
+        flags = _os_o_rdonly | _os_o_binary
+        flags |= _os_o_nofollow
         # A path can be replaced after lstat() but before open().  On POSIX,
         # opening a FIFO/device-like replacement without O_NONBLOCK could hang
         # the coordinator before descriptor-type verification gets a chance to

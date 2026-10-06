@@ -304,6 +304,39 @@ def test_contract_rejects_scalar_and_container_subclasses() -> None:
         _goal(blocked_sports=FrozenSetSubclass({"tennis"}))
 
 
+def test_contract_rejects_unregistered_exact_enum_instances() -> None:
+    forged_objective = str.__new__(
+        EconomicObjective,
+        "long_run_risk_adjusted_bankroll_growth",
+    )
+    object.__setattr__(forged_objective, "_name_", "FORGED")
+    object.__setattr__(
+        forged_objective,
+        "_value_",
+        "long_run_risk_adjusted_bankroll_growth",
+    )
+    assert type(forged_objective) is EconomicObjective
+    assert forged_objective is not EconomicObjective.LONG_RUN_RISK_ADJUSTED_BANKROLL_GROWTH
+
+    forged_automation = int.__new__(
+        AutomationLevel,
+        int.__index__(AutomationLevel.SUPERVISED_EXECUTION),
+    )
+    object.__setattr__(forged_automation, "_name_", "FORGED")
+    object.__setattr__(
+        forged_automation,
+        "_value_",
+        int.__index__(AutomationLevel.SUPERVISED_EXECUTION),
+    )
+    assert type(forged_automation) is AutomationLevel
+    assert forged_automation is not AutomationLevel.SUPERVISED_EXECUTION
+
+    with pytest.raises(EconomicGoalContractError, match="EconomicObjective"):
+        _goal(objective=forged_objective)
+    with pytest.raises(EconomicGoalContractError, match="AutomationLevel"):
+        _goal(automation_level=forged_automation)
+
+
 def test_automatic_transition_revalidates_post_construction_scalar_mutation() -> None:
     previous = _goal()
     candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))

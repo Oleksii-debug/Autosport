@@ -1486,6 +1486,74 @@ def test_store_constructor_ignores_rebound_path_resolve_and_join(monkeypatch, tm
     assert store.path == expected_path
 
 
+def test_payload_decoder_ignores_mutated_enum_value_maps(monkeypatch) -> None:
+    payload = economic_goal_to_payload(_goal())
+
+    forged_objective_map = dict(EconomicObjective._value2member_map_)
+    forged_objective_map["attacker-objective"] = (
+        EconomicObjective.LONG_RUN_RISK_ADJUSTED_BANKROLL_GROWTH
+    )
+    monkeypatch.setattr(
+        EconomicObjective,
+        "_value2member_map_",
+        forged_objective_map,
+    )
+
+    forged_automation_map = dict(AutomationLevel._value2member_map_)
+    forged_automation_map[
+        int.__index__(AutomationLevel.SUPERVISED_EXECUTION)
+    ] = AutomationLevel.HIGHER_AUTONOMY
+    forged_automation_map[99] = AutomationLevel.ANALYSIS_ONLY
+    monkeypatch.setattr(
+        AutomationLevel,
+        "_value2member_map_",
+        forged_automation_map,
+    )
+
+    restored = economic_goal_from_payload(payload)
+    assert restored.automation_level is AutomationLevel.SUPERVISED_EXECUTION
+
+    forged_payload = {
+        **payload,
+        "contract": {
+            **payload["contract"],
+            "automation_level": 99,
+        },
+    }
+    with pytest.raises(EconomicGoalContractError, match="unsupported automation_level"):
+        economic_goal_from_payload(forged_payload)
+
+    forged_objective_payload = {
+        **payload,
+        "contract": {
+            **payload["contract"],
+            "objective": "attacker-objective",
+        },
+    }
+    with pytest.raises(EconomicGoalContractError, match="unsupported economic objective"):
+        economic_goal_from_payload(forged_objective_payload)
+
+
+def test_payload_encoder_uses_immutable_enum_base_values(monkeypatch) -> None:
+    goal = _goal(automation_level=AutomationLevel.BOUNDED_AUTONOMY)
+
+    monkeypatch.setattr(
+        goal.objective,
+        "_value_",
+        "attacker-objective",
+    )
+    monkeypatch.setattr(
+        goal.automation_level,
+        "_value_",
+        0,
+    )
+
+    payload = economic_goal_to_payload(goal)
+    body = payload["contract"]
+    assert body["objective"] == "long_run_risk_adjusted_bankroll_growth"
+    assert body["automation_level"] == 3
+
+
 def test_payload_encoder_ignores_rebound_enum_serialization_protocols(monkeypatch) -> None:
     goal = _goal()
     expected = economic_goal_to_payload(goal)

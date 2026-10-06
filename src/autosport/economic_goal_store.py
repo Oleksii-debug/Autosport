@@ -14,7 +14,6 @@ import stat
 import weakref
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
-from enum import Enum, IntEnum
 from pathlib import Path
 from types import MethodType
 from typing import Final
@@ -25,6 +24,8 @@ from .economic_goal import (
     EconomicGoalContractError,
     EconomicObjective,
     validate_automatic_transition,
+    _CANONICAL_AUTOMATION_LEVEL_MEMBERS as _CONTRACT_AUTOMATION_LEVEL_MEMBERS,
+    _CANONICAL_OBJECTIVE_MEMBER as _CONTRACT_OBJECTIVE_MEMBER,
     _canonical_contract_snapshot,
 )
 from .integrity import atomic_write_json
@@ -202,8 +203,17 @@ _CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
 _CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
 _CANONICAL_OBJECTIVE_TYPE: Final = EconomicObjective
 _CANONICAL_AUTOMATION_TYPE: Final = AutomationLevel
-_CANONICAL_ENUM_VALUE_GETTER: Final = Enum.__dict__["value"].fget
-_CANONICAL_INT_ENUM_VALUE_GETTER: Final = Enum.__dict__["value"].fget
+_CANONICAL_OBJECTIVE_MEMBER: Final = _CONTRACT_OBJECTIVE_MEMBER
+_CANONICAL_AUTOMATION_MEMBERS: Final = _CONTRACT_AUTOMATION_LEVEL_MEMBERS
+_CANONICAL_OBJECTIVE_VALUE_GETTER: Final = str.__str__
+_CANONICAL_AUTOMATION_VALUE_GETTER: Final = int.__index__
+_CANONICAL_OBJECTIVE_VALUE: Final = _CANONICAL_OBJECTIVE_VALUE_GETTER(
+    _CANONICAL_OBJECTIVE_MEMBER
+)
+_CANONICAL_AUTOMATION_VALUE_MEMBERS: Final = tuple(
+    (_CANONICAL_AUTOMATION_VALUE_GETTER(member), member)
+    for member in _CANONICAL_AUTOMATION_MEMBERS
+)
 _CANONICAL_TRANSITION_VALIDATOR: Final = validate_automatic_transition
 _CANONICAL_STRICT_JSON_LOADS: Final = strict_json_loads
 _CANONICAL_ATOMIC_WRITE_JSON: Final = atomic_write_json
@@ -334,8 +344,8 @@ def economic_goal_to_payload(
     _json_dumps=_CANONICAL_JSON_DUMPS,
     _max_json_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
     _max_json_bytes=_MAX_ECONOMIC_GOAL_JSON_BYTES,
-    _objective_value_getter=_CANONICAL_ENUM_VALUE_GETTER,
-    _automation_value_getter=_CANONICAL_INT_ENUM_VALUE_GETTER,
+    _objective_value_getter=_CANONICAL_OBJECTIVE_VALUE_GETTER,
+    _automation_value_getter=_CANONICAL_AUTOMATION_VALUE_GETTER,
     _snapshot=_canonical_contract_snapshot,
     _ordered_field_names=_CONTRACT_KEYS_ORDERED,
 ) -> dict[str, object]:
@@ -471,8 +481,9 @@ def economic_goal_from_payload(
     _goal_type=EconomicGoalContract,
     _goal_builder=_build_economic_goal_contract,
     _goal_error=EconomicGoalContractError,
-    _objective_type=EconomicObjective,
-    _automation_type=AutomationLevel,
+    _objective_value=_CANONICAL_OBJECTIVE_VALUE,
+    _objective_member=_CANONICAL_OBJECTIVE_MEMBER,
+    _automation_value_members=_CANONICAL_AUTOMATION_VALUE_MEMBERS,
     _exact_keys=_require_exact_keys,
     _decimal_decoder=_decimal_text,
     _restriction_decoder=_restriction_set,
@@ -518,18 +529,21 @@ def economic_goal_from_payload(
 
     if type(body["objective"]) is not str:
         raise _goal_error("objective must be a string")
-    try:
-        decoded["objective"] = _objective_type(body["objective"])
-    except (TypeError, ValueError) as exc:
-        raise _goal_error("unsupported economic objective") from exc
+    if body["objective"] != _objective_value:
+        raise _goal_error("unsupported economic objective")
+    decoded["objective"] = _objective_member
 
     automation = body["automation_level"]
     if type(automation) is not int:
         raise _goal_error("automation_level must be an integer")
-    try:
-        decoded["automation_level"] = _automation_type(automation)
-    except ValueError as exc:
-        raise _goal_error("unsupported automation_level") from exc
+    decoded_automation = None
+    for expected_value, member in _automation_value_members:
+        if automation == expected_value:
+            decoded_automation = member
+            break
+    if decoded_automation is None:
+        raise _goal_error("unsupported automation_level")
+    decoded["automation_level"] = decoded_automation
 
     for field in _restriction_fields:
         decoded[field] = _restriction_decoder(field, body[field])

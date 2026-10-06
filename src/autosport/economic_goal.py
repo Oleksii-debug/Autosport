@@ -47,6 +47,16 @@ _ZERO: Final = Decimal("0")
 _ONE: Final = Decimal("1")
 _MAX_CANONICAL_TEXT_CHARS: Final = 512
 _MAX_RESTRICTION_MEMBERS: Final = 1024
+_CANONICAL_OBJECTIVE_MEMBER: Final = (
+    EconomicObjective.LONG_RUN_RISK_ADJUSTED_BANKROLL_GROWTH
+)
+_CANONICAL_AUTOMATION_LEVEL_MEMBERS: Final = (
+    AutomationLevel.ANALYSIS_ONLY,
+    AutomationLevel.RECOMMENDATION,
+    AutomationLevel.SUPERVISED_EXECUTION,
+    AutomationLevel.BOUNDED_AUTONOMY,
+    AutomationLevel.HIGHER_AUTONOMY,
+)
 
 
 class _EconomicGoalContractMeta(type):
@@ -247,6 +257,13 @@ def _canonical_restrictions(
     return value
 
 
+def _is_canonical_member(value: object, members: tuple[object, ...]) -> bool:
+    for member in members:
+        if value is member:
+            return True
+    return False
+
+
 @dataclass(frozen=True, slots=True)
 class EconomicGoalContract(metaclass=_EconomicGoalContractMeta):
     """Immutable owner-level economic objective and authority ceiling.
@@ -306,8 +323,11 @@ class EconomicGoalContract(metaclass=_EconomicGoalContractMeta):
         _nonnegative_decimal_validator=_nonnegative_decimal,
         _nonnegative_int_validator=_nonnegative_int,
         _restrictions_validator=_canonical_restrictions,
+        _member_validator=_is_canonical_member,
         _objective_type=EconomicObjective,
+        _objective_member=_CANONICAL_OBJECTIVE_MEMBER,
         _automation_type=AutomationLevel,
+        _automation_members=_CANONICAL_AUTOMATION_LEVEL_MEMBERS,
         _error_type=EconomicGoalContractError,
     ) -> None:
         _text_validator("goal_id", self.goal_id)
@@ -324,7 +344,10 @@ class EconomicGoalContract(metaclass=_EconomicGoalContractMeta):
                 "currency must be a three-letter uppercase ASCII code"
             )
 
-        if type(self.objective) is not _objective_type:
+        if (
+            type(self.objective) is not _objective_type
+            or self.objective is not _objective_member
+        ):
             raise _error_type("objective must be an EconomicObjective")
 
         _fraction_validator("max_stake_fraction", self.max_stake_fraction)
@@ -361,7 +384,10 @@ class EconomicGoalContract(metaclass=_EconomicGoalContractMeta):
             "max_concurrent_positions", self.max_concurrent_positions
         )
         _positive_int_validator("max_parlay_legs", self.max_parlay_legs)
-        if type(self.automation_level) is not _automation_type:
+        if (
+            type(self.automation_level) is not _automation_type
+            or not _member_validator(self.automation_level, _automation_members)
+        ):
             raise _error_type(
                 "automation_level must be an AutomationLevel"
             )
@@ -447,9 +473,12 @@ def _validate_contract_bound(
     _nonnegative_decimal_validator=_nonnegative_decimal,
     _nonnegative_int_validator=_nonnegative_int,
     _restrictions_validator=_canonical_restrictions,
+    _member_validator=_is_canonical_member,
     _snapshot=_canonical_contract_snapshot,
     _objective_type=EconomicObjective,
+    _objective_member=_CANONICAL_OBJECTIVE_MEMBER,
     _automation_type=AutomationLevel,
+    _automation_members=_CANONICAL_AUTOMATION_LEVEL_MEMBERS,
     _error_type=EconomicGoalContractError,
 ) -> None:
     """Validate contract fields through captured slot descriptors."""
@@ -477,7 +506,10 @@ def _validate_contract_bound(
         raise _error_type("currency must be a three-letter uppercase ASCII code")
     if currency != currency.upper():
         raise _error_type("currency must be a three-letter uppercase ASCII code")
-    if type(objective) is not _objective_type:
+    if (
+        type(objective) is not _objective_type
+        or objective is not _objective_member
+    ):
         raise _error_type("objective must be an EconomicObjective")
 
     _fraction_validator("max_stake_fraction", max_stake_fraction)
@@ -498,7 +530,10 @@ def _validate_contract_bound(
 
     _nonnegative_int_validator("max_concurrent_positions", max_concurrent_positions)
     _positive_int_validator("max_parlay_legs", max_parlay_legs)
-    if type(automation_level) is not _automation_type:
+    if (
+        type(automation_level) is not _automation_type
+        or not _member_validator(automation_level, _automation_members)
+    ):
         raise _error_type("automation_level must be an AutomationLevel")
     if type(emergency_stop) is not bool:
         raise _error_type("emergency_stop must be a bool")

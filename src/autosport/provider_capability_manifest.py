@@ -14,7 +14,7 @@ authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from hashlib import sha256
@@ -387,6 +387,12 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
     source_ref: str
     source_payload_sha256: str
     schema_version: int = 1
+    _bound_profile_id: str = field(init=False, repr=False, compare=False)
+    _bound_integration_evidence_id: str = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(
         self,
@@ -422,6 +428,28 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
             )
         _integration_contract_validator(self.integration)
         _verify_profile(self.integration, self.profile)
+
+        current_profile_id = self.profile.profile_id
+        current_integration_evidence_id = self.integration.evidence_id
+        try:
+            bound_profile_id = self._bound_profile_id
+            bound_integration_evidence_id = self._bound_integration_evidence_id
+        except AttributeError:
+            object.__setattr__(self, "_bound_profile_id", current_profile_id)
+            object.__setattr__(
+                self,
+                "_bound_integration_evidence_id",
+                current_integration_evidence_id,
+            )
+        else:
+            if current_profile_id != bound_profile_id:
+                raise ProviderCapabilityManifestError(
+                    "bound capability profile identity changed after validation"
+                )
+            if current_integration_evidence_id != bound_integration_evidence_id:
+                raise ProviderCapabilityManifestError(
+                    "bound integration evidence identity changed after validation"
+                )
 
         profile_at = _timestamp(self.profile.observed_at, "profile.observed_at")
         integration_at = _timestamp(
@@ -604,6 +632,23 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
                 "integration must be an exact BookmakerIntegrationEvidence"
             )
         _verify_profile(self.integration, self.profile)
+        current_profile_id = self.profile.profile_id
+        current_integration_evidence_id = self.integration.evidence_id
+        if (
+            type(self._bound_profile_id) is not str
+            or current_profile_id != self._bound_profile_id
+        ):
+            raise ProviderCapabilityManifestError(
+                "bound capability profile identity changed after validation"
+            )
+        if (
+            type(self._bound_integration_evidence_id) is not str
+            or current_integration_evidence_id
+            != self._bound_integration_evidence_id
+        ):
+            raise ProviderCapabilityManifestError(
+                "bound integration evidence identity changed after validation"
+            )
 
         if type(self.facts) is not tuple or any(
             type(fact) is not ProviderCapabilityManifestFact for fact in self.facts
@@ -712,13 +757,13 @@ def _make_provider_capability_manifest_builder(
         extension_facts: tuple[ProviderCapabilityManifestFact, ...] = (),
     ) -> ProviderCapabilityManifest:
         """Build a complete fail-closed manifest over canonical provider truth.
-    
+
         Missing extension facts are materialized as ''NOT_PROVEN''.  Canonical capabilities
         cannot be supplied in ''extension_facts'' and therefore cannot be caller-overridden.
         Public extension evidence remains structural only; conclusive extension facts fail
         closed until a separate product-owned, re-resolvable issuer is composed.
         """
-    
+
         _validate_exact_profile(profile)
         if type(integration) is not BookmakerIntegrationEvidence:
             raise ProviderCapabilityManifestError(
@@ -731,7 +776,7 @@ def _make_provider_capability_manifest_builder(
             raise ProviderCapabilityManifestError(
                 "extension_facts must contain exact ProviderCapabilityManifestFact values"
             )
-    
+
         by_capability: dict[ProviderManifestCapability, ProviderCapabilityManifestFact] = {}
         for fact in extension_facts:
             if _canonical_capability_for(fact.capability) is not None:
@@ -743,7 +788,7 @@ def _make_provider_capability_manifest_builder(
                     f"duplicate extension fact: {fact.capability.value}"
                 )
             by_capability[fact.capability] = fact
-    
+
         facts: list[ProviderCapabilityManifestFact] = []
         for capability in ProviderManifestCapability:
             canonical = _canonical_capability_for(capability)
@@ -756,7 +801,7 @@ def _make_provider_capability_manifest_builder(
                     )
                 )
                 continue
-    
+
             supplied = by_capability.get(capability)
             if supplied is not None:
                 facts.append(supplied)
@@ -768,7 +813,7 @@ def _make_provider_capability_manifest_builder(
                         authority=ProviderManifestFactAuthority.NOT_PROVEN,
                     )
                 )
-    
+
         return ProviderCapabilityManifest(
             manifest_ref=manifest_ref,
             manifest_version=manifest_version,

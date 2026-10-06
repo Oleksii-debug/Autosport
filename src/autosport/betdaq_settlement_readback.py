@@ -897,12 +897,42 @@ def _request_xml(
     credentials: _account.BetdaqCredentials,
     method: str,
     attributes: dict[str, str],
+    _et_module=ET,
+    _register_namespace=ET.register_namespace,
+    _register_namespace_code=getattr(ET.register_namespace, "__code__", None),
+    _register_namespace_defaults=getattr(ET.register_namespace, "__defaults__", None),
+    _element=ET.Element,
+    _subelement=ET.SubElement,
+    _tostring=ET.tostring,
+    _tostring_code=getattr(ET.tostring, "__code__", None),
+    _tostring_defaults=getattr(ET.tostring, "__defaults__", None),
+    _element_tree=ET.ElementTree,
 ) -> bytes:
+    def xml_authority_current() -> bool:
+        return (
+            globals().get("ET") is _et_module
+            and getattr(_et_module, "register_namespace", None) is _register_namespace
+            and getattr(_register_namespace, "__code__", None)
+            is _register_namespace_code
+            and getattr(_register_namespace, "__defaults__", None)
+            is _register_namespace_defaults
+            and getattr(_et_module, "Element", None) is _element
+            and getattr(_et_module, "SubElement", None) is _subelement
+            and getattr(_et_module, "tostring", None) is _tostring
+            and getattr(_tostring, "__code__", None) is _tostring_code
+            and getattr(_tostring, "__defaults__", None) is _tostring_defaults
+            and getattr(_et_module, "ElementTree", None) is _element_tree
+        )
+
+    if not xml_authority_current():
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic XML request authority was replaced"
+        )
     _, external_ns, soap11_ns, _ = _canonical_economic_protocol_authority()
-    ET.register_namespace("soap", soap11_ns)
-    envelope = ET.Element(f"{{{soap11_ns}}}Envelope")
-    header = ET.SubElement(envelope, f"{{{soap11_ns}}}Header")
-    ET.SubElement(
+    _register_namespace("soap", soap11_ns)
+    envelope = _element(f"{{{soap11_ns}}}Envelope")
+    header = _subelement(envelope, f"{{{soap11_ns}}}Header")
+    _subelement(
         header,
         f"{{{external_ns}}}ExternalApiHeader",
         {
@@ -913,8 +943,8 @@ def _request_xml(
             "applicationIdentifier": credentials.application_identifier,
         },
     )
-    body = ET.SubElement(envelope, f"{{{soap11_ns}}}Body")
-    method_element = ET.SubElement(body, f"{{{external_ns}}}{method}")
+    body = _subelement(envelope, f"{{{soap11_ns}}}Body")
+    method_element = _subelement(body, f"{{{external_ns}}}{method}")
     if method == "GetOrderDetails":
         request_name = "getOrderDetailsRequest"
     elif method == "ListAccountPostings":
@@ -925,17 +955,48 @@ def _request_xml(
         raise BetdaqEconomicReadbackError(
             "method is outside economic READ request-element allowlist"
         )
-    ET.SubElement(
+    _subelement(
         method_element,
         f"{{{external_ns}}}{request_name}",
         attributes,
     )
-    return ET.tostring(envelope, encoding="utf-8", xml_declaration=True)
+    payload = _tostring(envelope, encoding="utf-8", xml_declaration=True)
+    if not xml_authority_current():
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic XML request authority was replaced"
+        )
+    return payload
 
 
 
-def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
+def _parse_economic_soap_result(
+    payload: bytes,
+    method: str,
+    _et_module=ET,
+    _fromstring=ET.fromstring,
+    _fromstring_code=getattr(ET.fromstring, "__code__", None),
+    _fromstring_defaults=getattr(ET.fromstring, "__defaults__", None),
+    _parse_error=ET.ParseError,
+    _xml_parser=ET.XMLParser,
+    _tree_builder=ET.TreeBuilder,
+) -> ET.Element:
     """Parse generated BETDAQ SOAP results without inventing ReturnStatus."""
+
+    def xml_authority_current() -> bool:
+        return (
+            globals().get("ET") is _et_module
+            and getattr(_et_module, "fromstring", None) is _fromstring
+            and getattr(_fromstring, "__code__", None) is _fromstring_code
+            and getattr(_fromstring, "__defaults__", None) is _fromstring_defaults
+            and getattr(_et_module, "ParseError", None) is _parse_error
+            and getattr(_et_module, "XMLParser", None) is _xml_parser
+            and getattr(_et_module, "TreeBuilder", None) is _tree_builder
+        )
+
+    if not xml_authority_current():
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic XML response authority was replaced"
+        )
     _, external_ns, soap11_ns, soap12_ns = _canonical_economic_protocol_authority()
     upper = payload.upper()
     if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
@@ -943,11 +1004,15 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
             "BETDAQ economic SOAP payload contains forbidden DTD/entity"
         )
     try:
-        root = ET.fromstring(payload)
-    except (ET.ParseError, UnicodeError):
+        root = _fromstring(payload)
+    except (_parse_error, UnicodeError):
         raise BetdaqEconomicReadbackError(
             "BETDAQ economic response is not valid SOAP XML"
         ) from None
+    if not xml_authority_current():
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic XML response authority was replaced"
+        )
     namespace, local = _split_tag(root.tag)
     if local != "Envelope" or namespace not in {
         soap11_ns,
@@ -1296,6 +1361,7 @@ class BetdaqEconomicReadbackClient:
         _request_builder_kwdefaults=_request_xml.__kwdefaults__,
         _response_parser=_parse_economic_soap_result,
         _response_parser_code=_parse_economic_soap_result.__code__,
+        _response_parser_defaults=_parse_economic_soap_result.__defaults__,
     ) -> tuple[ET.Element, BetdaqEconomicEvidence]:
         if method not in ("GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"):
             raise BetdaqEconomicReadbackError("method is outside economic READ allowlist")
@@ -1331,6 +1397,10 @@ class BetdaqEconomicReadbackClient:
                 live_parser is _response_parser
                 and getattr(live_parser, "__code__", None) is _response_parser_code
                 and getattr(_response_parser, "__code__", None) is _response_parser_code
+                and getattr(live_parser, "__defaults__", None)
+                is _response_parser_defaults
+                and getattr(_response_parser, "__defaults__", None)
+                is _response_parser_defaults
             )
 
         if not response_parser_current():

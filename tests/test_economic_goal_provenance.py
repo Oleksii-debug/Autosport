@@ -248,6 +248,73 @@ def test_provenance_operations_revalidate_post_construction_mutation() -> None:
         verify_provenance(clean_goal, clean_provenance)
 
 
+def test_contract_sha256_rejects_bound_default_rebinding() -> None:
+    contract = _goal()
+    operation = economic_goal_provenance_module._contract_sha256_bound
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+
+    operation.__defaults__ = (
+        object,
+        *original_defaults[1:],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="provenance operation defaults authority changed",
+        ):
+            contract_sha256(contract)
+    finally:
+        operation.__defaults__ = original_defaults
+
+
+def test_decision_identity_rejects_snapshotter_default_rebinding() -> None:
+    evidence = provenance_for(_goal())
+    snapshotter = economic_goal_provenance_module._snapshot_provenance
+    original_defaults = snapshotter.__defaults__
+    assert original_defaults is not None
+
+    snapshotter.__defaults__ = (
+        original_defaults[0],
+        object,
+        original_defaults[2],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="provenance decision identity nested defaults authority changed",
+        ):
+            _ = evidence.decision_identity
+    finally:
+        snapshotter.__defaults__ = original_defaults
+
+
+def test_provenance_verifier_rejects_nested_hash_default_rebinding() -> None:
+    contract = _goal()
+    evidence = provenance_for(contract)
+    operation = economic_goal_provenance_module._contract_sha256_bound
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+
+    operation.__defaults__ = (
+        original_defaults[0],
+        original_defaults[1],
+        original_defaults[2],
+        original_defaults[3],
+        lambda payload: b"forged",
+        original_defaults[5],
+        original_defaults[6],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="provenance verification nested defaults authority changed",
+        ):
+            verify_provenance(contract, evidence)
+    finally:
+        operation.__defaults__ = original_defaults
+
+
 def test_contract_sha256_ignores_rebound_hashing_dispatch(monkeypatch) -> None:
     goal = _goal()
     expected = contract_sha256(goal)

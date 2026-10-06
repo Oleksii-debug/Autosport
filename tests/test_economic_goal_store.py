@@ -189,6 +189,36 @@ def test_persisted_payload_rejects_malformed_or_ambiguous_authority(
         economic_goal_from_payload(payload)
 
 
+def test_payload_decoder_rejects_oversize_decimal_text_before_parsing() -> None:
+    payload = economic_goal_to_payload(_goal())
+    body = payload["contract"]
+    assert type(body) is dict
+    body["max_turnover_fraction"] = "1" * 513
+
+    with pytest.raises(EconomicGoalContractError, match="Decimal text exceeds"):
+        economic_goal_from_payload(payload)
+
+
+def test_payload_decoder_rejects_oversize_restriction_cardinality_before_sorting() -> None:
+    payload = economic_goal_to_payload(_goal())
+    body = payload["contract"]
+    assert type(body) is dict
+    body["blocked_sports"] = [f"sport:{index:04d}" for index in range(1025)]
+
+    with pytest.raises(EconomicGoalContractError, match="restriction-count limit"):
+        economic_goal_from_payload(payload)
+
+
+def test_payload_decoder_rejects_oversize_restriction_member_before_sorting() -> None:
+    payload = economic_goal_to_payload(_goal())
+    body = payload["contract"]
+    assert type(body) is dict
+    body["blocked_sports"] = ["s" * 513]
+
+    with pytest.raises(EconomicGoalContractError, match="non-canonical restriction text"):
+        economic_goal_from_payload(payload)
+
+
 def test_strict_json_rejects_duplicate_schema_key() -> None:
     duplicate = (
         '{"schema":"autosport.economic_goal_contract",'

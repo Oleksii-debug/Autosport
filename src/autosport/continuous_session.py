@@ -2267,6 +2267,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     def _refresh_source_state_projection(
         self,
         *,
+        collector: HeadlessCollectorService | None = None,
         _snapshot_method: Callable[
             ["_ContinuousSessionState"], ContinuousSessionStatus
         ] = _ContinuousSessionState.snapshot,
@@ -2290,14 +2291,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "canonical source-projection coordinator authority changed"
             )
+        collector = self.collector if collector is None else collector
         snapshot = _snapshot_method(self._state)
-        deltas = self.collector.delta_store.deltas_after_commit(
-            source_id=self.collector.source_id,
+        deltas = collector.delta_store.deltas_after_commit(
+            source_id=collector.source_id,
             after_delta_id=snapshot.source_state_delta_id,
-            max_items=self.collector.config.max_items + 1,
+            max_items=collector.config.max_items + 1,
         )
-        backlog = len(deltas) > self.collector.config.max_items
-        selected = deltas[: self.collector.config.max_items]
+        backlog = len(deltas) > collector.config.max_items
+        selected = deltas[: collector.config.max_items]
         _record_source_projection_method(
             self._state,
             deltas=selected,
@@ -2754,11 +2756,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         _require_running_method(self)
         observation_token = self._state._checkpoint_token
+        collector = self.collector
         now = self.clock()
         _instant_validator(now, "now")
 
         try:
-            cycle = self.collector.run_cycle()
+            cycle = collector.run_cycle()
         except Exception as exc:
             try:
                 with _running_fence(self._state):
@@ -2838,7 +2841,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "canonical session generation"
                 )
             try:
-                source_snapshot = _refresh_source_state_projection_method(self)
+                source_snapshot = _refresh_source_state_projection_method(
+                    self,
+                    collector=collector,
+                )
                 source_gap_states = (
                     ()
                     if source_snapshot.source_gap_state is None

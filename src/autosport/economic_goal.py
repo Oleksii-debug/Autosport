@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum, IntEnum
+from functools import wraps
 from typing import Final
 
 
@@ -427,7 +428,38 @@ def _contract_init_authority(
     _CANONICAL_CONTRACT_VALIDATOR(self)
 
 
-EconomicGoalContract.__init__ = _contract_init_authority
+def _make_contract_constructor_authority(operation):
+    operation_code = operation.__code__
+    operation_defaults = operation.__defaults__
+    operation_kwdefaults = operation.__kwdefaults__
+    error_type = EconomicGoalContractError
+
+    @wraps(operation)
+    def bound(*args, **kwargs):
+        if operation.__code__ is not operation_code:
+            raise error_type("economic-goal constructor authority changed")
+        if operation.__defaults__ is not operation_defaults:
+            raise error_type("economic-goal constructor defaults authority changed")
+        if operation.__kwdefaults__ is not operation_kwdefaults:
+            raise error_type(
+                "economic-goal constructor keyword defaults authority changed"
+            )
+        result = operation(*args, **kwargs)
+        if operation.__code__ is not operation_code:
+            raise error_type("economic-goal constructor authority changed")
+        if operation.__defaults__ is not operation_defaults:
+            raise error_type("economic-goal constructor defaults authority changed")
+        if operation.__kwdefaults__ is not operation_kwdefaults:
+            raise error_type(
+                "economic-goal constructor keyword defaults authority changed"
+            )
+        return result
+
+
+_CANONICAL_CONTRACT_INIT: Final = _make_contract_constructor_authority(
+    _contract_init_authority
+)
+EconomicGoalContract.__init__ = _CANONICAL_CONTRACT_INIT
 
 
 def _snapshot_transition_contract(

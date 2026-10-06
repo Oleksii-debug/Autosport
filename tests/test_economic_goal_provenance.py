@@ -472,6 +472,22 @@ def test_provenance_snapshot_covers_every_captured_field(monkeypatch) -> None:
         monkeypatch.undo()
 
 
+def test_snapshot_provenance_ignores_rebound_snapshot_alias(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound canonical provenance snapshot executed")
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_canonical_provenance_snapshot",
+        forged,
+    )
+
+    snapshot = economic_goal_provenance_module._snapshot_provenance(evidence)
+    assert snapshot.contract_sha256 == evidence.contract_sha256
+
+
 def test_snapshot_provenance_ignores_rebound_field_descriptors(monkeypatch) -> None:
     evidence = provenance_for(_goal())
     expected_sha = evidence.contract_sha256

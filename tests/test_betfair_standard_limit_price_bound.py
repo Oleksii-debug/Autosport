@@ -130,6 +130,28 @@ def test_public_provider_client_rebinding_cannot_redirect_canonical_capture(
     assert actual.to_dict() == expected.to_dict()
 
 
+def test_capture_and_digest_helpers_ignore_module_rebinding(monkeypatch) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    bound, action, expected = _evidence()
+
+    def forged_capture(_action):
+        raise AssertionError("rebound capture helper executed")
+
+    def forged_digest(_payload):
+        raise AssertionError("rebound digest helper executed")
+
+    monkeypatch.setattr(module, "_capture_canonical_instruction", forged_capture)
+    monkeypatch.setattr(module, "_digest", forged_digest)
+
+    actual = module.resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    assert actual.to_dict() == expected.to_dict()
+
+
 def test_instruction_projection_is_captured_from_real_place_action_request() -> None:
     import autosport.betfair_standard_limit_price_bound as module
 

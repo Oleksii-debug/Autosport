@@ -106,6 +106,64 @@ class _MutatingOriginalScenarioEngine(ScenarioSearchEngine):
 
 
 class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
+    def test_stake_ingress_rejects_inexact_runtime_types_before_conversion(self):
+        leg = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        group = ScenarioGroup(
+            "e1",
+            (
+                ScenarioOutcome(leg.quote_key, Decimal("0.5")),
+                ScenarioOutcome("e1|winner|b", Decimal("0.5")),
+            ),
+        )
+        candidate = _single_candidate(leg)
+        optimizer = PortfolioAwareCandidateOptimizer()
+
+        class DecimalSubclass(Decimal):
+            pass
+
+        class HostileStringifier:
+            def __str__(self):
+                raise AssertionError("arbitrary stake __str__ must not execute")
+
+        for invalid_stake in (
+            0.1,
+            1,
+            True,
+            DecimalSubclass("1"),
+            HostileStringifier(),
+        ):
+            with self.subTest(stake_type=type(invalid_stake).__name__):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "stake must be an exact Decimal or decimal text",
+                ):
+                    optimizer.evaluate_candidates(
+                        [],
+                        [candidate],
+                        [group],
+                        stake=invalid_stake,  # type: ignore[arg-type]
+                    )
+
+        decimal_impact = optimizer.evaluate_candidates(
+            [],
+            [candidate],
+            [group],
+            stake=Decimal("1"),
+        )[0]
+        text_impact = optimizer.evaluate_candidates(
+            [],
+            [candidate],
+            [group],
+            stake="1",
+        )[0]
+        self.assertEqual(decimal_impact.stake, Decimal("1"))
+        self.assertEqual(text_impact.stake, Decimal("1"))
+
     def test_equal_standalone_ev_uses_scenario_extrema_only_as_secondary_tiebreak(self):
         book = PaperBook("1000")
         a_ticket_leg = TicketLeg("e1", "winner", "a", Decimal("2"))

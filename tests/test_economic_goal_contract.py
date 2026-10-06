@@ -626,3 +626,24 @@ def test_contract_validation_ignores_rebound_snapshot_helper(monkeypatch) -> Non
         replace(goal, revision=2, max_stake_fraction=Decimal("0.01")),
     )
     assert called is False
+
+def test_transition_validation_ignores_runtime_post_init_rebinding(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.01"),
+    )
+    called = False
+
+    def forged(self) -> None:
+        nonlocal called
+        called = True
+        raise AssertionError("runtime-rebound EconomicGoalContract.__post_init__ executed")
+
+    monkeypatch.setattr(EconomicGoalContract, "__post_init__", forged)
+
+    validate_automatic_transition(previous, candidate)
+
+    assert called is False
+

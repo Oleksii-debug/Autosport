@@ -21,6 +21,8 @@ from .real_execution_ledger import (
 
 _SCHEMA_VERSION = 2
 _ANCHOR_SCHEMA_VERSION = 1
+_MAX_DURABLE_ANCHOR_CHARS = 64 * 1024
+_MAX_DURABLE_EVENT_LINE_CHARS = 4 * 1024 * 1024
 _CANONICAL_DECIMAL_TYPE = Decimal
 _CANONICAL_INVALID_OPERATION = InvalidOperation
 _CANONICAL_DECIMAL_RESOURCE_VALIDATOR = _validate_decimal_text_resource_bound
@@ -907,7 +909,14 @@ class PaperExecutionLedger:
         if not self._anchor_path.exists():
             return None
         try:
-            raw = self._anchor_path.read_text(encoding="utf-8")
+            with self._anchor_path.open("r", encoding="utf-8", newline="") as handle:
+                raw = handle.read(_MAX_DURABLE_ANCHOR_CHARS + 1)
+                if len(raw) > _MAX_DURABLE_ANCHOR_CHARS or handle.read(1):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER execution anchor exceeds resource limit"
+                    )
+        except PaperExecutionIntegrityError:
+            raise
         except (OSError, UnicodeError) as exc:
             raise PaperExecutionIntegrityError("cannot read PAPER execution anchor") from exc
         anchor = _CANONICAL_JSON_OBJECT_PARSER(raw, what="ledger anchor")
@@ -957,11 +966,6 @@ class PaperExecutionLedger:
                 if anchor is None or anchor["event_count"] != 0:
                     raise PaperExecutionIntegrityError("ledger is missing but anchor claims history")
             return []
-        try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeError) as exc:
-            raise PaperExecutionIntegrityError("cannot read PAPER execution ledger") from exc
-
         events: list[dict[str, Any]] = []
         seen: set[str] = set()
         previous_sha256: str | None = None
@@ -969,29 +973,53 @@ class PaperExecutionLedger:
             "schema_version", "event_type", "run_id", "event_key", "sequence",
             "previous_sha256", "payload", "event_sha256",
         }
-        for sequence, raw in enumerate(lines):
-            if not raw:
-                raise PaperExecutionIntegrityError("ledger contains blank event line")
-            event = _CANONICAL_JSON_OBJECT_PARSER(raw, what="ledger event")
-            if set(event) != expected_keys or event["schema_version"] != _SCHEMA_VERSION:
-                raise PaperExecutionIntegrityError("ledger event schema is invalid")
-            if event["sequence"] != sequence:
-                raise PaperExecutionIntegrityError("ledger event sequence is not contiguous")
-            if event["previous_sha256"] != previous_sha256:
-                raise PaperExecutionIntegrityError("ledger event chain predecessor mismatch")
-            body = {key: event[key] for key in expected_keys if key != "event_sha256"}
-            if event["event_sha256"] != _CANONICAL_DIGEST(body):
-                raise PaperExecutionIntegrityError("ledger event digest mismatch")
-            key = event["event_key"]
-            if type(key) is not str or not key:
-                raise PaperExecutionIntegrityError("ledger event_key is invalid")
-            if key in seen:
-                raise PaperExecutionIntegrityError("duplicate event_key in durable ledger")
-            seen.add(key)
-            events.append(event)
-            previous_sha256 = event["event_sha256"]
+        try:
+            with self.path.open("r", encoding="utf-8", newline="") as handle:
+                sequence = 0
+                while True:
+                    raw = handle.readline(_MAX_DURABLE_EVENT_LINE_CHARS + 2)
+                    if raw == "":
+                        break
+                    if len(raw) > _MAX_DURABLE_EVENT_LINE_CHARS + 1:
+                        raise PaperExecutionIntegrityError(
+                            "PAPER execution ledger event exceeds resource limit"
+                        )
+                    if raw.endswith("\n"):
+                        raw = raw[:-1]
+                        if raw.endswith("\r"):
+                            raw = raw[:-1]
+                    elif len(raw) > _MAX_DURABLE_EVENT_LINE_CHARS:
+                        raise PaperExecutionIntegrityError(
+                            "PAPER execution ledger event exceeds resource limit"
+                        )
+                    if not raw:
+                        raise PaperExecutionIntegrityError("ledger contains blank event line")
+                    event = _CANONICAL_JSON_OBJECT_PARSER(raw, what="ledger event")
+                    if set(event) != expected_keys or event["schema_version"] != _SCHEMA_VERSION:
+                        raise PaperExecutionIntegrityError("ledger event schema is invalid")
+                    if event["sequence"] != sequence:
+                        raise PaperExecutionIntegrityError("ledger event sequence is not contiguous")
+                    if event["previous_sha256"] != previous_sha256:
+                        raise PaperExecutionIntegrityError("ledger event chain predecessor mismatch")
+                    body = {key: event[key] for key in expected_keys if key != "event_sha256"}
+                    if event["event_sha256"] != _CANONICAL_DIGEST(body):
+                        raise PaperExecutionIntegrityError("ledger event digest mismatch")
+                    key = event["event_key"]
+                    if type(key) is not str or not key:
+                        raise PaperExecutionIntegrityError("ledger event_key is invalid")
+                    if key in seen:
+                        raise PaperExecutionIntegrityError("duplicate event_key in durable ledger")
+                    seen.add(key)
+                    events.append(event)
+                    previous_sha256 = event["event_sha256"]
+                    sequence += 1
+        except PaperExecutionIntegrityError:
+            raise
+        except (OSError, UnicodeError) as exc:
+            raise PaperExecutionIntegrityError("cannot read PAPER execution ledger") from exc
 
         anchor = self._read_anchor_unlocked()
+
         if events and anchor is None:
             raise PaperExecutionIntegrityError("non-empty ledger is missing latest-root anchor")
         if anchor is not None:

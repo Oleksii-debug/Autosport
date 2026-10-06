@@ -119,12 +119,13 @@ def _reward(
     *,
     truth: EvidenceTruth,
     model_id: str | None,
+    reward_value: str = "-0.25",
 ):
     return RewardEvidence(
         environment_id=action.environment_id,
         action_id=action.action_id,
         outcome_id=outcome.outcome_id,
-        reward=Decimal("-0.25"),
+        reward=Decimal(reward_value),
         available_at=T4,
         truth=truth,
         evidence=(("reward_basis", "explicit-opportunity-cost-evidence"),),
@@ -171,6 +172,7 @@ class PaperAbstentionEvidenceAtomicityTests(unittest.TestCase):
                 outcome,
                 truth=EvidenceTruth.OBSERVED,
                 model_id=None,
+                reward_value="0",
             )
             receipt = runtime.finalize_abstention(
                 observation=observation,

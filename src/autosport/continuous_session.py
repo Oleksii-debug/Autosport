@@ -990,7 +990,7 @@ class _ContinuousSessionState:
 
     def _update(
         self,
-        mutate: Callable[[dict[str, Any]], None],
+        mutate: Callable[[dict[str, Any]], bool | None],
         *,
         advance_generation: bool = False,
         finalize_under_lock: Callable[[dict[str, Any]], None] | None = None,
@@ -1016,27 +1016,40 @@ class _ContinuousSessionState:
         # already re-enters this canonical lock for publication.
         with _durable_path_lock(self.path):
             raw = self._read()
-            mutate(raw)
-            if advance_generation:
-                raw["generation"] = int(raw["generation"]) + 1
-            _atomic_write_json(self.path, raw)
-            updated = self._read()
+            mutation_result = mutate(raw)
+            if mutation_result is False:
+                # Explicit no-op mutations do not manufacture a new generation
+                # or clear a failure sidecar.  This is used for idempotent state
+                # commands whose target already matches durable truth.
+                updated = raw
+            else:
+                if advance_generation:
+                    raw["generation"] = int(raw["generation"]) + 1
+                _atomic_write_json(self.path, raw)
+                updated = self._read()
+                if finalize_under_lock is not None:
+                    finalize_under_lock(updated)
             self._generation = updated["generation"]
             self._cycles_completed = updated["cycles_completed"]
             self._last_success_at = updated["last_success_at"]
             self._state = updated["state"]
-            if finalize_under_lock is not None:
-                finalize_under_lock(updated)
         return updated
 
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:
         if not isinstance(state, SessionState):
             raise TypeError("state must be SessionState")
 
-        def mutate(raw: dict[str, Any]) -> None:
+        def mutate(raw: dict[str, Any]) -> bool:
+            normalized_reason = None if reason is None else _text(reason, "reason")
+            if raw["state"] == state.value and (
+                normalized_reason is None
+                or raw["last_error_code"] == normalized_reason
+            ):
+                return False
             raw["state"] = state.value
-            if reason is not None:
-                raw["last_error_code"] = _text(reason, "reason")
+            if normalized_reason is not None:
+                raw["last_error_code"] = normalized_reason
+            return True
 
         def finalize(_updated: dict[str, Any]) -> None:
             # Any committed state transition supersedes an operational failure

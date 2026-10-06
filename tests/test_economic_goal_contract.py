@@ -432,6 +432,31 @@ def test_contract_successor_public_method_cannot_be_rebound() -> None:
         del EconomicGoalContract.validate_automatic_successor
 
 
+def test_contract_authority_rejects_direct_type_mutation() -> None:
+    original = EconomicGoalContract.validate_automatic_successor
+
+    def forged_validator(*args, **kwargs):
+        raise AssertionError("direct type mutation executed")
+
+    for name, replacement in (
+        ("validate_automatic_successor", forged_validator),
+        ("_authority_operations_sealed", False),
+    ):
+        with pytest.raises(
+            TypeError,
+            match="public authority operation binding is immutable",
+        ):
+            type.__setattr__(EconomicGoalContract, name, replacement)
+        with pytest.raises(
+            TypeError,
+            match="public authority operation binding is immutable",
+        ):
+            type.__delattr__(EconomicGoalContract, name)
+
+    assert EconomicGoalContract.validate_automatic_successor is original
+    assert EconomicGoalContract._authority_operations_sealed is True
+
+
 def test_contract_successor_ignores_rebound_canonical_transition_alias(monkeypatch) -> None:
     previous = _goal()
     candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))

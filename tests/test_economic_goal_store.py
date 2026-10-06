@@ -419,6 +419,36 @@ def test_store_rejects_instance_binding_rebind(tmp_path) -> None:
         )
 
 
+def test_store_ignores_rebound_lock_lifecycle(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+
+    def forged_enter(*args, **kwargs):
+        raise AssertionError("rebound WorkspaceEconomicLock.__enter__ executed")
+
+    def forged_exit(*args, **kwargs):
+        raise AssertionError("rebound WorkspaceEconomicLock.__exit__ executed")
+
+    monkeypatch.setattr(WorkspaceEconomicLock, "__enter__", forged_enter)
+    monkeypatch.setattr(WorkspaceEconomicLock, "__exit__", forged_exit)
+
+    store.initialize_owner(_goal())
+    assert store.load() == _goal()
+
+
+def test_store_ignores_rebound_lock_scope_helper(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound lock scope executed")
+
+    monkeypatch.setattr(economic_goal_store_module, "_workspace_lock_scope", forged)
+
+    candidate = replace(_goal(), revision=2, max_stake_fraction=Decimal("0.01"))
+    store.persist_automatic_successor(candidate)
+    assert EconomicGoalStore(tmp_path).load() == candidate
+
+
 def test_store_ignores_rebound_module_authorities(monkeypatch, tmp_path) -> None:
     previous = _goal()
     candidate = replace(

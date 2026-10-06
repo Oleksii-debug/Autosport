@@ -236,57 +236,106 @@ def _skill_handler_process(handler: SkillHandler, payload: dict[str, Any], sende
         sender.close()
 
 
-def _close_pipe_endpoints(*endpoints: Any) -> bool:
-    """Best-effort close every parent-side pipe endpoint without short-circuiting."""
+def _close_pipe_endpoints(
+    *endpoints: Any, suppress_base_exceptions: bool = False
+) -> bool:
+    """Best-effort close every parent-side pipe endpoint without short-circuiting.
+
+    Ordinary cleanup failures become explicit infrastructure truth. During an
+    already-active process-control interruption, cleanup must also suppress
+    BaseException so it cannot replace the original KeyboardInterrupt/SystemExit.
+    """
     closed = True
     for endpoint in endpoints:
         try:
             endpoint.close()
         except Exception:
             closed = False
+        except BaseException:
+            if not suppress_base_exceptions:
+                raise
+            closed = False
     return closed
 
 
-def _close_process_handle(process: Any) -> bool:
+def _close_process_handle(
+    process: Any, *, suppress_base_exceptions: bool = False
+) -> bool:
     """Best-effort close of a confirmed-stopped process handle.
 
     A close failure is returned as infrastructure truth instead of escaping and
-    leaving the durable SkillRun stuck in RUNNING.
+    leaving the durable SkillRun stuck in RUNNING. When preserving an already
+    active process-control interruption, cleanup BaseException is suppressed so
+    the original interruption remains authoritative.
     """
-    close = getattr(process, "close", None)
+    try:
+        close = getattr(process, "close", None)
+    except Exception:
+        return False
+    except BaseException:
+        if not suppress_base_exceptions:
+            raise
+        return False
     if close is None:
         return True
     try:
         close()
     except Exception:
-        # Process-handle cleanup is an infrastructure boundary.  Convert any
-        # ordinary cleanup exception into durable failure truth rather than
-        # allowing the caller's SkillRun to remain stranded in RUNNING.
+        return False
+    except BaseException:
+        if not suppress_base_exceptions:
+            raise
         return False
     return True
 
 
-def _stop_process_bounded(process: Any) -> str | None:
-    """Best-effort bounded stop with explicit stop-vs-handle-close truth."""
+def _stop_process_bounded(
+    process: Any, *, suppress_base_exceptions: bool = False
+) -> str | None:
+    """Best-effort bounded stop with explicit stop-vs-handle-close truth.
+
+    Normal callers preserve process-control BaseException. Cleanup that is
+    already handling a process-control interruption opts into suppression so a
+    secondary cleanup interrupt cannot mask the original parent interruption.
+    """
     last_alive: bool | None = None
     for method_name in ("kill", "terminate"):
-        method = getattr(process, method_name, None)
+        try:
+            method = getattr(process, method_name, None)
+        except Exception:
+            method = None
+        except BaseException:
+            if not suppress_base_exceptions:
+                raise
+            method = None
         if method is not None:
             try:
                 method()
             except Exception:
                 pass
+            except BaseException:
+                if not suppress_base_exceptions:
+                    raise
         try:
             process.join(_HANDLER_TIMEOUT_REAP_GRACE_SECONDS)
         except Exception:
             pass
+        except BaseException:
+            if not suppress_base_exceptions:
+                raise
         try:
             alive = process.is_alive()
         except Exception:
             alive = None
+        except BaseException:
+            if not suppress_base_exceptions:
+                raise
+            alive = None
         last_alive = alive
         if alive is False:
-            if _close_process_handle(process):
+            if _close_process_handle(
+                process, suppress_base_exceptions=suppress_base_exceptions
+            ):
                 return None
             return "HANDLE_CLOSE_FAILED"
 
@@ -294,7 +343,9 @@ def _stop_process_bounded(process: Any) -> str | None:
     # successful close is sufficient proof that the child is no longer running.
     # Never use close() to override an explicit final is_alive() == True.
     if last_alive is None:
-        if _close_process_handle(process):
+        if _close_process_handle(
+            process, suppress_base_exceptions=suppress_base_exceptions
+        ):
             return None
         return "HANDLE_CLOSE_FAILED"
     return "STOP_FAILED"
@@ -515,7 +566,9 @@ class SkillRegistry:
         except BaseException:
             # Process-control interruption is not a handler failure, but parent
             # pipe resources created before construction must still be released.
-            _close_pipe_endpoints(receiver,sender)
+            _close_pipe_endpoints(
+                receiver, sender, suppress_base_exceptions=True
+            )
             raise
         try:
             process.start()
@@ -535,8 +588,10 @@ class SkillRegistry:
         except BaseException:
             # A partially-started child must not survive an operator/process
             # control interruption in the parent.
-            _stop_process_bounded(process)
-            _close_pipe_endpoints(receiver,sender)
+            _stop_process_bounded(process, suppress_base_exceptions=True)
+            _close_pipe_endpoints(
+                receiver, sender, suppress_base_exceptions=True
+            )
             raise
         try:
             sender.close()
@@ -549,8 +604,10 @@ class SkillRegistry:
                 return None,"HANDLER_PROCESS_STOP_FAILED"
             return None,"HANDLER_RESULT_PIPE_CLOSE_FAILED"
         except BaseException:
-            _stop_process_bounded(process)
-            _close_pipe_endpoints(receiver,sender)
+            _stop_process_bounded(process, suppress_base_exceptions=True)
+            _close_pipe_endpoints(
+                receiver, sender, suppress_base_exceptions=True
+            )
             raise
         try:
             process.join(timeout_seconds)
@@ -565,8 +622,8 @@ class SkillRegistry:
                 return None,"HANDLER_PROCESS_PIPE_CLOSE_FAILED"
             return None,"HANDLER_PROCESS_JOIN_FAILED"
         except BaseException:
-            _stop_process_bounded(process)
-            _close_pipe_endpoints(receiver)
+            _stop_process_bounded(process, suppress_base_exceptions=True)
+            _close_pipe_endpoints(receiver, suppress_base_exceptions=True)
             raise
         try:
             alive = process.is_alive()
@@ -581,8 +638,8 @@ class SkillRegistry:
                 return None,"HANDLER_PROCESS_PIPE_CLOSE_FAILED"
             return None,"HANDLER_PROCESS_STATE_UNAVAILABLE"
         except BaseException:
-            _stop_process_bounded(process)
-            _close_pipe_endpoints(receiver)
+            _stop_process_bounded(process, suppress_base_exceptions=True)
+            _close_pipe_endpoints(receiver, suppress_base_exceptions=True)
             raise
         if alive:
             # The timeout is an execution-authority boundary, not the start of
@@ -610,8 +667,8 @@ class SkillRegistry:
                 return None,"HANDLER_RESULT_PIPE_CLOSE_FAILED"
             return None,"HANDLER_RESULT_UNAVAILABLE"
         except BaseException:
-            _close_pipe_endpoints(receiver)
-            _close_process_handle(process)
+            _close_pipe_endpoints(receiver, suppress_base_exceptions=True)
+            _close_process_handle(process, suppress_base_exceptions=True)
             raise
         if not has_result:
             pipe_close_ok = _close_pipe_endpoints(receiver)
@@ -632,8 +689,8 @@ class SkillRegistry:
                 return None,"HANDLER_RESULT_PIPE_CLOSE_FAILED"
             return None,"HANDLER_RESULT_UNAVAILABLE"
         except BaseException:
-            _close_pipe_endpoints(receiver)
-            _close_process_handle(process)
+            _close_pipe_endpoints(receiver, suppress_base_exceptions=True)
+            _close_process_handle(process, suppress_base_exceptions=True)
             raise
         pipe_close_ok = _close_pipe_endpoints(receiver)
         handle_close_ok = _close_process_handle(process)

@@ -1192,6 +1192,11 @@ class _ContinuousSessionState:
             raise TypeError("deltas must be an exact tuple")
         if type(backlog) is not bool:
             raise TypeError("backlog must be boolean")
+        if (
+            expected_after_delta_id is not _EXPECTED_PROJECTION_UNSET
+            and expected_after_delta_id is not None
+        ):
+            _text(expected_after_delta_id, "expected_after_delta_id")
         if backlog and not deltas:
             raise ContinuousSessionError(
                 "source-state projection backlog requires at least one delta"

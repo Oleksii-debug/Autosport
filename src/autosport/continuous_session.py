@@ -1463,23 +1463,42 @@ class _ContinuousSessionState:
         code: str,
         _durable_path_lock: Callable[..., Any] = durable_path_lock,
         _durable_path_lock_code: object = durable_path_lock.__code__,
+        _error_checkpoint_present: Callable[["_ContinuousSessionState"], bool] = (
+            _error_checkpoint_present
+        ),
+        _error_checkpoint_present_code: object = _error_checkpoint_present.__code__,
+        _read_error_checkpoint: Callable[
+            ["_ContinuousSessionState"], dict[str, Any]
+        ] = _read_error_checkpoint,
+        _read_error_checkpoint_code: object = _read_error_checkpoint.__code__,
     ) -> None:
         code = _text(code, "code")
         if (
             durable_path_lock is not _durable_path_lock
             or getattr(_durable_path_lock, "__code__", None)
             is not _durable_path_lock_code
+            or getattr(_error_checkpoint_present, "__code__", None)
+            is not _error_checkpoint_present_code
+            or getattr(_read_error_checkpoint, "__code__", None)
+            is not _read_error_checkpoint_code
         ):
             raise ContinuousSessionError(
                 "canonical failure publication lock authority changed"
             )
         with _durable_path_lock(self.path):
-            # Keep failure publication bounded by active cached state.  A full
+            # Keep failure publication bounded by active cached state. A full
             # canonical _read() validates every retained settlement receipt and
             # would reintroduce the exact O(history) amplification this sidecar
-            # exists to remove.  If another instance has advanced the canonical
-            # generation, these cached markers make this sidecar stale and
-            # snapshot() fails closed by refusing to overlay it.
+            # exists to remove. Before publishing, however, fence a stale
+            # process from overwriting a newer bounded sidecar generation that
+            # another process already made authoritative.
+            if _error_checkpoint_present(self):
+                existing = _read_error_checkpoint(self)
+                if existing["observed_generation"] > self._generation:
+                    raise ContinuousSessionError(
+                        "stale continuous session instance cannot overwrite "
+                        "newer operational error checkpoint"
+                    )
             self._write_error_checkpoint(code)
 
 

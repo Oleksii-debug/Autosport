@@ -2553,6 +2553,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     def _load_book(
         self,
         *,
+        paper_book_path: Path | None = None,
+        initial_bankroll: str | None = None,
         _paper_book_type: type[PaperBook] = PaperBook,
         _paper_book_load: Callable[..., PaperBook] = PaperBook.load,
         _paper_book_load_descriptor: object = PaperBook.__dict__["load"],
@@ -2575,9 +2577,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "settlement book loader authority changed"
             )
-        if _path_exists(self.paper_book_path):
-            return _paper_book_load(self.paper_book_path)
-        return _paper_book_type(self.initial_bankroll)
+        paper_book_path = (
+            self.paper_book_path if paper_book_path is None else paper_book_path
+        )
+        initial_bankroll = (
+            self.initial_bankroll if initial_bankroll is None else initial_bankroll
+        )
+        if _path_exists(paper_book_path):
+            return _paper_book_load(paper_book_path)
+        return _paper_book_type(initial_bankroll)
 
     @_seal_settlement_consumer_entry
     @_bind_canonical_settlement_engine
@@ -2610,6 +2618,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         if type(resolutions) is not tuple:
             raise TypeError("resolutions must be an exact tuple")
+        workspace = self.workspace
+        paper_book_path = self.paper_book_path
+        initial_bankroll = self.initial_bankroll
         unique: dict[str, SettlementResolution] = {}
         outcome_by_settlement: dict[tuple[str, str], dict[str, str]] = {}
         for resolution in resolutions:
@@ -2666,8 +2677,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 continue
             unique[resolution.evidence_id] = resolution
 
-        with WorkspaceEconomicLock(self.workspace):
-            book = ContinuousSessionCoordinator._load_book(self)
+        with WorkspaceEconomicLock(workspace):
+            book = ContinuousSessionCoordinator._load_book(
+                self,
+                paper_book_path=paper_book_path,
+                initial_bankroll=initial_bankroll,
+            )
             engine = _settlement_engine_type()
             if type(engine) is not _settlement_engine_type:
                 raise ContinuousSessionError(
@@ -2687,7 +2702,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     engine.record(scoped)
             settled = tuple(engine.settle_ready(book))
             if settled:
-                _paper_book_save(book, self.paper_book_path)
+                _paper_book_save(book, paper_book_path)
 
         return settled, tuple(unique)
 
@@ -2818,7 +2833,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         required_history = self.required_history
         outcome_authority = self.outcome_authority
         learning_handoff = self.settlement_learning_handoff
+        workspace = self.workspace
         paper_book_path = self.paper_book_path
+        initial_bankroll = self.initial_bankroll
         now = self.clock()
         _instant_validator(now, "now")
 
@@ -2976,6 +2993,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     self._state,
                     settlement_evidence=resolutions,
                 )
+                if (
+                    self.workspace != workspace
+                    or self.paper_book_path != paper_book_path
+                    or self.initial_bankroll != initial_bankroll
+                ):
+                    raise ContinuousSessionError(
+                        "settlement economic configuration changed during tick"
+                    )
                 prepare_settlement = None
                 reconcile_after_settlement = None
                 if learning_handoff is not None:
@@ -3008,7 +3033,23 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         ),
                         at=now,
                     )
+                    if (
+                        self.workspace != workspace
+                        or self.paper_book_path != paper_book_path
+                        or self.initial_bankroll != initial_bankroll
+                    ):
+                        raise ContinuousSessionError(
+                            "settlement economic configuration changed during tick"
+                        )
                 settled, evidence_ids = self._settle(resolutions=resolutions)
+                if (
+                    self.workspace != workspace
+                    or self.paper_book_path != paper_book_path
+                    or self.initial_bankroll != initial_bankroll
+                ):
+                    raise ContinuousSessionError(
+                        "settlement economic configuration changed during tick"
+                    )
                 if reconcile_after_settlement is not None:
                     reconcile_after_settlement(
                         paper_book_path=paper_book_path,

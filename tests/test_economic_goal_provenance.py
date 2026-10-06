@@ -474,6 +474,37 @@ def test_decision_identity_ignores_rebound_snapshotter_alias(monkeypatch) -> Non
     assert evidence.decision_identity == expected
 
 
+def test_provenance_constructor_rejects_authority_injection() -> None:
+    with pytest.raises(TypeError):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="owner-goal-v1",
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
+            _validator=lambda value: None,  # type: ignore[call-arg]
+        )
+
+
+def test_provenance_constructor_ignores_rebound_module_authorities(monkeypatch) -> None:
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound provenance constructor authority executed")
+
+    monkeypatch.setattr(economic_goal_provenance_module, "_CANONICAL_PROVENANCE_VALIDATOR", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_PROVENANCE_OBJECT_SETATTR", forged)
+
+    with pytest.raises(EconomicGoalProvenanceError, match="SHA-256 hex"):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="owner-goal-v1",
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="not-a-sha",
+        )
+
+
 def test_provenance_constructor_rejects_code_rebinding(monkeypatch) -> None:
     operation = economic_goal_provenance_module._provenance_init_authority
     original_code = operation.__code__

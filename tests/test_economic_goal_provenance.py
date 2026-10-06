@@ -397,16 +397,15 @@ def test_contract_sha256_rejects_bound_default_rebinding() -> None:
         operation.__defaults__ = original_defaults
 
 
-def test_decision_identity_rejects_snapshotter_default_rebinding() -> None:
+def test_decision_identity_rejects_snapshot_default_rebinding() -> None:
     evidence = provenance_for(_goal())
-    snapshotter = economic_goal_provenance_module._snapshot_provenance
+    snapshotter = economic_goal_provenance_module._canonical_provenance_snapshot
     original_defaults = snapshotter.__defaults__
     assert original_defaults is not None
 
     snapshotter.__defaults__ = (
-        original_defaults[0],
-        object,
-        original_defaults[2],
+        (),
+        original_defaults[1],
     )
     try:
         with pytest.raises(
@@ -530,63 +529,66 @@ def test_public_provenance_operations_ignore_rebound_bound_implementation_aliase
     verify_provenance(goal, evidence)
 
 
-def test_provenance_identity_is_bound_to_one_canonical_contract_snapshot() -> None:
+def test_provenance_derivation_rejects_contract_mutation_during_hash() -> None:
     goal = _goal()
-    canonical_encoder = economic_goal_provenance_module.economic_goal_to_payload
+    canonical_hash = economic_goal_provenance_module._contract_sha256_bound
+    mutated = False
 
-    def encode_then_mutate(contract):
-        payload = canonical_encoder(contract)
+    def hash_then_mutate(contract):
+        nonlocal mutated
+        digest = canonical_hash(contract)
         object.__setattr__(goal, "goal_id", "mutated-after-snapshot")
         object.__setattr__(goal, "revision", 99)
-        return payload
+        mutated = True
+        return digest
 
-    evidence = economic_goal_provenance_module._provenance_for_bound(
-        goal,
-        _payload_encoder=encode_then_mutate,
-    )
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="changed during provenance derivation",
+    ):
+        economic_goal_provenance_module._provenance_for_bound(
+            goal,
+            _contract_sha256=hash_then_mutate,
+        )
 
-    assert evidence.goal_id == "owner-goal-v1"
-    assert evidence.revision == 1
-    assert goal.goal_id == "mutated-after-snapshot"
-    assert goal.revision == 99
+    assert mutated is True
 
 
-def test_provenance_verification_uses_canonical_contract_snapshot_after_capture() -> None:
+def test_provenance_verification_rejects_contract_mutation_during_hash() -> None:
     goal = _goal()
     evidence = provenance_for(goal)
-    canonical_encoder = economic_goal_provenance_module.economic_goal_to_payload
+    canonical_hash = economic_goal_provenance_module._contract_sha256_bound
+    mutated = False
 
-    def encode_then_mutate(contract):
-        payload = canonical_encoder(contract)
+    def hash_then_mutate(contract):
+        nonlocal mutated
+        digest = canonical_hash(contract)
         object.__setattr__(goal, "bankroll_id", "mutated-after-snapshot")
-        return payload
+        mutated = True
+        return digest
 
-    economic_goal_provenance_module._verify_provenance_bound(
-        goal,
-        evidence,
-        _payload_encoder=encode_then_mutate,
-    )
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="changed during provenance verification",
+    ):
+        economic_goal_provenance_module._verify_provenance_bound(
+            goal,
+            evidence,
+            _contract_sha256=hash_then_mutate,
+        )
 
-    assert goal.bankroll_id == "mutated-after-snapshot"
+    assert mutated is True
 
 
-def test_decision_identity_uses_isolated_provenance_snapshot() -> None:
+def test_provenance_snapshot_isolated_from_later_source_mutation() -> None:
     evidence = provenance_for(_goal())
-    expected = evidence.decision_identity
-    canonical_snapshotter = economic_goal_provenance_module._snapshot_provenance
+    snapshot = economic_goal_provenance_module._snapshot_provenance(evidence)
 
-    def snapshot_then_mutate(provenance):
-        snapshot = canonical_snapshotter(provenance)
-        object.__setattr__(evidence, "goal_id", "mutated-after-snapshot")
-        object.__setattr__(evidence, "revision", 999)
-        return snapshot
+    object.__setattr__(evidence, "goal_id", "mutated-after-snapshot")
+    object.__setattr__(evidence, "revision", 999)
 
-    actual = economic_goal_provenance_module._decision_identity_bound(
-        evidence,
-        _snapshotter=snapshot_then_mutate,
-    )
-
-    assert actual == expected
+    assert snapshot.goal_id == "owner-goal-v1"
+    assert snapshot.revision == 1
     assert evidence.goal_id == "mutated-after-snapshot"
     assert evidence.revision == 999
 

@@ -1080,7 +1080,17 @@ class ProductEconomicSessionStore:
                 and _getattr(self._current_method_witness, "__code__", None)
                 is not self._current_method_code_witness
             )
-            or "current" in self.__dict__
+            or _any(
+                name in self.__dict__
+                for name in (
+                    "current",
+                    "require_current",
+                    "transition_to_current_goal",
+                    "_publish_new",
+                    "_evidence",
+                    "_require_configuration_authority",
+                )
+            )
             or _any(
                 ProductEconomicSession.__dict__[name] is not descriptor
                 for name, descriptor in self._product_economic_session_field_descriptors_witness

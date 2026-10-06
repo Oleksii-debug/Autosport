@@ -40,14 +40,14 @@ class EconomicGoalProvenance:
             raise EconomicGoalProvenanceError("unsupported provenance schema")
         if self.schema_version != PROVENANCE_SCHEMA_VERSION:
             raise EconomicGoalProvenanceError("unsupported provenance schema version")
-        if not isinstance(self.goal_id, str) or not self.goal_id:
+        if type(self.goal_id) is not str or not self.goal_id:
             raise EconomicGoalProvenanceError("goal_id must be a non-empty string")
-        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision <= 0:
+        if type(self.revision) is not int or self.revision <= 0:
             raise EconomicGoalProvenanceError("revision must be a positive integer")
-        if not isinstance(self.bankroll_id, str) or not self.bankroll_id:
+        if type(self.bankroll_id) is not str or not self.bankroll_id:
             raise EconomicGoalProvenanceError("bankroll_id must be a non-empty string")
         if (
-            not isinstance(self.contract_sha256, str)
+            type(self.contract_sha256) is not str
             or len(self.contract_sha256) != 64
             or any(ch not in "0123456789abcdef" for ch in self.contract_sha256)
         ):
@@ -75,7 +75,7 @@ def _canonical_json(payload: object) -> bytes:
 def contract_sha256(contract: EconomicGoalContract) -> str:
     """Hash the exact canonical persisted representation of ``contract``."""
 
-    if not isinstance(contract, EconomicGoalContract):
+    if type(contract) is not EconomicGoalContract:
         raise EconomicGoalContractError("provenance hashing requires an EconomicGoalContract")
     return hashlib.sha256(_canonical_json(economic_goal_to_payload(contract))).hexdigest()
 
@@ -83,7 +83,7 @@ def contract_sha256(contract: EconomicGoalContract) -> str:
 def provenance_for(contract: EconomicGoalContract) -> EconomicGoalProvenance:
     """Derive immutable provenance identity without introducing another authority."""
 
-    if not isinstance(contract, EconomicGoalContract):
+    if type(contract) is not EconomicGoalContract:
         raise EconomicGoalContractError("provenance requires an EconomicGoalContract")
     return EconomicGoalProvenance(
         schema=PROVENANCE_SCHEMA,
@@ -101,7 +101,7 @@ def verify_provenance(
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
-    if not isinstance(provenance, EconomicGoalProvenance):
+    if type(provenance) is not EconomicGoalProvenance:
         raise EconomicGoalProvenanceError("provenance must be EconomicGoalProvenance")
     if provenance.goal_id != contract.goal_id:
         raise EconomicGoalProvenanceError("provenance goal_id mismatch")

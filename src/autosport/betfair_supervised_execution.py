@@ -614,6 +614,13 @@ class BetfairSupervisedPlaceOrdersClient:
         execution_workspace: Path,
         _before_transport: Callable[[str], None] | None = None,
     ) -> BetfairPlaceExecutionReport:
+        _canonical_place_client_preflight(self)
+        response_parser = _parse_place_orders_response
+        response_parser_code = getattr(response_parser, "__code__", None)
+        if response_parser_code is None:
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair response parser is unavailable"
+            )
         selection_id = _validate_betfair_place_action(action)
         self._gate.require(
             action=action,
@@ -733,6 +740,14 @@ class BetfairSupervisedPlaceOrdersClient:
         # observation timestamp is also product-owned; caller/test clocks remain
         # valid for structural responses but cannot mint durable provider truth.
         _canonical_place_client_preflight(self)
+        if (
+            _parse_place_orders_response is not response_parser
+            or getattr(response_parser, "__code__", None) is not response_parser_code
+        ):
+            raise BetfairPlaceOrdersAmbiguous(
+                "canonical placeOrders response parser changed; "
+                "authoritative readback required"
+            )
         observation_clock_authoritative = observed_clock is _now
         provider_origin_authoritative = (
             origin_candidate
@@ -746,7 +761,7 @@ class BetfairSupervisedPlaceOrdersClient:
             is canonical_transport_post
             and _execution_provider_network_dispatch_is_current()
         )
-        return _parse_place_orders_response(
+        return response_parser(
             payload,
             request_id=request_id,
             request_sha256=request_sha256,
@@ -817,6 +832,14 @@ def _build_canonical_place_action_dispatch():
 
     canonical_bytes = _canonical_bytes
     canonical_bytes_code = canonical_bytes.__code__
+    canonical_response_parser = _parse_place_orders_response
+    canonical_response_parser_code = getattr(
+        canonical_response_parser,
+        "__code__",
+        None,
+    )
+    if canonical_response_parser_code is None:
+        raise RuntimeError("canonical Betfair response parser is unavailable")
     binding_digest = _hmac_digest
     binding_compare_digest = _hmac_compare_digest
     binding_key = _token_bytes(32)
@@ -873,6 +896,9 @@ def _build_canonical_place_action_dispatch():
             )
             and _canonical_bytes is canonical_bytes
             and canonical_bytes.__code__ is canonical_bytes_code
+            and _parse_place_orders_response is canonical_response_parser
+            and getattr(canonical_response_parser, "__code__", None)
+            is canonical_response_parser_code
         )
 
     def instance_dict(value: object) -> dict[str, object] | None:
@@ -1070,12 +1096,6 @@ def _build_canonical_place_action_dispatch():
         )
 
     return dispatch, preflight
-
-
-_canonical_place_action_dispatch, _canonical_place_client_preflight = (
-    _build_canonical_place_action_dispatch()
-)
-del _build_canonical_place_action_dispatch
 
 
 def _mapping(
@@ -1298,6 +1318,12 @@ def _parse_place_orders_response(
         instruction=instruction,
         provider_origin_authoritative=provider_origin_authoritative,
     )
+
+
+_canonical_place_action_dispatch, _canonical_place_client_preflight = (
+    _build_canonical_place_action_dispatch()
+)
+del _build_canonical_place_action_dispatch
 
 
 def _report_outcome(

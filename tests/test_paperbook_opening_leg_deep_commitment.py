@@ -3174,3 +3174,53 @@ def test_lay_settlement_requires_market_semantics_bound_key() -> None:
     )
     assert settled.status is paper_module.TicketStatus.LOST
     assert settled.payout == Decimal("0")
+
+
+def test_settlement_key_rejects_in_place_semantic_validator_code_mutation() -> None:
+    validator = paper_module._canonical_semantic_identity
+    original_code = validator.__code__
+    try:
+        def hostile(*_args, **_kwargs):
+            raise AssertionError("mutated semantic validator executed")
+
+        validator.__code__ = hostile.__code__
+        leg = TicketLeg(
+            "event-1",
+            "market-1",
+            "selection-1",
+            Decimal("3.00"),
+            exchange_side="lay",
+            market_semantics_id="exchange.match.odds.v1",
+        )
+        with pytest.raises(
+            ValueError,
+            match="market settlement identity authority changed",
+        ):
+            _ = leg.settlement_key
+    finally:
+        validator.__code__ = original_code
+
+
+def test_settlement_key_rejects_in_place_json_serializer_code_mutation() -> None:
+    serializer = paper_module.json.dumps
+    original_code = serializer.__code__
+    try:
+        def hostile(*_args, **_kwargs):
+            raise AssertionError("mutated json serializer executed")
+
+        serializer.__code__ = hostile.__code__
+        leg = TicketLeg(
+            "event-1",
+            "market-1",
+            "selection-1",
+            Decimal("3.00"),
+            exchange_side="lay",
+            market_semantics_id="exchange.match.odds.v1",
+        )
+        with pytest.raises(
+            ValueError,
+            match="market settlement identity authority changed",
+        ):
+            _ = leg.settlement_key
+    finally:
+        serializer.__code__ = original_code

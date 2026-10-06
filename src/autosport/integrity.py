@@ -26,6 +26,15 @@ _PATH_LOCKS_GUARD = threading.Lock()
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCK_LOCAL = threading.local()
 
+
+class AtomicWritePublicationUncertainError(RuntimeError):
+    """Replacement completed, but exact published bytes could not be verified.
+
+    Callers must reconcile the canonical destination before retrying because the
+    new image may already be visible even though this call cannot report success.
+    """
+
+
 _SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN = "autosport.scientific-registry.v1"
 _SCIENTIFIC_REGISTRY_ENTRY_KEYS = frozenset(
     {
@@ -311,15 +320,30 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
 
         protect_scientific_registry = _looks_like_scientific_registry_state(payload)
-        intended = sha256_file(temporary) if protect_scientific_registry else None
+        # A successful generic publication must prove that the bytes visible at the
+        # canonical destination are exactly the bytes that were fsync'd in the
+        # sibling temporary file. This is a post-replace integrity check, not a
+        # claim of power-loss durability on every filesystem.
+        intended = sha256_file(temporary)
 
         with durable_path_lock(destination):
             with _ATOMIC_JSON_PUBLISH_LOCK:
                 if not protect_scientific_registry:
                     os.replace(temporary, destination)
+                    try:
+                        published = sha256_file(destination)
+                    except OSError as exc:
+                        raise AtomicWritePublicationUncertainError(
+                            "atomic JSON replacement completed but published bytes "
+                            "could not be verified"
+                        ) from exc
+                    if published != intended:
+                        raise AtomicWritePublicationUncertainError(
+                            "atomic JSON replacement completed but published bytes "
+                            "do not match intended digest"
+                        )
                     return
 
-                assert intended is not None
                 observed = sha256_file(destination) if destination.exists() else None
                 authority = _scientific_registry_authority(destination)
                 _recover_or_bootstrap_scientific_registry_authority(

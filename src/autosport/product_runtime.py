@@ -346,7 +346,16 @@ class _ManifestStore:
         version = raw.get("schema_version")
         if version == 1 and set(raw) == self._V1_FIELDS:
             self._text(raw.get("source_id"), "source_id")
-            self._text(raw.get("initial_bankroll"), "initial_bankroll")
+            initial_bankroll = self._text(
+                raw.get("initial_bankroll"),
+                "initial_bankroll",
+            )
+            try:
+                PaperBook(initial_bankroll)
+            except Exception as exc:
+                raise ProductCompositionError(
+                    "initial_bankroll must construct a valid PaperBook"
+                ) from exc
             return {
                 **raw,
                 "settlement_authority_identity": None,
@@ -354,7 +363,16 @@ class _ManifestStore:
         if version != self._VERSION or set(raw) != self._FIELDS:
             raise ProductCompositionError("product composition manifest schema mismatch")
         self._text(raw.get("source_id"), "source_id")
-        self._text(raw.get("initial_bankroll"), "initial_bankroll")
+        initial_bankroll = self._text(
+            raw.get("initial_bankroll"),
+            "initial_bankroll",
+        )
+        try:
+            PaperBook(initial_bankroll)
+        except Exception as exc:
+            raise ProductCompositionError(
+                "initial_bankroll must construct a valid PaperBook"
+            ) from exc
         authority_identity = raw.get("settlement_authority_identity")
         if authority_identity is not None:
             identity = self._text(

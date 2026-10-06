@@ -1103,6 +1103,41 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         self.assertTrue(evidence.product_clock_authoritative)
         self.assertEqual(store.require_current(evidence), evidence)
 
+    def test_rebound_product_clock_cannot_mint_positive_session(self) -> None:
+        import autosport.economic_session as economic_session
+
+        original = economic_session._PRODUCT_TIME_NS
+        economic_session._PRODUCT_TIME_NS = lambda: self.clock()
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "product clock authority changed",
+            ):
+                ProductEconomicSessionStore(
+                    self.workspace,
+                    authority_root=self.authority_root,
+                )
+        finally:
+            economic_session._PRODUCT_TIME_NS = original
+
+    def test_post_construction_product_clock_rebind_fails_before_resolution(self) -> None:
+        import autosport.economic_session as economic_session
+
+        store = ProductEconomicSessionStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+        original = economic_session._PRODUCT_TIME_NS
+        economic_session._PRODUCT_TIME_NS = lambda: self.clock()
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+        finally:
+            economic_session._PRODUCT_TIME_NS = original
+
     def test_under_lock_revalidation_accepts_exact_current_product_session(self) -> None:
         store = ProductEconomicSessionStore(
             self.workspace,

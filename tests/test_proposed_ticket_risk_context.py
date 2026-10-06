@@ -6,6 +6,7 @@ from pathlib import Path
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
+import autosport.risk as risk_module
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 
 
@@ -620,6 +621,48 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
 
         self.assertIsNotNone(second_sha)
         self.assertNotEqual(first_sha, second_sha)
+
+    def test_zero_stake_cannot_bypass_lay_proposal_shape_validation(self) -> None:
+        first = TicketLeg(
+            event_id="event-zero-a",
+            market_id="market-zero-a",
+            selection_id="selection-zero-a",
+            locked_odds=Decimal("5"),
+            exchange_side="lay",
+        )
+        second = TicketLeg(
+            event_id="event-zero-b",
+            market_id="market-zero-b",
+            selection_id="selection-zero-b",
+            locked_odds=Decimal("2"),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exactly one canonical single-leg proposal",
+        ):
+            risk_module._CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                Decimal("0"),
+                (first, second),
+            )
+
+    def test_zero_stake_still_rejects_noncanonical_proposal_leg(self) -> None:
+        leg = TicketLeg(
+            event_id="event-zero",
+            market_id="market-zero",
+            selection_id="selection-zero",
+            locked_odds=Decimal("2"),
+        )
+        object.__setattr__(leg, "locked_odds", Decimal("NaN"))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "proposal exposure leg is not canonical",
+        ):
+            risk_module._CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                Decimal("0"),
+                (leg,),
+            )
 
     def test_lay_liability_drives_aggregate_committed_capital_limit(self) -> None:
         policy = PaperRiskPolicy(

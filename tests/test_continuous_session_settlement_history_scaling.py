@@ -582,3 +582,84 @@ def test_in_place_operational_checkpoint_mutation_during_read_fails_closed() -> 
                 assert "changed during bounded read" in str(exc)
             else:
                 raise AssertionError("same-inode checkpoint mutation was accepted")
+
+def test_checkpoint_authority_ignores_rebound_module_constants(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        monkeypatch.setattr(
+            continuous_session,
+            "_CONTINUOUS_SESSION_SCHEMA",
+            "attacker.session",
+        )
+        monkeypatch.setattr(continuous_session, "_CONTINUOUS_SESSION_VERSION", 999)
+        monkeypatch.setattr(
+            continuous_session,
+            "_CONTINUOUS_SESSION_FIELDS",
+            frozenset({"attacker"}),
+        )
+        monkeypatch.setattr(
+            continuous_session,
+            "_CONTINUOUS_SESSION_ERROR_SCHEMA",
+            "attacker.error",
+        )
+        monkeypatch.setattr(
+            continuous_session,
+            "_CONTINUOUS_SESSION_ERROR_VERSION",
+            999,
+        )
+        monkeypatch.setattr(
+            continuous_session,
+            "_CONTINUOUS_SESSION_ERROR_FIELDS",
+            frozenset({"attacker"}),
+        )
+        monkeypatch.setattr(
+            continuous_session,
+            "_CONTINUOUS_SESSION_ERROR_MAX_BYTES",
+            1,
+        )
+        monkeypatch.setattr(
+            continuous_session,
+            "_CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS",
+            1,
+        )
+
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        assert reopened.snapshot().last_error_code == "SYNTHETIC_PROVIDER_FAILURE"
+
+        error_path = root / "continuous_session.json.operational_error.json"
+        payload = json.loads(error_path.read_text(encoding="utf-8"))
+        assert payload["schema"] == "autosport.continuous_session.operational_error"
+        assert payload["schema_version"] == 1
+
+        payload["schema"] = "attacker.error"
+        payload["schema_version"] = 999
+        error_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        try:
+            reopened._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "module-constant rebinding changed operational checkpoint authority"
+            )
+
+        fresh_path = root / "fresh_session.json"
+        fresh = continuous_session._ContinuousSessionState(
+            fresh_path,
+            session_id="fresh-session",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        fresh_payload = json.loads(fresh_path.read_text(encoding="utf-8"))
+        assert fresh_payload["schema"] == "autosport.continuous_session"
+        assert fresh_payload["schema_version"] == 2
+        assert fresh.snapshot().session_id == "fresh-session"
+

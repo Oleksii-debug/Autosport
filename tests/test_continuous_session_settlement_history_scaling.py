@@ -901,3 +901,109 @@ def test_state_round_trip_does_not_resurrect_superseded_failure() -> None:
         snapshot = reopened.snapshot()
         assert snapshot.state is continuous_session.SessionState.RUNNING
         assert snapshot.last_error_code is None
+
+
+def test_durable_session_parser_and_path_reader_code_identity_are_immutable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        original_parser = continuous_session.strict_json_loads
+        original_parser_code = original_parser.__code__
+        original_read_text = Path.read_text
+        original_read_text_code = original_read_text.__code__
+
+        def attacker_parser(_text: object) -> object:
+            raise AssertionError("mutated session parser executed")
+
+        def attacker_read_text(_self: Path, **_kwargs: object) -> str:
+            raise AssertionError("mutated Path.read_text executed")
+
+        try:
+            original_parser.__code__ = attacker_parser.__code__
+            original_read_text.__code__ = attacker_read_text.__code__
+
+            for operation in (
+                lambda: state.snapshot(),
+                lambda: continuous_session._ContinuousSessionState(
+                    root / "reopened.json",
+                    session_id="reopened-session",
+                    source_id="provider-a",
+                    clock=lambda: _AT,
+                ),
+            ):
+                try:
+                    operation()
+                except continuous_session.ContinuousSessionError as exc:
+                    assert "code identity" in str(exc)
+                else:
+                    raise AssertionError(
+                        "mutated durable session reader was accepted"
+                    )
+        finally:
+            original_parser.__code__ = original_parser_code
+            original_read_text.__code__ = original_read_text_code
+
+
+def test_durable_session_writer_code_identity_is_immutable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        original_writer = continuous_session.atomic_write_json
+        original_writer_code = original_writer.__code__
+
+        def attacker_writer(
+            _path: object,
+            _payload: object,
+        ) -> None:
+            raise AssertionError("mutated session writer executed")
+
+        try:
+            original_writer.__code__ = attacker_writer.__code__
+            try:
+                state.record_success(
+                    at=_AT,
+                    full_refresh=False,
+                    settlement_evidence=(),
+                )
+            except continuous_session.ContinuousSessionError as exc:
+                assert "writer code identity" in str(exc)
+            else:
+                raise AssertionError("mutated durable session writer was accepted")
+        finally:
+            original_writer.__code__ = original_writer_code
+
+
+def test_operational_checkpoint_writer_code_identity_is_immutable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        original_dumps = continuous_session.json.dumps
+        original_dumps_code = original_dumps.__code__
+        original_writer = continuous_session.atomic_write_json
+        original_writer_code = original_writer.__code__
+
+        def attacker_dumps(*_args: object, **_kwargs: object) -> str:
+            raise AssertionError("mutated sidecar serializer executed")
+
+        def attacker_writer(
+            _path: object,
+            _payload: object,
+        ) -> None:
+            raise AssertionError("mutated sidecar writer executed")
+
+        try:
+            original_dumps.__code__ = attacker_dumps.__code__
+            original_writer.__code__ = attacker_writer.__code__
+            try:
+                state.record_failure(code="CANONICAL_FAILURE")
+            except continuous_session.ContinuousSessionError as exc:
+                assert "writer code identity" in str(exc)
+            else:
+                raise AssertionError(
+                    "mutated operational-checkpoint writer was accepted"
+                )
+        finally:
+            original_dumps.__code__ = original_dumps_code
+            original_writer.__code__ = original_writer_code

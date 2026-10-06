@@ -866,6 +866,11 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
     fsync_directory_descriptor = None
     fsync_directory_function = None
     fsync_directory_code = None
+    directory_fsync_os_module = os
+    directory_fsync_open = os.open
+    directory_fsync_fsync = os.fsync
+    directory_fsync_close = os.close
+    directory_fsync_o_directory = getattr(os, "O_DIRECTORY", None)
     snapshot_helper_authorities = None
     snapshot_helper_names = (
         "_require_finite",
@@ -1014,6 +1019,18 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             raise ValueError("PaperBook lifecycle serializer authority changed")
         return result
 
+    def require_directory_fsync_dependencies() -> None:
+        if os is not directory_fsync_os_module:
+            raise ValueError("PaperBook directory fsync os module authority changed")
+        if directory_fsync_os_module.open is not directory_fsync_open:
+            raise ValueError("PaperBook directory open authority changed")
+        if directory_fsync_os_module.fsync is not directory_fsync_fsync:
+            raise ValueError("PaperBook directory fsync syscall authority changed")
+        if directory_fsync_os_module.close is not directory_fsync_close:
+            raise ValueError("PaperBook directory close authority changed")
+        if getattr(directory_fsync_os_module, "O_DIRECTORY", None) != directory_fsync_o_directory:
+            raise ValueError("PaperBook directory flag authority changed")
+
     def ensure_parent(canonical_type: type, directory: Path) -> None:
         if ensure_parent_descriptor is None or ensure_parent_function is None or ensure_parent_code is None:
             raise RuntimeError("PaperBook parent durability dispatch authority is unavailable")
@@ -1029,7 +1046,9 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             raise ValueError("PaperBook directory fsync dispatch changed")
         if fsync_directory_function.__code__ is not fsync_directory_code:
             raise ValueError("PaperBook directory fsync authority changed")
+        require_directory_fsync_dependencies()
         ensure_parent_function(canonical_type, directory)
+        require_directory_fsync_dependencies()
         if canonical_type.__dict__.get("_fsync_snapshot_directory") is not fsync_directory_descriptor:
             raise ValueError("PaperBook directory fsync dispatch changed")
         if fsync_directory_function.__code__ is not fsync_directory_code:
@@ -1044,7 +1063,9 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             raise ValueError("PaperBook directory fsync dispatch changed")
         if fsync_directory_function.__code__ is not fsync_directory_code:
             raise ValueError("PaperBook directory fsync authority changed")
+        require_directory_fsync_dependencies()
         fsync_directory_function(directory)
+        require_directory_fsync_dependencies()
         if fsync_directory_function.__code__ is not fsync_directory_code:
             raise ValueError("PaperBook directory fsync authority changed")
 

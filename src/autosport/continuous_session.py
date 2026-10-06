@@ -2238,8 +2238,41 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         *,
         dependency_index: FocusedMirrorDependencyIndex | None = None,
         register_input: Callable[..., object] | None = None,
+        _dependency_index_type: type[FocusedMirrorDependencyIndex] = (
+            FocusedMirrorDependencyIndex
+        ),
+        _dependency_type: type[FocusedMirrorDependency] = FocusedMirrorDependency,
+        _selector_normalizer: Callable[..., frozenset[str] | None] = (
+            FocusedMirrorDependencyIndex._selector
+        ),
+        _selector_normalizer_code: object = FocusedMirrorDependencyIndex._selector.__code__,
+        _input_id_validator: Callable[[str], str] = FocusedMirrorDependencyIndex._input_id,
+        _input_id_validator_code: object = FocusedMirrorDependencyIndex._input_id.__code__,
+        _dependency_reader: Callable[
+            [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
+        ] = FocusedMirrorDependencyIndex._dependency,
+        _dependency_reader_code: object = FocusedMirrorDependencyIndex._dependency.__code__,
         **selectors: object,
     ) -> bool:
+        def require_canonical_dependency_helpers() -> None:
+            if (
+                FocusedMirrorDependencyIndex is not _dependency_index_type
+                or FocusedMirrorDependency is not _dependency_type
+                or _dependency_index_type._selector is not _selector_normalizer
+                or getattr(_selector_normalizer, "__code__", None)
+                is not _selector_normalizer_code
+                or _dependency_index_type._input_id is not _input_id_validator
+                or getattr(_input_id_validator, "__code__", None)
+                is not _input_id_validator_code
+                or _dependency_index_type._dependency is not _dependency_reader
+                or getattr(_dependency_reader, "__code__", None)
+                is not _dependency_reader_code
+            ):
+                raise ContinuousSessionError(
+                    "canonical dependency lifecycle verification authority changed"
+                )
+
+        require_canonical_dependency_helpers()
         dependency_index = (
             self.dependency_index if dependency_index is None else dependency_index
         )
@@ -2284,27 +2317,27 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         expected_dependency: FocusedMirrorDependency | None = None
         before_dependencies: tuple[FocusedMirrorDependency, ...] | None = None
         dependency_mirror: object | None = None
-        if isinstance(dependency_index, FocusedMirrorDependencyIndex):
+        if isinstance(dependency_index, _dependency_index_type):
             try:
-                expected_dependency = FocusedMirrorDependency(
+                expected_dependency = _dependency_type(
                     input_id=input_id,
-                    source_ids=FocusedMirrorDependencyIndex._selector(
+                    source_ids=_selector_normalizer(
                         selectors.get("source_ids"),
                         name="source_ids",
                     ),
-                    sports=FocusedMirrorDependencyIndex._selector(
+                    sports=_selector_normalizer(
                         selectors.get("sports"),
                         name="sports",
                     ),
-                    event_ids=FocusedMirrorDependencyIndex._selector(
+                    event_ids=_selector_normalizer(
                         selectors.get("event_ids"),
                         name="event_ids",
                     ),
-                    market_ids=FocusedMirrorDependencyIndex._selector(
+                    market_ids=_selector_normalizer(
                         selectors.get("market_ids"),
                         name="market_ids",
                     ),
-                    selection_ids=FocusedMirrorDependencyIndex._selector(
+                    selection_ids=_selector_normalizer(
                         selectors.get("selection_ids"),
                         name="selection_ids",
                     ),
@@ -2314,7 +2347,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "dependency index registration selectors are invalid"
                 ) from exc
             before_dependencies = tuple(
-                FocusedMirrorDependencyIndex._dependency(
+                _dependency_reader(
                     dependency_index,
                     existing_input_id,
                 )
@@ -2323,7 +2356,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             dependency_mirror = dependency_index._mirror
         if input_id in before_ids:
             if expected_dependency is not None:
-                existing_dependency = FocusedMirrorDependencyIndex._dependency(
+                existing_dependency = _dependency_reader(
                     dependency_index,
                     input_id,
                 )
@@ -2337,6 +2370,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "dependency index registration authority is unavailable"
             )
         register_input(input_id, **selectors)
+        require_canonical_dependency_helpers()
         after_ids = dependency_index.input_ids
         if (
             type(after_ids) is not tuple
@@ -2365,7 +2399,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "dependency index registration changed mirror authority"
                 )
             current_dependencies = tuple(
-                FocusedMirrorDependencyIndex._dependency(
+                _dependency_reader(
                     dependency_index,
                     existing_input_id,
                 )
@@ -2376,7 +2410,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "dependency index registration changed unrelated dependency selectors"
                 )
         if expected_dependency is not None:
-            published_dependency = FocusedMirrorDependencyIndex._dependency(
+            published_dependency = _dependency_reader(
                 dependency_index,
                 input_id,
             )
@@ -2392,7 +2426,31 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         *,
         dependency_index: FocusedMirrorDependencyIndex | None = None,
         unregister_input: Callable[[str], object] | None = None,
+        _dependency_index_type: type[FocusedMirrorDependencyIndex] = (
+            FocusedMirrorDependencyIndex
+        ),
+        _input_id_validator: Callable[[str], str] = FocusedMirrorDependencyIndex._input_id,
+        _input_id_validator_code: object = FocusedMirrorDependencyIndex._input_id.__code__,
+        _dependency_reader: Callable[
+            [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
+        ] = FocusedMirrorDependencyIndex._dependency,
+        _dependency_reader_code: object = FocusedMirrorDependencyIndex._dependency.__code__,
     ) -> bool:
+        def require_canonical_dependency_helpers() -> None:
+            if (
+                FocusedMirrorDependencyIndex is not _dependency_index_type
+                or _dependency_index_type._input_id is not _input_id_validator
+                or getattr(_input_id_validator, "__code__", None)
+                is not _input_id_validator_code
+                or _dependency_index_type._dependency is not _dependency_reader
+                or getattr(_dependency_reader, "__code__", None)
+                is not _dependency_reader_code
+            ):
+                raise ContinuousSessionError(
+                    "canonical dependency lifecycle verification authority changed"
+                )
+
+        require_canonical_dependency_helpers()
         dependency_index = (
             self.dependency_index if dependency_index is None else dependency_index
         )
@@ -2429,9 +2487,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         before_dependencies: tuple[FocusedMirrorDependency, ...] | None = None
         dependency_mirror: object | None = None
-        if isinstance(dependency_index, FocusedMirrorDependencyIndex):
+        if isinstance(dependency_index, _dependency_index_type):
             before_dependencies = tuple(
-                FocusedMirrorDependencyIndex._dependency(
+                _dependency_reader(
                     dependency_index,
                     existing_input_id,
                 )
@@ -2439,6 +2497,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
             dependency_mirror = dependency_index._mirror
         removed = unregister_input(input_id)
+        require_canonical_dependency_helpers()
         if type(removed) is not bool:
             raise ContinuousSessionError(
                 "dependency index retirement receipt is invalid"
@@ -2484,7 +2543,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 if dependency.input_id != input_id
             )
             current_remaining_dependencies = tuple(
-                FocusedMirrorDependencyIndex._dependency(
+                _dependency_reader(
                     dependency_index,
                     remaining_input_id,
                 )

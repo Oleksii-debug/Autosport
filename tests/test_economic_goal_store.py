@@ -1488,6 +1488,18 @@ def test_store_public_authority_operations_reject_instance_shadowing(tmp_path) -
     assert callable(store.persist_automatic_successor)
 
 
+def test_store_operation_descriptors_do_not_expose_mutable_operation_slot() -> None:
+    descriptor = EconomicGoalStore.__dict__["load"]
+
+    assert not hasattr(descriptor, "_operation")
+    try:
+        object.__setattr__(descriptor, "_operation", lambda _self: None)
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("store authority descriptor exposed mutable operation storage")
+
+
 def test_store_public_authority_operations_ignore_direct_dict_shadowing(tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
 

@@ -402,10 +402,21 @@ class BetfairRequestIntent:
             order_projection,
             match_projection,
         ) = _market_book_components(params)
+        try:
+            canonical_budget = _marketbook_budget.MarketBookRequestBudget(
+                market_ids=market_ids,
+                price_data=price_data,
+                best_prices_depth=best_prices_depth,
+                operation="listMarketBook",
+            )
+        except _marketbook_budget.MarketBookBudgetError as exc:
+            raise BetfairRequestBudgetError(
+                "listMarketBook RPC origin has invalid provider budget semantics"
+            ) from exc
         if (
-            market_ids != self.market_ids
-            or price_data != self.price_data
-            or best_prices_depth != self.best_prices_depth
+            canonical_budget.market_ids != self.market_ids
+            or canonical_budget.price_data != self.price_data
+            or canonical_budget.best_prices_depth != self.best_prices_depth
             or order_projection != self.order_projection
             or match_projection != self.match_projection
         ):

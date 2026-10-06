@@ -1783,6 +1783,14 @@ class _ContinuousSessionState:
                     "stale continuous session instance cannot publish operational "
                     "failure after canonical checkpoint changed"
                 )
+            if self._state == SessionState.PAUSED.value:
+                raise SessionPausedError(
+                    "operational failure cannot publish while session is PAUSED"
+                )
+            if self._state == SessionState.STOPPED.value:
+                raise SessionStoppedError(
+                    "operational failure cannot publish while session is STOPPED"
+                )
             if self._last_error_code is not None and self._last_error_code != code:
                 raise ContinuousSessionError(
                     "operational failure conflicts with canonical session reason"

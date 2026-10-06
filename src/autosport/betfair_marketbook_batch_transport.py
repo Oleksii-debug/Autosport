@@ -356,6 +356,9 @@ def _read_market_book_batch(
     post_readonly: Callable[..., _transport._MarketBookRpcResponse],
     receipt_from_response: Callable[..., MarketBookBatchReceipt],
     result_factory: Callable[..., MarketBookBatchTransportResult],
+    post_dispatch_failure_type: type[MarketBookPostDispatchFailure],
+    protocol_error_type: type[BaseException],
+    completeness_error_type: type[MarketBookCompletenessError],
 ) -> MarketBookBatchTransportResult:
     batch = canonical_batch(plan, batch_id)
     params = params_for_batch(plan, batch)
@@ -383,7 +386,7 @@ def _read_market_book_batch(
     # rather than escaping the attempt-history coordinator unclassified.
     try:
         if response.request_budget.evidence_id != batch.budget_evidence_id:
-            raise MarketBookPostDispatchFailure(
+            raise post_dispatch_failure_type(
                 "transport request budget drifted from the canonical planned batch"
             )
 
@@ -392,7 +395,7 @@ def _read_market_book_batch(
             current_plan_id = plan.plan_id
             current_request_contract_id = plan.request_contract_id
         except Exception as exc:
-            raise MarketBookPostDispatchFailure(
+            raise post_dispatch_failure_type(
                 "MarketBook plan changed during provider dispatch"
             ) from exc
         if (
@@ -400,14 +403,14 @@ def _read_market_book_batch(
             or current_plan_id != plan_id
             or current_request_contract_id != request_contract_id
         ):
-            raise MarketBookPostDispatchFailure(
+            raise post_dispatch_failure_type(
                 "MarketBook plan changed during provider dispatch"
             )
 
         try:
             receipt = receipt_from_response(batch, list(response.rows))
-        except MarketBookCompletenessError as exc:
-            raise _transport.BetfairMarketBookProtocolError(
+        except completeness_error_type as exc:
+            raise protocol_error_type(
                 "MarketBook response cannot produce canonical structural receipt"
             ) from exc
 
@@ -423,12 +426,12 @@ def _read_market_book_batch(
             receipt=receipt,
         )
     except (
-        MarketBookPostDispatchFailure,
-        _transport.BetfairMarketBookProtocolError,
+        post_dispatch_failure_type,
+        protocol_error_type,
     ):
         raise
     except Exception as exc:
-        raise MarketBookPostDispatchFailure(
+        raise post_dispatch_failure_type(
             "provider read completed but canonical MarketBook result finalization failed"
         ) from exc
 
@@ -653,6 +656,12 @@ def _install_transport_result_authority() -> None:
     post_market_book_readonly = _transport._post_market_book_readonly
     receipt_from_response = MarketBookBatchReceipt.from_response
     result_factory = MarketBookBatchTransportResult
+    admission_error_type = MarketBookBatchAdmissionError
+    post_dispatch_failure_type = MarketBookPostDispatchFailure
+    protocol_error_type = _transport.BetfairMarketBookProtocolError
+    completeness_error_type = MarketBookCompletenessError
+    not_dispatched_rate = MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    not_dispatched_concurrency = MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY
     dispatch_instant = _dispatch_instant
     token = _token
     release_projection_lease = _release_projection_lease
@@ -697,13 +706,13 @@ def _install_transport_result_authority() -> None:
                 has_match_projection=contract["match_projection"] is not None,
             )
         except Exception as exc:
-            raise MarketBookBatchAdmissionError(
-                MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY,
+            raise admission_error_type(
+                not_dispatched_concurrency,
                 "MarketBook projection concurrency gate could not establish local admission",
             ) from exc
         if concurrency_decision.allowed is not True:
-            raise MarketBookBatchAdmissionError(
-                MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY,
+            raise admission_error_type(
+                not_dispatched_concurrency,
                 "MarketBook projection concurrency gate denied local admission",
             )
 
@@ -725,8 +734,8 @@ def _install_transport_result_authority() -> None:
                     complete=concurrency_complete,
                 )
                 raise
-            denial = MarketBookBatchAdmissionError(
-                MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
+            denial = admission_error_type(
+                not_dispatched_rate,
                 "MarketBook per-market rate gate could not establish local admission",
             )
             release_projection_lease_after_failure(
@@ -739,8 +748,8 @@ def _install_transport_result_authority() -> None:
             )
             raise denial from exc
         if rate_decision.allowed is not True:
-            denial = MarketBookBatchAdmissionError(
-                MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
+            denial = admission_error_type(
+                not_dispatched_rate,
                 "MarketBook per-market rate gate denied local admission",
             )
             release_projection_lease_after_failure(
@@ -764,6 +773,9 @@ def _install_transport_result_authority() -> None:
                 post_readonly=post_market_book_readonly,
                 receipt_from_response=receipt_from_response,
                 result_factory=result_factory,
+                post_dispatch_failure_type=post_dispatch_failure_type,
+                protocol_error_type=protocol_error_type,
+                completeness_error_type=completeness_error_type,
             )
         except BaseException as exc:
             # Parent process-control interruption must not strand a locally
@@ -789,7 +801,7 @@ def _install_transport_result_authority() -> None:
                 )
             except BaseException as exc:
                 if isinstance(exc, Exception):
-                    raise MarketBookPostDispatchFailure(
+                    raise post_dispatch_failure_type(
                         "provider read completed but projection lease cleanup failed"
                     ) from exc
                 # Process control may land after the provider response but
@@ -808,7 +820,7 @@ def _install_transport_result_authority() -> None:
         # authority. Dataclass __post_init__ and fingerprint methods are mutable
         # class attributes after import and therefore cannot be trusted here.
         if type(result) is not result_factory:
-            raise MarketBookPostDispatchFailure(
+            raise post_dispatch_failure_type(
                 "canonical MarketBook transport returned a noncanonical result type"
             )
         validate(result)

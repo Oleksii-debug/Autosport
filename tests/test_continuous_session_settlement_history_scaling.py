@@ -288,18 +288,19 @@ def test_conflicting_same_generation_error_authorities_fail_closed() -> None:
         payload["last_error_code"] = "MAIN_FAILURE"
         state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
-        reopened = continuous_session._ContinuousSessionState(
-            state_path,
-            session_id="session-history-scaling",
-            source_id="provider-a",
-            clock=lambda: _AT,
-        )
         try:
-            reopened.snapshot()
-        except continuous_session.ContinuousSessionError:
-            pass
+            continuous_session._ContinuousSessionState(
+                state_path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "error authorities conflict at bootstrap" in str(exc)
         else:
-            raise AssertionError("conflicting same-generation error authorities were accepted")
+            raise AssertionError(
+                "conflicting same-generation error authorities survived bootstrap"
+            )
 
 
 def test_oversized_failure_code_is_rejected_before_operational_write() -> None:

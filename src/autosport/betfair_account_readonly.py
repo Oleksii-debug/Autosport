@@ -1662,6 +1662,10 @@ def _install_execution_readback_authority() -> None:
         raise BetfairReadOnlyError(
             "execution readback network predicate is not immutable"
         )
+    # Reuse the exact same deep HTTPS/TLS witness for supervised provider writes.
+    # This is a predicate only: it grants no evidence authority by itself.
+    global _execution_provider_network_dispatch_is_current
+    _execution_provider_network_dispatch_is_current = origin_dispatch_current
     delattr(account_identity, binder_name)
 
     BetfairReadOnlyClient.read_execution_readback = authoritative_read

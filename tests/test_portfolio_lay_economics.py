@@ -135,6 +135,7 @@ class PortfolioLayEconomicsTests(unittest.TestCase):
             )
 
     def test_portfolio_capital_authority_fails_closed_on_calculator_code_drift(self) -> None:
+        ticket, _ = self._lay_ticket()
         calculator = portfolio_module.locked_capital_for_exchange_side
         original_code = calculator.__code__
         try:
@@ -142,7 +143,6 @@ class PortfolioLayEconomicsTests(unittest.TestCase):
                 raise AssertionError("mutated calculator executed")
 
             calculator.__code__ = hostile.__code__
-            ticket, _ = self._lay_ticket()
             with self.assertRaisesRegex(
                 ValueError,
                 "locked-capital exposure authority changed",

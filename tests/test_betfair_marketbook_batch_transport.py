@@ -2297,3 +2297,195 @@ def test_module_rebound_failure_cleanup_cannot_mask_rate_denial_or_strand_lease(
     assert concurrency_gate.snapshot().active == ()
     assert transport.calls == []
 
+def test_attempt_executor_seals_plan_roundtrip_methods(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    called_to = False
+    called_from = False
+
+    def forged_to_json(self):
+        nonlocal called_to
+        called_to = True
+        raise AssertionError("rebound plan to_json must not run")
+
+    def forged_from_json(cls, encoded):
+        nonlocal called_from
+        called_from = True
+        raise AssertionError("rebound plan from_json must not run")
+
+    monkeypatch.setattr(MarketBookReadPlan, "to_json", forged_to_json)
+    monkeypatch.setattr(
+        MarketBookReadPlan,
+        "from_json",
+        classmethod(forged_from_json),
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="sealed-plan-roundtrip",
+        required=True,
+        request_id="sealed-plan-roundtrip",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert called_to is False
+    assert called_from is False
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert len(transport.calls) == 1
+
+
+def test_attempt_executor_seals_history_roundtrip_methods(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    called_to = False
+    called_from = False
+
+    def forged_to_json(self):
+        nonlocal called_to
+        called_to = True
+        raise AssertionError("rebound history to_json must not run")
+
+    def forged_from_json(cls, plan_arg, encoded):
+        nonlocal called_from
+        called_from = True
+        raise AssertionError("rebound history from_json must not run")
+
+    monkeypatch.setattr(MarketBookAttemptHistory, "to_json", forged_to_json)
+    monkeypatch.setattr(
+        MarketBookAttemptHistory,
+        "from_json",
+        classmethod(forged_from_json),
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="sealed-history-roundtrip",
+        required=True,
+        request_id="sealed-history-roundtrip",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert called_to is False
+    assert called_from is False
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert len(transport.calls) == 1
+
+
+def test_attempt_executor_seals_attempt_token_validation(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    rebound_called = False
+
+    def forged_token(value, field):
+        nonlocal rebound_called
+        rebound_called = True
+        return "laundered-attempt"
+
+    monkeypatch.setattr(_batch_transport_module, "_token", forged_token)
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="attempt_id must be a non-empty canonical string",
+    ):
+        execute_market_book_batch_attempt(
+            client,
+            MarketBookAttemptHistory(plan, ()),
+            batch_id=batch.batch_id,
+            attempt_id=" bad-attempt ",
+            required=True,
+            request_id="sealed-attempt-token",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert rebound_called is False
+    assert transport.calls == []
+
+
+def test_attempt_executor_seals_pre_dispatch_batch_lookup(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    rebound_called = False
+
+    def forged_canonical_batch(*args, **kwargs):
+        nonlocal rebound_called
+        rebound_called = True
+        raise AssertionError("rebound executor batch lookup must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "_canonical_batch",
+        forged_canonical_batch,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="sealed-executor-batch",
+        required=True,
+        request_id="sealed-executor-batch",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert rebound_called is False
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert len(transport.calls) == 1
+
+
+def test_attempt_executor_rejects_invalid_batch_before_transport_after_rebound(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    client, transport = _client(_payload(("1.001",)))
+    rate_gate, concurrency_gate = _gates()
+    rebound_called = False
+
+    def forged_canonical_batch(plan_arg, batch_id):
+        nonlocal rebound_called
+        rebound_called = True
+        return plan_arg.batches[0]
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "_canonical_batch",
+        forged_canonical_batch,
+    )
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="batch_id must identify exactly one current canonical plan batch",
+    ):
+        execute_market_book_batch_attempt(
+            client,
+            MarketBookAttemptHistory(plan, ()),
+            batch_id="forged-batch-id",
+            attempt_id="sealed-invalid-batch",
+            required=True,
+            request_id="sealed-invalid-batch",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert rebound_called is False
+    assert transport.calls == []
+

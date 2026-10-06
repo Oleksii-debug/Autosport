@@ -7204,3 +7204,53 @@ def test_tick_invalidation_structure_recovery_does_not_trust_foreign_limit_equal
         assert buffer._max_dirty_keys == canonical_limit
         assert coordinator._state.snapshot().last_error_code == "RuntimeError"
 
+@pytest.mark.parametrize("mutation_mode", ("binding", "code"))
+def test_tick_rechecks_invalidation_validator_authority_after_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation_mode: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        coordinator.invalidation_buffer = (
+            continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        )
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+        forged_calls = 0
+
+        def forged_validator(_buffer):
+            nonlocal forged_calls
+            forged_calls += 1
+            raise AssertionError("forged invalidation validator executed")
+
+        def mutate() -> None:
+            if mutation_mode == "binding":
+                monkeypatch.setattr(
+                    continuous_session,
+                    "_validate_canonical_invalidation_buffer_state",
+                    forged_validator,
+                )
+            else:
+                monkeypatch.setattr(
+                    continuous_session._validate_canonical_invalidation_buffer_state,
+                    "__code__",
+                    forged_validator.__code__,
+                )
+
+        coordinator.collector = _Collector(callback=mutate)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical invalidation buffer dispatch authority changed",
+        ):
+            coordinator.tick()
+
+        assert forged_calls == 0
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+

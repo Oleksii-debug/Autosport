@@ -419,6 +419,23 @@ def test_decision_identity_ignores_rebound_snapshotter_alias(monkeypatch) -> Non
     assert evidence.decision_identity == expected
 
 
+def test_contract_hash_ignores_descriptor_laundering(monkeypatch) -> None:
+    goal = _goal(max_stake_fraction=Decimal("0.03"))
+    expected = economic_goal_provenance_module.contract_sha256(goal)
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return Decimal("0.02")
+
+    monkeypatch.setattr(
+        EconomicGoalContract,
+        "max_stake_fraction",
+        ForgedDescriptor(),
+    )
+
+    assert economic_goal_provenance_module.contract_sha256(goal) == expected
+
+
 def test_provenance_creation_and_identity_ignore_rebound_constructor(monkeypatch) -> None:
     goal = _goal()
     expected = provenance_for(goal)

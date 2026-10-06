@@ -2322,8 +2322,24 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "dependency index registration selectors are invalid"
             )
         expected_dependency: FocusedMirrorDependency | None = None
-        before_dependencies: tuple[FocusedMirrorDependency, ...] | None = None
+        before_dependencies: tuple[tuple[object, ...], ...] | None = None
         before_matching_keys: tuple[tuple[str, tuple[object, ...]], ...] | None = None
+
+        def dependency_fingerprint(
+            dependency: FocusedMirrorDependency,
+        ) -> tuple[object, ...]:
+            if type(dependency) is not _dependency_type:
+                raise ContinuousSessionError(
+                    "dependency index published non-canonical dependency state"
+                )
+            return (
+                dependency.input_id,
+                dependency.source_ids,
+                dependency.sports,
+                dependency.event_ids,
+                dependency.market_ids,
+                dependency.selection_ids,
+            )
         dependency_mirror: object | None = None
         dependency_storage: object | None = None
         matched_keys_storage: object | None = None
@@ -2358,9 +2374,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "dependency index registration selectors are invalid"
                 ) from exc
             before_dependencies = tuple(
-                _dependency_reader(
-                    dependency_index,
-                    existing_input_id,
+                dependency_fingerprint(
+                    _dependency_reader(
+                        dependency_index,
+                        existing_input_id,
+                    )
                 )
                 for existing_input_id in before_ids
             )
@@ -2381,7 +2399,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     dependency_index,
                     input_id,
                 )
-                if existing_dependency != expected_dependency:
+                if dependency_fingerprint(existing_dependency) != dependency_fingerprint(
+                    expected_dependency
+                ):
                     raise ContinuousSessionError(
                         "existing dependency selectors conflict with lifecycle registration"
                     )
@@ -2428,9 +2448,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "dependency index registration changed mirror authority"
                 )
             current_dependencies = tuple(
-                _dependency_reader(
-                    dependency_index,
-                    existing_input_id,
+                dependency_fingerprint(
+                    _dependency_reader(
+                        dependency_index,
+                        existing_input_id,
+                    )
                 )
                 for existing_input_id in before_ids
             )
@@ -2454,7 +2476,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 dependency_index,
                 input_id,
             )
-            if published_dependency != expected_dependency:
+            if dependency_fingerprint(published_dependency) != dependency_fingerprint(
+                expected_dependency
+            ):
                 raise ContinuousSessionError(
                     "dependency index registration selectors do not match lifecycle request"
                 )
@@ -2469,6 +2493,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _dependency_index_type: type[FocusedMirrorDependencyIndex] = (
             FocusedMirrorDependencyIndex
         ),
+        _dependency_type: type[FocusedMirrorDependency] = FocusedMirrorDependency,
         _input_id_validator: Callable[[str], str] = FocusedMirrorDependencyIndex._input_id,
         _input_id_validator_code: object = FocusedMirrorDependencyIndex._input_id.__code__,
         _dependency_reader: Callable[
@@ -2483,6 +2508,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         def require_canonical_dependency_helpers() -> None:
             if (
                 FocusedMirrorDependencyIndex is not _dependency_index_type
+                or FocusedMirrorDependency is not _dependency_type
                 or _dependency_index_type._input_id is not _input_id_validator
                 or getattr(_input_id_validator, "__code__", None)
                 is not _input_id_validator_code
@@ -2532,17 +2558,38 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index input identity state is invalid"
             )
-        before_dependencies: tuple[FocusedMirrorDependency, ...] | None = None
+        before_dependencies: tuple[tuple[str, tuple[object, ...]], ...] | None = None
         before_matching_keys: tuple[tuple[str, tuple[object, ...]], ...] | None = None
+
+        def dependency_fingerprint(
+            dependency: FocusedMirrorDependency,
+        ) -> tuple[object, ...]:
+            if type(dependency) is not _dependency_type:
+                raise ContinuousSessionError(
+                    "dependency index published non-canonical dependency state"
+                )
+            return (
+                dependency.input_id,
+                dependency.source_ids,
+                dependency.sports,
+                dependency.event_ids,
+                dependency.market_ids,
+                dependency.selection_ids,
+            )
         dependency_mirror: object | None = None
         dependency_storage: object | None = None
         matched_keys_storage: object | None = None
         dependency_lock: object | None = None
         if isinstance(dependency_index, _dependency_index_type):
             before_dependencies = tuple(
-                _dependency_reader(
-                    dependency_index,
+                (
                     existing_input_id,
+                    dependency_fingerprint(
+                        _dependency_reader(
+                            dependency_index,
+                            existing_input_id,
+                        )
+                    ),
                 )
                 for existing_input_id in before_ids
             )
@@ -2607,14 +2654,19 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "dependency index retirement changed mirror authority"
                 )
             expected_remaining_dependencies = tuple(
-                dependency
-                for dependency in before_dependencies
-                if dependency.input_id != input_id
+                item
+                for item in before_dependencies
+                if item[0] != input_id
             )
             current_remaining_dependencies = tuple(
-                _dependency_reader(
-                    dependency_index,
+                (
                     remaining_input_id,
+                    dependency_fingerprint(
+                        _dependency_reader(
+                            dependency_index,
+                            remaining_input_id,
+                        )
+                    ),
                 )
                 for remaining_input_id in after_ids
             )
@@ -2741,7 +2793,23 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             "canonical dependency routing model authority changed"
         )
 
-        dependency_authority: tuple[FocusedMirrorDependency, ...] | None = None
+        def dependency_fingerprint(
+            dependency: FocusedMirrorDependency,
+        ) -> tuple[object, ...]:
+            if type(dependency) is not _dependency_type:
+                raise ContinuousSessionError(
+                    "dependency index published non-canonical dependency state"
+                )
+            return (
+                dependency.input_id,
+                dependency.source_ids,
+                dependency.sports,
+                dependency.event_ids,
+                dependency.market_ids,
+                dependency.selection_ids,
+            )
+
+        dependency_authority: tuple[tuple[object, ...], ...] | None = None
         dependency_mirror: object | None = None
         dependency_storage: object | None = None
         matched_keys_storage: object | None = None
@@ -2756,7 +2824,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "canonical dependency routing reader authority changed"
                 )
             dependency_authority = tuple(
-                _dependency_reader(dependency_index, input_id)
+                dependency_fingerprint(
+                    _dependency_reader(dependency_index, input_id)
+                )
                 for input_id in indexed_input_ids
             )
             dependency_mirror = dependency_index._mirror
@@ -2776,7 +2846,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             ):
                 raise ContinuousSessionError(message)
             current = tuple(
-                _dependency_reader(dependency_index, input_id)
+                dependency_fingerprint(
+                    _dependency_reader(dependency_index, input_id)
+                )
                 for input_id in indexed_input_ids
             )
             if current != dependency_authority:
@@ -3423,6 +3495,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _dependency_index_type: type[FocusedMirrorDependencyIndex] = (
             FocusedMirrorDependencyIndex
         ),
+        _dependency_type: type[FocusedMirrorDependency] = FocusedMirrorDependency,
         _dependency_reader: Callable[
             [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
         ] = FocusedMirrorDependencyIndex._dependency,
@@ -3684,6 +3757,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 descriptor = _dependency_index_type.__dict__.get("input_ids")
                 if (
                     FocusedMirrorDependencyIndex is not _dependency_index_type
+                    or FocusedMirrorDependency is not _dependency_type
                     or getattr(dependency_register, "__self__", None)
                     is not dependency_index
                     or getattr(dependency_register, "__func__", None)
@@ -3730,6 +3804,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     )
 
         require_lifecycle_dispatch_authority()
+
+        def dependency_fingerprint(
+            dependency: FocusedMirrorDependency,
+        ) -> tuple[object, ...]:
+            if type(dependency) is not _dependency_type:
+                raise ContinuousSessionError(
+                    "dependency index published non-canonical dependency state"
+                )
+            return (
+                dependency.input_id,
+                dependency.source_ids,
+                dependency.sports,
+                dependency.event_ids,
+                dependency.market_ids,
+                dependency.selection_ids,
+            )
 
         def require_economic_context() -> None:
             if (
@@ -3978,7 +4068,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     )
                 expected_lifecycle_index_ids = list(lifecycle_index_before)
                 lifecycle_expected_dependencies: dict[
-                    str, FocusedMirrorDependency
+                    str, tuple[object, ...]
                 ] | None = None
                 lifecycle_expected_matching_keys: dict[
                     str, tuple[object, ...]
@@ -3989,7 +4079,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 lifecycle_dependency_lock: object | None = None
                 if isinstance(dependency_index, _dependency_index_type):
                     lifecycle_expected_dependencies = {
-                        input_id: _dependency_reader(dependency_index, input_id)
+                        input_id: dependency_fingerprint(
+                            _dependency_reader(dependency_index, input_id)
+                        )
                         for input_id in lifecycle_index_before
                     }
                     lifecycle_expected_matching_keys = {
@@ -4027,7 +4119,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         expected_lifecycle_index_ids.append(input_id)
                         if lifecycle_expected_dependencies is not None:
                             lifecycle_expected_dependencies[input_id] = (
-                                _dependency_reader(dependency_index, input_id)
+                                dependency_fingerprint(
+                                    _dependency_reader(dependency_index, input_id)
+                                )
                             )
                             lifecycle_expected_matching_keys[input_id] = (
                                 _matching_keys_reader(
@@ -4122,7 +4216,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                             "coordinator callbacks"
                         )
                     current_dependencies = tuple(
-                        _dependency_reader(dependency_index, input_id)
+                        dependency_fingerprint(
+                            _dependency_reader(dependency_index, input_id)
+                        )
                         for input_id in indexed_input_ids
                     )
                     expected_dependencies = tuple(

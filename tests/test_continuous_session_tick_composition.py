@@ -748,6 +748,55 @@ def test_tick_rejects_invalid_affected_input_ids(routed: object) -> None:
             coordinator.tick()
 
 
+def test_tick_rejects_incomplete_full_refresh_routing() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=True,
+                    has_more=False,
+                )
+
+        class Index:
+            input_ids = ("input-a", "input-b")
+
+            def affected_inputs(self, _batch):
+                return ("input-a",)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.invalidation_buffer = Buffer()
+        coordinator.dependency_index = Index()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="full refresh routing is incomplete or reordered",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
 def test_tick_rejects_unregistered_affected_input_id() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

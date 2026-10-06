@@ -2465,7 +2465,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "dependency index returned invalid affected inputs"
                 )
-            if routed:
+            if routed or batch.full_refresh_required:
                 indexed_input_ids = dependency_index.input_ids
                 if (
                     type(indexed_input_ids) is not tuple
@@ -2483,6 +2483,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 if any(input_id not in indexed_input_ids for input_id in routed):
                     raise ContinuousSessionError(
                         "dependency index routed an unregistered input"
+                    )
+                if (
+                    batch.full_refresh_required
+                    and routed != indexed_input_ids
+                ):
+                    raise ContinuousSessionError(
+                        "dependency index full refresh routing is incomplete or reordered"
                     )
             affected.extend(routed)
             full_refresh_required = full_refresh_required or batch.full_refresh_required

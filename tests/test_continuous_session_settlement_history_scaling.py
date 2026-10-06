@@ -3783,6 +3783,49 @@ def test_settlement_resolution_collection_rejects_callback_discovery_mutation(
         )
 
 
+def test_settlement_resolution_collection_freezes_resolver_across_batch() -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+
+    class RebindingAuthority:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def _attacker(self, _record: object, *, as_of: str):
+            raise AssertionError(
+                "prepare-time rebound settlement resolver executed"
+            )
+
+        def resolve(
+            self,
+            _record: object,
+            *,
+            as_of: str,
+        ) -> continuous_session.SettlementResolution:
+            assert as_of == _AT
+            self.calls += 1
+            if self.calls == 1:
+                self.resolve = self._attacker  # type: ignore[method-assign]
+            return _resolution(
+                evidence_id=f"evidence-{self.calls}",
+                digest_char="e" if self.calls == 1 else "f",
+            )
+
+    authority = RebindingAuthority()
+    coordinator = object.__new__(
+        continuous_session.ContinuousSessionCoordinator
+    )
+    coordinator.lifecycle = _ResolutionLifecycle((record, record))
+    coordinator.outcome_authority = authority
+
+    collected = coordinator._settlement_resolutions(as_of=_AT)
+
+    assert authority.calls == 2
+    assert tuple(item.evidence_id for item in collected) == (
+        "evidence-1",
+        "evidence-2",
+    )
+
+
 def test_settlement_resolution_detaches_authority_mapping_before_validation(
     monkeypatch,
 ) -> None:

@@ -1001,6 +1001,48 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 store.close()
 
 
+    def test_status_snapshots_invalidation_backlog_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                invalidations = coordinator.invalidation_buffer
+                invalidations._dirty[("provider-a", "quote-1")] = None
+
+                class InterleavingLock:
+                    def __init__(self) -> None:
+                        self.exits = 0
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, exc_type, exc, traceback) -> None:
+                        self.exits += 1
+                        if self.exits == 1:
+                            invalidations._dirty.clear()
+                            invalidations._full_refresh_required = True
+
+                invalidations._lock = InterleavingLock()
+                status = coordinator.status()
+
+                self.assertEqual(status.invalidation_pending_count, 1)
+                self.assertFalse(status.invalidation_full_refresh_required)
+                self.assertEqual(invalidations._dirty, {})
+                self.assertTrue(invalidations._full_refresh_required)
+            finally:
+                store.close()
+
+
     def test_status_rejects_invalidation_pending_descriptor_rebinding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

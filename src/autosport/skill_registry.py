@@ -9,6 +9,8 @@ import hashlib
 import json
 import math
 import multiprocessing
+import os
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,6 +26,8 @@ SCHEMA_VERSION: Final = 1
 AGENT_LOOP_READ_ONLY_AUTHORITY_PROFILE: Final = "agent-loop-read-only-v1"
 _HEX: Final = frozenset("0123456789abcdef")
 _HANDLER_TIMEOUT_REAP_GRACE_SECONDS: Final = 0.25
+_HANDLER_RESULT_SPOOL_MAX_BYTES: Final = 64 * 1024 * 1024
+_CANONICAL_SPAWN_CONTEXT_TYPE: Final = type(multiprocessing.get_context("spawn"))
 NON_DELEGABLE_MUTATIONS: Final = frozenset({
     "ECONOMIC_GOAL_EXPAND", "RISK_LIMIT_EXPAND", "REAL_MONEY_EXECUTION_ENABLE",
     "PROVIDER_WRITE", "PROMOTION_DECISION", "DECISION_TIME_TRUTH_REWRITE",
@@ -353,6 +357,269 @@ def _stop_process_bounded(
     return "STOP_FAILED"
 
 
+
+def _skill_handler_spooled_process(
+    handler: SkillHandler,
+    payload: dict[str, Any],
+    result_path: str,
+    _canonicalize=_canon,
+    _result_type=SkillExecutionResult,
+    _isinstance=isinstance,
+    _path_type=Path,
+) -> None:
+    """Run one handler and publish only canonical JSON from the killable child.
+
+    The parent never blocks while receiving a framed multiprocessing message.
+    Serialization and result-file publication remain inside this already-bounded
+    process, so a partial/stalled write is covered by the same timeout authority
+    as handler execution itself.
+    """
+
+    try:
+        result = handler(payload)
+        if not _isinstance(result, _result_type):
+            record: dict[str, Any] = {"kind": "INVALID_RESULT"}
+        else:
+            record = {
+                "kind": "OK",
+                "result": {
+                    "output": result.output,
+                    "emitted_evidence": [list(item) for item in result.emitted_evidence],
+                    "used_tools": list(result.used_tools),
+                    "applied_mutations": list(result.applied_mutations),
+                    "consumed_compute_units": result.consumed_compute_units,
+                    "consumed_data_units": result.consumed_data_units,
+                    "consumed_ai_units": result.consumed_ai_units,
+                    "research_question_candidate": result.research_question_candidate,
+                },
+            }
+        encoded = _canonicalize(record)
+    except BaseException as exc:
+        try:
+            encoded = _canonicalize(
+                {"kind": "ERROR", "error_type": exc.__class__.__name__}
+            )
+        except BaseException:
+            return
+
+    try:
+        _path_type(result_path).write_text(encoded, encoding="utf-8")
+    except BaseException:
+        # The parent observes an empty/partial/unreadable spool as result
+        # infrastructure failure after the child has terminated or been reaped.
+        return
+
+
+def _remove_handler_result_spool(
+    path: Path, *, suppress_base_exceptions: bool = False
+) -> bool:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        return False
+    except BaseException:
+        if not suppress_base_exceptions:
+            raise
+        return False
+    return True
+
+
+def _decode_handler_result_spool(
+    path: Path,
+) -> tuple[SkillExecutionResult | None, str | None]:
+    try:
+        size = path.stat().st_size
+    except Exception:
+        return None, "HANDLER_RESULT_UNAVAILABLE"
+    if size == 0:
+        return None, "HANDLER_PROCESS_EXITED"
+    if size > _HANDLER_RESULT_SPOOL_MAX_BYTES:
+        return None, "HANDLER_RESULT_TOO_LARGE"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, "HANDLER_RESULT_UNAVAILABLE"
+    if type(record) is not dict:
+        return None, "HANDLER_PROTOCOL_ERROR"
+
+    kind = record.get("kind")
+    if kind == "ERROR":
+        if set(record) != {"kind", "error_type"}:
+            return None, "HANDLER_PROTOCOL_ERROR"
+        try:
+            error_type = _text(record["error_type"], "handler error type")
+        except SkillRegistryError:
+            return None, "HANDLER_PROTOCOL_ERROR"
+        return None, "HANDLER_ERROR_" + error_type.upper()
+    if kind == "INVALID_RESULT":
+        if set(record) != {"kind"}:
+            return None, "HANDLER_PROTOCOL_ERROR"
+        return None, "HANDLER_ERROR_SKILLREGISTRYERROR"
+    if kind != "OK" or set(record) != {"kind", "result"}:
+        return None, "HANDLER_PROTOCOL_ERROR"
+
+    raw = record["result"]
+    expected_fields = {
+        "output",
+        "emitted_evidence",
+        "used_tools",
+        "applied_mutations",
+        "consumed_compute_units",
+        "consumed_data_units",
+        "consumed_ai_units",
+        "research_question_candidate",
+    }
+    if type(raw) is not dict or set(raw) != expected_fields:
+        return None, "HANDLER_PROTOCOL_ERROR"
+    try:
+        result = SkillExecutionResult(
+            output=raw["output"],
+            emitted_evidence=tuple(
+                tuple(item) for item in raw["emitted_evidence"]
+            ),
+            used_tools=tuple(raw["used_tools"]),
+            applied_mutations=tuple(raw["applied_mutations"]),
+            consumed_compute_units=raw["consumed_compute_units"],
+            consumed_data_units=raw["consumed_data_units"],
+            consumed_ai_units=raw["consumed_ai_units"],
+            research_question_candidate=raw["research_question_candidate"],
+        )
+    except Exception as exc:
+        return None, "HANDLER_ERROR_" + exc.__class__.__name__.upper()
+    return result, None
+
+
+def _execute_handler_spooled_bounded(
+    context: Any,
+    handler: SkillHandler,
+    payload: dict[str, Any],
+    timeout_seconds: int,
+) -> tuple[SkillExecutionResult | None, str | None]:
+    """Execute the real spawn path without any parent-side blocking receive."""
+
+    descriptor: int | None = None
+    spool_path: Path | None = None
+    try:
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix="autosport-skill-result-",
+            suffix=".json",
+        )
+        spool_path = Path(raw_path)
+        os.close(descriptor)
+        descriptor = None
+    except Exception as exc:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except BaseException:
+                pass
+        if spool_path is not None:
+            _remove_handler_result_spool(
+                spool_path, suppress_base_exceptions=True
+            )
+        return None, "HANDLER_RESULT_SPOOL_CREATE_" + exc.__class__.__name__.upper()
+    except BaseException:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except BaseException:
+                pass
+        if spool_path is not None:
+            _remove_handler_result_spool(
+                spool_path, suppress_base_exceptions=True
+            )
+        raise
+
+    assert spool_path is not None
+
+    def finish(
+        result: SkillExecutionResult | None,
+        error: str | None,
+    ) -> tuple[SkillExecutionResult | None, str | None]:
+        if not _remove_handler_result_spool(spool_path):
+            return None, "HANDLER_RESULT_SPOOL_CLEANUP_FAILED"
+        return result, error
+
+    try:
+        process = context.Process(
+            target=_skill_handler_spooled_process,
+            args=(handler, payload, str(spool_path)),
+            daemon=True,
+        )
+    except Exception as exc:
+        return finish(
+            None,
+            "HANDLER_PROCESS_CONSTRUCTION_" + exc.__class__.__name__.upper(),
+        )
+    except BaseException:
+        _remove_handler_result_spool(
+            spool_path, suppress_base_exceptions=True
+        )
+        raise
+
+    try:
+        process.start()
+    except Exception as exc:
+        stop_error = _stop_process_bounded(process)
+        if stop_error == "HANDLE_CLOSE_FAILED":
+            return finish(None, "HANDLER_START_HANDLE_CLOSE_FAILED")
+        if stop_error == "STOP_FAILED":
+            return finish(None, "HANDLER_START_STOP_FAILED")
+        return finish(None, "HANDLER_START_" + exc.__class__.__name__.upper())
+    except BaseException:
+        _stop_process_bounded(process, suppress_base_exceptions=True)
+        _remove_handler_result_spool(
+            spool_path, suppress_base_exceptions=True
+        )
+        raise
+
+    try:
+        process.join(timeout_seconds)
+    except Exception:
+        stop_error = _stop_process_bounded(process)
+        if stop_error == "HANDLE_CLOSE_FAILED":
+            return finish(None, "HANDLER_PROCESS_HANDLE_CLOSE_FAILED")
+        if stop_error == "STOP_FAILED":
+            return finish(None, "HANDLER_PROCESS_STOP_FAILED")
+        return finish(None, "HANDLER_PROCESS_JOIN_FAILED")
+    except BaseException:
+        _stop_process_bounded(process, suppress_base_exceptions=True)
+        _remove_handler_result_spool(
+            spool_path, suppress_base_exceptions=True
+        )
+        raise
+
+    try:
+        alive = process.is_alive()
+    except Exception:
+        stop_error = _stop_process_bounded(process)
+        if stop_error == "HANDLE_CLOSE_FAILED":
+            return finish(None, "HANDLER_PROCESS_HANDLE_CLOSE_FAILED")
+        if stop_error == "STOP_FAILED":
+            return finish(None, "HANDLER_PROCESS_STOP_FAILED")
+        return finish(None, "HANDLER_PROCESS_STATE_UNAVAILABLE")
+    except BaseException:
+        _stop_process_bounded(process, suppress_base_exceptions=True)
+        _remove_handler_result_spool(
+            spool_path, suppress_base_exceptions=True
+        )
+        raise
+
+    if alive:
+        stop_error = _stop_process_bounded(process)
+        if stop_error == "HANDLE_CLOSE_FAILED":
+            return finish(None, "HANDLER_TIMEOUT_HANDLE_CLOSE_FAILED")
+        if stop_error == "STOP_FAILED":
+            return finish(None, "HANDLER_TIMEOUT_STOP_FAILED")
+        return finish(None, "HANDLER_TIMEOUT")
+
+    if not _close_process_handle(process):
+        return finish(None, "HANDLER_PROCESS_HANDLE_CLOSE_FAILED")
+
+    result, error = _decode_handler_result_spool(spool_path)
+    return finish(result, error)
+
+
 class SkillRegistry:
     """Durable exact-version registry with fail-closed invocation semantics."""
     def __init__(self, path: str | Path) -> None:
@@ -558,6 +825,15 @@ class SkillRegistry:
     @staticmethod
     def _execute_handler_bounded(h:SkillHandler,payload:dict[str,Any],timeout_seconds:int)->tuple[SkillExecutionResult|None,str|None]:
         context=multiprocessing.get_context("spawn")
+        if type(context) is _CANONICAL_SPAWN_CONTEXT_TYPE:
+            return _execute_handler_spooled_bounded(
+                context,
+                h,
+                payload,
+                timeout_seconds,
+            )
+        # Compatibility-only path for connection/process test doubles. The real
+        # product spawn context above never executes a blocking parent recv().
         receiver,sender=context.Pipe(duplex=False)
         try:
             process=context.Process(target=_skill_handler_process,args=(h,payload,sender),daemon=True)

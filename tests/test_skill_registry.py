@@ -39,6 +39,21 @@ def _large_result_handler(_payload):
     return SkillExecutionResult(output={"payload": "x" * (1024 * 1024)})
 
 
+def _partial_spool_stall_handler(_payload):
+    def stalled_write_text(self, data, *args, **kwargs):
+        with self.open("w", encoding="utf-8") as handle:
+            handle.write(data[:1])
+            handle.flush()
+        time.sleep(60)
+        return len(data)
+
+    # Child-local mutation only. The real bounded transport captures the Path
+    # class but serialization/file publication still happens inside the killable
+    # child, so a partial write must remain covered by the handler deadline.
+    skill_registry_module.Path.write_text = stalled_write_text
+    return SkillExecutionResult(output={"payload": "never-authoritative"})
+
+
 def _undeclared_mutation_handler(_payload):
     return SkillExecutionResult(output={}, applied_mutations=("LOCAL_WRITE",))
 
@@ -510,7 +525,7 @@ def test_handler_result_pipe_is_drained_before_process_exit_wait(monkeypatch):
     assert "join" not in events[: events.index("recv")]
 
 
-def test_handler_large_result_crosses_pipe_without_false_timeout():
+def test_handler_large_result_crosses_transport_without_false_timeout():
     result, error = SkillRegistry._execute_handler_bounded(
         _large_result_handler,
         {},
@@ -520,6 +535,20 @@ def test_handler_large_result_crosses_pipe_without_false_timeout():
     assert error is None
     assert result is not None
     assert len(result.output["payload"]) == 1024 * 1024
+
+
+def test_handler_partial_result_spool_write_remains_timeout_bounded():
+    started = time.monotonic()
+    result, error = SkillRegistry._execute_handler_bounded(
+        _partial_spool_stall_handler,
+        {},
+        1,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result is None
+    assert error == "HANDLER_TIMEOUT"
+    assert elapsed < 3
 
 
 def test_handler_timeout_cleanup_hard_kills_before_bounded_reap(monkeypatch):

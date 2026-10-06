@@ -1403,6 +1403,34 @@ def test_store_snapshot_helper_ignores_rebound_contract_descriptors(monkeypatch,
     assert snapshot.max_stake_fraction == Decimal("0.03")
 
 
+def test_store_successor_rejects_descriptor_laundered_expansion(
+    monkeypatch, tmp_path
+) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.03"),
+    )
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(previous)
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return Decimal("0.02")
+
+    monkeypatch.setattr(
+        EconomicGoalContract,
+        "max_stake_fraction",
+        ForgedDescriptor(),
+    )
+
+    with pytest.raises(EconomicGoalContractError, match="must not increase"):
+        store.persist_automatic_successor(candidate)
+
+    assert EconomicGoalStore(tmp_path).load() == previous
+
+
 def test_payload_uses_captured_contract_field_values_after_descriptor_rebinding(
     monkeypatch,
 ) -> None:

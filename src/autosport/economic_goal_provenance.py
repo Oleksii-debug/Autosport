@@ -243,23 +243,76 @@ def _verify_provenance_bound(
         raise _provenance_error("provenance contract_sha256 mismatch")
 
 
+def _make_provenance_authority(operation, label: str):
+    operation_code = operation.__code__
+    operation_defaults = operation.__defaults__
+    nested_callables = tuple(
+        value
+        for value in (operation_defaults or ())
+        if callable(value)
+    )
+    nested_authority = tuple(
+        (
+            callable_object,
+            getattr(callable_object, "__code__", None),
+            getattr(callable_object, "__defaults__", None),
+            getattr(callable_object, "__kwdefaults__", None),
+        )
+        for callable_object in nested_callables
+    )
+
+    def require_authority() -> None:
+        if operation.__code__ is not operation_code:
+            raise EconomicGoalProvenanceError(
+                f"{label} authority changed"
+            )
+        if operation.__defaults__ is not operation_defaults:
+            raise EconomicGoalProvenanceError(
+                f"{label} defaults authority changed"
+            )
+        for callable_object, expected_code, expected_defaults, expected_kwdefaults in nested_authority:
+            if getattr(callable_object, "__code__", None) is not expected_code:
+                raise EconomicGoalProvenanceError(
+                    f"{label} nested authority changed"
+                )
+            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                raise EconomicGoalProvenanceError(
+                    f"{label} nested defaults authority changed"
+                )
+            if getattr(callable_object, "__kwdefaults__", None) is not expected_kwdefaults:
+                raise EconomicGoalProvenanceError(
+                    f"{label} nested keyword defaults authority changed"
+                )
+
+    def bound(*args, **kwargs):
+        require_authority()
+        result = operation(*args, **kwargs)
+        require_authority()
+        return result
+
+    return bound
+
+
 # Public authority-bearing operations intentionally expose no injectable helper
 # parameters.  The closures capture the already-bound canonical implementations,
-# so rebinding module aliases cannot redirect dispatch and callers cannot supply
-# forged validator/hash/type dependencies through hidden keyword arguments.
+# so rebinding module aliases or callable defaults cannot redirect dispatch.
 def _bind_contract_operation(operation):
+    bound_operation = _make_provenance_authority(operation, "economic-goal provenance operation")
+
     def bound(contract: EconomicGoalContract):
-        return operation(contract)
+        return bound_operation(contract)
 
     return bound
 
 
 def _bind_provenance_verifier(operation):
+    bound_operation = _make_provenance_authority(operation, "economic-goal provenance verification")
+
     def bound(
         contract: EconomicGoalContract,
         provenance: EconomicGoalProvenance,
     ) -> None:
-        operation(contract, provenance)
+        bound_operation(contract, provenance)
 
     return bound
 
@@ -267,3 +320,9 @@ def _bind_provenance_verifier(operation):
 contract_sha256 = _bind_contract_operation(_contract_sha256_bound)
 provenance_for = _bind_contract_operation(_provenance_for_bound)
 verify_provenance = _bind_provenance_verifier(_verify_provenance_bound)
+
+_decision_identity_authority = _make_provenance_authority(
+    _decision_identity_bound,
+    "economic-goal provenance decision identity",
+)
+EconomicGoalProvenance.decision_identity = property(_decision_identity_authority)

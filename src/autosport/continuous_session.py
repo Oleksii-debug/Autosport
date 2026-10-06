@@ -2923,6 +2923,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             ):
                 raise ContinuousSessionError(message)
 
+        def read_dependency_input_ids() -> object:
+            require_dependency_identity_dispatch(
+                "canonical dependency routing identity authority changed"
+            )
+            if type(dependency_index) is _dependency_index_type:
+                return _input_ids_getter(dependency_index)
+            return dependency_index.input_ids
+
         require_dependency_identity_dispatch(
             "canonical dependency routing identity authority changed"
         )
@@ -2998,11 +3006,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "continuous-session invalidation bounds are invalid"
             )
-        indexed_input_ids = (
-            _input_ids_getter(dependency_index)
-            if type(dependency_index) is _dependency_index_type
-            else dependency_index.input_ids
-        )
+        indexed_input_ids = read_dependency_input_ids()
         if (
             type(indexed_input_ids) is not tuple
             or any(
@@ -3231,7 +3235,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         last_has_more = False
 
         for _ in range(max_batches):
-            if dependency_index.input_ids != indexed_input_ids:
+            if read_dependency_input_ids() != indexed_input_ids:
                 raise ContinuousSessionError(
                     "dependency index input identity state changed between invalidation batches"
                 )
@@ -3239,7 +3243,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             matching_keys_before_drain = matching_keys_authority()
             batch = drain_invalidation(max_items=max_items)
             with consumed_batch_recovery():
-                if dependency_index.input_ids != indexed_input_ids:
+                if read_dependency_input_ids() != indexed_input_ids:
                     restore_dependency_authority()
                     restore_matching_key_state(matching_state_before_drain)
                     raise ContinuousSessionError(
@@ -3295,7 +3299,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     raise ContinuousSessionError(
                         "dependency index routing mutated invalidation batch truth"
                     )
-                if dependency_index.input_ids != indexed_input_ids:
+                if read_dependency_input_ids() != indexed_input_ids:
                     raise ContinuousSessionError(
                         "dependency index routing mutated input identity state"
                     )
@@ -3361,7 +3365,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "invalidation buffer backlog state is invalid"
             )
-        if dependency_index.input_ids != indexed_input_ids:
+        if read_dependency_input_ids() != indexed_input_ids:
             restore_dependency_authority()
             restore_matching_key_state(matching_state_before_backlog)
             raise ContinuousSessionError(

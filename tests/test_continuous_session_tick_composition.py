@@ -5273,6 +5273,67 @@ def test_direct_invalidation_helper_rejects_canonical_buffer_drain_rebinding(
             max_items=250,
         )
 
+
+def test_direct_invalidation_helper_rejects_canonical_buffer_subclass() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+
+    class ForgedInvalidationBuffer(
+        continuous_session.BoundedMirrorInvalidationBuffer
+    ):
+        def drain(self, *, max_items=250):
+            return continuous_session.MirrorInvalidationBatch(
+                changed_keys=(),
+                full_refresh_required=False,
+                has_more=False,
+            )
+
+    buffer = ForgedInvalidationBuffer(mirror)
+    index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical invalidation buffer subtype is not supported",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=index.affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+
+
+def test_tick_rejects_canonical_invalidation_buffer_subclass_before_cycle() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+
+        class ForgedInvalidationBuffer(
+            continuous_session.BoundedMirrorInvalidationBuffer
+        ):
+            def drain(self, *, max_items=250):
+                raise AssertionError("subclass invalidation drain must not run")
+
+        buffer = ForgedInvalidationBuffer(mirror)
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+        coordinator.collector = _Collector(
+            callback=lambda: (_ for _ in ()).throw(
+                AssertionError("collector ran before invalidation subtype rejection")
+            )
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical invalidation buffer subtype is not supported",
+        ):
+            coordinator.tick()
+
 def test_collector_invalidation_buffer_rebind_is_restored_before_next_phase() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

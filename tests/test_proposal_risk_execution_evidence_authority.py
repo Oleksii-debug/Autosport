@@ -2721,6 +2721,100 @@ class ProductProposalRiskTerminalPayoffEvaluationTests(unittest.TestCase):
         finally:
             method.__code__ = original_code
 
+    def test_portfolio_ticket_fingerprint_rebinding_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = (
+            terminal_payoff_authority
+            ._portfolio_module
+            ._analysis_ticket_fingerprint
+        )
+        try:
+            terminal_payoff_authority._portfolio_module._analysis_ticket_fingerprint = (
+                lambda _ticket: ("forged",)
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            (
+                terminal_payoff_authority
+                ._portfolio_module
+                ._analysis_ticket_fingerprint
+            ) = original
+
+    def test_portfolio_ticket_fingerprint_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        helper = (
+            terminal_payoff_authority
+            ._portfolio_module
+            ._analysis_ticket_fingerprint
+        )
+        original_code = helper.__code__
+
+        def forged_fingerprint(_ticket):
+            return ("forged",)
+
+        try:
+            helper.__code__ = forged_fingerprint.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            helper.__code__ = original_code
+
+    def test_portfolio_locked_capital_rebinding_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = (
+            terminal_payoff_authority
+            ._portfolio_module
+            ._CANONICAL_LOCKED_CAPITAL_FOR_TICKET
+        )
+        try:
+            terminal_payoff_authority._portfolio_module._CANONICAL_LOCKED_CAPITAL_FOR_TICKET = (
+                lambda _ticket: Decimal("0")
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            (
+                terminal_payoff_authority
+                ._portfolio_module
+                ._CANONICAL_LOCKED_CAPITAL_FOR_TICKET
+            ) = original
+
+    def test_portfolio_locked_capital_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        helper = (
+            terminal_payoff_authority
+            ._portfolio_module
+            ._CANONICAL_LOCKED_CAPITAL_FOR_TICKET
+        )
+        original_code = helper.__code__
+
+        def forged_capital(_ticket):
+            return Decimal("0")
+
+        try:
+            helper.__code__ = forged_capital.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            helper.__code__ = original_code
+
     def test_paperbook_settlement_method_code_mutation_is_rejected(self) -> None:
         bindings = self._bindings()
         self._issue_mapping_parent(bindings)

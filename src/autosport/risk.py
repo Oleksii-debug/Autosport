@@ -1031,6 +1031,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     "locked_odds": str(leg.locked_odds),
                     "sport": leg.sport,
                     "exchange_side": leg.exchange_side,
+                    "market_semantics_id": leg.market_semantics_id,
                 }
                 for leg in sorted(
                     context.legs,
@@ -1039,7 +1040,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             ]
             return _sha256_payload(
                 {
-                    "schema": "autosport.risk-candidate.v3",
+                    "schema": "autosport.risk-candidate.v4",
                     "legs": legs,
                     "quotes": quotes,
                     "provider_accounts": [

@@ -1731,13 +1731,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "settlement evidence reference does not match lifecycle evidence"
                 )
+            # Reject non-canonical mapping types before snapshotting: coercing
+            # an arbitrary mapping with dict(...) can execute attacker-controlled
+            # iteration or collapse non-canonical input before validation.
+            if type(resolution.quote_outcomes) is not dict:
+                raise ContinuousSessionError(
+                    "settlement resolution quote_outcomes must be an exact dict"
+                )
             # Detach mutable quote_outcomes before validation.  Validating the
             # authority-owned mapping and copying it afterwards leaves a TOCTOU
             # window where external mutation can change already-validated
             # settlement truth before product state takes ownership.
             resolution = replace(
                 resolution,
-                quote_outcomes=dict(resolution.quote_outcomes),
+                quote_outcomes=resolution.quote_outcomes.copy(),
             )
             try:
                 _resolution_validate(resolution, as_of=as_of)
@@ -1812,12 +1819,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "settlement consumer requires exact SettlementResolution values"
                 )
+            if type(resolution.quote_outcomes) is not dict:
+                raise ContinuousSessionError(
+                    "settlement consumer quote_outcomes must be an exact dict"
+                )
             # Take ownership of the only mutable field before any economic I/O.
             # A caller retaining the input resolution must not be able to alter
             # outcomes after the consumer has accepted the batch.
             resolution = replace(
                 resolution,
-                quote_outcomes=dict(resolution.quote_outcomes),
+                quote_outcomes=resolution.quote_outcomes.copy(),
             )
             settlement_key = (
                 resolution.event_identity,

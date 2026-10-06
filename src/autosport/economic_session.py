@@ -70,6 +70,15 @@ _WORKSPACE_LOCK_ACQUIRE: Final = WorkspaceEconomicLock.acquire
 _WORKSPACE_LOCK_ACQUIRE_CODE: Final = getattr(_WORKSPACE_LOCK_ACQUIRE, "__code__", None)
 _WORKSPACE_LOCK_RELEASE: Final = WorkspaceEconomicLock.release
 _WORKSPACE_LOCK_RELEASE_CODE: Final = getattr(_WORKSPACE_LOCK_RELEASE, "__code__", None)
+_WORKSPACE_LOCK_VALIDATE_OPEN_HANDLE_IDENTITY: Final = (
+    WorkspaceEconomicLock._validate_open_handle_identity
+)
+_WORKSPACE_LOCK_VALIDATE_OPEN_HANDLE_IDENTITY_CODE: Final = getattr(
+    _WORKSPACE_LOCK_VALIDATE_OPEN_HANDLE_IDENTITY,
+    "__code__",
+    None,
+)
+_WORKSPACE_LOCK_FILE_NAME: Final = WorkspaceEconomicLock.FILE_NAME
 _OBJECT_SETATTR: Final = object.__setattr__
 _METHOD_TYPE: Final = MethodType
 _PAPERBOOK_LOAD = PaperBook.load
@@ -1168,6 +1177,119 @@ class ProductEconomicSessionStore:
             raise EconomicSessionMismatchError(
                 "economic-session evidence does not match current durable authority"
             )
+        return current
+
+    def require_current_under_lock(
+        self,
+        candidate: ProductEconomicSession,
+        *,
+        workspace_lock: WorkspaceEconomicLock,
+    ) -> ProductEconomicSession:
+        """Re-resolve current session authority while admission already owns the lock."""
+
+        if type(candidate) is not ProductEconomicSession:
+            raise EconomicSessionMismatchError(
+                "candidate must be exact ProductEconomicSession evidence"
+            )
+        self._require_configuration_authority()
+        if type(workspace_lock) is not _WORKSPACE_LOCK_TYPE:
+            raise EconomicSessionIntegrityError(
+                "economic-session revalidation requires canonical held workspace lock"
+            )
+        if (
+            WorkspaceEconomicLock.FILE_NAME != _WORKSPACE_LOCK_FILE_NAME
+            or WorkspaceEconomicLock._validate_open_handle_identity
+            is not _WORKSPACE_LOCK_VALIDATE_OPEN_HANDLE_IDENTITY
+            or (
+                _WORKSPACE_LOCK_VALIDATE_OPEN_HANDLE_IDENTITY_CODE is not None
+                and getattr(
+                    _WORKSPACE_LOCK_VALIDATE_OPEN_HANDLE_IDENTITY,
+                    "__code__",
+                    None,
+                )
+                is not _WORKSPACE_LOCK_VALIDATE_OPEN_HANDLE_IDENTITY_CODE
+            )
+        ):
+            raise EconomicSessionIntegrityError(
+                "economic-session workspace lock authority changed"
+            )
+        try:
+            lock_workspace = self._path_resolve_witness(
+                self._path_expanduser_witness(workspace_lock.workspace),
+                strict=False,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise EconomicSessionIntegrityError(
+                "economic-session workspace lock identity is invalid"
+            ) from exc
+        expected_lock_path = self._workspace_witness / _WORKSPACE_LOCK_FILE_NAME
+        handle = workspace_lock._handle
+        if (
+            lock_workspace != self._workspace_witness
+            or workspace_lock.path != expected_lock_path
+            or handle is None
+            or handle.closed
+        ):
+            raise EconomicSessionIntegrityError(
+                "economic-session revalidation requires canonical held workspace lock"
+            )
+        try:
+            _WORKSPACE_LOCK_VALIDATE_OPEN_HANDLE_IDENTITY(workspace_lock, handle)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise EconomicSessionIntegrityError(
+                "economic-session held workspace lock cannot be verified"
+            ) from exc
+
+        goal = _ECONOMIC_GOAL_LOAD(self._goal_store_witness)
+        provenance = self._provenance_for_witness(goal)
+        if not self._lexists_witness(self._state_path_witness):
+            raise EconomicSessionIntegrityError(
+                "economic-session state is missing after authority establishment"
+            )
+        raw = self._read_regular_bytes_witness(
+            self._state_path_witness,
+            limit=_MAX_STATE_BYTES,
+            label="economic-session state",
+        )
+        payload = self._decode_state_witness(
+            raw,
+            workspace_instance_id=self._authority_witness.workspace_instance_id,
+        )
+        observed = self._sha256_witness(raw).hexdigest()
+        recovery = _AUTHORITY_RECOVER(
+            self._authority_witness,
+            observed_state_sha256=observed,
+            tx_id=self._tx_id_witness(payload),
+            semantic_binding_sha256=self._semantic_binding_witness(payload),
+        )
+        if recovery.disposition not in {
+            RecoveryDisposition.CURRENT,
+            RecoveryDisposition.ABORTED_PREPARE,
+            RecoveryDisposition.COMMITTED_PREPARE,
+        }:
+            raise EconomicSessionIntegrityError(
+                "economic-session state is not a recoverable authority tip"
+            )
+        if (
+            payload["goal_id"] != goal.goal_id
+            or payload["goal_revision"] != goal.revision
+            or payload["bankroll_id"] != goal.bankroll_id
+            or payload["currency"] != goal.currency
+            or payload["goal_contract_sha256"] != provenance.contract_sha256
+        ):
+            raise EconomicSessionMismatchError(
+                "owner EconomicGoal changed without explicit economic-session transition"
+            )
+        current = self._evidence(payload, observed, recovery.committed_generation)
+        if not current.product_clock_authoritative:
+            raise EconomicSessionIntegrityError(
+                "synthetic clock cannot mint positive economic-session authority"
+            )
+        if candidate != current:
+            raise EconomicSessionMismatchError(
+                "economic-session evidence does not match current durable authority"
+            )
+        self._require_configuration_authority()
         return current
 
     def _publish_new(self, goal, goal_contract_sha256: str) -> ProductEconomicSession:

@@ -18,6 +18,72 @@ from .source_universe_commitment import SourceUniverseCommitment
 
 _SCHEMA = "autosport.acquisition_denominator_evidence"
 _SCHEMA_VERSION = 1
+
+
+class AcquisitionDenominatorEvidenceError(ValueError):
+    """Scheduled acquisition evidence cannot support the frozen denominator."""
+
+
+class AcquisitionCoverageStrength(StrEnum):
+    """Strongest generic coverage claim this composition can make."""
+
+    INCOMPLETE_OR_UNKNOWN = "INCOMPLETE_OR_UNKNOWN"
+    SCHEDULED_CYCLE_WINDOW_COMPLETE = "SCHEDULED_CYCLE_WINDOW_COMPLETE"
+
+
+def _canonical_json(value: object) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise AcquisitionDenominatorEvidenceError(
+            "acquisition denominator evidence is not canonical JSON"
+        ) from exc
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value)).hexdigest()
+
+
+def _instant(value: object, name: str) -> datetime:
+    if type(value) is not str or not value or value.strip() != value:
+        raise AcquisitionDenominatorEvidenceError(
+            f"{name} must be a non-empty canonical timestamp"
+        )
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AcquisitionDenominatorEvidenceError(
+            f"{name} must be ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise AcquisitionDenominatorEvidenceError(
+            f"{name} must include a timezone"
+        )
+    return parsed.astimezone(timezone.utc)
+
+
+def _expected_path(store: CollectorDeltaStore, expected_store_path: str | Path) -> Path:
+    if isinstance(expected_store_path, str):
+        if not expected_store_path or expected_store_path.strip() != expected_store_path:
+            raise AcquisitionDenominatorEvidenceError(
+                "expected_store_path must be a non-empty trimmed path"
+            )
+        expected = Path(expected_store_path)
+    elif isinstance(expected_store_path, Path):
+        expected = expected_store_path
+    else:
+        raise TypeError("expected_store_path must be str or Path")
+    if getattr(store, "path", None) != expected:
+        raise AcquisitionDenominatorEvidenceError(
+            "collector store path does not match product-expected authority path"
+        )
+    return expected
 def _install_canonical_acquisition_readers():
     """Capture producer readers and their executable witnesses outside module globals."""
 

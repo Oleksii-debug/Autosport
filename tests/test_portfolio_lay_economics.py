@@ -134,6 +134,61 @@ class PortfolioLayEconomicsTests(unittest.TestCase):
                 placed_at="2026-10-06T00:00:00+00:00",
             )
 
+    def test_portfolio_snapshot_rejects_nonfinite_or_negative_ticket_stake(self) -> None:
+        ticket, leg = self._lay_ticket()
+        for invalid in (
+            Decimal("NaN"),
+            Decimal("Infinity"),
+            Decimal("-Infinity"),
+            Decimal("-1"),
+        ):
+            with self.subTest(invalid=str(invalid)):
+                original = ticket.stake
+                ticket.stake = invalid
+                try:
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "portfolio ticket must be canonical",
+                    ):
+                        PortfolioEngine.scenario_profit_settlements(
+                            [ticket],
+                            {leg.settlement_key: "loss"},
+                        )
+                finally:
+                    ticket.stake = original
+
+    def test_portfolio_snapshot_rejects_mutated_exchange_side(self) -> None:
+        ticket, leg = self._lay_ticket()
+        original = leg.exchange_side
+        try:
+            object.__setattr__(leg, "exchange_side", "forged")
+            with self.assertRaisesRegex(
+                ValueError,
+                "portfolio ticket leg must be canonical",
+            ):
+                PortfolioEngine.scenario_profit_settlements(
+                    [ticket],
+                    {leg.settlement_key: "loss"},
+                )
+        finally:
+            object.__setattr__(leg, "exchange_side", original)
+
+    def test_portfolio_snapshot_rejects_noncanonical_provider_source_container(self) -> None:
+        ticket, leg = self._lay_ticket()
+        original = ticket.provider_source_ids
+        ticket.provider_source_ids = list(original)  # type: ignore[assignment]
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "ticket identity is not canonical",
+            ):
+                PortfolioEngine.scenario_profit_settlements(
+                    [ticket],
+                    {leg.settlement_key: "loss"},
+                )
+        finally:
+            ticket.provider_source_ids = original
+
     def test_portfolio_capital_authority_fails_closed_on_calculator_code_drift(self) -> None:
         ticket, _ = self._lay_ticket()
         calculator = portfolio_module.locked_capital_for_exchange_side

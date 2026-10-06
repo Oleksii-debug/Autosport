@@ -181,14 +181,21 @@ class BetfairMarketBookPerMarketRateGate:
 
     def __init__(self, state: MarketBookRateGateState | None = None) -> None:
         self._lock = RLock()
-        self._accepted: dict[str, list[int]] = {}
+        # Internal entries carry a process-local generation so an interrupted
+        # admission can remove only its own capacity even if another thread
+        # reserves the same market and timestamp before cleanup reacquires the
+        # lock. Persisted state intentionally strips these generations.
+        self._accepted: dict[str, list[tuple[int, int]]] = {}
         self._last_scheduled_at_utc_us: int | None = None
+        self._next_reservation_generation = 1
         if state is not None:
             if type(state) is not MarketBookRateGateState:
                 raise TypeError("state must be MarketBookRateGateState or None")
             self._last_scheduled_at_utc_us = state.last_scheduled_at_utc_us
             self._accepted = {
-                market.market_id: list(market.accepted_at_utc_us)
+                market.market_id: [
+                    (timestamp, 0) for timestamp in market.accepted_at_utc_us
+                ]
                 for market in state.markets
             }
 
@@ -202,7 +209,13 @@ class BetfairMarketBookPerMarketRateGate:
                 policy_version=BETFAIR_MARKETBOOK_RATE_POLICY_VERSION,
                 last_scheduled_at_utc_us=self._last_scheduled_at_utc_us,
                 markets=tuple(
-                    MarketBookRateWindowState(market_id, tuple(self._accepted[market_id]))
+                    MarketBookRateWindowState(
+                        market_id,
+                        tuple(
+                            timestamp
+                            for timestamp, _generation in self._accepted[market_id]
+                        ),
+                    )
                     for market_id in sorted(self._accepted)
                     if self._accepted[market_id]
                 ),
@@ -214,47 +227,91 @@ class BetfairMarketBookPerMarketRateGate:
         *,
         scheduled_at: datetime,
     ) -> MarketBookRateDecision:
-        with self._lock:
-            normalized_ids = _normalize_market_ids(market_ids)
-            scheduled_us = _utc_microseconds(scheduled_at)
-            if (
-                self._last_scheduled_at_utc_us is not None
-                and scheduled_us < self._last_scheduled_at_utc_us
-            ):
-                raise ValueError("scheduled_at must not move backwards")
+        normalized_ids: tuple[str, ...] = ()
+        reservation_generation: int | None = None
+        try:
+            with self._lock:
+                normalized_ids = _normalize_market_ids(market_ids)
+                scheduled_us = _utc_microseconds(scheduled_at)
+                if (
+                    self._last_scheduled_at_utc_us is not None
+                    and scheduled_us < self._last_scheduled_at_utc_us
+                ):
+                    raise ValueError("scheduled_at must not move backwards")
 
-            cutoff = scheduled_us - _WINDOW_MICROSECONDS
-            working: dict[str, list[int]] = {}
-            for market_id, accepted in self._accepted.items():
-                retained = [timestamp for timestamp in accepted if timestamp > cutoff]
-                if retained:
-                    working[market_id] = retained
+                cutoff = scheduled_us - _WINDOW_MICROSECONDS
+                working: dict[str, list[tuple[int, int]]] = {}
+                for market_id, accepted in self._accepted.items():
+                    retained = [
+                        entry for entry in accepted if entry[0] > cutoff
+                    ]
+                    if retained:
+                        working[market_id] = retained
 
-            blocked: list[str] = []
-            next_eligible: list[int] = []
-            for market_id in normalized_ids:
-                accepted = working.get(market_id, [])
-                if len(accepted) >= _MAX_CALLS_PER_WINDOW:
-                    blocked.append(market_id)
-                    next_eligible.append(accepted[0] + _WINDOW_MICROSECONDS)
+                blocked: list[str] = []
+                next_eligible: list[int] = []
+                for market_id in normalized_ids:
+                    accepted = working.get(market_id, [])
+                    if len(accepted) >= _MAX_CALLS_PER_WINDOW:
+                        blocked.append(market_id)
+                        next_eligible.append(
+                            accepted[0][0] + _WINDOW_MICROSECONDS
+                        )
 
-            self._accepted = working
-            self._last_scheduled_at_utc_us = scheduled_us
+                self._accepted = working
+                self._last_scheduled_at_utc_us = scheduled_us
 
-            if blocked:
-                return MarketBookRateDecision(
+                if blocked:
+                    return MarketBookRateDecision(
+                        market_ids=normalized_ids,
+                        scheduled_at_utc_us=scheduled_us,
+                        allowed=False,
+                        blocked_market_ids=tuple(blocked),
+                        next_eligible_at_utc_us=max(next_eligible),
+                    )
+
+                # Consume a unique generation before adding capacity. If process
+                # control lands anywhere after this point, a successor cannot
+                # reuse the generation while cleanup is pending.
+                reservation_generation = self._next_reservation_generation
+                self._next_reservation_generation += 1
+                decision = MarketBookRateDecision(
                     market_ids=normalized_ids,
                     scheduled_at_utc_us=scheduled_us,
-                    allowed=False,
-                    blocked_market_ids=tuple(blocked),
-                    next_eligible_at_utc_us=max(next_eligible),
+                    allowed=True,
                 )
-
-            for market_id in normalized_ids:
-                self._accepted.setdefault(market_id, []).append(scheduled_us)
-
-            return MarketBookRateDecision(
-                market_ids=normalized_ids,
-                scheduled_at_utc_us=scheduled_us,
-                allowed=True,
-            )
+                for market_id in normalized_ids:
+                    self._accepted.setdefault(market_id, []).append(
+                        (scheduled_us, reservation_generation)
+                    )
+                return decision
+        except BaseException as primary:
+            if reservation_generation is not None:
+                try:
+                    with self._lock:
+                        for market_id in normalized_ids:
+                            accepted = self._accepted.get(market_id)
+                            if not accepted:
+                                continue
+                            retained = [
+                                entry
+                                for entry in accepted
+                                if entry[1] != reservation_generation
+                            ]
+                            if retained:
+                                self._accepted[market_id] = retained
+                            else:
+                                self._accepted.pop(market_id, None)
+                except BaseException as cleanup_exc:
+                    if (
+                        not isinstance(cleanup_exc, Exception)
+                        and isinstance(primary, Exception)
+                    ):
+                        raise
+                    add_note = getattr(primary, "add_note", None)
+                    if callable(add_note):
+                        add_note(
+                            "rate-reservation cleanup also failed: "
+                            f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                        )
+            raise

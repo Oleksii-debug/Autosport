@@ -773,6 +773,54 @@ def test_rate_gate_process_control_releases_projection_lease():
     assert rate_gate._last_scheduled_at_utc_us is None
 
 
+def test_rate_gate_post_mutation_process_control_rolls_back_capacity_and_lease():
+    plan = _plan(
+        market_ids=("1.001",),
+        order_projection="EXECUTABLE",
+    )
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    interrupt = KeyboardInterrupt("rate admission interrupted after mutation")
+    original_lock = rate_gate._lock
+
+    class InterruptAfterMutationLock:
+        def __init__(self):
+            self.raise_once = True
+
+        def __enter__(self):
+            return original_lock.__enter__()
+
+        def __exit__(self, exc_type, exc, tb):
+            result = original_lock.__exit__(exc_type, exc, tb)
+            if self.raise_once and exc_type is None:
+                self.raise_once = False
+                raise interrupt
+            return result
+
+    rate_gate._lock = InterruptAfterMutationLock()
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="rate-post-mutation-process-control",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value is interrupt
+    assert transport.calls == []
+    assert concurrency_gate.snapshot().active == ()
+    rate_state = rate_gate.snapshot()
+    assert rate_state.markets == ()
+    assert rate_state.last_scheduled_at_utc_us == int(
+        NOW.timestamp() * 1_000_000
+    )
+
+
 def test_rate_denial_releases_projection_lease_without_transport():
     plan = _plan(
         market_ids=("1.001",),

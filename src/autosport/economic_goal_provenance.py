@@ -74,9 +74,10 @@ _CANONICAL_PROVENANCE_FIELD_GETTERS: Final = tuple(
 def _canonical_provenance_snapshot(
     provenance: EconomicGoalProvenance,
     _field_getters=_CANONICAL_PROVENANCE_FIELD_GETTERS,
+    _provenance_type=EconomicGoalProvenance,
 ) -> tuple[object, ...]:
     return tuple(
-        getter(provenance, EconomicGoalProvenance)
+        getter(provenance, _provenance_type)
         for _, getter in _field_getters
     )
 
@@ -86,9 +87,10 @@ def _validate_provenance_bound(
     _schema_version=PROVENANCE_SCHEMA_VERSION,
     _max_identity_chars=_MAX_PROVENANCE_IDENTITY_CHARS,
     _error_type=EconomicGoalProvenanceError,
+    _provenance_type=EconomicGoalProvenance,
 ) -> None:
     """Validate provenance through captured slot descriptors."""
-    if type(self) is not EconomicGoalProvenance:
+    if type(self) is not _provenance_type:
         raise _error_type("provenance must use the exact evidence type")
     schema, schema_version, goal_id, revision, bankroll_id, contract_sha256 = _canonical_provenance_snapshot(self)
     if type(schema) is not str or schema != _schema:

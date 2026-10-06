@@ -11,6 +11,7 @@ from autosport.betfair_request_budget import (
     BetfairRequestIntent,
     BetfairRequestOperation,
     BetfairRequestPriority,
+    market_book_intent_from_rpc_params,
     release_betfair_request,
 )
 
@@ -28,11 +29,10 @@ def _policy() -> BetfairRequestBudgetPolicy:
 
 
 def _market(request_id: str, market_id: str) -> BetfairRequestIntent:
-    return BetfairRequestIntent(
-        request_id=request_id,
-        operation=BetfairRequestOperation.LIST_MARKET_BOOK,
-        priority=BetfairRequestPriority.EXECUTION_READ,
-        market_ids=(market_id,),
+    return market_book_intent_from_rpc_params(
+        request_id,
+        BetfairRequestPriority.EXECUTION_READ,
+        params={"marketIds": [market_id]},
     )
 
 

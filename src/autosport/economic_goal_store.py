@@ -8,10 +8,10 @@ non-expanding successor of the already persisted owner contract.
 
 from __future__ import annotations
 
+import weakref
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final
-import weakref
 
 from .economic_goal import (
     AutomationLevel,
@@ -169,6 +169,7 @@ _CANONICAL_STRICT_JSON_LOADS: Final = strict_json_loads
 _CANONICAL_ATOMIC_WRITE_JSON: Final = atomic_write_json
 _CANONICAL_WORKSPACE_LOCK_TYPE: Final = WorkspaceEconomicLock
 _CANONICAL_PATH_TYPE: Final = Path
+_CANONICAL_STORE_FILE_NAME: Final = "economic_goal_contract.json"
 
 _STORE_BINDINGS_BY_ID: Final = {}
 
@@ -365,9 +366,10 @@ class EconomicGoalStore:
         _path_type=_CANONICAL_PATH_TYPE,
         _bindings=_STORE_BINDINGS_BY_ID,
         _weakref_ref=weakref.ref,
+        _file_name=_CANONICAL_STORE_FILE_NAME,
     ) -> None:
         workspace_path = _path_type(workspace)
-        path = workspace_path / self.FILE_NAME
+        path = workspace_path / _file_name
         self.workspace = workspace_path
         self.path = path
         _bindings[id(self)] = (

@@ -85,7 +85,7 @@ def _sha(value: object, field: str) -> str:
 
 def _dec(value: object, field: str) -> Decimal:
     try:
-        parsed = value if isinstance(value, Decimal) else Decimal(value) if type(value) is str else None
+        parsed = value if type(value) is Decimal else Decimal(value) if type(value) is str else None
     except InvalidOperation as exc:
         raise BetfairSettlementRevisionError(f"{field} must be finite Decimal") from exc
     if parsed is None or not parsed.is_finite():
@@ -160,13 +160,31 @@ class BetfairSettlementRevision:
             _text(getattr(self, field), field)
         if self.adapter_id != BETFAIR_ADAPTER_ID or self.adapter_version != BETFAIR_ADAPTER_VERSION:
             raise BetfairSettlementRevisionError("settlement adapter identity mismatch")
+        if self.side not in ("BACK", "LAY"):
+            raise BetfairSettlementRevisionError("side must be canonical BACK or LAY")
         if self.provider_status not in _ALLOWED_STATUSES:
             raise BetfairSettlementRevisionError("provider_status is not a BET cleared status")
-        if _time(self.available_at, "available_at") < _time(self.settled_date, "settled_date"):
-            raise BetfairSettlementRevisionError("settlement cannot be available before settled_date")
-        _time(self.placed_date, "placed_date")
-        for field in ("price_requested", "price_matched", "size_settled", "provider_profit"):
-            _dec(getattr(self, field), field)
+        placed_at = _time(self.placed_date, "placed_date")
+        settled_at = _time(self.settled_date, "settled_date")
+        available_at = _time(self.available_at, "available_at")
+        if placed_at > settled_at:
+            raise BetfairSettlementRevisionError(
+                "settlement provider chronology predates order placement"
+            )
+        if available_at < settled_at:
+            raise BetfairSettlementRevisionError(
+                "settlement cannot be available before settled_date"
+            )
+        price_requested = _dec(self.price_requested, "price_requested")
+        price_matched = _dec(self.price_matched, "price_matched")
+        size_settled = _dec(self.size_settled, "size_settled")
+        _dec(self.provider_profit, "provider_profit")
+        if price_requested <= 0:
+            raise BetfairSettlementRevisionError("price_requested must be positive")
+        if price_matched < 0:
+            raise BetfairSettlementRevisionError("price_matched must be non-negative")
+        if size_settled < 0:
+            raise BetfairSettlementRevisionError("size_settled must be non-negative")
         _sha(self.source_payload_sha256, "source_payload_sha256")
         _sha(self.capture_evidence_sha256, "capture_evidence_sha256")
         _sha(self.content_sha256, "content_sha256")

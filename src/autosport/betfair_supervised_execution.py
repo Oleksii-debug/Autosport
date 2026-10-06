@@ -708,6 +708,35 @@ def _build_canonical_place_action_dispatch():
     canonical_default_transport_type = UrllibBetfairHttpTransport
     canonical_default_clock = _now
     canonical_default_clock_code = getattr(canonical_default_clock, "__code__", None)
+    canonical_client_getattribute = client_type.__getattribute__
+    canonical_credentials_getattribute = canonical_credentials_type.__getattribute__
+    canonical_gate_getattribute = canonical_gate_type.__getattribute__
+    gate_owner_authority_method = canonical_gate_type.__dict__.get(
+        "_require_current_owner_authority"
+    )
+    if (
+        not callable(gate_owner_authority_method)
+        or getattr(gate_owner_authority_method, "__code__", None) is None
+    ):
+        raise RuntimeError("canonical Betfair gate owner authority is unavailable")
+    gate_owner_authority_code = gate_owner_authority_method.__code__
+    gate_field_descriptors = tuple(
+        (name, canonical_gate_type.__dict__.get(name))
+        for name in (
+            "enabled",
+            "bookmaker_id",
+            "account_id",
+            "profile_sha256",
+            "authority_ref",
+            "authority_sha256",
+            "economic_goal_store",
+            "economic_goal_workspace",
+        )
+    )
+    credential_field_descriptors = tuple(
+        (name, canonical_credentials_type.__dict__.get(name))
+        for name in ("application_key", "session_token")
+    )
     bindings: weakref.WeakKeyDictionary[
         BetfairSupervisedPlaceOrdersClient,
         tuple[object, ...],
@@ -737,6 +766,22 @@ def _build_canonical_place_action_dispatch():
             or _now is not canonical_default_clock
             or getattr(canonical_default_clock, "__code__", None)
             is not canonical_default_clock_code
+            or client_type.__getattribute__ is not canonical_client_getattribute
+            or canonical_credentials_type.__getattribute__
+            is not canonical_credentials_getattribute
+            or canonical_gate_type.__getattribute__ is not canonical_gate_getattribute
+            or canonical_gate_type.__dict__.get("_require_current_owner_authority")
+            is not gate_owner_authority_method
+            or getattr(gate_owner_authority_method, "__code__", None)
+            is not gate_owner_authority_code
+            or any(
+                canonical_gate_type.__dict__.get(name) is not descriptor
+                for name, descriptor in gate_field_descriptors
+            )
+            or any(
+                canonical_credentials_type.__dict__.get(name) is not descriptor
+                for name, descriptor in credential_field_descriptors
+            )
         ):
             raise BetfairSupervisedExecutionError(
                 "canonical Betfair client constructor authority changed"
@@ -759,6 +804,7 @@ def _build_canonical_place_action_dispatch():
             )
         gate_method = type(gate).__dict__.get("require")
         transport_method = type(transport).__dict__.get("post")
+        transport_getattribute = type(transport).__getattribute__
         if (
             not callable(gate_method)
             or getattr(gate_method, "__code__", None) is None
@@ -799,6 +845,7 @@ def _build_canonical_place_action_dispatch():
             gate_state,
             transport,
             transport_method,
+            transport_getattribute,
             credential_state,
             clock,
             getattr(clock, "__code__", None),
@@ -816,6 +863,7 @@ def _build_canonical_place_action_dispatch():
     def preflight(client: BetfairSupervisedPlaceOrdersClient) -> None:
         if (
             type(client) is not client_type
+            or client_type.__getattribute__ is not canonical_client_getattribute
             or client_type.__dict__.get("__init__") is not sealed_init
             or sealed_init.__code__ is not sealed_init_code
             or client_type.__dict__.get("place_action") is not place_action
@@ -840,6 +888,7 @@ def _build_canonical_place_action_dispatch():
             gate_state,
             bound_transport,
             transport_method,
+            transport_getattribute,
             credential_state,
             bound_clock,
             bound_clock_code,
@@ -859,6 +908,33 @@ def _build_canonical_place_action_dispatch():
         ):
             raise BetfairSupervisedExecutionError(
                 "Betfair client dependency binding changed"
+            )
+        current_gate_method = type(bound_gate).__dict__.get("require")
+        current_transport_method = type(bound_transport).__dict__.get("post")
+        current_gate_owner_authority = type(bound_gate).__dict__.get(
+            "_require_current_owner_authority"
+        )
+        if (
+            type(bound_gate) is not canonical_gate_type
+            or canonical_gate_type.__getattribute__ is not canonical_gate_getattribute
+            or type(current_credentials) is not canonical_credentials_type
+            or canonical_credentials_type.__getattribute__
+            is not canonical_credentials_getattribute
+            or type(bound_transport).__getattribute__ is not transport_getattribute
+            or current_gate_owner_authority is not gate_owner_authority_method
+            or getattr(current_gate_owner_authority, "__code__", None)
+            is not gate_owner_authority_code
+            or any(
+                canonical_gate_type.__dict__.get(name) is not descriptor
+                for name, descriptor in gate_field_descriptors
+            )
+            or any(
+                canonical_credentials_type.__dict__.get(name) is not descriptor
+                for name, descriptor in credential_field_descriptors
+            )
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency dispatch changed"
             )
         current_gate_state = tuple(
             object_getattribute(bound_gate, name)
@@ -886,8 +962,6 @@ def _build_canonical_place_action_dispatch():
             raise BetfairSupervisedExecutionError(
                 "Betfair client credential authority changed"
             )
-        current_gate_method = type(bound_gate).__dict__.get("require")
-        current_transport_method = type(bound_transport).__dict__.get("post")
         if (
             current_gate_method is not gate_method
             or getattr(gate_method, "__code__", None)

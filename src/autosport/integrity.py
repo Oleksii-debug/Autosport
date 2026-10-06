@@ -74,6 +74,14 @@ _SCIENTIFIC_REGISTRY_ENTRY_KEYS = frozenset(
 )
 
 
+def _canonical_path(value: str | Path) -> Path:
+    """Construct paths without dispatching through a replaceable module alias."""
+
+    if Path is not _CANONICAL_PATH_TYPE:
+        raise RuntimeError("Autosport integrity path constructor changed")
+    return _CANONICAL_PATH_TYPE(value)
+
+
 def _resolved_key(path: Path) -> str:
     try:
         return str(path.resolve(strict=False))
@@ -122,7 +130,7 @@ def durable_path_lock(path: str | Path) -> Iterator[None]:
     lock provides the cross-process fence required by Windows product runtimes.
     """
 
-    destination = Path(path)
+    destination = _canonical_path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     key = _resolved_key(destination)
     thread_lock = _thread_lock_for(destination)
@@ -157,7 +165,7 @@ def durable_path_lock(path: str | Path) -> Iterator[None]:
 
 def sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
+    with _canonical_path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -166,7 +174,7 @@ def sha256_file(path: str | Path) -> str:
 def ensure_durable_file(path: str | Path) -> None:
     """Create an empty file when absent and fsync its current bytes without rewriting existing content."""
 
-    destination = Path(path)
+    destination = _canonical_path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("ab") as handle:
         handle.flush()
@@ -394,7 +402,7 @@ def read_verified_scientific_registry_text(path: str | Path) -> str:
     independent authority for every non-pristine image before recovery.
     """
 
-    destination = Path(path)
+    destination = _canonical_path(path)
     with durable_path_lock(destination):
         try:
             return destination.read_bytes().decode("utf-8")
@@ -418,7 +426,7 @@ def establish_validated_scientific_registry_read_baseline(
     if type(validated_text) is not str:
         raise TypeError("validated_text must be a string")
 
-    destination = Path(path)
+    destination = _canonical_path(path)
     with durable_path_lock(destination):
         current_bytes = destination.read_bytes()
         try:
@@ -463,7 +471,7 @@ def establish_validated_scientific_registry_read_baseline(
 
 
 def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
-    destination = Path(path)
+    destination = _canonical_path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
     try:
@@ -476,7 +484,7 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
             suffix=".tmp",
             delete=False,
         ) as handle:
-            temporary = Path(handle.name)
+            temporary = _canonical_path(handle.name)
             json.dump(
                 payload,
                 handle,

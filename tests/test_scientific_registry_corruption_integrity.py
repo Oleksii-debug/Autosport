@@ -478,6 +478,54 @@ def test_transplant_rejects_one_shot_path_resolver_redirection(
     assert target_path.read_bytes() == transplanted_bytes
 
 
+def test_transplant_rejects_integrity_path_alias_before_constructor_execution(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target_path = _transplanted_registry_path(tmp_path)
+    canonical_path = Path
+    hostile_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def hostile_path(*args: object, **kwargs: object) -> Path:
+        hostile_calls.append((args, kwargs))
+        return canonical_path(*args, **kwargs)
+
+    monkeypatch.setattr(integrity, "Path", hostile_path)
+    with pytest.raises(
+        RuntimeError,
+        match="integrity path constructor changed",
+    ):
+        ScientificRegistry(target_path)
+
+    assert hostile_calls == []
+
+
+def test_scientific_registry_append_rejects_integrity_path_alias_before_constructor_execution(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(_question())
+    before = path.read_bytes()
+    canonical_path = Path
+    hostile_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def hostile_path(*args: object, **kwargs: object) -> Path:
+        hostile_calls.append((args, kwargs))
+        return canonical_path(*args, **kwargs)
+
+    monkeypatch.setattr(integrity, "Path", hostile_path)
+    with pytest.raises(
+        RuntimeError,
+        match="integrity path constructor changed",
+    ):
+        registry.append(_hypothesis())
+
+    assert hostile_calls == []
+    assert path.read_bytes() == before
+
+
 def test_valid_old_registry_restore_is_rejected_as_monotonic_rollback(tmp_path):
     path = tmp_path / "scientific_registry.json"
     registry = ScientificRegistry.initialize_pristine(path)

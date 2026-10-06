@@ -476,6 +476,48 @@ class IncidentRiskRegisterTests(unittest.TestCase):
             (critical_action, low_action, high_no_action, medium_no_action_newer),
         )
 
+    def test_operator_projection_redacts_credential_bearing_text_deterministically(self) -> None:
+        first = self._entry(
+            title="Provider Authorization: Bearer FIRST_SECRET_VALUE_1234567890",
+            summary="api_key=first-secret-value-1234567890",
+            mitigation="-----BEGIN PRIVATE KEY-----FIRST_PRIVATE_MATERIAL-----END PRIVATE KEY-----",
+        )
+        second = self._entry(
+            title="Provider Authorization: Bearer SECOND_SECRET_VALUE_ABCDEFGHIJ",
+            summary="api_key=second-secret-value-ABCDEFGHIJ",
+            mitigation="-----BEGIN PRIVATE KEY-----SECOND_PRIVATE_MATERIAL-----END PRIVATE KEY-----",
+        )
+
+        first_projection = operator_projection(first)
+        second_projection = operator_projection(second)
+
+        self.assertEqual(first_projection.title, "Provider [REDACTED]")
+        self.assertEqual(first_projection.summary, "[REDACTED]")
+        self.assertEqual(first_projection.mitigation, "[REDACTED]")
+        self.assertEqual(
+            (first_projection.title, first_projection.summary, first_projection.mitigation),
+            (second_projection.title, second_projection.summary, second_projection.mitigation),
+        )
+        self.assertNotIn("FIRST_SECRET_VALUE", first_projection.title)
+        self.assertNotIn("SECOND_SECRET_VALUE", second_projection.title)
+        self.assertEqual(first.title, "Provider Authorization: Bearer FIRST_SECRET_VALUE_1234567890")
+        self.assertEqual(first_projection.fingerprint_sha256, first.fingerprint_sha256)
+
+    def test_operator_projection_preserves_noncredential_text(self) -> None:
+        entry = self._entry(
+            title="Provider session recovered",
+            summary="Secret rotation completed; no credential value is present.",
+            mitigation="Keep monitoring the canonical provider health signal.",
+            residual_risk="No unresolved credential material is exposed to the operator.",
+        )
+
+        projection = operator_projection(entry)
+
+        self.assertEqual(projection.title, entry.title)
+        self.assertEqual(projection.summary, entry.summary)
+        self.assertEqual(projection.mitigation, entry.mitigation)
+        self.assertEqual(projection.residual_risk, entry.residual_risk)
+
     def test_register_contract_has_no_execution_or_release_truth_fields(self) -> None:
         keys = set(self._entry().to_dict())
         self.assertNotIn("real_money_execution", keys)

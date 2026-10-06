@@ -75,7 +75,7 @@ def load_incident_risk_operator_view(
             )
             for entry in ordered
         )
-    except (IncidentRiskStoreError, IncidentRiskRegisterError):
+    except (IncidentRiskStoreError, IncidentRiskRegisterError, OSError):
         return _unavailable_view()
 
     return IncidentRiskOperatorView(

@@ -367,7 +367,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     "RUN_COMPLETED exists before durable state is terminal"
                 )
             payload = completion["payload"]
-            if set(payload) != {
+            if type(payload) is not dict or set(payload) != {
                 "pending_action_ids",
                 "recovery_decision",
                 "worst_case_exposure",
@@ -375,17 +375,27 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionIntegrityError(
                     "completion payload schema is invalid"
                 )
+            pending_raw = payload["pending_action_ids"]
+            exposure_raw = payload["worst_case_exposure"]
+            if (
+                type(pending_raw) is not list
+                or any(type(item) is not str or not item for item in pending_raw)
+                or type(exposure_raw) is not str
+            ):
+                raise PaperExecutionIntegrityError(
+                    "completion payload schema is invalid"
+                )
             try:
                 recovery = _CANONICAL_RECOVERY_DECISION_TYPE(
                     payload["recovery_decision"]
                 )
-                pending = tuple(payload["pending_action_ids"])
+                pending = tuple(pending_raw)
                 exposure = _CANONICAL_DECIMAL_PARSER(
-                    payload["worst_case_exposure"],
+                    exposure_raw,
                     "worst_case_exposure",
                     allow_zero=True,
                 )
-            except (KeyError, ValueError, TypeError) as exc:
+            except (ValueError, TypeError) as exc:
                 raise PaperExecutionIntegrityError("invalid completion payload") from exc
             if (
                 pending != derived.pending_action_ids

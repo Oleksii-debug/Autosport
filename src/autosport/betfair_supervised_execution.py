@@ -696,21 +696,61 @@ def _build_canonical_place_action_dispatch():
     if not callable(original_init) or getattr(original_init, "__code__", None) is None:
         raise RuntimeError("canonical Betfair client constructor is unavailable")
     original_init_code = original_init.__code__
+    original_init_defaults = original_init.__defaults__
+    original_init_kwdefaults = original_init.__kwdefaults__
+    original_init_kwdefault_items = (
+        tuple(original_init_kwdefaults.items())
+        if original_init_kwdefaults is not None
+        else ()
+    )
+    canonical_credentials_type = BetfairSessionCredentials
+    canonical_gate_type = BetfairSupervisedExecutionGate
+    canonical_default_transport_type = UrllibBetfairHttpTransport
+    canonical_default_clock = _now
+    canonical_default_clock_code = getattr(canonical_default_clock, "__code__", None)
     bindings: weakref.WeakKeyDictionary[
         BetfairSupervisedPlaceOrdersClient,
         tuple[object, ...],
     ] = weakref.WeakKeyDictionary()
 
     def sealed_init(self, *args, **kwargs):
+        current_kwdefaults = original_init.__kwdefaults__
         if (
             client_type.__dict__.get("__init__") is not sealed_init
             or original_init.__code__ is not original_init_code
+            or original_init.__defaults__ is not original_init_defaults
+            or current_kwdefaults is not original_init_kwdefaults
+            or (
+                current_kwdefaults is not None
+                and (
+                    len(current_kwdefaults) != len(original_init_kwdefault_items)
+                    or any(
+                        key not in current_kwdefaults
+                        or current_kwdefaults[key] is not value
+                        for key, value in original_init_kwdefault_items
+                    )
+                )
+            )
+            or BetfairSessionCredentials is not canonical_credentials_type
+            or BetfairSupervisedExecutionGate is not canonical_gate_type
+            or UrllibBetfairHttpTransport is not canonical_default_transport_type
+            or _now is not canonical_default_clock
+            or getattr(canonical_default_clock, "__code__", None)
+            is not canonical_default_clock_code
         ):
             raise BetfairSupervisedExecutionError(
                 "canonical Betfair client constructor authority changed"
             )
         original_init(self, *args, **kwargs)
         namespace = object_getattribute(self, "__dict__")
+        if type(namespace.get("_credentials")) is not canonical_credentials_type:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client credentials must be exact canonical credentials"
+            )
+        if type(namespace.get("_gate")) is not canonical_gate_type:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client gate must be exact canonical gate"
+            )
         gate = namespace.get("_gate")
         transport = namespace.get("_transport")
         if gate is None or transport is None:

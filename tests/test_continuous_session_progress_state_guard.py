@@ -291,3 +291,75 @@ def test_checkpoint_reader_rejects_rebound_nested_dispatch(
 
         with pytest.raises(continuous_session.ContinuousSessionError):
             state._read_error_checkpoint()
+
+def test_state_transition_ignores_instance_shadowed_rmw_dispatch() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+
+        def attacker_update(*_args: object, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("instance-shadowed state RMW executed")
+
+        state._update = attacker_update  # type: ignore[method-assign]
+        state.set_state(
+            continuous_session.SessionState.PAUSED,
+            reason="OPERATOR_PAUSE",
+        )
+
+        durable = json.loads(path.read_text(encoding="utf-8"))
+        assert durable["generation"] == 1
+        assert durable["state"] == continuous_session.SessionState.PAUSED.value
+        assert durable["last_error_code"] == "OPERATOR_PAUSE"
+
+
+def test_state_transition_rejects_class_rebound_rmw_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        before = path.read_bytes()
+
+        def attacker_update(
+            _self: object,
+            *_args: object,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            raise AssertionError("class-rebound state RMW executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_update",
+            attacker_update,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical state-transition error authority changed",
+        ):
+            state.set_state(continuous_session.SessionState.PAUSED)
+
+        assert path.read_bytes() == before
+
+
+def test_state_transition_rejects_runtime_reason_validator_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        before = path.read_bytes()
+
+        def attacker_text(_value: object, _field: str) -> str:
+            raise AssertionError("runtime-rebound state reason validator executed")
+
+        monkeypatch.setattr(continuous_session, "_text", attacker_text)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical state-transition error authority changed",
+        ):
+            state.set_state(
+                continuous_session.SessionState.PAUSED,
+                reason="OPERATOR_PAUSE",
+            )
+
+        assert path.read_bytes() == before
+

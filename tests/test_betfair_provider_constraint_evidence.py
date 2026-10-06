@@ -198,6 +198,86 @@ def test_future_effective_record_is_not_current_rule() -> None:
     assert result.state is BetfairConstraintResolutionState.NO_APPLICABLE_RULE
     assert result.min_standard_size is None
 
+def test_currency_scope_mismatch_cannot_cross_reuse_provider_rule() -> None:
+    gbp_rule = observation(currency="GBP", scope="UK_INTERNATIONAL")
+
+    result = resolve(
+        gbp_rule,
+        scope="UK_INTERNATIONAL",
+        currency="EUR",
+    )
+
+    assert result.state is BetfairConstraintResolutionState.NO_EVIDENCE
+    assert result.candidate_generation_sha256s == ()
+    assert result.min_standard_size is None
+    assert result.min_payout is None
+
+
+def test_jurisdiction_scope_mismatch_cannot_cross_reuse_provider_rule() -> None:
+    international_rule = observation(
+        currency="EUR",
+        scope="UK_INTERNATIONAL",
+        min_size=Decimal("1"),
+        min_payout=Decimal("10"),
+        lower_enabled=True,
+    )
+    spain_rule = observation(
+        currency="EUR",
+        scope="ES",
+        min_size=Decimal("2"),
+        min_payout=None,
+        lower_enabled=False,
+        source_revision="es-rule",
+        source_sha256=HASH_B,
+    )
+
+    result = resolve(
+        international_rule,
+        spain_rule,
+        scope="ES",
+        currency="EUR",
+    )
+
+    assert result.state is BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED
+    assert result.jurisdiction_scope == "ES"
+    assert result.currency_code == "EUR"
+    assert result.min_standard_size == Decimal("2")
+    assert result.min_payout is None
+    assert result.lower_minimum_payout_enabled is False
+
+
+def test_other_jurisdiction_record_does_not_create_conflict_in_target_scope() -> None:
+    target = observation(
+        currency="GBP",
+        scope="UK_INTERNATIONAL",
+        min_size=Decimal("1"),
+        min_payout=Decimal("10"),
+        lower_enabled=True,
+    )
+    unrelated = observation(
+        currency="GBP",
+        scope="ES",
+        min_size=Decimal("999"),
+        min_payout=None,
+        lower_enabled=False,
+        source_revision="es-unrelated",
+        source_sha256=HASH_B,
+    )
+
+    result = resolve(
+        target,
+        unrelated,
+        scope="UK_INTERNATIONAL",
+        currency="GBP",
+    )
+
+    assert result.state is BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED
+    assert result.min_standard_size == Decimal("1")
+    assert result.min_payout == Decimal("10")
+    assert result.lower_minimum_payout_enabled is True
+    assert unrelated.generation_sha256 not in result.candidate_generation_sha256s
+
+
 
 @pytest.mark.parametrize(
     "bad",

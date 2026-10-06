@@ -26,6 +26,10 @@ _CANONICAL_INVALID_OPERATION = InvalidOperation
 _CANONICAL_DECIMAL_RESOURCE_VALIDATOR = _validate_decimal_text_resource_bound
 _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE = _validate_decimal_text_resource_bound.__code__
 _CANONICAL_DECIMAL_INPUT_TEXT_LIMIT = _MAX_EXECUTION_DECIMAL_TEXT_LENGTH
+# Any base-10 integer with <= N digits has strictly fewer than 4*N bits.
+# Bound exact-int ingress before Decimal allocates its coefficient; the
+# canonical fixed-point validator remains the exact acceptance authority.
+_CANONICAL_DECIMAL_INPUT_INT_MAX_BITS = _MAX_EXECUTION_DECIMAL_TEXT_LENGTH * 4
 _CANONICAL_DECIMAL_FORMATTER = Decimal.__format__
 
 
@@ -121,6 +125,8 @@ def _decimal(
                 raise ValueError("decimal input text exceeds resource limit")
             parsed = decimal_type(value)
         elif type(value) is int:
+            if value.bit_length() > _CANONICAL_DECIMAL_INPUT_INT_MAX_BITS:
+                raise ValueError("decimal integer input exceeds resource limit")
             parsed = decimal_type(value)
         else:
             raise ValueError(f"{name} must be a Decimal, decimal string, or int")

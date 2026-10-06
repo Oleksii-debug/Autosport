@@ -1632,3 +1632,19 @@ def test_payload_decoder_ignores_rebound_contract_constructor(monkeypatch) -> No
 
     restored = economic_goal_from_payload(payload)
     assert restored == expected
+
+def test_payload_encoder_rejects_bound_keyword_default_rebinding() -> None:
+    contract = _goal()
+    operation = economic_goal_store_module._BOUND_ECONOMIC_GOAL_TO_PAYLOAD
+    original_kwdefaults = operation.__kwdefaults__
+
+    operation.__kwdefaults__ = {"forged_authority": object()}
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="payload encoder keyword defaults authority changed",
+        ):
+            economic_goal_to_payload(contract)
+    finally:
+        operation.__kwdefaults__ = original_kwdefaults
+

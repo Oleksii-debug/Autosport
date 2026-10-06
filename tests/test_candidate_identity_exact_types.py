@@ -39,6 +39,14 @@ def test_ticket_identity_rejects_str_subclass_before_virtual_method(field: str) 
         leg.ticket_identity()
 
 
+def test_ticket_identity_rejects_quote_key_str_subclass_before_virtual_method() -> None:
+    leg = _leg()
+    object.__setattr__(leg, "quote_key", _TrapStr(leg.quote_key))
+
+    with pytest.raises(ValueError, match="quote_key must be a non-empty canonical string"):
+        leg.ticket_identity()
+
+
 def test_search_rejects_quote_key_str_subclass_before_virtual_method() -> None:
     leg = _leg()
     object.__setattr__(leg, "quote_key", _TrapStr(leg.quote_key))

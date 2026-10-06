@@ -73,6 +73,27 @@ def test_provenance_verifies_after_durable_restart_readback(tmp_path) -> None:
     assert restored == goal
 
 
+def test_provenance_trust_roots_are_detached_from_live_rebinding(monkeypatch) -> None:
+    import autosport.economic_goal_provenance as provenance
+
+    goal = _goal()
+    expected = provenance.provenance_for(goal)
+    calls = 0
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("hostile provenance trust root executed")
+
+    monkeypatch.setattr(provenance, "economic_goal_to_payload", forbidden)
+    monkeypatch.setattr(provenance, "contract_sha256", forbidden)
+    monkeypatch.setattr(provenance, "EconomicGoalContract", forbidden)
+
+    assert provenance.provenance_for(goal) == expected
+    provenance.verify_provenance(goal, expected)
+    assert calls == 0
+
+
 def test_provenance_fails_closed_after_contract_tampering() -> None:
     goal = _goal()
     evidence = provenance_for(goal)
@@ -81,6 +102,27 @@ def test_provenance_fails_closed_after_contract_tampering() -> None:
     with pytest.raises(EconomicGoalProvenanceError, match="contract_sha256 mismatch"):
         verify_provenance(tampered, evidence)
 
+
+def test_verify_provenance_rejects_non_contract_before_attribute_access() -> None:
+    import autosport.economic_goal_provenance as provenance
+
+    evidence = provenance.provenance_for(_goal())
+
+    class Hostile:
+        @property
+        def goal_id(self):
+            raise AssertionError("hostile goal_id accessed")
+
+        @property
+        def revision(self):
+            raise AssertionError("hostile revision accessed")
+
+        @property
+        def bankroll_id(self):
+            raise AssertionError("hostile bankroll_id accessed")
+
+    with pytest.raises(EconomicGoalContractError):
+        provenance.verify_provenance(Hostile(), evidence)
 
 def test_provenance_rejects_identity_rebinding() -> None:
     goal = _goal()
@@ -95,6 +137,18 @@ def test_provenance_rejects_identity_rebinding() -> None:
     with pytest.raises(EconomicGoalProvenanceError, match="bankroll_id mismatch"):
         verify_provenance(replace(goal, bankroll_id="other-bankroll"), evidence)
 
+
+def test_provenance_schema_is_detached_from_live_rebinding(monkeypatch) -> None:
+    import autosport.economic_goal_provenance as provenance
+
+    goal = _goal()
+    monkeypatch.setattr(provenance, "PROVENANCE_SCHEMA", "forged-schema")
+    monkeypatch.setattr(provenance, "PROVENANCE_SCHEMA_VERSION", 999)
+
+    evidence = provenance.provenance_for(goal)
+
+    assert evidence.schema == "autosport.economic_goal_provenance"
+    assert evidence.schema_version == 1
 
 def test_provenance_schema_validation_is_fail_closed() -> None:
     with pytest.raises(EconomicGoalProvenanceError, match="SHA-256 hex"):

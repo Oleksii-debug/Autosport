@@ -380,3 +380,34 @@ def test_session_turnover_is_invariant_to_later_settlement(tmp_path):
     assert after.confirmed_turnover == before.confirmed_turnover == Decimal("4")
     assert after.constituent_sha256 == before.constituent_sha256
     assert after.evidence_sha256 == before.evidence_sha256
+
+
+def test_unwitnessed_ticket_timestamp_cannot_mint_session_turnover_scope(tmp_path):
+    EconomicGoalStore(tmp_path).initialize_owner(_goal())
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    session_store = ProductEconomicSessionStore(tmp_path)
+    session = session_store.current()
+
+    current = PaperBook.load(tmp_path / "paper_book.json")
+    current.open_ticket(
+        [_leg("unwitnessed")],
+        Decimal("2"),
+        placed_at=session.started_at,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+    current.save(tmp_path / "paper_book.json")
+
+    import pytest
+    from autosport.risk_turnover_evidence import (
+        PaperSessionTurnoverEvidenceIncompleteError,
+    )
+
+    with pytest.raises(PaperSessionTurnoverEvidenceIncompleteError):
+        PaperSessionTurnoverResolver.resolve(
+            book=PaperBook.load(tmp_path / "paper_book.json"),
+            goal_store=EconomicGoalStore(tmp_path),
+            session_store=session_store,
+            session_evidence=session,
+        )

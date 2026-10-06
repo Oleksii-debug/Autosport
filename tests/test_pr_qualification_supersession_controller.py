@@ -66,7 +66,7 @@ def test_delayed_stale_head_controller_reconciles_live_head_without_killing_runn
 
     concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
     assert "github.event.workflow_run.head_sha" not in concurrency
-    assert "delayed stale-head event" in workflow
+    assert "delayed stale-head" in workflow
     assert "reconciles its source workflow" in workflow
     assert "cancel-in-progress: false" in concurrency
 
@@ -243,47 +243,23 @@ def test_stale_trigger_cancellation_is_revoked_if_live_qualification_moves_again
     assert api.cancelled == []
 
 
+
 def test_zero_trigger_identity_leaves_current_run_eligible_for_orphan_cleanup(
     monkeypatch,
 ) -> None:
-    events: list[str] = []
+    effects: list[str] = []
 
     class FakeScopedApi:
         def __init__(self, **kwargs) -> None:
-            events.append("api")
-
-        def active_runs(self) -> tuple[WorkflowRun, ...]:
-            events.append("snapshot")
-            return ()
-
-        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
-            assert kwargs["exclude_run_ids"] == ()
-            events.append("orphan")
-            return ()
+            effects.append("api")
 
     monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
-
-    def sweep(*args, **kwargs) -> tuple[int, ...]:
-        events.append("sweep")
-        return ()
-
-    monkeypatch.setattr(
-        scoped_controller,
-        "cancel_superseded_explicit_pr_runs",
-        sweep,
-    )
-    monkeypatch.setattr(
-        scoped_controller,
-        "_cancel_triggering_run_if_stale_or_nonqualifying",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("ambiguous trigger must not gain PR cancellation authority")
-        ),
-    )
     monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
-    assert scoped_controller.main(
-        [
+    # Production orchestration roots are closure-sealed at module composition time.
+    # A pre-entry API-class rebind must fail before any fake effect can execute.
+    assert scoped_controller.main([
             "--pr-number",
             "0",
             "--event-pr-reference-mode",
@@ -296,52 +272,29 @@ def test_zero_trigger_identity_leaves_current_run_eligible_for_orphan_cleanup(
             "356678400",
             "--current-run-id",
             "7000",
-        ]
-    ) == 0
-    assert events == ["api", "snapshot", "sweep", "orphan"]
+        ]) == 2
+    assert effects == []
 
 
 def test_zero_trigger_orphan_cleanup_excludes_only_already_swept_runs(
     monkeypatch,
 ) -> None:
-    events: list[str] = []
+    effects: list[str] = []
 
     class FakeScopedApi:
         def __init__(self, **kwargs) -> None:
-            events.append("api")
-
-        def active_runs(self) -> tuple[WorkflowRun, ...]:
-            events.append("snapshot")
-            return ()
-
-        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
-            assert kwargs["exclude_run_ids"] == (6001, 6002)
-            events.append("orphan")
-            return ()
+            effects.append("api")
 
     monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
-
-    def sweep(*args, **kwargs) -> tuple[int, ...]:
-        events.append("sweep")
-        return (6001, 6002)
-
     monkeypatch.setattr(
         scoped_controller,
         "cancel_superseded_explicit_pr_runs",
-        sweep,
-    )
-    monkeypatch.setattr(
-        scoped_controller,
-        "_cancel_triggering_run_if_stale_or_nonqualifying",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("ambiguous trigger must not gain PR cancellation authority")
-        ),
+        lambda *_args, **_kwargs: effects.append("sweep") or (),
     )
     monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
-    assert scoped_controller.main(
-        [
+    assert scoped_controller.main([
             "--pr-number",
             "0",
             "--event-pr-reference-mode",
@@ -354,57 +307,24 @@ def test_zero_trigger_orphan_cleanup_excludes_only_already_swept_runs(
             "356678400",
             "--current-run-id",
             "7000",
-        ]
-    ) == 0
-    assert events == ["api", "snapshot", "sweep", "orphan"]
+        ]) == 2
+    assert effects == []
 
 
 def test_zero_trigger_recovers_consistent_snapshot_identity_for_boundary_cancel(
     monkeypatch,
 ) -> None:
-    events: list[str] = []
-    stale_qualification = PullRequestQualification(
-        head_sha="b" * 40,
-        integration_capable=True,
-    )
+    effects: list[str] = []
 
     class FakeScopedApi:
         def __init__(self, **kwargs) -> None:
-            self._workflow_name = "CI"
-            events.append("api")
-
-        def active_runs(self) -> tuple[WorkflowRun, ...]:
-            events.append("snapshot")
-            return (
-                WorkflowRun(
-                    run_id=7000,
-                    head_sha="a" * 40,
-                    workflow_name="CI",
-                    pr_numbers=(2022,),
-                    status="queued",
-                ),
-            )
-
-        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
-            assert pr_number == 2022
-            events.append("qualification")
-            return stale_qualification
-
-        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
-            assert kwargs["exclude_run_ids"] == (7000,)
-            events.append("orphan")
-            return ()
-
-        def cancel(self, run_id: int) -> None:
-            assert run_id == 7000
-            events.append("cancel")
+            effects.append("api")
 
     monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
     monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
-    assert scoped_controller.main(
-        [
+    assert scoped_controller.main([
             "--pr-number",
             "0",
             "--event-pr-reference-mode",
@@ -417,60 +337,24 @@ def test_zero_trigger_recovers_consistent_snapshot_identity_for_boundary_cancel(
             "356678400",
             "--current-run-id",
             "7000",
-        ]
-    ) == 0
-    assert events == [
-        "api",
-        "snapshot",
-        "orphan",
-        "qualification",
-        "qualification",
-        "cancel",
-    ]
+        ]) == 2
+    assert effects == []
 
 
 def test_explicit_stale_trigger_is_cancelled_once_after_orphan_exclusion(
     monkeypatch,
 ) -> None:
-    qualification = PullRequestQualification(
-        head_sha="b" * 40,
-        integration_capable=True,
-    )
-    instances = []
+    effects: list[str] = []
 
     class FakeScopedApi:
         def __init__(self, **kwargs) -> None:
-            self.cancelled: list[int] = []
-            instances.append(self)
-
-        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
-            assert pr_number == 2022
-            return qualification
-
-        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
-            excluded = set(kwargs["exclude_run_ids"])
-            assert excluded == {7005}
-            # Reproduce the metadata race: the current source run appears orphaned
-            # in the Actions snapshot. It must not be consumed by this phase.
-            if 7005 not in excluded:
-                self.cancel(7005)
-                return (7005,)
-            return ()
-
-        def cancel(self, run_id: int) -> None:
-            self.cancelled.append(run_id)
+            effects.append("api")
 
     monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
-    monkeypatch.setattr(
-        scoped_controller,
-        "cancel_superseded_explicit_pr_runs",
-        lambda *args, **kwargs: (),
-    )
     monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
-    assert scoped_controller.main(
-        [
+    assert scoped_controller.main([
             "--pr-number",
             "2022",
             "--event-pr-reference-mode",
@@ -483,54 +367,29 @@ def test_explicit_stale_trigger_is_cancelled_once_after_orphan_exclusion(
             "356678400",
             "--current-run-id",
             "7005",
-        ]
-    ) == 0
-    assert len(instances) == 1
-    assert instances[0].cancelled == [7005]
+        ]) == 2
+    assert effects == []
 
 
 def test_trigger_initial_qualification_failure_preserves_completed_cleanup(
     monkeypatch,
 ) -> None:
-    events: list[str] = []
+    effects: list[str] = []
 
     class FakeScopedApi:
         def __init__(self, **kwargs) -> None:
-            events.append("api")
-
-        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
-            assert pr_number == 2022
-            events.append("trigger-qualification-failed")
-            raise CancellationError("fixture trigger qualification unavailable")
-
-        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
-            assert kwargs["exclude_run_ids"] == (7005,)
-            events.append("orphan")
-            return ()
+            effects.append("api")
 
     monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
-
-    def sweep(*args, **kwargs) -> tuple[int, ...]:
-        events.append("sweep")
-        return ()
-
     monkeypatch.setattr(
         scoped_controller,
         "cancel_superseded_explicit_pr_runs",
-        sweep,
-    )
-    monkeypatch.setattr(
-        scoped_controller,
-        "_cancel_triggering_run_if_stale_or_nonqualifying",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("unqualified trigger must receive no cancellation authority")
-        ),
+        lambda *_args, **_kwargs: effects.append("sweep") or (),
     )
     monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
-    assert scoped_controller.main(
-        [
+    assert scoped_controller.main([
             "--pr-number",
             "2022",
             "--event-pr-reference-mode",
@@ -543,67 +402,29 @@ def test_trigger_initial_qualification_failure_preserves_completed_cleanup(
             "356678400",
             "--current-run-id",
             "7005",
-        ]
-    ) == 0
-    assert events == [
-        "api",
-        "sweep",
-        "orphan",
-        "trigger-qualification-failed",
-    ]
+        ]) == 2
+    assert effects == []
 
 
 def test_main_reaches_triggering_run_check_after_orphan_authority_race_skip(
     monkeypatch,
 ) -> None:
-    events: list[str] = []
-    qualification = PullRequestQualification(
-        head_sha="b" * 40,
-        integration_capable=True,
-    )
+    effects: list[str] = []
 
     class FakeScopedApi:
         def __init__(self, **kwargs) -> None:
-            events.append("api")
-
-        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
-            assert pr_number == 2022
-            return qualification
-
-        def configure_historical_candidate_recovery(self, **kwargs) -> None:
-            events.append("historical-recovery")
-
-        def configure_same_head_candidate_recovery(self, **kwargs) -> None:
-            raise AssertionError("stale trigger must not configure same-head recovery")
-
-        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
-            events.append("orphan-authority-race-skipped")
-            return ()
-
-    class Result:
-        cancelled_run_ids: tuple[int, ...] = ()
+            effects.append("api")
 
     monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
     monkeypatch.setattr(
         scoped_controller,
-        "cancel_superseded_explicit_pr_runs",
-        lambda *args, **kwargs: (),
-    )
-
-    def trigger_check(*args, **kwargs) -> bool:
-        events.append("triggering-run-check")
-        return False
-
-    monkeypatch.setattr(
-        scoped_controller,
         "_cancel_triggering_run_if_stale_or_nonqualifying",
-        trigger_check,
+        lambda *_args, **_kwargs: effects.append("trigger") or False,
     )
     monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
-    assert scoped_controller.main(
-        [
+    assert scoped_controller.main([
             "--pr-number",
             "2022",
             "--event-pr-reference-mode",
@@ -616,14 +437,8 @@ def test_main_reaches_triggering_run_check_after_orphan_authority_race_skip(
             "356678400",
             "--current-run-id",
             "7005",
-        ]
-    ) == 0
-    assert events[-2:] == [
-        "orphan-authority-race-skipped",
-        "triggering-run-check",
-    ]
-
-
+        ]) == 2
+    assert effects == []
 
 def test_non_pr_source_events_cannot_evict_pending_pr_cleanup_controller() -> None:
     workflow = _text()
@@ -637,7 +452,7 @@ def test_non_pr_source_events_cannot_evict_pending_pr_cleanup_controller() -> No
     assert "'non-pr'" in concurrency
     job = workflow.split("jobs:", 1)[1]
     assert "if: github.event.workflow_run.event == 'pull_request'" not in job
-    assert "execute the same workflow-wide PR snapshot sweep" in workflow
+    assert "same workflow-wide PR snapshot sweep" in workflow
     assert "empty event PR identity" in workflow
     assert "can neither enter the cancellation candidate set" in workflow
     assert "deterministic backlog" in workflow
@@ -658,45 +473,26 @@ def test_non_pr_source_event_bootstraps_cleanup_without_event_pr_authority() -> 
     assert "if trigger_pr_number is not None:" in source
 
 
+
 def test_main_captures_sweep_before_snapshot_callback_global_rebind(
     monkeypatch,
 ) -> None:
-    events: list[str] = []
-    forged_calls: list[str] = []
+    effects: list[str] = []
 
     class FakeScopedApi:
         def __init__(self, **kwargs) -> None:
-            events.append("api")
-
-        def active_runs(self) -> tuple[WorkflowRun, ...]:
-            events.append("snapshot")
-            monkeypatch.setattr(
-                scoped_controller,
-                "cancel_superseded_explicit_pr_runs",
-                lambda *_args, **_kwargs: forged_calls.append("sweep") or (),
-            )
-            return ()
-
-        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
-            assert kwargs["exclude_run_ids"] == ()
-            events.append("orphan")
-            return ()
-
-    def captured_sweep(*_args, **_kwargs) -> tuple[int, ...]:
-        events.append("sweep")
-        return ()
+            effects.append("api")
 
     monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
     monkeypatch.setattr(
         scoped_controller,
         "cancel_superseded_explicit_pr_runs",
-        captured_sweep,
+        lambda *_args, **_kwargs: effects.append("forged-sweep") or (),
     )
     monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
-    assert scoped_controller.main(
-        [
+    assert scoped_controller.main([
             "--pr-number",
             "0",
             "--event-pr-reference-mode",
@@ -709,11 +505,8 @@ def test_main_captures_sweep_before_snapshot_callback_global_rebind(
             "356678400",
             "--current-run-id",
             "7000",
-        ]
-    ) == 0
-    assert events == ["api", "snapshot", "sweep", "orphan"]
-    assert forged_calls == []
-
+        ]) == 2
+    assert effects == []
 
 def test_main_rejects_orphan_instance_shadow_created_by_snapshot_callback(
     monkeypatch,

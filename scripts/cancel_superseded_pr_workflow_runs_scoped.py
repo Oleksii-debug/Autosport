@@ -1903,6 +1903,10 @@ def cancel_superseded_explicit_pr_runs(
     if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
         raise CancellationError("canonical cancel effect authority changed")
     if type(api) is _production_api_type:
+        workflow_name_authority = object.__getattribute__(
+            api,
+            "_WorkflowScopedGitHubApi__workflow_name",
+        )
         _qualification_reader = _production_qualification_reader
         _qualification_reader_code = _production_qualification_reader_code
         _identity_checker = _production_identity_checker
@@ -1911,6 +1915,9 @@ def cancel_superseded_explicit_pr_runs(
         raise CancellationError("decision authority API type changed")
     else:
         # Compatibility fixtures may inject their own authority readers before entry.
+        # Never use this mutable alias for production authority: exact production APIs
+        # are handled above through the closure-owned private workflow coordinate.
+        workflow_name_authority = getattr(api, "_workflow_name", None)
         # Production never derives these effect-authorizing helpers from mutable globals.
         if _qualification_reader is None:
             _qualification_reader = _trusted_live_pr_qualification
@@ -1953,10 +1960,7 @@ def cancel_superseded_explicit_pr_runs(
     if (
         type(workflow_name) is not str
         or not workflow_name
-        or workflow_name != object.__getattribute__(
-            api,
-            "_WorkflowScopedGitHubApi__workflow_name",
-        )
+        or workflow_name != workflow_name_authority
     ):
         raise CancellationError("workflow name does not match exact workflow id")
 

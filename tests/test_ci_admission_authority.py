@@ -168,9 +168,11 @@ def test_main_admission_does_not_trust_rebound_positive_int_helper(
             "123",
             "--admission-only",
         ]
-    ) == 0
+    ) == 2
 
-    assert requested == [2008]
+    # main() snapshots the production API dispatch at module composition time.
+    # Rebinding the class method cannot become admission authority.
+    assert requested == []
 
 
 def test_main_rejects_output_writer_rebind_from_live_qualification(

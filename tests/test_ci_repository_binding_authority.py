@@ -606,21 +606,13 @@ def test_trigger_current_run_coordinate_cannot_be_redirected_by_validator_rebind
         checked.append(run_id)
         return True
 
-    monkeypatch.setattr(
-        scoped_controller,
-        "_explicit_run_identity_is_current",
-        check_identity,
-    )
-    monkeypatch.setattr(
-        scoped_controller,
-        "_trusted_live_pr_qualification",
-        lambda *_args, **_kwargs: (live_head, True),
-    )
-    monkeypatch.setattr(
-        scoped_controller,
-        "_cancel_run_or_defer_active_conflict",
-        lambda _api, run_id: cancelled.append(run_id) is None or True,
-    )
+    def read_qualification(_api, pr_number):
+        assert pr_number == 303
+        return (live_head, True)
+
+    def cancel_effect(_api, run_id):
+        cancelled.append(run_id)
+        return True
 
     assert scoped_controller._cancel_triggering_run_if_stale_or_nonqualifying(
         object(),  # type: ignore[arg-type]
@@ -628,6 +620,12 @@ def test_trigger_current_run_coordinate_cannot_be_redirected_by_validator_rebind
         event_head_sha=event_head,
         current_run_id=123,
         qualification=(live_head, True),
+        _identity_checker=check_identity,
+        _identity_checker_code=check_identity.__code__,
+        _qualification_reader=read_qualification,
+        _qualification_reader_code=read_qualification.__code__,
+        _cancel_effect=cancel_effect,
+        _cancel_effect_code=cancel_effect.__code__,
     )
     assert checked == [123]
     assert cancelled == [123]

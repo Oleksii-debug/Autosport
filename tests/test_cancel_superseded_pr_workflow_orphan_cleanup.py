@@ -199,8 +199,11 @@ def test_unbound_stale_run_is_cancelled_only_after_unique_association_and_bounda
     ]
 
 
-def test_unbound_same_head_ready_run_is_preserved() -> None:
-    api = FakeApi(
+def test_unbound_same_head_ready_run_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _sealed_api(
+        monkeypatch,
         [
             {
                 "total_count": 1,
@@ -208,7 +211,7 @@ def test_unbound_same_head_ready_run_is_preserved() -> None:
             },
             [_associated_pr(77, head_sha=CURRENT_HEAD)],
             _live_pr(CURRENT_HEAD),
-        ]
+        ],
     )
     api._active_runs_for_status("queued")
 
@@ -219,8 +222,11 @@ def test_unbound_same_head_ready_run_is_preserved() -> None:
     ]
 
 
-def test_unbound_cleanup_preserves_ambiguous_association_without_branch_fallback() -> None:
-    api = FakeApi(
+def test_unbound_cleanup_preserves_ambiguous_association_without_branch_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _sealed_api(
+        monkeypatch,
         [
             {
                 "total_count": 1,
@@ -230,7 +236,7 @@ def test_unbound_cleanup_preserves_ambiguous_association_without_branch_fallback
                 _associated_pr(77, head_sha=CURRENT_HEAD),
                 _associated_pr(88, head_sha=CURRENT_HEAD),
             ],
-        ]
+        ],
     )
     api._active_runs_for_status("queued")
 

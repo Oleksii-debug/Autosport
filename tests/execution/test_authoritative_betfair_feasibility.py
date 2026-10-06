@@ -444,6 +444,15 @@ def test_forged_structurally_equal_receipt_cannot_issue_positive_truth() -> None
             )
 
 
+def test_extreme_provider_decimal_exponent_is_rejected_before_feasibility_arithmetic() -> None:
+    transport = MarketBookTransport(
+        back_sizes=(("2.10", "1e999999999"),),
+    )
+
+    with pytest.raises(BetfairReadOnlyError, match="Decimal resource limit"):
+        _client(transport).read_market_book_depth("1.234", 42)
+
+
 def test_response_level_delayed_data_fails_closed() -> None:
     receipt, canonical_source = _synthetic_authoritative_receipt(
         MarketBookTransport(delayed=True)

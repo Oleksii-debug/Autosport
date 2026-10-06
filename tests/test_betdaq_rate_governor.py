@@ -886,7 +886,7 @@ def test_unknown_operation_still_cannot_inherit_any_other_allowance(
     )
 
     with pytest.raises(BetdaqRateDeferred) as denied:
-        governor.admit("GetAccountBalances")
+        governor.admit("GetPrices2")
 
     assert denied.value.reason == "unmodeled_provider_rate_axis"
     assert denied.value.retry_after_seconds is None

@@ -90,6 +90,34 @@ class _EconomicGoalContractMeta(type):
 
 
 
+def _build_contract_class_guard(name: str):
+    """Block direct base-metaclass mutation of sealed contract authority names."""
+
+    class _ContractClassGuard:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            binding = instance.__dict__[name]
+            descriptor_get = getattr(binding, "__get__", None)
+            if descriptor_get is None:
+                return binding
+            return descriptor_get(None, instance)
+
+        def __set__(self, _instance, _value) -> None:
+            raise TypeError(
+                "economic-goal public authority operation binding is immutable"
+            )
+
+        def __delete__(self, _instance) -> None:
+            raise TypeError(
+                "economic-goal public authority operation binding is immutable"
+            )
+
+    return _ContractClassGuard()
+
+
 def _canonical_text(
     name: str,
     value: object,
@@ -996,6 +1024,14 @@ EconomicGoalContract.validate_automatic_successor = _bind_contract_successor_ope
 
 # Freeze the public method once its closure has captured the canonical validator.
 EconomicGoalContract._authority_operations_sealed = True
+
+for _sealed_contract_name in _EconomicGoalContractMeta._AUTHORITY_NAMES:
+    setattr(
+        _EconomicGoalContractMeta,
+        _sealed_contract_name,
+        _build_contract_class_guard(_sealed_contract_name),
+    )
+del _sealed_contract_name
 
 
 # Keep the public transition proof noninjectable while capturing the canonical

@@ -2058,3 +2058,43 @@ def test_store_callable_authority_ignores_rebound_introspection_globals(
     finally:
         operation.__code__ = original_code
 
+def test_store_instance_descriptor_ignores_rebound_method_type(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    goal = _goal()
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(goal)
+
+    def forged_method_type(*_args, **_kwargs):
+        return lambda *_call_args, **_call_kwargs: "forged"
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "MethodType",
+        forged_method_type,
+    )
+
+    assert store.load() == goal
+
+
+def test_store_class_guard_ignores_rebound_getattr(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    goal = _goal()
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(goal)
+
+    def forged_getattr(*_args, **_kwargs):
+        return lambda *_descriptor_args: (lambda _store: "forged")
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "getattr",
+        forged_getattr,
+        raising=False,
+    )
+
+    assert EconomicGoalStore.load(store) == goal
+

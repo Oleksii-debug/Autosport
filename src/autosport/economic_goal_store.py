@@ -765,7 +765,12 @@ class _EconomicGoalStoreMeta(type):
         super().__delattr__(name)
 
 
-def _build_store_class_guard(name: str):
+def _build_store_class_guard(
+    name: str,
+    _getattr=getattr,
+    _attribute_error=AttributeError,
+    _type_error=TypeError,
+):
     """Block direct base-metaclass replacement of sealed store authority names."""
 
     class _StoreClassGuard:
@@ -779,26 +784,31 @@ def _build_store_class_guard(name: str):
                     binding = ancestor.__dict__[name]
                     break
             else:
-                raise AttributeError(name)
-            descriptor_get = getattr(binding, "__get__", None)
+                raise _attribute_error(name)
+            descriptor_get = _getattr(binding, "__get__", None)
             if descriptor_get is None:
                 return binding
             return descriptor_get(None, instance)
 
         def __set__(self, _instance, _value) -> None:
-            raise TypeError(
+            raise _type_error(
                 "economic goal store authority operation binding is immutable"
             )
 
         def __delete__(self, _instance) -> None:
-            raise TypeError(
+            raise _type_error(
                 "economic goal store authority operation binding is immutable"
             )
 
     return _StoreClassGuard()
 
 
-def _make_store_operation_descriptor(operation):
+def _make_store_operation_descriptor(
+    operation,
+    _type=type,
+    _method_type=MethodType,
+    _type_error=TypeError,
+):
     """Make a closure-owned public store operation non-shadowable on an instance."""
 
     class _ImmutableStoreOperation:
@@ -807,19 +817,19 @@ def _make_store_operation_descriptor(operation):
         def __get__(self, instance, owner=None):
             if instance is None:
                 return operation
-            if type(instance) is not owner:
-                raise TypeError(
+            if _type(instance) is not owner:
+                raise _type_error(
                     "economic goal store authority requires the exact store type"
                 )
-            return MethodType(operation, instance)
+            return _method_type(operation, instance)
 
         def __set__(self, _instance, _value) -> None:
-            raise TypeError(
+            raise _type_error(
                 "economic goal store authority operation binding is immutable"
             )
 
         def __delete__(self, _instance) -> None:
-            raise TypeError(
+            raise _type_error(
                 "economic goal store authority operation binding is immutable"
             )
 

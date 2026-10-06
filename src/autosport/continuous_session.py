@@ -666,11 +666,19 @@ class _ContinuousSessionState:
         _max_code_chars: int = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS,
         _read_error_checkpoint_bytes: Callable[..., bytes] = _read_error_checkpoint_bytes,
         _read_error_checkpoint_bytes_code: object = _read_error_checkpoint_bytes.__code__,
+        _text_validator: Callable[[object, str], str] = _text,
+        _text_validator_code: object = _text.__code__,
+        _instant_validator: Callable[[object, str], datetime] = _instant,
+        _instant_validator_code: object = _instant.__code__,
     ) -> dict[str, Any]:
         if (
             getattr(_strict_json_loads, "__code__", None) is not _strict_json_loads_code
             or getattr(_read_error_checkpoint_bytes, "__code__", None)
             is not _read_error_checkpoint_bytes_code
+            or _text is not _text_validator
+            or getattr(_text_validator, "__code__", None) is not _text_validator_code
+            or _instant is not _instant_validator
+            or getattr(_instant_validator, "__code__", None) is not _instant_validator_code
         ):
             raise ContinuousSessionError(
                 "canonical operational-checkpoint parser code identity changed"
@@ -727,7 +735,7 @@ class _ContinuousSessionState:
             )
         try:
             if raw["observed_last_success_at"] is not None:
-                _instant(
+                _instant_validator(
                     raw["observed_last_success_at"],
                     "operational error observed_last_success_at",
                 )
@@ -741,7 +749,7 @@ class _ContinuousSessionState:
                     "operational error observed_state is unsupported"
                 )
             if raw["last_error_code"] is not None:
-                error_code = _text(
+                error_code = _text_validator(
                     raw["last_error_code"],
                     "operational error last_error_code",
                 )
@@ -771,6 +779,8 @@ class _ContinuousSessionState:
         _json_dumps_code: object = json.dumps.__code__,
         _json_dump_code: object = json.dump.__code__,
         _atomic_write_json_code: object = atomic_write_json.__code__,
+        _text_validator: Callable[[object, str], str] = _text,
+        _text_validator_code: object = _text.__code__,
     ) -> None:
         if (
             getattr(_json_dumps, "__code__", None) is not _json_dumps_code
@@ -778,12 +788,14 @@ class _ContinuousSessionState:
             or getattr(_json_dump, "__code__", None) is not _json_dump_code
             or getattr(_atomic_write_json, "__code__", None)
             is not _atomic_write_json_code
+            or _text is not _text_validator
+            or getattr(_text_validator, "__code__", None) is not _text_validator_code
         ):
             raise ContinuousSessionError(
                 "canonical operational-checkpoint writer code identity changed"
             )
         if code is not None:
-            code = _text(code, "code")
+            code = _text_validator(code, "code")
             if len(code) > _max_code_chars:
                 raise ValueError("code exceeds operational error resource limit")
         payload = {

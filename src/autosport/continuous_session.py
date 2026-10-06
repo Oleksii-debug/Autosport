@@ -2256,10 +2256,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             cycle = self.collector.run_cycle()
             if cycle.provider_unavailable:
                 with self._state.running_fence():
-                # A provider-unavailable collector cycle commits no source deltas,
-                # so there is no new source projection to publish. Avoid the full
-                # continuous-session snapshot path here: retained settlement history
-                # must not amplify an operational provider failure into O(history).
+                    # A provider-unavailable collector cycle commits no source deltas,
+                    # so there is no new source projection to publish. Avoid the full
+                    # continuous-session snapshot path here: retained settlement history
+                    # must not amplify an operational provider failure into O(history).
                     failure = self._state.record_failure(
                         code="ProviderUnavailableError"
                     )
@@ -2298,83 +2298,84 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             with self._state.running_fence():
                 source_snapshot = self._refresh_source_state_projection()
                 source_gap_states = (
-                ()
-                if source_snapshot.source_gap_state is None
-                else (source_snapshot.source_gap_state,)
-            )
-            source_sync_states = (
-                ()
-                if source_snapshot.source_sync_state is None
-                else (source_snapshot.source_sync_state,)
-            )
-            delivered = self.desktop_consumer.drain(
-                as_of=now,
-                view=self.causal_view,
-            )
-            affected, full_refresh, backlog = self._drain_invalidations()
-
-            newly_registered: list[str] = []
-            retired: list[str] = []
-
-            def register(input_id: str, **selectors: object) -> None:
-                before = input_id in self.dependency_index.input_ids
-                self._register_input(input_id, **selectors)
-                if not before:
-                    newly_registered.append(input_id)
-
-            def retire(input_id: str) -> None:
-                before = input_id in self.dependency_index.input_ids
-                self._retire_input(input_id)
-                if before:
-                    retired.append(input_id)
-
-            registered = self.lifecycle.register_eligible(
-                self.market_store,
-                as_of=now,
-                required_history=self.required_history,
-                register_input=register,
-                retire_input=retire,
-            )
-            # The lifecycle is canonical about eligibility; the index is canonical
-            # about dependency routing. Keep both outputs for auditability.
-            for input_id in registered:
-                if input_id not in newly_registered:
-                    newly_registered.append(input_id)
-
-            resolutions = self._settlement_resolutions(as_of=now)
-            self._state.validate_settlement_evidence(
-                settlement_evidence=resolutions
-            )
-            if self.settlement_learning_handoff is not None:
-                prepare = getattr(
-                    self.settlement_learning_handoff,
-                    "prepare_settlement",
-                    None,
+                    ()
+                    if source_snapshot.source_gap_state is None
+                    else (source_snapshot.source_gap_state,)
                 )
-                if prepare is not None:
-                    prepare(
+                source_sync_states = (
+                    ()
+                    if source_snapshot.source_sync_state is None
+                    else (source_snapshot.source_sync_state,)
+                )
+                delivered = self.desktop_consumer.drain(
+                    as_of=now,
+                    view=self.causal_view,
+                )
+                affected, full_refresh, backlog = self._drain_invalidations()
+
+                newly_registered: list[str] = []
+                retired: list[str] = []
+
+                def register(input_id: str, **selectors: object) -> None:
+                    before = input_id in self.dependency_index.input_ids
+                    self._register_input(input_id, **selectors)
+                    if not before:
+                        newly_registered.append(input_id)
+
+                def retire(input_id: str) -> None:
+                    before = input_id in self.dependency_index.input_ids
+                    self._retire_input(input_id)
+                    if before:
+                        retired.append(input_id)
+
+                registered = self.lifecycle.register_eligible(
+                    self.market_store,
+                    as_of=now,
+                    required_history=self.required_history,
+                    register_input=register,
+                    retire_input=retire,
+                )
+                # The lifecycle is canonical about eligibility; the index is canonical
+                # about dependency routing. Keep both outputs for auditability.
+                for input_id in registered:
+                    if input_id not in newly_registered:
+                        newly_registered.append(input_id)
+
+                resolutions = self._settlement_resolutions(as_of=now)
+                self._state.validate_settlement_evidence(
+                    settlement_evidence=resolutions
+                )
+                if self.settlement_learning_handoff is not None:
+                    prepare = getattr(
+                        self.settlement_learning_handoff,
+                        "prepare_settlement",
+                        None,
+                    )
+                    if prepare is not None:
+                        prepare(
+                            paper_book_path=self.paper_book_path,
+                            resolutions=self._detached_settlement_resolutions(
+                                resolutions
+                            ),
+                            at=now,
+                        )
+                settled, evidence_ids = self._settle(resolutions=resolutions)
+                if self.settlement_learning_handoff is not None:
+                    self.settlement_learning_handoff.reconcile_after_settlement(
                         paper_book_path=self.paper_book_path,
                         resolutions=self._detached_settlement_resolutions(
                             resolutions
                         ),
+                        settled_ticket_ids=settled,
                         at=now,
                     )
-            settled, evidence_ids = self._settle(resolutions=resolutions)
-            if self.settlement_learning_handoff is not None:
-                self.settlement_learning_handoff.reconcile_after_settlement(
-                    paper_book_path=self.paper_book_path,
-                    resolutions=self._detached_settlement_resolutions(
-                        resolutions
-                    ),
-                    settled_ticket_ids=settled,
-                    at=now,
-                )
 
                 cycle_index = self._state.record_success(
                     at=now,
                     full_refresh=full_refresh,
                     settlement_evidence=resolutions,
                 )
+
             return ContinuousTickResult(
                 session_id=self.session_id,
                 cycle_index=cycle_index,

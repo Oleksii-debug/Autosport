@@ -4979,11 +4979,24 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         refresh_tick_dependency_routing_authority()
 
+        missing_economic_value = object()
+
+        def economic_value_changed(name: str, canonical: object) -> bool:
+            current = getattr(self, name, missing_economic_value)
+            return (
+                current is missing_economic_value
+                or type(current) is not type(canonical)
+                or current != canonical
+            )
+
         def restore_economic_context() -> bool:
+            # Never dispatch equality on a foreign replacement object. A callback
+            # can rebind or delete public coordinator configuration before failing;
+            # recovery must remain able to restore the canonical tick snapshot.
             changed = (
-                self.workspace != workspace
-                or self.paper_book_path != paper_book_path
-                or self.initial_bankroll != initial_bankroll
+                economic_value_changed("workspace", workspace)
+                or economic_value_changed("paper_book_path", paper_book_path)
+                or economic_value_changed("initial_bankroll", initial_bankroll)
             )
             if changed:
                 self.workspace = workspace

@@ -4383,11 +4383,11 @@ def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
         if "/actions/workflows/356678400/runs?" in url:
             if "status=queued" in url:
                 page = int(url.rsplit("page=", 1)[1])
-                assert page in {1, 2, 12}
+                assert page in {1, 2, 13}
                 first_run_id = (page - 1) * 100 + 1
-                page_head = STALE_HEAD if page == 12 else HEAD
+                page_head = STALE_HEAD if page == 13 else HEAD
                 payload = {
-                    "total_count": 1200,
+                    "total_count": 1300 if page in {2, 13} else 1200,
                     "workflow_runs": [
                         {
                             "id": first_run_id + offset,
@@ -4418,7 +4418,7 @@ def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
 
         if "/actions/runs/" in url and not url.endswith("/cancel"):
             run_id = int(url.split("/actions/runs/", 1)[1].split("/", 1)[0])
-            reread_head = STALE_HEAD if run_id >= 1101 else HEAD
+            reread_head = STALE_HEAD if run_id >= 1201 else HEAD
             return FakeResponse(
                 (
                     '{"id":' + str(run_id) + ',"workflow_id":356678400,'
@@ -4445,12 +4445,12 @@ def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
     ]
     # The large queued snapshot is deliberately bounded so transport capacity is
     # spent on irreversible effects rather than exhaustive observation. The scan
-    # must reach the frozen tail page; otherwise a permanently large queue could
+    # must reach the refreshed observed tail page; otherwise a growing large queue could
     # starve old stale runs forever. With the canonical 24-request budget this
     # fixture must make five independently revalidated tail cancellations.
     assert len(cancel_requests) == 5
     assert all(
-        int(url.split("/actions/runs/", 1)[1].split("/", 1)[0]) >= 1101
+        int(url.split("/actions/runs/", 1)[1].split("/", 1)[0]) >= 1201
         for url in cancel_requests
     )
     queued_pages = [
@@ -4460,7 +4460,7 @@ def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
         and "/actions/workflows/356678400/runs?" in url
         and "status=queued" in url
     ]
-    assert queued_pages == [1, 2, 12]
+    assert queued_pages == [1, 2, 13]
     assert "request budget exhausted" in captured.err
     assert len(requested) == 24
 

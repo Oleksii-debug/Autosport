@@ -34,6 +34,10 @@ PRODUCT_RUNTIME_UK_UA: Mapping[str, str] = MappingProxyType(
         "ui.product_runtime.status.recovery_required": (
             "Тривала PAPER-робота заблокована: спочатку відновіть робочу область із карантину."
         ),
+        "ui.product_runtime.status.workspace_identity_mismatch": (
+            "Тривала PAPER-робота не запущена: активна економічна робоча область "
+            "не відповідає поточній стратегії."
+        ),
         "ui.product_runtime.status.operation_busy": (
             "Спочатку завершіть поточний повтор, живе спостереження, відновлення або експорт."
         ),

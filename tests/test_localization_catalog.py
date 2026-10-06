@@ -138,6 +138,7 @@ _RUNTIME_RECOVERY_KEYS = {
     "ui.product_runtime.status.configuration_missing",
     "ui.product_runtime.status.configuration_invalid",
     "ui.product_runtime.status.recovery_required",
+    "ui.product_runtime.status.workspace_identity_mismatch",
     "ui.product_runtime.status.operation_busy",
     "ui.product_runtime.status.session_close_failed",
     "ui.product_runtime.status.start_failed",

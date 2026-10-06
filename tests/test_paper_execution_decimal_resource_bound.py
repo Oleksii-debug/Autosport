@@ -97,6 +97,70 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
 
         self.assertEqual(result, Decimal("3.50"))
 
+    def test_public_decimal_reconstruction_rejects_composite_type_alias_laundering(self) -> None:
+        previous_type = public_paper._CANONICAL_DECIMAL_TYPE
+        previous_identity = public_paper._CANONICAL_DECIMAL_TYPE_IDENTITY
+
+        def forged_decimal(*args, **kwargs):
+            raise AssertionError("composite-rebound Decimal authority executed")
+
+        public_paper._CANONICAL_DECIMAL_TYPE = forged_decimal
+        public_paper._CANONICAL_DECIMAL_TYPE_IDENTITY = forged_decimal
+        try:
+            result = public_paper._decimal_from_coefficient(125, -2)
+        finally:
+            public_paper._CANONICAL_DECIMAL_TYPE = previous_type
+            public_paper._CANONICAL_DECIMAL_TYPE_IDENTITY = previous_identity
+
+        self.assertEqual(result, Decimal("1.25"))
+
+    def test_public_decimal_reconstruction_rejects_composite_validator_alias_laundering(self) -> None:
+        previous_validator = public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+        previous_identity = public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR_IDENTITY
+
+        def forged_validator(_value):
+            raise AssertionError("composite-rebound resource validator executed")
+
+        public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR = forged_validator
+        public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR_IDENTITY = forged_validator
+        try:
+            result = public_paper._decimal_from_coefficient(250, -2)
+        finally:
+            public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR = previous_validator
+            public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR_IDENTITY = previous_identity
+
+        self.assertEqual(result, Decimal("2.50"))
+
+    def test_public_decimal_add_rejects_composite_helper_alias_laundering(self) -> None:
+        previous_coefficient = public_paper._decimal_coefficient
+        previous_canonical_coefficient = public_paper._CANONICAL_DECIMAL_COEFFICIENT
+        previous_from_coefficient = public_paper._decimal_from_coefficient
+        previous_canonical_from_coefficient = (
+            public_paper._CANONICAL_DECIMAL_FROM_COEFFICIENT
+        )
+
+        def forged_helper(*args, **kwargs):
+            raise AssertionError("composite-rebound arithmetic helper executed")
+
+        public_paper._decimal_coefficient = forged_helper
+        public_paper._CANONICAL_DECIMAL_COEFFICIENT = forged_helper
+        public_paper._decimal_from_coefficient = forged_helper
+        public_paper._CANONICAL_DECIMAL_FROM_COEFFICIENT = forged_helper
+        try:
+            result = public_paper._decimal_add_exact(
+                Decimal("1.20"),
+                Decimal("2.30"),
+            )
+        finally:
+            public_paper._decimal_coefficient = previous_coefficient
+            public_paper._CANONICAL_DECIMAL_COEFFICIENT = previous_canonical_coefficient
+            public_paper._decimal_from_coefficient = previous_from_coefficient
+            public_paper._CANONICAL_DECIMAL_FROM_COEFFICIENT = (
+                previous_canonical_from_coefficient
+            )
+
+        self.assertEqual(result, Decimal("3.50"))
+
     def test_public_decimal_coefficient_boundary_avoids_int_string_limit(self) -> None:
         coefficient = 10 ** 8191
 

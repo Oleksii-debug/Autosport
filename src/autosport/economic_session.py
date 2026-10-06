@@ -783,7 +783,19 @@ _PRODUCT_ECONOMIC_SESSION_FIELD_DESCRIPTORS: Final = tuple(
 _DECODE_STATE_CODE: Final = _decode_state.__code__
 
 _ECONOMIC_SESSION_CODE_AUTHORITIES: Final = tuple(
-    (label, authority, getattr(authority, "__code__", None))
+    (
+        label,
+        authority,
+        getattr(authority, "__code__", None),
+        getattr(authority, "__defaults__", None),
+        getattr(authority, "__kwdefaults__", None),
+        tuple(
+            (key, value)
+            for key, value in (
+                getattr(authority, "__kwdefaults__", None) or {}
+            ).items()
+        ),
+    )
     for label, authority in (
         ("uuid4", _UUID4),
         ("EconomicGoalStore.load", _ECONOMIC_GOAL_LOAD),
@@ -834,15 +846,52 @@ class ProductEconomicSessionStore:
             except AttributeError:
                 descriptor = cls.__dict__[name]
             else:
-                descriptor, code = next(
-                    (candidate, candidate_code)
-                    for protected_name, candidate, candidate_code in witnesses
+                (
+                    descriptor,
+                    code,
+                    defaults,
+                    kwdefaults,
+                    kwdefault_items,
+                ) = next(
+                    (
+                        candidate,
+                        candidate_code,
+                        candidate_defaults,
+                        candidate_kwdefaults,
+                        candidate_kwdefault_items,
+                    )
+                    for (
+                        protected_name,
+                        candidate,
+                        candidate_code,
+                        candidate_defaults,
+                        candidate_kwdefaults,
+                        candidate_kwdefault_items,
+                    ) in witnesses
                     if protected_name == name
                 )
                 if code is not None and getattr(descriptor, "__code__", None) is not code:
                     raise EconomicSessionIntegrityError(
                         "economic-session authority method code changed"
                     )
+                if getattr(descriptor, "__defaults__", None) is not defaults:
+                    raise EconomicSessionIntegrityError(
+                        "economic-session authority method defaults changed"
+                    )
+                if getattr(descriptor, "__kwdefaults__", None) is not kwdefaults:
+                    raise EconomicSessionIntegrityError(
+                        "economic-session authority method keyword defaults changed"
+                    )
+                if kwdefaults is not None:
+                    if len(kwdefaults) != len(kwdefault_items):
+                        raise EconomicSessionIntegrityError(
+                            "economic-session authority method keyword defaults changed"
+                        )
+                    for key, value in kwdefault_items:
+                        if key not in kwdefaults or kwdefaults[key] is not value:
+                            raise EconomicSessionIntegrityError(
+                                "economic-session authority method keyword defaults changed"
+                            )
             return descriptor.__get__(self, cls)
         return object.__getattribute__(self, name)
 
@@ -878,17 +927,36 @@ class ProductEconomicSessionStore:
                 "economic-session store method authority is not initialized"
             )
         cls = object.__getattribute__(self, "__class__")
-        for method_name, descriptor, code in canonical_methods:
+        for (
+            method_name,
+            descriptor,
+            code,
+            defaults,
+            kwdefaults,
+            kwdefault_items,
+        ) in canonical_methods:
             if (
                 cls.__dict__.get(method_name) is not descriptor
                 or (
                     code is not None
                     and getattr(descriptor, "__code__", None) is not code
                 )
+                or getattr(descriptor, "__defaults__", None) is not defaults
+                or getattr(descriptor, "__kwdefaults__", None) is not kwdefaults
             ):
                 raise EconomicSessionIntegrityError(
                     "economic-session store method authority changed"
                 )
+            if kwdefaults is not None:
+                if len(kwdefaults) != len(kwdefault_items):
+                    raise EconomicSessionIntegrityError(
+                        "economic-session store method authority changed"
+                    )
+                for key, value in kwdefault_items:
+                    if key not in kwdefaults or kwdefaults[key] is not value:
+                        raise EconomicSessionIntegrityError(
+                            "economic-session store method authority changed"
+                        )
         object.__setattr__(
             self,
             "_protected_method_witnesses",
@@ -908,14 +976,35 @@ class ProductEconomicSessionStore:
             raise EconomicSessionIntegrityError(
                 "economic-session PaperBook classmethod authority changed"
             )
-        for label, authority, code in _ECONOMIC_SESSION_CODE_AUTHORITIES:
+        for (
+            label,
+            authority,
+            code,
+            defaults,
+            kwdefaults,
+            kwdefault_items,
+        ) in _ECONOMIC_SESSION_CODE_AUTHORITIES:
             if (
-                code is not None
-                and getattr(authority, "__code__", None) is not code
+                (
+                    code is not None
+                    and getattr(authority, "__code__", None) is not code
+                )
+                or getattr(authority, "__defaults__", None) is not defaults
+                or getattr(authority, "__kwdefaults__", None) is not kwdefaults
             ):
                 raise EconomicSessionIntegrityError(
-                    f"economic-session {label} callable code authority changed"
+                    f"economic-session {label} callable authority changed"
                 )
+            if kwdefaults is not None:
+                if len(kwdefaults) != len(kwdefault_items):
+                    raise EconomicSessionIntegrityError(
+                        f"economic-session {label} callable authority changed"
+                    )
+                for key, value in kwdefault_items:
+                    if key not in kwdefaults or kwdefaults[key] is not value:
+                        raise EconomicSessionIntegrityError(
+                            f"economic-session {label} callable authority changed"
+                        )
         object.__setattr__(
             self,
             "_code_authority_witnesses",
@@ -1230,9 +1319,30 @@ class ProductEconomicSessionStore:
             or self._code_authority_witnesses
             is not _ECONOMIC_SESSION_CODE_AUTHORITIES
             or _any(
-                code is not None
-                and _getattr(authority, "__code__", None) is not code
-                for _label, authority, code in self._code_authority_witnesses
+                (
+                    code is not None
+                    and _getattr(authority, "__code__", None) is not code
+                )
+                or _getattr(authority, "__defaults__", None) is not defaults
+                or _getattr(authority, "__kwdefaults__", None) is not kwdefaults
+                or (
+                    kwdefaults is not None
+                    and (
+                        len(kwdefaults) != len(kwdefault_items)
+                        or _any(
+                            key not in kwdefaults or kwdefaults[key] is not value
+                            for key, value in kwdefault_items
+                        )
+                    )
+                )
+                for (
+                    _label,
+                    authority,
+                    code,
+                    defaults,
+                    kwdefaults,
+                    kwdefault_items,
+                ) in self._code_authority_witnesses
             )
             or _any(
                 _type(self).__dict__.get(name) is not descriptor
@@ -1240,7 +1350,26 @@ class ProductEconomicSessionStore:
                     code is not None
                     and _getattr(descriptor, "__code__", None) is not code
                 )
-                for name, descriptor, code in self._protected_method_witnesses
+                or _getattr(descriptor, "__defaults__", None) is not defaults
+                or _getattr(descriptor, "__kwdefaults__", None) is not kwdefaults
+                or (
+                    kwdefaults is not None
+                    and (
+                        len(kwdefaults) != len(kwdefault_items)
+                        or _any(
+                            key not in kwdefaults or kwdefaults[key] is not value
+                            for key, value in kwdefault_items
+                        )
+                    )
+                )
+                for (
+                    name,
+                    descriptor,
+                    code,
+                    defaults,
+                    kwdefaults,
+                    kwdefault_items,
+                ) in self._protected_method_witnesses
             )
             or _type(self).__dict__.get("current") is not self._current_method_witness
             or (
@@ -1597,13 +1726,24 @@ class ProductEconomicSessionStore:
         )
 
 
-_PRODUCT_ECONOMIC_SESSION_STORE_METHODS: (
-    tuple[tuple[str, object, object | None], ...] | None
-) = tuple(
+_PRODUCT_ECONOMIC_SESSION_STORE_METHODS: tuple[tuple[object, ...], ...] | None = tuple(
     (
         name,
         ProductEconomicSessionStore.__dict__[name],
         getattr(ProductEconomicSessionStore.__dict__[name], "__code__", None),
+        getattr(ProductEconomicSessionStore.__dict__[name], "__defaults__", None),
+        getattr(ProductEconomicSessionStore.__dict__[name], "__kwdefaults__", None),
+        tuple(
+            (key, value)
+            for key, value in (
+                getattr(
+                    ProductEconomicSessionStore.__dict__[name],
+                    "__kwdefaults__",
+                    None,
+                )
+                or {}
+            ).items()
+        ),
     )
     for name in (
         "current",

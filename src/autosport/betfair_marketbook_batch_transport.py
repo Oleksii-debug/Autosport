@@ -43,6 +43,9 @@ from .betfair_marketbook_projection_concurrency import (
     MarketBookProjectionConcurrencyDecision,
     MarketBookProjectionLease,
 )
+from .betfair_marketbook_retry_backoff import (
+    MarketBookRetryBackoffGate,
+)
 
 
 class MarketBookBatchTransportError(RuntimeError):
@@ -56,6 +59,7 @@ class MarketBookBatchAdmissionError(MarketBookBatchTransportError):
         if outcome not in {
             MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
             MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY,
+            MarketBookAttemptOutcome.NOT_DISPATCHED_BACKOFF,
         }:
             raise ValueError("admission outcome must be a NOT_DISPATCHED outcome")
         super().__init__(message)
@@ -98,6 +102,25 @@ def _sha256_token(value: object, field: str) -> str:
     if len(token) != 64 or any(char not in "0123456789abcdef" for char in token):
         raise MarketBookBatchTransportError(f"{field} must be lowercase sha256")
     return token
+
+
+def _provider_error_code_token(value: object) -> str | None:
+    if value is None:
+        return None
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or value != value.upper()
+        or any(
+            char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+            for char in value
+        )
+    ):
+        raise MarketBookBatchTransportError(
+            "provider_error_code must be a canonical uppercase provider token"
+        )
+    return value
 
 
 def _transport_now(
@@ -561,6 +584,7 @@ def _append_nonresponse_attempt(
         {
             MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
             MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY,
+            MarketBookAttemptOutcome.NOT_DISPATCHED_BACKOFF,
             MarketBookAttemptOutcome.PROVIDER_FAILURE,
             MarketBookAttemptOutcome.TRANSPORT_FAILURE,
             MarketBookAttemptOutcome.PARSE_FAILURE,
@@ -592,6 +616,7 @@ class MarketBookBatchAttemptExecution:
     history: MarketBookAttemptHistory
     outcome: MarketBookAttemptOutcome
     result: MarketBookBatchTransportResult | None
+    provider_error_code: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.history) is not MarketBookAttemptHistory:
@@ -604,6 +629,16 @@ class MarketBookBatchAttemptExecution:
             ) from exc
         if not isinstance(self.outcome, MarketBookAttemptOutcome):
             raise TypeError("outcome must be MarketBookAttemptOutcome")
+        provider_error_code = _provider_error_code_token(
+            self.provider_error_code
+        )
+        if (
+            self.outcome is not MarketBookAttemptOutcome.PROVIDER_FAILURE
+            and provider_error_code is not None
+        ):
+            raise MarketBookBatchTransportError(
+                "provider_error_code is only valid for PROVIDER_FAILURE"
+            )
         if not self.history.records:
             raise MarketBookBatchTransportError(
                 "attempt execution requires an appended canonical history record"
@@ -793,6 +828,7 @@ def _install_transport_result_authority() -> None:
     )
     all_attempt_outcomes = frozenset(MarketBookAttemptOutcome)
     batch_transport_error_type = MarketBookBatchTransportError
+    validate_provider_error_code = _provider_error_code_token
     validate_history = MarketBookAttemptHistory.__post_init__
     admission_error_type = MarketBookBatchAdmissionError
     post_dispatch_failure_type = MarketBookPostDispatchFailure
@@ -1388,6 +1424,16 @@ def _install_transport_result_authority() -> None:
             ) from exc
         if self.outcome not in all_attempt_outcomes:
             raise TypeError("outcome must be MarketBookAttemptOutcome")
+        provider_error_code = validate_provider_error_code(
+            self.provider_error_code
+        )
+        if (
+            self.outcome is not MarketBookAttemptOutcome.PROVIDER_FAILURE
+            and provider_error_code is not None
+        ):
+            raise batch_transport_error_type(
+                "provider_error_code is only valid for PROVIDER_FAILURE"
+            )
         if not self.history.records:
             raise batch_transport_error_type(
                 "attempt execution requires an appended canonical history record"
@@ -1507,10 +1553,7 @@ def _execute_market_book_batch_attempt(
     exact_response_status: BatchReceiptStatus,
     history_type: type[MarketBookAttemptHistory],
     batch_transport_error_type: type[MarketBookBatchTransportError],
-    make_execution: Callable[
-        [MarketBookAttemptHistory, MarketBookAttemptOutcome, MarketBookBatchTransportResult | None],
-        MarketBookBatchAttemptExecution,
-    ],
+    make_execution: Callable[..., MarketBookBatchAttemptExecution],
 ) -> MarketBookBatchAttemptExecution:
     """Execute one admitted read and durably classify its structural attempt truth."""
 
@@ -1561,8 +1604,11 @@ def _execute_market_book_batch_attempt(
             outcome=outcome,
         )
         return make_execution(updated, outcome, None)
-    except provider_error_type:
+    except provider_error_type as exc:
         outcome = provider_failure_outcome
+        provider_error_code = _provider_error_code_token(
+            getattr(exc, "provider_error_code", None)
+        )
         updated = append_nonresponse(
             frozen_history,
             batch_id=batch_id,
@@ -1570,7 +1616,12 @@ def _execute_market_book_batch_attempt(
             required=required,
             outcome=outcome,
         )
-        return make_execution(updated, outcome, None)
+        return make_execution(
+            updated,
+            outcome,
+            None,
+            provider_error_code,
+        )
     except protocol_error_type:
         outcome = parse_failure_outcome
         updated = append_nonresponse(
@@ -1622,6 +1673,12 @@ def _install_attempt_executor() -> None:
     canonical_execution_validate = MarketBookBatchAttemptExecution.__post_init__
     canonical_history_type = MarketBookAttemptHistory
     canonical_batch_transport_error_type = MarketBookBatchTransportError
+    canonical_retry_gate_type = MarketBookRetryBackoffGate
+    canonical_retry_snapshot = MarketBookRetryBackoffGate.snapshot
+    canonical_retry_admit = MarketBookRetryBackoffGate.admit
+    canonical_retry_record = MarketBookRetryBackoffGate.record_outcome
+    canonical_dispatch_instant = _dispatch_instant
+    canonical_backoff_outcome = MarketBookAttemptOutcome.NOT_DISPATCHED_BACKOFF
     canonical_plan_type = MarketBookReadPlan
     canonical_plan_validate = MarketBookReadPlan.__post_init__
     canonical_history_validate = MarketBookAttemptHistory.__post_init__
@@ -1663,6 +1720,7 @@ def _install_attempt_executor() -> None:
         history: MarketBookAttemptHistory,
         outcome: MarketBookAttemptOutcome,
         result: MarketBookBatchTransportResult | None,
+        provider_error_code: str | None = None,
     ) -> MarketBookBatchAttemptExecution:
         # Avoid generated dataclass __init__ -> mutable self.__post_init__
         # dispatch on the canonical executor path. Construct the exact frozen
@@ -1671,6 +1729,11 @@ def _install_attempt_executor() -> None:
         object.__setattr__(execution, "history", history)
         object.__setattr__(execution, "outcome", outcome)
         object.__setattr__(execution, "result", result)
+        object.__setattr__(
+            execution,
+            "provider_error_code",
+            provider_error_code,
+        )
         canonical_execution_validate(execution)
         return execution
 
@@ -1719,7 +1782,102 @@ def _install_attempt_executor() -> None:
             make_execution=make_execution,
         )
 
+    def execute_market_book_batch_attempt_with_backoff(
+        client: _base.BetfairReadOnlyClient,
+        history: MarketBookAttemptHistory,
+        *,
+        batch_id: str,
+        attempt_id: str,
+        required: bool,
+        request_id: str,
+        scheduled_at: datetime,
+        rate_gate: BetfairMarketBookPerMarketRateGate,
+        concurrency_gate: BetfairMarketBookProjectionConcurrencyGate,
+        retry_gate: MarketBookRetryBackoffGate,
+    ) -> MarketBookBatchAttemptExecution:
+        if type(history) is not canonical_history_type:
+            raise TypeError("history must be an exact MarketBookAttemptHistory")
+        if type(retry_gate) is not canonical_retry_gate_type:
+            raise TypeError(
+                "retry_gate must be an exact MarketBookRetryBackoffGate"
+            )
+        state = canonical_retry_snapshot(retry_gate)
+        if (
+            state.plan_id != history.plan.plan_id
+            or state.request_contract_id
+            != history.plan.request_contract_id
+        ):
+            raise canonical_batch_transport_error_type(
+                "retry gate is bound to another MarketBook plan"
+            )
+
+        retry_observed_at = canonical_dispatch_instant(
+            client,
+            scheduled_at,
+        )
+        decision = canonical_retry_admit(
+            retry_gate,
+            batch_id,
+            observed_at=retry_observed_at,
+        )
+        if decision.allowed is not True:
+            frozen_plan = freeze_plan(history.plan)
+            frozen_history = freeze_history(frozen_plan, history)
+            attempt = canonical_token(attempt_id, "attempt_id")
+            if type(required) is not bool:
+                raise TypeError("required must be exact bool")
+            if any(
+                record.attempt_id == attempt
+                for record in frozen_history.records
+            ):
+                raise canonical_batch_transport_error_type(
+                    "attempt_id is already present in canonical MarketBook history"
+                )
+            canonical_batch(frozen_history.plan, batch_id)
+            updated = canonical_append_nonresponse(
+                frozen_history,
+                batch_id=batch_id,
+                attempt_id=attempt,
+                required=required,
+                outcome=canonical_backoff_outcome,
+            )
+            execution = make_execution(
+                updated,
+                canonical_backoff_outcome,
+                None,
+            )
+            canonical_retry_record(
+                retry_gate,
+                batch_id,
+                observed_at=retry_observed_at,
+                outcome=canonical_backoff_outcome,
+            )
+            return execution
+
+        execution = execute_market_book_batch_attempt(
+            client,
+            history,
+            batch_id=batch_id,
+            attempt_id=attempt_id,
+            required=required,
+            request_id=request_id,
+            scheduled_at=scheduled_at,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+        canonical_retry_record(
+            retry_gate,
+            batch_id,
+            observed_at=retry_observed_at,
+            outcome=execution.outcome,
+            provider_error_code=execution.provider_error_code,
+        )
+        return execution
+
     globals()["execute_market_book_batch_attempt"] = execute_market_book_batch_attempt
+    globals()["execute_market_book_batch_attempt_with_backoff"] = (
+        execute_market_book_batch_attempt_with_backoff
+    )
 
 
 _install_attempt_executor()

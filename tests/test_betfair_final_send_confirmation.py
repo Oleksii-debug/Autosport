@@ -7,6 +7,7 @@ import tempfile
 import pytest
 
 import autosport.betfair_execution_confirmation as confirmation_runtime
+import autosport.betfair_supervised_execution as betfair_execution_runtime
 import autosport.supervised_confirmation as confirmation_store_runtime
 import autosport.supervised_execution as supervised_execution
 from autosport.betfair_execution_confirmation import (
@@ -483,6 +484,135 @@ def test_last_provider_seam_clock_sample_blocks_exact_quote_expiry(
         )
         assert binding.receipt.consumed_at is not None
         assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
+
+def test_coordinated_cached_consumer_root_rebinding_fails_closed(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-coordinated-consumer-rebound"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        _authority, review, receipt = _issue_confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        _set_trusted_times(monkeypatch, RESERVED_AT)
+
+        original = (
+            confirmation_store_runtime.SupervisedConfirmationAuthority
+            .consume_receipt
+        )
+
+        def rebound(self, *args, **kwargs):
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            confirmation_store_runtime.SupervisedConfirmationAuthority,
+            "consume_receipt",
+            rebound,
+        )
+        monkeypatch.setattr(
+            confirmation_runtime,
+            "_CONSUME_RECEIPT",
+            rebound,
+        )
+        monkeypatch.setattr(
+            confirmation_runtime,
+            "_CONSUME_RECEIPT_CODE",
+            rebound.__code__,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="confirmation authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+
+
+def test_raw_final_send_callables_are_not_module_level_bypass_surfaces() -> None:
+    assert not hasattr(
+        betfair_execution_runtime,
+        "_canonical_place_action_dispatch",
+    )
+    assert not hasattr(
+        betfair_execution_runtime,
+        "_place_action_with_final_durable_authority",
+    )
+    assert not hasattr(
+        betfair_execution_runtime,
+        "_execute_betfair_supervised_action_core",
+    )
+
+
+def test_restart_recovery_promotes_confirmation_denial_to_unknown_without_retry(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-confirmation-denied-restart"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        _authority, _review, receipt = _issue_confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        _set_trusted_times(
+            monkeypatch,
+            RESERVED_AT,
+            SUBMITTED_AT,
+            SUBMITTED_AT,
+        )
+
+        with pytest.raises(BetfairFinalConfirmationDenied):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256="0" * 64,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.SUBMITTED
+
+        from autosport.real_execution_ledger import RealExecutionLedger
+
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        promoted = restarted.recover_uncertain(
+            reason="restart_after_final_confirmation_denial"
+        )
+        assert attempt_id in promoted
+        assert restarted.attempt_state(attempt_id) is AttemptState.UNKNOWN
+        assert not restarted.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         )

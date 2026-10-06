@@ -3622,3 +3622,22 @@ def test_settlement_book_loader_rejects_module_paperbook_rebinding(monkeypatch) 
             assert "book loader authority changed" in str(exc)
         else:
             raise AssertionError("runtime-rebound PaperBook type was accepted")
+
+
+def test_settlement_book_loader_rejects_runtime_path_exists_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+        coordinator.paper_book_path = Path(directory) / "paper_book.json"
+        coordinator.initial_bankroll = "10000"
+
+        def attacker_exists(_path: Path) -> bool:
+            raise AssertionError("runtime-rebound Path.exists executed")
+
+        monkeypatch.setattr(Path, "exists", attacker_exists)
+
+        try:
+            coordinator._load_book()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "book loader authority changed" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound settlement existence authority was accepted")

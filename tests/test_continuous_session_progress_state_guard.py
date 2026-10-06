@@ -789,3 +789,30 @@ def test_existing_session_bootstrap_reopens_after_reader_hardening() -> None:
         assert snapshot.session_id == "session-progress-state-guard"
         assert snapshot.last_error_code == "ProviderUnavailableError"
 
+@pytest.mark.parametrize("authority", ("text", "sha256"))
+def test_durable_session_parser_rejects_runtime_scalar_validator_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+    authority: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+
+        if authority == "text":
+            def attacker_text(_value: object, _field: str) -> str:
+                raise AssertionError("runtime-rebound durable text validator executed")
+
+            monkeypatch.setattr(continuous_session, "_text", attacker_text)
+            expected = "canonical session-reader code identity changed"
+        else:
+            def attacker_sha256(_value: object, _field: str) -> str:
+                raise AssertionError("runtime-rebound durable hash validator executed")
+
+            monkeypatch.setattr(continuous_session, "_sha256", attacker_sha256)
+            expected = "canonical settlement evidence parser authority changed"
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match=expected,
+        ):
+            state.snapshot()
+

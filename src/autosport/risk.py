@@ -16,9 +16,38 @@ from decimal import (
 )
 
 from .domain import MarketEvent, PaperTicket, TicketLeg, TicketStatus
+from .exchange_exposure import locked_capital_for_exchange_side
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .paper import PaperBook
+
+
+def _make_locked_capital_authority():
+    calculator = locked_capital_for_exchange_side
+    calculator_code = calculator.__code__
+
+    def calculate(ticket: PaperTicket) -> Decimal:
+        if calculator.__code__ is not calculator_code:
+            raise ValueError("risk locked-capital exposure authority changed")
+        if type(ticket) is not PaperTicket or type(ticket.legs) is not tuple:
+            raise ValueError("risk ticket must be canonical")
+        if any(leg.exchange_side == "lay" for leg in ticket.legs):
+            if len(ticket.legs) != 1 or type(ticket.legs[0]) is not TicketLeg:
+                raise ValueError(
+                    "risk LAY exposure requires exactly one canonical single-leg ticket"
+                )
+            return calculator(
+                stake=ticket.stake,
+                odds=ticket.legs[0].locked_odds,
+                exchange_side="LAY",
+            )
+        return ticket.stake
+
+    return calculate
+
+
+_CANONICAL_LOCKED_CAPITAL_FOR_TICKET = _make_locked_capital_authority()
+del _make_locked_capital_authority
 
 
 def _canonical_context_text(name: str, value: object) -> str:
@@ -672,7 +701,10 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 ticket for ticket in tickets.values() if ticket.status is TicketStatus.OPEN
             )
             committed_stake = cls._exact_positive_sum(
-                tuple(ticket.stake for ticket in open_tickets)
+                tuple(
+                    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
+                    for ticket in open_tickets
+                )
             )
             open_position_count = len(open_tickets)
         except (ArithmeticError, AttributeError, TypeError, ValueError):
@@ -1033,11 +1065,12 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     return None
 
                 if action == "open":
+                    locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     replay_balance = PaperBook._debit_balance(
-                        replay_balance, ticket.stake
+                        replay_balance, locked_capital
                     )
                     replay_committed = cls._exact_positive_sum(
-                        (replay_committed, ticket.stake)
+                        (replay_committed, locked_capital)
                     )
                     turnover = cls._exact_positive_sum((turnover, ticket.stake))
                 else:
@@ -1047,11 +1080,12 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                         set(winners_raw),
                         set(voids_raw),
                     )
+                    locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     with localcontext(cls._decimal_context()):
-                        replay_committed = replay_committed - ticket.stake
+                        replay_committed = replay_committed - locked_capital
                         loss = (
-                            ticket.stake - payout
-                            if payout < ticket.stake
+                            locked_capital - payout
+                            if payout < locked_capital
                             else Decimal("0")
                         )
                     if replay_committed < 0:
@@ -1086,7 +1120,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
 
             current_committed = cls._exact_positive_sum(
                 tuple(
-                    ticket.stake
+                    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     for ticket in book.tickets.values()
                     if ticket.status is TicketStatus.OPEN
                 )

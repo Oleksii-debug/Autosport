@@ -349,6 +349,29 @@ def _canonical_candidate(candidate: ParlayCandidate) -> ParlayCandidate:
     for leg in candidate.legs:
         if type(leg) is not CandidateLeg:
             raise ValueError("candidate leg must be the exact canonical CandidateLeg type")
+        for field_name, value in (
+            ("quote_key", leg.quote_key),
+            ("event_id", leg.event_id),
+        ):
+            if type(value) is not str or not value or value.strip() != value:
+                raise ValueError(
+                    f"candidate leg {field_name} must be exact canonical text"
+                )
+        if (leg.market_id is None) != (leg.selection_id is None):
+            raise ValueError(
+                "candidate leg market_id and selection_id must be provided together"
+            )
+        for field_name, value in (
+            ("market_id", leg.market_id),
+            ("selection_id", leg.selection_id),
+            ("sport", leg.sport),
+        ):
+            if value is not None and (
+                type(value) is not str or not value or value.strip() != value
+            ):
+                raise ValueError(
+                    f"candidate leg {field_name} must be exact canonical text when present"
+                )
         if type(leg.decimal_odds) is not Decimal:
             raise ValueError("candidate decimal odds must be an exact Decimal")
         if not leg.decimal_odds.is_finite():

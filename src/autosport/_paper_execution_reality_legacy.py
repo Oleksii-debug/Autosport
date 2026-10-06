@@ -323,8 +323,12 @@ class PaperExecutionEvidenceRecord:
         elif self.accepted_odds is not None or self.accepted_stake is not None:
             raise ValueError("rejected/unknown evidence cannot claim accepted odds/stake")
 
-    def to_dict(self) -> dict[str, Any]:
-        _preflight_decimal_text_fields(self.accepted_odds, self.accepted_stake)
+    def to_dict(
+        self,
+        _preflight=_preflight_decimal_text_fields,
+        _decimal_formatter=_decimal_text,
+    ) -> dict[str, Any]:
+        _preflight(self.accepted_odds, self.accepted_stake)
         return {
             "action_id": self.action_id,
             "bookmaker_id": self.bookmaker_id,
@@ -339,10 +343,10 @@ class PaperExecutionEvidenceRecord:
             "evidence_grade": self.evidence_grade.value,
             "evidence_source": self.evidence_source,
             "accepted_odds": (
-                None if self.accepted_odds is None else _decimal_text(self.accepted_odds)
+                None if self.accepted_odds is None else _decimal_formatter(self.accepted_odds)
             ),
             "accepted_stake": (
-                None if self.accepted_stake is None else _decimal_text(self.accepted_stake)
+                None if self.accepted_stake is None else _decimal_formatter(self.accepted_stake)
             ),
             "suspended": self.suspended,
             "reason": self.reason,
@@ -566,8 +570,12 @@ class PaperLegAttempt:
         elif self.execution_odds is not None or self.execution_stake is not None:
             raise ValueError("rejected/unknown attempt cannot claim execution odds/stake")
 
-    def to_dict(self) -> dict[str, Any]:
-        _preflight_decimal_text_fields(
+    def to_dict(
+        self,
+        _preflight=_preflight_decimal_text_fields,
+        _decimal_formatter=_decimal_text,
+    ) -> dict[str, Any]:
+        _preflight(
             self.decision_odds,
             self.requested_stake,
             self.execution_odds,
@@ -586,18 +594,18 @@ class PaperLegAttempt:
             "selection_id": self.selection_id,
             "side": self.side,
             "decision_quote_id": self.decision_quote_id,
-            "decision_odds": _decimal_text(self.decision_odds),
-            "requested_stake": _decimal_text(self.requested_stake),
+            "decision_odds": _decimal_formatter(self.decision_odds),
+            "requested_stake": _decimal_formatter(self.requested_stake),
             "decision_observed_at": self.decision_observed_at,
             "execution_observed_at": self.execution_observed_at,
             "delay_ms": self.delay_ms,
             "quote_age_ms": self.quote_age_ms,
             "outcome": self.outcome.value,
             "execution_odds": (
-                None if self.execution_odds is None else _decimal_text(self.execution_odds)
+                None if self.execution_odds is None else _decimal_formatter(self.execution_odds)
             ),
             "execution_stake": (
-                None if self.execution_stake is None else _decimal_text(self.execution_stake)
+                None if self.execution_stake is None else _decimal_formatter(self.execution_stake)
             ),
             "suspended": self.suspended,
             "evidence_grade": self.evidence_grade.value,
@@ -1030,11 +1038,12 @@ class PaperExecutionLedger:
         pending_action_ids: tuple[str, ...],
         recovery_decision: RecoveryDecision,
         worst_case_exposure: Decimal,
+        _decimal_formatter=_decimal_text,
     ) -> None:
         payload = {
             "pending_action_ids": list(pending_action_ids),
             "recovery_decision": recovery_decision.value,
-            "worst_case_exposure": _decimal_text(worst_case_exposure),
+            "worst_case_exposure": _decimal_formatter(worst_case_exposure),
         }
         self._append_event(
             event_type="RUN_COMPLETED",

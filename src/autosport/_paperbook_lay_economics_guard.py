@@ -247,19 +247,19 @@ def _settlement_result(
     cls._require_finite(balance, "balance")
     leg = ticket.legs[0]
     cls._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
-    known = {leg.quote_key}
+    known = {leg.settlement_key}
     if winning_quote_keys - known:
-        raise ValueError("PaperBook settlement contains unknown winning quote_key")
+        raise ValueError("PaperBook settlement contains unknown winning settlement key")
     if void_quote_keys - known:
-        raise ValueError("PaperBook settlement contains unknown void quote_key")
+        raise ValueError("PaperBook settlement contains unknown void settlement key")
     if winning_quote_keys & void_quote_keys:
-        raise ValueError("PaperBook settlement quote_key cannot be both winning and void")
+        raise ValueError("PaperBook settlement key cannot be both winning and void")
 
     locked_capital = _locked_capital_for_ticket(ticket)
-    if leg.quote_key in void_quote_keys:
+    if leg.settlement_key in void_quote_keys:
         status = TicketStatus.VOID
         payout = locked_capital
-    elif leg.quote_key in winning_quote_keys:
+    elif leg.settlement_key in winning_quote_keys:
         status = TicketStatus.LOST
         payout = Decimal("0")
     else:

@@ -945,3 +945,59 @@ def test_transition_validator_rejects_transitive_contract_validation_mutation() 
             validate_automatic_transition(previous, candidate)
     finally:
         nested_decimal_validator.__code__ = original_code
+
+def test_contract_authority_graph_ignores_rebound_introspection_builtins(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    def forged(name: str):
+        def operation(*_args, **_kwargs):
+            calls.append(name)
+            raise AssertionError(f"rebound {name} executed")
+        return operation
+
+    for name in ("getattr", "tuple", "enumerate"):
+        monkeypatch.setattr(
+            economic_goal_module,
+            name,
+            forged(name),
+            raising=False,
+        )
+
+    goal = _goal()
+    candidate = replace(
+        goal,
+        revision=2,
+        max_stake_fraction=Decimal("0.01"),
+    )
+
+    goal.validate_automatic_successor(candidate)
+    validate_automatic_transition(goal, candidate)
+    assert callable(EconomicGoalContract.__init__)
+    assert calls == []
+
+
+def test_contract_class_guard_ignores_rebound_getattr(monkeypatch) -> None:
+    executed = False
+
+    def forged_getattr(*_args, **_kwargs):
+        nonlocal executed
+        executed = True
+        raise AssertionError("rebound getattr executed")
+
+    monkeypatch.setattr(
+        economic_goal_module,
+        "getattr",
+        forged_getattr,
+        raising=False,
+    )
+
+    assert callable(EconomicGoalContract.__init__)
+    with pytest.raises(TypeError, match="immutable"):
+        type.__setattr__(
+            EconomicGoalContract,
+            "__init__",
+            lambda *_args, **_kwargs: None,
+        )
+    assert executed is False

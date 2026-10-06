@@ -1364,6 +1364,28 @@ def test_payload_decoder_ignores_rebound_contract_constructor(monkeypatch) -> No
     assert restored == expected
 
 
+def test_store_snapshot_covers_every_captured_contract_slot(
+    monkeypatch, tmp_path
+) -> None:
+    goal = _goal()
+    field_names = economic_goal_store_module._CONTRACT_KEYS_ORDERED
+    expected = economic_goal_to_payload(goal)["contract"]
+
+    for name in field_names:
+        class ForgedDescriptor:
+            def __get__(self, instance, owner=None):
+                raise AssertionError("rebound contract descriptor executed")
+
+        monkeypatch.setattr(EconomicGoalContract, name, ForgedDescriptor())
+        snapshot = economic_goal_store_module._snapshot_economic_goal_contract(goal)
+        assert snapshot == economic_goal_store_module._build_economic_goal_contract(
+            dict(zip(field_names, economic_goal_store_module._canonical_contract_snapshot(goal))),
+        )
+        monkeypatch.undo()
+
+    assert economic_goal_to_payload(goal)["contract"] == expected
+
+
 def test_store_snapshot_helper_ignores_rebound_contract_descriptors(monkeypatch, tmp_path) -> None:
     goal = _goal(max_stake_fraction=Decimal("0.03"))
 

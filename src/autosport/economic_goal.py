@@ -313,6 +313,53 @@ _CANONICAL_CONTRACT_TYPE: Final = EconomicGoalContract
 _CANONICAL_CONTRACT_VALIDATOR: Final = EconomicGoalContract.__post_init__
 
 
+def _snapshot_transition_contract(
+    contract: EconomicGoalContract,
+    _contract_type=_CANONICAL_CONTRACT_TYPE,
+    _contract_validator=_CANONICAL_CONTRACT_VALIDATOR,
+    _object_new=object.__new__,
+    _object_setattr=object.__setattr__,
+    _error_type=EconomicGoalContractError,
+) -> EconomicGoalContract:
+    if type(contract) is not _contract_type:
+        raise _error_type(
+            "automatic transition requires EconomicGoalContract instances"
+        )
+    snapshot = _object_new(_contract_type)
+    for name, value in (
+        ("goal_id", contract.goal_id),
+        ("revision", contract.revision),
+        ("bankroll_id", contract.bankroll_id),
+        ("currency", contract.currency),
+        ("objective", contract.objective),
+        ("max_stake_fraction", contract.max_stake_fraction),
+        ("max_stake_amount", contract.max_stake_amount),
+        ("max_session_loss_fraction", contract.max_session_loss_fraction),
+        ("max_day_loss_fraction", contract.max_day_loss_fraction),
+        ("max_drawdown_fraction", contract.max_drawdown_fraction),
+        ("max_capital_at_risk_fraction", contract.max_capital_at_risk_fraction),
+        ("max_event_concentration_fraction", contract.max_event_concentration_fraction),
+        ("max_market_concentration_fraction", contract.max_market_concentration_fraction),
+        ("max_provider_concentration_fraction", contract.max_provider_concentration_fraction),
+        ("max_sport_concentration_fraction", contract.max_sport_concentration_fraction),
+        ("max_turnover_fraction", contract.max_turnover_fraction),
+        ("max_risk_of_ruin", contract.max_risk_of_ruin),
+        ("max_execution_slippage_fraction", contract.max_execution_slippage_fraction),
+        ("max_quote_age_seconds", contract.max_quote_age_seconds),
+        ("minimum_data_quality", contract.minimum_data_quality),
+        ("max_concurrent_positions", contract.max_concurrent_positions),
+        ("max_parlay_legs", contract.max_parlay_legs),
+        ("automation_level", contract.automation_level),
+        ("emergency_stop", contract.emergency_stop),
+        ("blocked_sports", contract.blocked_sports),
+        ("blocked_providers", contract.blocked_providers),
+        ("blocked_markets", contract.blocked_markets),
+    ):
+        _object_setattr(snapshot, name, value)
+    _contract_validator(snapshot)
+    return snapshot
+
+
 def _require_same(
     name: str,
     previous: object,
@@ -391,8 +438,7 @@ def _require_restrictions_not_removed(
 def _validate_automatic_transition_bound(
     previous: EconomicGoalContract,
     candidate: EconomicGoalContract,
-    _contract_type=_CANONICAL_CONTRACT_TYPE,
-    _contract_validator=_CANONICAL_CONTRACT_VALIDATOR,
+    _snapshotter=_snapshot_transition_contract,
     _same_guard=_require_same,
     _cap_guard=_require_cap_not_increased,
     _optional_cap_guard=_require_optional_cap_not_increased,
@@ -409,16 +455,8 @@ def _validate_automatic_transition_bound(
     *non-expansion*, not that every revision necessarily tightens a limit.
     """
 
-    if (
-        type(previous) is not _contract_type
-        or type(candidate) is not _contract_type
-    ):
-        raise _error_type(
-            "automatic transition requires EconomicGoalContract instances"
-        )
-
-    _contract_validator(previous)
-    _contract_validator(candidate)
+    previous = _snapshotter(previous)
+    candidate = _snapshotter(candidate)
 
     _same_guard("goal_id", previous.goal_id, candidate.goal_id)
     _same_guard("bankroll_id", previous.bankroll_id, candidate.bankroll_id)

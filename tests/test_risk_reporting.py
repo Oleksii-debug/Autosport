@@ -11,6 +11,7 @@ from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
 from autosport.risk import (
     PaperRiskPolicy,
+    ProposedTicketRiskContext,
     RiskOfRuinEvidence,
     RiskOfRuinVectorEvidence,
 )
@@ -118,6 +119,66 @@ class RiskOfRuinEvidenceCanonicalityTests(unittest.TestCase):
             RiskOfRuinVectorEvidence(
                 **self._vector_kwargs(upper_bound=forged_nan)
             )
+
+    def test_ruin_evidence_subclasses_are_not_executable_authority(self) -> None:
+        class ForgedScalarEvidence(RiskOfRuinEvidence):
+            def __post_init__(self):
+                return None
+
+        class ForgedVectorEvidence(RiskOfRuinVectorEvidence):
+            def __post_init__(self):
+                return None
+
+        forged_scalar = ForgedScalarEvidence(
+            **self._kwargs(upper_bound=Decimal("-1"))
+        )
+        forged_vector = ForgedVectorEvidence(
+            **self._vector_kwargs(upper_bound=Decimal("-1"))
+        )
+        leg = TicketLeg(
+            event_id="event-forged",
+            market_id="market-forged",
+            selection_id="selection-forged",
+            locked_odds=Decimal("2"),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "canonical RiskOfRuinEvidence",
+        ):
+            ProposedTicketRiskContext(
+                legs=(leg,),
+                risk_of_ruin_evidence=forged_scalar,
+            )
+
+        context = ProposedTicketRiskContext(legs=(leg,))
+        object.__setattr__(context, "risk_of_ruin_evidence", forged_scalar)
+        scalar_decision = PaperRiskPolicy._risk_of_ruin_evidence_decision(
+            PaperBook("100"),
+            Decimal("10"),
+            PaperRiskReportingTests._goal(),
+            context,
+        )
+        self.assertIsNotNone(scalar_decision)
+        self.assertFalse(scalar_decision.allowed)
+        self.assertEqual(
+            scalar_decision.reason,
+            "portfolio risk-of-ruin evidence is invalid",
+        )
+
+        vector_decision = PaperRiskPolicy._risk_of_ruin_vector_evidence_decision(
+            PaperBook("100"),
+            PaperRiskReportingTests._goal(),
+            (),
+            (),
+            forged_vector,
+        )
+        self.assertIsNotNone(vector_decision)
+        self.assertFalse(vector_decision.allowed)
+        self.assertEqual(
+            vector_decision.reason,
+            "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
+        )
 
 
 class PaperRiskReportingTests(unittest.TestCase):

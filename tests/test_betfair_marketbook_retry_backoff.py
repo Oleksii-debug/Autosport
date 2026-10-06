@@ -15,7 +15,7 @@ from autosport.betfair_marketbook_retry_backoff import (
     MarketBookRetryDisposition,
 )
 from autosport.continuous_observation import ContinuousObservationConfig
-from autosport.ingestion_health import SourceHealthState
+from autosport.ingestion_health import SourceHealthState, SourceHealthStore
 
 
 NOW = datetime(2026, 10, 6, 21, 0, tzinfo=timezone.utc)
@@ -56,23 +56,22 @@ def _config(
     )
 
 
-def _health(
+def _health_store(
+    tmp_path,
     streak: int,
     *,
-    source_id: str = SOURCE_ID,
     last_error_at: datetime = NOW,
-) -> SourceHealthState:
-    return SourceHealthState(
-        source_id=source_id,
-        status="failed",
-        poll_count=streak,
-        total_failures=streak,
-        consecutive_failures=streak,
-        last_error_at=last_error_at.isoformat(),
-        last_error="provider unavailable",
-        last_failure_kind="provider_unavailable",
-        consecutive_failure_kind_count=streak,
-    )
+    failure_kind: str = "provider_unavailable",
+) -> SourceHealthStore:
+    store = SourceHealthStore(tmp_path / "source_health.json")
+    for _ in range(streak):
+        store.record_failure(
+            SOURCE_ID,
+            now=last_error_at.isoformat(),
+            error=RuntimeError("provider unavailable"),
+            failure_kind=failure_kind,
+        )
+    return store
 
 
 def test_new_batch_is_ready_but_never_dispatch_authority():
@@ -124,7 +123,7 @@ def test_transient_provider_error_requires_external_recovery_authority(
     assert decision.provider_recovery_projection_applied is False
 
 
-def test_provider_recovery_reuses_exact_canonical_backoff_policy():
+def test_provider_recovery_reuses_exact_canonical_backoff_policy(tmp_path):
     plan = _plan()
     batch = plan.batches[0]
     gate = _gate(plan)
@@ -138,7 +137,7 @@ def test_provider_recovery_reuses_exact_canonical_backoff_policy():
     projected = gate.apply_provider_recovery(
         batch.batch_id,
         observed_at=NOW,
-        health=_health(2),
+        health_store=_health_store(tmp_path, 2),
         config=_config(interval_seconds=1.0, max_backoff_seconds=8.0),
     )
 
@@ -167,7 +166,7 @@ def test_provider_recovery_reuses_exact_canonical_backoff_policy():
     assert ready.provider_recovery_projection_applied is True
 
 
-def test_provider_backoff_caps_using_canonical_continuous_config():
+def test_provider_backoff_caps_using_canonical_continuous_config(tmp_path):
     plan = _plan()
     batch = plan.batches[0]
     gate = _gate(plan)
@@ -180,7 +179,7 @@ def test_provider_backoff_caps_using_canonical_continuous_config():
     projected = gate.apply_provider_recovery(
         batch.batch_id,
         observed_at=NOW,
-        health=_health(20),
+        health_store=_health_store(tmp_path, 20),
         config=_config(interval_seconds=1.0, max_backoff_seconds=3.0),
     )
     assert (
@@ -190,7 +189,7 @@ def test_provider_backoff_caps_using_canonical_continuous_config():
     )
 
 
-def test_restart_discards_volatile_deadline_and_revalidates_durable_health():
+def test_restart_discards_volatile_deadline_and_revalidates_durable_health(tmp_path):
     plan = _plan()
     batch = plan.batches[0]
     gate = _gate(plan)
@@ -203,7 +202,7 @@ def test_restart_discards_volatile_deadline_and_revalidates_durable_health():
     gate.apply_provider_recovery(
         batch.batch_id,
         observed_at=NOW,
-        health=_health(1),
+        health_store=_health_store(tmp_path, 1),
         config=_config(),
     )
 
@@ -218,7 +217,7 @@ def test_restart_discards_volatile_deadline_and_revalidates_durable_health():
     assert decision.provider_recovery_projection_applied is False
 
 
-def test_provider_recovery_rejects_wrong_source_and_wrong_failure_kind():
+def test_provider_recovery_rejects_nonprovider_typed_durable_health(tmp_path):
     plan = _plan()
     batch = plan.batches[0]
     gate = _gate(plan)
@@ -231,39 +230,21 @@ def test_provider_recovery_rejects_wrong_source_and_wrong_failure_kind():
 
     with pytest.raises(
         MarketBookRetryBackoffError,
-        match="another source",
-    ):
-        gate.apply_provider_recovery(
-            batch.batch_id,
-            observed_at=NOW,
-            health=_health(1, source_id="other-provider"),
-            config=_config(),
-        )
-
-    generic = SourceHealthState(
-        source_id=SOURCE_ID,
-        status="failed",
-        poll_count=1,
-        total_failures=1,
-        consecutive_failures=1,
-        last_error_at=NOW.isoformat(),
-        last_error="generic failure",
-        last_failure_kind="provider_or_validation",
-        consecutive_failure_kind_count=1,
-    )
-    with pytest.raises(
-        MarketBookRetryBackoffError,
         match="durable provider_unavailable health",
     ):
         gate.apply_provider_recovery(
             batch.batch_id,
             observed_at=NOW,
-            health=generic,
+            health_store=_health_store(
+                tmp_path,
+                1,
+                failure_kind="provider_or_validation",
+            ),
             config=_config(),
         )
 
 
-def test_provider_recovery_rejects_health_predating_current_failure():
+def test_provider_recovery_rejects_health_predating_current_failure(tmp_path):
     plan = _plan()
     batch = plan.batches[0]
     gate = _gate(plan)
@@ -282,7 +263,11 @@ def test_provider_recovery_rejects_health_predating_current_failure():
         gate.apply_provider_recovery(
             batch.batch_id,
             observed_at=failure_at,
-            health=_health(1, last_error_at=NOW),
+            health_store=_health_store(
+                tmp_path,
+                1,
+                last_error_at=NOW,
+            ),
             config=_config(),
         )
 
@@ -590,6 +575,7 @@ def test_backwards_time_and_datetime_subclass_fail_before_state_rewrite():
 
 def test_late_rebind_cannot_replace_canonical_provider_backoff_or_health_validator(
     monkeypatch,
+    tmp_path,
 ):
     plan = _plan()
     batch = plan.batches[0]
@@ -600,7 +586,7 @@ def test_late_rebind_cannot_replace_canonical_provider_backoff_or_health_validat
         outcome=MarketBookAttemptOutcome.PROVIDER_FAILURE,
         provider_error_code="TIMEOUT_ERROR",
     )
-    health = _health(1)
+    health_store = _health_store(tmp_path, 1)
     config = _config(interval_seconds=1.0, max_backoff_seconds=8.0)
 
     monkeypatch.setattr(
@@ -615,11 +601,25 @@ def test_late_rebind_cannot_replace_canonical_provider_backoff_or_health_validat
         "_provider_backoff_seconds",
         lambda *args, **kwargs: 999999.0,
     )
+    monkeypatch.setattr(
+        SourceHealthStore,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("rebound store get must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        SourceHealthStore,
+        "_writer_guard",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("rebound writer guard must not run")
+        ),
+    )
 
     decision = gate.apply_provider_recovery(
         batch.batch_id,
         observed_at=NOW,
-        health=health,
+        health_store=health_store,
         config=config,
     )
 

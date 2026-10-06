@@ -165,18 +165,21 @@ def _derive_run_economics(
     attempts: tuple[PaperLegAttempt, ...],
 ) -> _DerivedRunEconomics:
     decimal_add = _decimal_add_exact
+    from_coefficient = _decimal_from_coefficient
     if (
         decimal_add is not _CANONICAL_DECIMAL_ADD_EXACT
         or decimal_add.__code__ is not _CANONICAL_DECIMAL_ADD_EXACT_CODE
+        or from_coefficient is not _CANONICAL_DECIMAL_FROM_COEFFICIENT
+        or from_coefficient.__code__ is not _CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE
     ):
         raise PaperExecutionIntegrityError(
-            "PAPER exact Decimal addition authority changed"
+            "PAPER exact Decimal arithmetic authority changed"
         )
     if len(attempts) > len(action_ids):
         raise PaperExecutionIntegrityError("durable attempts exceed reserved action list")
 
     known_exposure = from_coefficient(0, 0)
-    worst_case = _decimal_from_coefficient(0, 0)
+    worst_case = from_coefficient(0, 0)
     terminal_seen = False
     for index, attempt in enumerate(attempts):
         if attempt.sequence != index or attempt.action_id != action_ids[index]:
@@ -559,6 +562,7 @@ def _synthetic_attempt(
     decimal_add = _decimal_add_exact
     decimal_subtract = _decimal_subtract_exact
     decimal_scale = _decimal_scale_bps_exact
+    from_coefficient = _decimal_from_coefficient
     if (
         decimal_add is not _CANONICAL_DECIMAL_ADD_EXACT
         or decimal_add.__code__ is not _CANONICAL_DECIMAL_ADD_EXACT_CODE
@@ -566,6 +570,8 @@ def _synthetic_attempt(
         or decimal_subtract.__code__ is not _CANONICAL_DECIMAL_SUBTRACT_EXACT_CODE
         or decimal_scale is not _CANONICAL_DECIMAL_SCALE_BPS_EXACT
         or decimal_scale.__code__ is not _CANONICAL_DECIMAL_SCALE_BPS_EXACT_CODE
+        or from_coefficient is not _CANONICAL_DECIMAL_FROM_COEFFICIENT
+        or from_coefficient.__code__ is not _CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE
     ):
         raise PaperExecutionIntegrityError(
             "PAPER synthetic Decimal arithmetic authority changed"
@@ -631,10 +637,10 @@ def _synthetic_attempt(
             )
             odds_margin = decimal_subtract(
                 action.requested_odds,
-                _decimal_from_coefficient(1, 0),
+                from_coefficient(1, 0),
             )
             execution_odds = decimal_add(
-                _decimal_from_coefficient(1, 0),
+                from_coefficient(1, 0),
                 decimal_scale(
                     odds_margin,
                     10_000 - slippage_bps,

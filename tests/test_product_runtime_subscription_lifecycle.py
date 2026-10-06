@@ -246,7 +246,6 @@ class ProductRuntimeSubscriptionLifecycleTests(unittest.TestCase):
             self.assertIsNone(reopened.status()["stop_reason"])
             self.assertEqual(reopened.status()["provider_failures"], 0)
 
-
     def test_retry_exhaustion_is_bounded_and_reopen_has_no_inherited_backoff(
         self,
     ) -> None:
@@ -390,7 +389,6 @@ class ProductRuntimeSubscriptionLifecycleTests(unittest.TestCase):
             self.assertEqual(reopened_source.delta_calls, 1)
             self.assertIsNone(reopened.status()["last_error_code"])
             self.assertEqual(reopened.status()["provider_failures"], 0)
-
 
     def test_post_subscription_construction_failure_releases_runtime_graph(
         self,

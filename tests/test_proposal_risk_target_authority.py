@@ -951,6 +951,34 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             ):
                 self._issue()
 
+    def test_target_schema_rebinding_fails_closed(self) -> None:
+        with patch.object(
+            proposal_target_authority,
+            "_SCHEMA",
+            "autosport.proposal-risk-target-precommit.forged",
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "protocol constants changed",
+            ):
+                self._issue()
+
+    def test_target_protocol_tuple_substitution_fails_closed(self) -> None:
+        original = proposal_target_authority._PROTOCOL_CONSTANTS
+        substituted = tuple(list(original))
+        self.assertEqual(substituted, original)
+        self.assertIsNot(substituted, original)
+        with patch.object(
+            proposal_target_authority,
+            "_PROTOCOL_CONSTANTS",
+            substituted,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "protocol constants changed",
+            ):
+                self._issue()
+
     def test_market_event_serializer_rebinding_fails_closed(self) -> None:
         original = MarketEvent.to_dict
 

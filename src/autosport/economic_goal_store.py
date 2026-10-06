@@ -12,6 +12,7 @@ import weakref
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import MethodType
 from typing import Final
 
 from .economic_goal import (
@@ -172,11 +173,15 @@ _CANONICAL_ATOMIC_WRITE_JSON: Final = atomic_write_json
 _CANONICAL_WORKSPACE_LOCK_TYPE: Final = WorkspaceEconomicLock
 _CANONICAL_WORKSPACE_LOCK_ENTER: Final = WorkspaceEconomicLock.__enter__
 _CANONICAL_WORKSPACE_LOCK_EXIT: Final = WorkspaceEconomicLock.__exit__
+_CANONICAL_WORKSPACE_LOCK_ACQUIRE: Final = WorkspaceEconomicLock.acquire
+_CANONICAL_WORKSPACE_LOCK_RELEASE: Final = WorkspaceEconomicLock.release
 _CANONICAL_PATH_TYPE: Final = Path
 _CANONICAL_STORE_FILE_NAME: Final = "economic_goal_contract.json"
 
 _STORE_BINDINGS_BY_ID: Final = {}
 _CANONICAL_OBJECT_GETATTRIBUTE: Final = object.__getattribute__
+_CANONICAL_OBJECT_SETATTR: Final = object.__setattr__
+_CANONICAL_METHOD_TYPE: Final = MethodType
 
 _CANONICAL_WORKSPACE_CONTEXTMANAGER: Final = contextmanager
 
@@ -189,6 +194,16 @@ def _workspace_lock_scope(
     _exit=_CANONICAL_WORKSPACE_LOCK_EXIT,
 ):
     lock = _lock_type(workspace)
+    _CANONICAL_OBJECT_SETATTR(
+        lock,
+        "acquire",
+        _CANONICAL_METHOD_TYPE(_CANONICAL_WORKSPACE_LOCK_ACQUIRE, lock),
+    )
+    _CANONICAL_OBJECT_SETATTR(
+        lock,
+        "release",
+        _CANONICAL_METHOD_TYPE(_CANONICAL_WORKSPACE_LOCK_RELEASE, lock),
+    )
     _enter(lock)
     try:
         yield lock

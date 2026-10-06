@@ -1540,10 +1540,40 @@ def _seal_paperbook_save_candidate_authority(method):
 
 
 def _seal_paperbook_snapshot_json_publish_authority(method):
-    """Inject closure-captured JSON serialization authority into durable save."""
+    """Inject closure-captured JSON and filesystem publication authorities."""
     method_code = method.__code__
     dump = json.dump
     dump_code = dump.__code__
+    tempfile_module = tempfile
+    named_temporary_file = tempfile_module.NamedTemporaryFile
+    named_temporary_file_code = named_temporary_file.__code__
+    path_factory = Path
+    path_unlink = path_factory.unlink
+    path_unlink_code = path_unlink.__code__
+    os_module = os
+    fsync_file = os_module.fsync
+    replace_file = os_module.replace
+    publish_globals = globals()
+
+    def require_publish_dependencies() -> None:
+        if publish_globals.get("tempfile") is not tempfile_module:
+            raise ValueError("PaperBook tempfile module authority changed")
+        if tempfile_module.NamedTemporaryFile is not named_temporary_file:
+            raise ValueError("PaperBook temporary-file authority changed")
+        if named_temporary_file.__code__ is not named_temporary_file_code:
+            raise ValueError("PaperBook temporary-file callable authority changed")
+        if publish_globals.get("Path") is not path_factory:
+            raise ValueError("PaperBook snapshot Path authority changed")
+        if path_factory.unlink is not path_unlink:
+            raise ValueError("PaperBook snapshot unlink authority changed")
+        if path_unlink.__code__ is not path_unlink_code:
+            raise ValueError("PaperBook snapshot unlink callable authority changed")
+        if publish_globals.get("os") is not os_module:
+            raise ValueError("PaperBook os module authority changed")
+        if os_module.fsync is not fsync_file:
+            raise ValueError("PaperBook file fsync authority changed")
+        if os_module.replace is not replace_file:
+            raise ValueError("PaperBook atomic replace authority changed")
 
     def publish(raw: object, handle: object) -> None:
         if dump.__code__ is not dump_code:
@@ -1552,13 +1582,36 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
         if dump.__code__ is not dump_code:
             raise ValueError("PaperBook JSON serializer authority changed")
 
+    def unlink(path: object) -> None:
+        if type(path) is not path_factory:
+            raise ValueError("PaperBook temporary snapshot path type changed")
+        if path_factory.unlink is not path_unlink:
+            raise ValueError("PaperBook snapshot unlink authority changed")
+        if path_unlink.__code__ is not path_unlink_code:
+            raise ValueError("PaperBook snapshot unlink callable authority changed")
+        path_unlink(path)
+        if path_unlink.__code__ is not path_unlink_code:
+            raise ValueError("PaperBook snapshot unlink callable authority changed")
+
     @wraps(method)
     def sealed(self, *args, **kwargs):
         if method.__code__ is not method_code:
             raise ValueError("PaperBook save publish callable authority changed")
         if dump.__code__ is not dump_code:
             raise ValueError("PaperBook JSON serializer authority changed")
-        result = method(self, *args, _json_dump=publish, **kwargs)
+        require_publish_dependencies()
+        result = method(
+            self,
+            *args,
+            _json_dump=publish,
+            _named_temporary_file=named_temporary_file,
+            _path_factory=path_factory,
+            _fsync_file=fsync_file,
+            _replace_file=replace_file,
+            _unlink_file=unlink,
+            **kwargs,
+        )
+        require_publish_dependencies()
         if method.__code__ is not method_code:
             raise ValueError("PaperBook save publish callable authority changed")
         return result
@@ -1943,6 +1996,11 @@ class PaperBook:
         _ensure_parent_durable=None,
         _fsync_directory=None,
         _json_dump=None,
+        _named_temporary_file=None,
+        _path_factory=None,
+        _fsync_file=None,
+        _replace_file=None,
+        _unlink_file=None,
     ) -> None:
         # Runtime visible-state + hidden-authority validation is performed once
         # by the closure-captured guard before this body executes.
@@ -1996,7 +2054,7 @@ class PaperBook:
 
         temporary: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile(
+            with _named_temporary_file(
                 "w",
                 encoding="utf-8",
                 newline="\n",
@@ -2005,17 +2063,17 @@ class PaperBook:
                 suffix=".tmp",
                 delete=False,
             ) as handle:
-                temporary = Path(handle.name)
+                temporary = _path_factory(handle.name)
                 _json_dump(raw, handle)
                 handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, destination)
+                _fsync_file(handle.fileno())
+            _replace_file(temporary, destination)
             temporary = None
             _fsync_directory(type(self), destination.parent)
         finally:
             if temporary is not None:
                 try:
-                    temporary.unlink()
+                    _unlink_file(temporary)
                 except FileNotFoundError:
                     pass
 

@@ -1767,6 +1767,53 @@ def test_load_bytes_rejects_in_place_snapshot_revoke_authority_code_mutation(
         "_install_validated_paperbook_causal_history_authority",
     ),
 )
+@pytest.mark.parametrize(
+    ("authority_name", "message"),
+    (
+        (
+            "_revoke_ticket_opening_authority",
+            "requires trusted decode authority",
+        ),
+        (
+            "_revoke_paperbook_causal_history_authority",
+            "requires trusted decode authority",
+        ),
+        (
+            "_install_validated_ticket_opening_authority",
+            "requires trusted load authority",
+        ),
+        (
+            "_install_validated_paperbook_causal_history_authority",
+            "requires trusted load authority",
+        ),
+    ),
+)
+def test_snapshot_authority_transitions_cannot_be_called_directly(
+    authority_name: str,
+    message: str,
+) -> None:
+    book = PaperBook("100")
+    authority = getattr(paper_module, authority_name)
+
+    with pytest.raises(ValueError, match=message):
+        authority(book)
+
+    assert book.committed_stake == Decimal("0")
+
+
+def test_canonical_file_load_reinstalls_revoked_snapshot_authority(tmp_path) -> None:
+    path = tmp_path / "trusted-load.json"
+    source = PaperBook("100")
+    ticket = source.open_ticket([_leg()], "10", placed_at=_TS)
+    source.save(path)
+
+    loaded = PaperBook.load(path)
+
+    assert loaded.committed_stake == Decimal("10")
+    assert ticket.ticket_id in loaded.tickets
+    assert tuple(loaded._lifecycle) == (("open", ticket.ticket_id, (), ()),)
+
+
 def test_load_never_executes_rebound_snapshot_install_authority(
     monkeypatch,
     tmp_path,

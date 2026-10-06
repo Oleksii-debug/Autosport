@@ -605,22 +605,6 @@ def build_product_issued_paper_equity_path(
 ) -> ProductIssuedPaperEquityPath:
     """Acquire the canonical PaperBook operation lock for the full evidence replay."""
 
-    if type(book) is not PaperBook:
-        raise TypeError("book must be canonical PaperBook")
-    if type(goal) is not EconomicGoalContract:
-        raise TypeError("goal must be canonical EconomicGoalContract")
-    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
-        raise ValueError("canonical PAPER operation-lock authority changed")
-    lock = _CANONICAL_PAPERBOOK_OPERATION_LOCK(book)
-    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
-        raise ValueError("canonical PAPER operation-lock authority changed")
-    with lock:
-        result = _build_product_issued_paper_equity_path_locked(book, goal)
-    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
-        raise ValueError("canonical PAPER operation-lock authority changed")
-    return result
-
-
     def _build_product_issued_paper_equity_path_locked(
         book: PaperBook,
         goal: EconomicGoalContract,
@@ -851,8 +835,23 @@ def build_product_issued_paper_equity_path(
             frozen_scope_complete=frozen_scope_complete,
             historical_reresolution_complete=historical_reresolution_complete,
         )
-    
-    
+
+    if type(book) is not PaperBook:
+        raise TypeError("book must be canonical PaperBook")
+    if type(goal) is not EconomicGoalContract:
+        raise TypeError("goal must be canonical EconomicGoalContract")
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    lock = _CANONICAL_PAPERBOOK_OPERATION_LOCK(book)
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    with lock:
+        result = _build_product_issued_paper_equity_path_locked(book, goal)
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    return result
+
+
 def _historical_max_drawdown_from_path(
     path: ProductIssuedPaperEquityPath,
 ) -> _HistoricalMaxDrawdown:
@@ -1415,21 +1414,6 @@ def build_paper_risk_report(
 ) -> PaperRiskReport:
     """Acquire the canonical PaperBook operation lock for the full risk report replay."""
 
-    if type(book) is not PaperBook:
-        raise TypeError("book must be canonical PaperBook")
-    if type(goal) is not EconomicGoalContract:
-        raise TypeError("goal must be canonical EconomicGoalContract")
-    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
-        raise ValueError("canonical PAPER operation-lock authority changed")
-    lock = _CANONICAL_PAPERBOOK_OPERATION_LOCK(book)
-    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
-        raise ValueError("canonical PAPER operation-lock authority changed")
-    with lock:
-        result = _build_paper_risk_report_locked(book, goal)
-    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
-        raise ValueError("canonical PAPER operation-lock authority changed")
-    return result
-
     def _build_paper_risk_report_locked(
         book: PaperBook,
         goal: EconomicGoalContract,
@@ -1569,3 +1553,18 @@ def build_paper_risk_report(
         if _CANONICAL_GOAL_PROVENANCE(goal) != goal_snapshot_provenance:
             raise ValueError("canonical economic goal changed during reporting")
         return report
+
+    if type(book) is not PaperBook:
+        raise TypeError("book must be canonical PaperBook")
+    if type(goal) is not EconomicGoalContract:
+        raise TypeError("goal must be canonical EconomicGoalContract")
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    lock = _CANONICAL_PAPERBOOK_OPERATION_LOCK(book)
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    with lock:
+        result = _build_paper_risk_report_locked(book, goal)
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    return result

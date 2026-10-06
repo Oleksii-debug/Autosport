@@ -560,6 +560,22 @@ def test_transition_ignores_rebound_module_contract_type(monkeypatch) -> None:
     with pytest.raises(EconomicGoalContractError, match="must not increase"):
         validate_automatic_transition(previous, candidate)
 
+def test_transition_snapshot_covers_every_captured_contract_slot(monkeypatch) -> None:
+    goal = _goal()
+    field_names = economic_goal_module._CONTRACT_FIELD_NAMES
+    expected = economic_goal_module._canonical_contract_snapshot(goal)
+
+    for index, name in enumerate(field_names):
+        class ForgedDescriptor:
+            def __get__(self, instance, owner=None):
+                return object()
+
+        monkeypatch.setattr(EconomicGoalContract, name, ForgedDescriptor())
+        snapshot = economic_goal_module._canonical_contract_snapshot(goal)
+        assert snapshot[index] == expected[index]
+        monkeypatch.undo()
+
+
 def test_transition_snapshot_helper_ignores_rebound_contract_descriptors(monkeypatch) -> None:
     goal = _goal(max_stake_fraction=Decimal("0.03"))
 

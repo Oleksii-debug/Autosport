@@ -4349,3 +4349,73 @@ def test_invalidation_rejects_post_validation_batch_truth_mutation(
             max_batches=4,
             max_items=250,
         )
+
+
+def test_tick_rejects_in_place_dependency_mutation_during_collector_observation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        dependency = index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop delivery ran after collector routing mutation")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after collector routing mutation")
+
+        def mutate() -> None:
+            object.__setattr__(
+                dependency,
+                "source_ids",
+                frozenset({"provider-b"}),
+            )
+
+        coordinator.collector = _Collector(callback=mutate)
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency routing authority changed during collector observation",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_in_place_dependency_mutation_during_desktop_delivery() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        dependency = index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                object.__setattr__(
+                    dependency,
+                    "source_ids",
+                    frozenset({"provider-b"}),
+                )
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after desktop routing mutation")
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency routing authority changed during desktop delivery",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"

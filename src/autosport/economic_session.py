@@ -879,6 +879,20 @@ class ProductEconomicSessionStore:
             "_protected_method_witnesses",
             canonical_methods,
         )
+        if (
+            PaperBook is not _PAPERBOOK_TYPE
+            or PaperBook.__dict__.get("load_bytes")
+            is not _PAPERBOOK_LOAD_BYTES_DESCRIPTOR
+            or PaperBook.__dict__.get("_validate_loaded_state")
+            is not _PAPERBOOK_VALIDATE_LOADED_STATE_DESCRIPTOR
+            or _PAPERBOOK_LOAD_BYTES_DESCRIPTOR.__func__
+            is not _PAPERBOOK_LOAD_BYTES
+            or _PAPERBOOK_VALIDATE_LOADED_STATE_DESCRIPTOR.__func__
+            is not _PAPERBOOK_VALIDATE_LOADED_STATE
+        ):
+            raise EconomicSessionIntegrityError(
+                "economic-session PaperBook classmethod authority changed"
+            )
         for label, authority, code in _ECONOMIC_SESSION_CODE_AUTHORITIES:
             if (
                 code is not None

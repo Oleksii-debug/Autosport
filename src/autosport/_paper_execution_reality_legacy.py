@@ -20,6 +20,11 @@ from .real_execution_ledger import (
 
 _SCHEMA_VERSION = 2
 _ANCHOR_SCHEMA_VERSION = 1
+_CANONICAL_DECIMAL_TYPE = Decimal
+_CANONICAL_INVALID_OPERATION = InvalidOperation
+_CANONICAL_DECIMAL_RESOURCE_VALIDATOR = _validate_decimal_text_resource_bound
+_CANONICAL_DECIMAL_FORMATTER = Decimal.__format__
+_CANONICAL_TEXT_COERCION = str
 
 
 class PaperExecutionRealityError(RuntimeError):
@@ -80,36 +85,57 @@ def _timestamp_text(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
-def _decimal(value: object, name: str, *, allow_zero: bool = False) -> Decimal:
+def _decimal(
+    value: object,
+    name: str,
+    *,
+    allow_zero: bool = False,
+    _decimal_type=_CANONICAL_DECIMAL_TYPE,
+    _invalid_operation=_CANONICAL_INVALID_OPERATION,
+    _resource_validator=_CANONICAL_DECIMAL_RESOURCE_VALIDATOR,
+    _text_coercion=_CANONICAL_TEXT_COERCION,
+) -> Decimal:
     try:
-        parsed = value if type(value) is Decimal else Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError) as exc:
+        parsed = (
+            value
+            if type(value) is _decimal_type
+            else _decimal_type(_text_coercion(value))
+        )
+    except (_invalid_operation, ValueError, TypeError) as exc:
         raise ValueError(f"{name} must be a finite Decimal") from exc
     if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
         comparator = ">= 0" if allow_zero else "> 0"
         raise ValueError(f"{name} must be finite and {comparator}")
     # Reuse the execution-ledger fixed-point resource law before any durable
     # Decimal formatting can allocate a potentially enormous expanded string.
-    _validate_decimal_text_resource_bound(parsed)
+    _resource_validator(parsed)
     return parsed
 
 
-def _preflight_decimal_text_fields(*values: Decimal | None) -> None:
+def _preflight_decimal_text_fields(
+    *values: Decimal | None,
+    _decimal_type=_CANONICAL_DECIMAL_TYPE,
+    _resource_validator=_CANONICAL_DECIMAL_RESOURCE_VALIDATOR,
+) -> None:
     """Validate every sibling Decimal before any fixed-point string is allocated."""
     for value in values:
         if value is None:
             continue
-        if type(value) is not Decimal or not value.is_finite():
+        if type(value) is not _decimal_type or not value.is_finite():
             raise ValueError("Decimal must be finite")
-        _validate_decimal_text_resource_bound(value)
+        _resource_validator(value)
 
 
-def _decimal_text(value: Decimal) -> str:
+def _decimal_text(
+    value: Decimal,
+    _preflight=_preflight_decimal_text_fields,
+    _formatter=_CANONICAL_DECIMAL_FORMATTER,
+) -> str:
     # Keep the scalar formatter fail-closed, while aggregate serializers call
     # _preflight_decimal_text_fields first so no benign sibling is formatted
     # before an oversized sibling has been rejected.
-    _preflight_decimal_text_fields(value)
-    return format(value, "f")
+    _preflight(value)
+    return _formatter(value, "f")
 
 
 def _canonical(value: Any) -> str:

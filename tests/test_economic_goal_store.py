@@ -1371,6 +1371,10 @@ def test_store_rejects_subclass_and_noncanonical_workspace_types(tmp_path) -> No
     class StoreSubclass(EconomicGoalStore):
         pass
 
+    assert callable(StoreSubclass.load)
+    assert callable(StoreSubclass.initialize_owner)
+    assert callable(StoreSubclass.persist_automatic_successor)
+
     class TextSubclass(str):
         pass
 

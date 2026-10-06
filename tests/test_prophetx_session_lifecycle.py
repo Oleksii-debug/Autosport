@@ -1277,7 +1277,7 @@ def test_pre_expiry_renewal_failure_cannot_launder_backoff_at_token_expiry(
     assert failed.state is ProphetXSessionState.RENEWAL_DUE
     assert failed.retry_not_before is not None
     assert failed.retry_not_before > active.access_expires_at
-    assert failed.slot_hold_until == failed.retry_not_before
+    assert failed.slot_hold_until >= failed.retry_not_before
 
     blocked = lifecycle.begin_login(
         now=active.access_expires_at,
@@ -1287,11 +1287,21 @@ def test_pre_expiry_renewal_failure_cannot_launder_backoff_at_token_expiry(
         blocked.action
         is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
     )
-    assert blocked.retry_at == failed.retry_not_before
+    assert blocked.retry_at == failed.slot_hold_until
     assert blocked.login_authorized is False
 
-    admitted = lifecycle.begin_login(
+    still_blocked = lifecycle.begin_login(
         now=failed.retry_not_before,
+        access_token_available=False,
+    )
+    assert (
+        still_blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert still_blocked.retry_at == failed.slot_hold_until
+
+    admitted = lifecycle.begin_login(
+        now=failed.slot_hold_until,
         access_token_available=False,
     )
     assert admitted.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
@@ -1380,6 +1390,7 @@ def test_credential_rejected_during_renewal_stays_fail_closed(tmp_path):
         refresh_token_lineage_id=active.session_lineage_id,
     )
     _dispatch(lifecycle, started, at=due_at)
+    dispatched = lifecycle.read_snapshot()
     rejected = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
         now=due_at + timedelta(seconds=1),
@@ -1387,7 +1398,7 @@ def test_credential_rejected_during_renewal_stays_fail_closed(tmp_path):
     )
 
     assert rejected.state is ProphetXSessionState.CREDENTIAL_REJECTED
-    assert rejected.slot_hold_until == active.slot_hold_until
+    assert rejected.slot_hold_until == dispatched.slot_hold_until
     assert (
         lifecycle.begin_login(
             now=due_at + timedelta(seconds=2),
@@ -1428,8 +1439,9 @@ def test_late_renewal_failure_keeps_bounded_retry_before_replacement_login(
         refresh_token_lineage_id=active.session_lineage_id,
     )
 
-    failed_at = active.slot_hold_until + timedelta(seconds=1)
     _dispatch(lifecycle, started, at=due_at)
+    dispatched = lifecycle.read_snapshot()
+    failed_at = dispatched.slot_hold_until + timedelta(seconds=1)
     failed = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
         now=failed_at,
@@ -1460,11 +1472,17 @@ def test_late_renewal_failure_keeps_bounded_retry_before_replacement_login(
 def test_expired_renewal_backoff_can_extend_conservative_no_login_horizon(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
     payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["state"] = ProphetXSessionState.RENEWAL_DUE.value
+    payload["last_transition_at"] = (due_at - timedelta(seconds=1)).isoformat()
+    payload["retry_not_before"] = due_at.isoformat()
     payload["transient_failures"] = 32
+    payload["last_renewal_failure_class"] = (
+        ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE.value
+    )
     lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    due_at = active.access_expires_at - timedelta(minutes=1)
     lifecycle.begin_login(
         now=due_at,
         access_token_available=True,
@@ -1510,6 +1528,7 @@ def test_renewal_failure_after_short_expiry_preserves_provider_slot_hold(tmp_pat
         refresh_token_lineage_id=active.session_lineage_id,
     )
     _dispatch(lifecycle, started, at=due_at)
+    dispatched = lifecycle.read_snapshot()
     failed = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
         now=active.access_expires_at + timedelta(seconds=1),
@@ -1517,8 +1536,8 @@ def test_renewal_failure_after_short_expiry_preserves_provider_slot_hold(tmp_pat
     )
 
     assert failed.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
-    assert failed.slot_hold_started_at == active.slot_hold_started_at
-    assert failed.slot_hold_until == active.slot_hold_until
+    assert failed.slot_hold_started_at == dispatched.slot_hold_started_at
+    assert failed.slot_hold_until == dispatched.slot_hold_until
     blocked = lifecycle.begin_login(
         now=active.access_expires_at + timedelta(seconds=2),
         access_token_available=False,
@@ -1527,10 +1546,10 @@ def test_renewal_failure_after_short_expiry_preserves_provider_slot_hold(tmp_pat
         blocked.action
         is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
     )
-    assert blocked.retry_at == active.slot_hold_until
+    assert blocked.retry_at == dispatched.slot_hold_until
 
     fresh = lifecycle.begin_login(
-        now=active.slot_hold_until,
+        now=dispatched.slot_hold_until,
         access_token_available=False,
     )
     assert fresh.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
@@ -2371,7 +2390,7 @@ def test_same_process_stale_login_reservation_recovers_after_hold(tmp_path):
 
     with pytest.raises(
         ProphetXSessionLifecycleError,
-        match="login attempt no longer owns current session-pool admission",
+        match="login attempt was not issued by this coordinator",
     ):
         lifecycle.complete_login_failure(
             attempt_id=first.attempt_id,
@@ -2550,6 +2569,7 @@ def test_retryable_durable_state_accepts_matching_renewal_origin(
         integration_role="market-maker-primary",
         last_transition_at=NOW,
         retry_not_before=NOW + timedelta(seconds=5),
+        transient_failures=1,
         last_renewal_failure_class=renewal_failure,
     )
 
@@ -2723,6 +2743,8 @@ def test_session_pool_exhaustion_cannot_claim_access_expiry():
             access_expires_at=NOW + timedelta(minutes=10),
             slot_hold_started_at=NOW,
             slot_hold_until=NOW + timedelta(minutes=20),
+            transient_failures=1,
+            last_failure_class=ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED,
         )
 
 

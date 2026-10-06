@@ -730,7 +730,7 @@ def _decode_state(
         started_at=_str(parsed["started_at"]),
         opening_paperbook_sha256=_str(parsed["opening_paperbook_sha256"]),
         product_clock_authoritative=_bool(parsed["product_clock_authoritative"]),
-        transition_id=str(parsed["transition_id"]),
+        transition_id=_str(parsed["transition_id"]),
         predecessor_session_id=(
             None
             if parsed["predecessor_session_id"] is None

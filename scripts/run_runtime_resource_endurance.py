@@ -55,6 +55,17 @@ class _ExpectedQualificationFailure(RuntimeError):
     pass
 
 
+def _qualification_status(
+    failures: list[str],
+    missing_resource_classes: tuple[str, ...],
+) -> str:
+    if failures:
+        return "FAIL"
+    if missing_resource_classes:
+        return "INCONCLUSIVE"
+    return "PASS"
+
+
 class _DeterministicClock:
     def __init__(self) -> None:
         self._base = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -368,12 +379,9 @@ def main(argv: list[str] | None = None) -> int:
         for resource_class in _REQUIRED_RESOURCE_CLASSES
         if resource_class not in _OBSERVED_RESOURCE_CLASSES
     )
-    qualification_status = (
-        "FAIL"
-        if failures
-        else "INCONCLUSIVE"
-        if missing_resource_classes
-        else "PASS"
+    qualification_status = _qualification_status(
+        failures,
+        missing_resource_classes,
     )
 
     report: dict[str, object] = {

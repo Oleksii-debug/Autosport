@@ -66,6 +66,10 @@ def _build_guard():
     ) = _cost_source._SEALED_CANONICAL_TYPES
     component_fields = tuple(_COMPONENT_FIELDS)
     canonical_getattribute = object.__getattribute__
+    canonical_type = type
+    canonical_len = len
+    canonical_enumerate = enumerate
+    canonical_zip = zip
     resolution_fields = tuple(_RESOLUTION_FIELDS)
 
     def sealed_validate_component(value: object) -> None:
@@ -96,11 +100,11 @@ def _build_guard():
         *,
         index: int,
     ) -> None:
-        if type(asserted) is not component_cls:
+        if canonical_type(asserted) is not component_cls:
             raise error_cls(
                 "prospective applicable-cost assertion components must use the exact canonical type"
             )
-        if type(canonical) is not component_cls:
+        if canonical_type(canonical) is not component_cls:
             raise error_cls(
                 "canonical applicable-cost resolver returned a non-canonical component type"
             )
@@ -126,7 +130,7 @@ def _build_guard():
     ) -> ProspectiveApplicableCostResolution:
         """Return fresh sealed product truth only when an assertion matches it."""
 
-        if type(asserted) is not resolution_cls:
+        if canonical_type(asserted) is not resolution_cls:
             raise error_cls(
                 "prospective applicable-cost assertion must use the exact canonical type"
             )
@@ -134,11 +138,11 @@ def _build_guard():
         # objects, before any authority-bearing source read.
         sealed_validate_resolution(asserted)
 
-        if type(intent) is not intent_cls:
+        if canonical_type(intent) is not intent_cls:
             raise error_cls("intent must be the exact canonical OpportunityIntent type")
-        if type(plan) is not plan_cls:
+        if canonical_type(plan) is not plan_cls:
             raise error_cls("plan must be the exact canonical PortfolioPlan type")
-        if type(router_store) is not router_store_cls:
+        if canonical_type(router_store) is not router_store_cls:
             raise error_cls(
                 "router_store must be the exact canonical ModelComputeRouterStore type"
             )
@@ -154,7 +158,7 @@ def _build_guard():
         )
         if canonical_resolver.__code__ is not canonical_resolver_code:
             raise error_cls("canonical applicable-cost resolver authority changed")
-        if type(canonical) is not resolution_cls:
+        if canonical_type(canonical) is not resolution_cls:
             raise error_cls(
                 "canonical applicable-cost resolver returned a non-canonical resolution type"
             )
@@ -171,16 +175,16 @@ def _build_guard():
 
         asserted_components = slot_value(asserted, "components")
         canonical_components = slot_value(canonical, "components")
-        if type(asserted_components) is not tuple or type(canonical_components) is not tuple:
+        if canonical_type(asserted_components) is not tuple or canonical_type(canonical_components) is not tuple:
             raise error_cls(
                 "prospective applicable-cost component collections must be canonical tuples"
             )
-        if len(asserted_components) != len(canonical_components):
+        if canonical_len(asserted_components) != canonical_len(canonical_components):
             raise error_cls(
                 "prospective applicable-cost assertion component count does not match canonical re-resolution"
             )
-        for index, (asserted_component, canonical_component) in enumerate(
-            zip(asserted_components, canonical_components, strict=True)
+        for index, (asserted_component, canonical_component) in canonical_enumerate(
+            canonical_zip(asserted_components, canonical_components, strict=True)
         ):
             assert_component_matches(
                 asserted_component,

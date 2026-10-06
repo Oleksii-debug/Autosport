@@ -42,6 +42,27 @@ _AUTHORITY_DOMAIN = "proposal-risk-target-precommit-v1"
 _WORKSPACE_BINDING_KEY = "workspace-binding-v1"
 _TARGET_CHAIN_KEY = "current-target-chain-v1"
 _TARGET_AUTHORITY_PREFIX = "target-v1:"
+_PROTOCOL_CONSTANTS = (
+    _SCHEMA,
+    _ACTION,
+    _AGENT,
+    _ALLOCATION_ALGORITHM,
+    _AUTHORITY_DOMAIN,
+    _WORKSPACE_BINDING_KEY,
+    _TARGET_CHAIN_KEY,
+    _TARGET_AUTHORITY_PREFIX,
+)
+_PROTOCOL_CONSTANTS_EXPECTED = (
+    "autosport.proposal-risk-target-precommit.v2",
+    "PROPOSAL_RISK_TARGET_PRECOMMIT",
+    "autosport.proposal-risk-target-authority.v1",
+    "autosport.paper-risk-policy.derive-goal-stake-vector.relaxed-ruin-internal.v1",
+    "proposal-risk-target-precommit-v1",
+    "workspace-binding-v1",
+    "current-target-chain-v1",
+    "target-v1:",
+)
+_PROTOCOL_CONSTANTS_ROOT = _PROTOCOL_CONSTANTS
 _HEX = frozenset("0123456789abcdef")
 _MAX_DECIMAL_TEXT = 256
 
@@ -472,6 +493,24 @@ def _workspace_path(workspace: object) -> Path:
 
 
 def _require_dispatch() -> None:
+    live_protocol_constants = (
+        _SCHEMA,
+        _ACTION,
+        _AGENT,
+        _ALLOCATION_ALGORITHM,
+        _AUTHORITY_DOMAIN,
+        _WORKSPACE_BINDING_KEY,
+        _TARGET_CHAIN_KEY,
+        _TARGET_AUTHORITY_PREFIX,
+    )
+    if (
+        _PROTOCOL_CONSTANTS is not _PROTOCOL_CONSTANTS_ROOT
+        or _PROTOCOL_CONSTANTS != _PROTOCOL_CONSTANTS_EXPECTED
+        or live_protocol_constants != _PROTOCOL_CONSTANTS_EXPECTED
+    ):
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target protocol constants changed"
+        )
     checks = (
         (_POLICY_TYPE is PaperRiskPolicy, "PaperRiskPolicy type"),
         (_CONTEXT_TYPE is ProposedTicketRiskContext, "ProposedTicketRiskContext type"),

@@ -49,6 +49,10 @@ _WRITE_ADAPTER_ID = WRITE_ADAPTER_ID
 _WRITE_ADAPTER_VERSION = WRITE_ADAPTER_VERSION
 _CANONICAL_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
 _CANONICAL_PROVIDER_CLIENT_TYPE = BetfairSupervisedPlaceOrdersClient
+_CANONICAL_PROVIDER_CONTRACT_ID = _PROVIDER_CONTRACT_ID
+_CANONICAL_PROVIDER_CONTRACT_REF = _PROVIDER_CONTRACT_REF
+_CANONICAL_WRITE_ADAPTER_ID = _WRITE_ADAPTER_ID
+_CANONICAL_WRITE_ADAPTER_VERSION = _WRITE_ADAPTER_VERSION
 _CAPTURE_PROVIDER_ORDER_REF = "0" * 32
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -522,6 +526,10 @@ def _issue_evidence(
     bound: BoundSupervisedExecutionPlan,
     action: ExecutionAction,
     instruction_sha256: str,
+    _provider_contract_id=_CANONICAL_PROVIDER_CONTRACT_ID,
+    _provider_contract_ref=_CANONICAL_PROVIDER_CONTRACT_REF,
+    _write_adapter_id=_CANONICAL_WRITE_ADAPTER_ID,
+    _write_adapter_version=_CANONICAL_WRITE_ADAPTER_VERSION,
 ) -> BetfairStandardLimitPriceBoundEvidence:
     item = object.__new__(BetfairStandardLimitPriceBoundEvidence)
     action_payload = ExecutionAction.to_dict(action)
@@ -545,10 +553,10 @@ def _issue_evidence(
         "quote_expires_at": action.expires_at,
         "decision_at": bound.execution_plan.created_at,
         "instruction_sha256": instruction_sha256,
-        "provider_contract_id": _PROVIDER_CONTRACT_ID,
-        "provider_contract_ref": _PROVIDER_CONTRACT_REF,
-        "write_adapter_id": _WRITE_ADAPTER_ID,
-        "write_adapter_version": _WRITE_ADAPTER_VERSION,
+        "provider_contract_id": _provider_contract_id,
+        "provider_contract_ref": _provider_contract_ref,
+        "write_adapter_id": _write_adapter_id,
+        "write_adapter_version": _write_adapter_version,
         "status": BetfairStandardLimitPriceBoundStatus.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION,
         "matchme_applicability_proven": True,
         "zero_adverse_price_deterioration": True,

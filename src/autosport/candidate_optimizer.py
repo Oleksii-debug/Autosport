@@ -336,6 +336,15 @@ def _canonical_candidate(candidate: ParlayCandidate) -> ParlayCandidate:
         raise ValueError("candidate must be the exact canonical ParlayCandidate type")
     if type(candidate.legs) is not tuple or not candidate.legs:
         raise ValueError("candidate requires a canonical non-empty leg tuple")
+    for field_name, value in (
+        ("combined_odds", candidate.combined_odds),
+        ("independent_probability", candidate.independent_probability),
+        ("expected_profit_per_unit", candidate.expected_profit_per_unit),
+    ):
+        if type(value) is not Decimal or not value.is_finite():
+            raise ValueError(
+                f"candidate {field_name} must be an exact finite Decimal"
+            )
 
     for leg in candidate.legs:
         if type(leg) is not CandidateLeg:

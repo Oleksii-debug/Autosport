@@ -37,6 +37,20 @@ _CANONICAL_JSON_DUMPS = json.dumps
 _CANONICAL_JSON_LOADS = json.loads
 _CANONICAL_JSON_DECODE_ERROR = json.JSONDecodeError
 _CANONICAL_SHA256 = hashlib.sha256
+_CANONICAL_PATH_TYPE = Path
+_CANONICAL_RLOCK_FACTORY = threading.RLock
+_CANONICAL_THREAD_IDENT = threading.get_ident
+_CANONICAL_OS_NAME = os.name
+_CANONICAL_OS_OPEN = os.open
+_CANONICAL_OS_FSYNC = os.fsync
+_CANONICAL_OS_CLOSE = os.close
+_CANONICAL_OS_REPLACE = os.replace
+_CANONICAL_OS_GETPID = os.getpid
+_CANONICAL_OS_O_RDONLY = os.O_RDONLY
+_CANONICAL_OS_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_CANONICAL_OS_O_CREAT = os.O_CREAT
+_CANONICAL_OS_O_EXCL = os.O_EXCL
+_CANONICAL_OS_O_WRONLY = os.O_WRONLY
 
 
 class PaperExecutionRealityError(RuntimeError):
@@ -806,22 +820,22 @@ class PaperExecutionLedger:
     """Append-only PAPER evidence with a chained log and durable latest-root anchor."""
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+        self.path = _CANONICAL_PATH_TYPE(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_path = self.path.with_name(self.path.name + ".writer.lock")
         self._anchor_path = self.path.with_name(self.path.name + ".anchor.json")
-        self._lock = threading.RLock()
+        self._lock = _CANONICAL_RLOCK_FACTORY()
         self._path_durable = False
 
     def _sync_parent_directory(self) -> None:
-        if os.name == "nt":
+        if _CANONICAL_OS_NAME == "nt":
             return
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        directory_fd = os.open(self.path.parent, flags)
+        flags = _CANONICAL_OS_O_RDONLY | _CANONICAL_OS_O_DIRECTORY
+        directory_fd = _CANONICAL_OS_OPEN(self.path.parent, flags)
         try:
-            os.fsync(directory_fd)
+            _CANONICAL_OS_FSYNC(directory_fd)
         finally:
-            os.close(directory_fd)
+            _CANONICAL_OS_CLOSE(directory_fd)
 
     def _ensure_existing_path_durable(self) -> None:
         if self._path_durable or not self.path.exists():
@@ -829,7 +843,7 @@ class PaperExecutionLedger:
         try:
             with self.path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.flush()
-                os.fsync(handle.fileno())
+                _CANONICAL_OS_FSYNC(handle.fileno())
             self._sync_parent_directory()
         except OSError as exc:
             self._path_durable = False
@@ -841,9 +855,9 @@ class PaperExecutionLedger:
     def _with_writer_lock(self, operation):
         with self._lock:
             try:
-                fd = os.open(
+                fd = _CANONICAL_OS_OPEN(
                     self._lock_path,
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    _CANONICAL_OS_O_CREAT | _CANONICAL_OS_O_EXCL | _CANONICAL_OS_O_WRONLY,
                     0o600,
                 )
             except FileExistsError as exc:
@@ -854,7 +868,7 @@ class PaperExecutionLedger:
             try:
                 return operation()
             finally:
-                os.close(fd)
+                _CANONICAL_OS_CLOSE(fd)
                 try:
                     self._lock_path.unlink()
                 except FileNotFoundError:
@@ -910,14 +924,14 @@ class PaperExecutionLedger:
         }
         anchor = {**body, "anchor_sha256": _CANONICAL_DIGEST(body)}
         tmp = self._anchor_path.with_name(
-            self._anchor_path.name + f".tmp-{os.getpid()}-{threading.get_ident()}"
+            self._anchor_path.name + f".tmp-{_CANONICAL_OS_GETPID()}-{_CANONICAL_THREAD_IDENT()}"
         )
         try:
             with tmp.open("w", encoding="utf-8", newline="\n") as handle:
                 handle.write(_CANONICAL_CANONICALIZER(anchor) + "\n")
                 handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, self._anchor_path)
+                _CANONICAL_OS_FSYNC(handle.fileno())
+            _CANONICAL_OS_REPLACE(tmp, self._anchor_path)
             self._sync_parent_directory()
         except OSError as exc:
             try:
@@ -1035,7 +1049,7 @@ class PaperExecutionLedger:
                 with self.path.open("a", encoding="utf-8", newline="\n") as handle:
                     handle.write(encoded)
                     handle.flush()
-                    os.fsync(handle.fileno())
+                    _CANONICAL_OS_FSYNC(handle.fileno())
                 if not path_existed_before or not self._path_durable:
                     self._sync_parent_directory()
                 self._write_anchor_unlocked(events + [event])

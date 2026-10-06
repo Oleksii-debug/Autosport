@@ -1064,3 +1064,66 @@ def test_json_decoder_normalizes_pathological_nesting() -> None:
 
     with pytest.raises(EconomicGoalContractError, match="invalid economic goal JSON"):
         economic_goal_from_json(nested)
+
+
+def test_store_rejects_subclass_and_noncanonical_workspace_types(tmp_path) -> None:
+    class StoreSubclass(EconomicGoalStore):
+        pass
+
+    class TextSubclass(str):
+        pass
+
+    class HostilePathLike:
+        calls = 0
+
+        def __fspath__(self):
+            type(self).calls += 1
+            raise AssertionError("hostile __fspath__ executed")
+
+    with pytest.raises(TypeError, match="exact store type"):
+        StoreSubclass(tmp_path)
+
+    with pytest.raises(TypeError, match="exact str or exact Path"):
+        EconomicGoalStore(TextSubclass(str(tmp_path)))
+
+    hostile = HostilePathLike()
+    with pytest.raises(TypeError, match="exact str or exact Path"):
+        EconomicGoalStore(hostile)  # type: ignore[arg-type]
+    assert HostilePathLike.calls == 0
+
+
+def test_store_canonical_workspace_survives_cwd_change(tmp_path, monkeypatch) -> None:
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+
+    monkeypatch.chdir(first_cwd)
+    store = EconomicGoalStore("workspace")
+    expected_workspace = (first_cwd / "workspace").resolve()
+    expected_path = expected_workspace / "economic_goal_contract.json"
+
+    assert store.workspace is not None
+    assert store.workspace == expected_workspace
+    assert store.path == expected_path
+
+    monkeypatch.chdir(second_cwd)
+    store.initialize_owner(_goal())
+
+    assert expected_path.exists()
+    assert store.load() == _goal()
+    assert not (second_cwd / "workspace" / "economic_goal_contract.json").exists()
+
+
+def test_store_constructor_ignores_rebound_path_resolve_and_join(monkeypatch, tmp_path) -> None:
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound Path authority executed")
+
+    path_type = economic_goal_store_module._CANONICAL_PATH_TYPE
+    monkeypatch.setattr(path_type, "resolve", forged)
+    monkeypatch.setattr(path_type, "__truediv__", forged)
+
+    store = EconomicGoalStore(tmp_path)
+
+    assert store.workspace == tmp_path.resolve()
+    assert store.path.name == "economic_goal_contract.json"

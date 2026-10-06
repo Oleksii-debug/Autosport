@@ -31,6 +31,25 @@ _CANDIDATE_DECIMAL_CONTEXT = Context(
 )
 
 
+def _canonical_identity_text(value: object, field_name: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value.strip() != value
+        or "\x00" in value
+    ):
+        raise ValueError(
+            f"candidate leg {field_name} must be a non-empty canonical string"
+        )
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            f"candidate leg {field_name} must be a non-empty canonical string"
+        ) from exc
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateLeg:
     quote_key: str
@@ -59,18 +78,8 @@ class CandidateLeg:
         prefix.
         """
 
-        if (
-            type(self.quote_key) is not str
-            or not self.quote_key
-            or self.quote_key.strip() != self.quote_key
-        ):
-            raise ValueError("candidate leg quote_key must be a non-empty canonical string")
-        if (
-            type(self.event_id) is not str
-            or not self.event_id
-            or self.event_id.strip() != self.event_id
-        ):
-            raise ValueError("candidate leg event_id must be a non-empty canonical string")
+        _canonical_identity_text(self.quote_key, "quote_key")
+        _canonical_identity_text(self.event_id, "event_id")
         if self.sport is not None:
             _canonical_sport(self.sport)
         if (self.market_id is None) != (self.selection_id is None):
@@ -82,10 +91,7 @@ class CandidateLeg:
                 ("market_id", self.market_id),
                 ("selection_id", self.selection_id),
             ):
-                if type(value) is not str or not value or value.strip() != value:
-                    raise ValueError(
-                        f"candidate leg {field_name} must be a non-empty canonical string"
-                    )
+                _canonical_identity_text(value, field_name)
             expected = _candidate_quote_key(
                 self.event_id,
                 self.market_id,
@@ -115,6 +121,8 @@ class CandidateLeg:
         market_id, selection_id = remainder.split("|", 1)
         if not market_id or not selection_id:
             raise ValueError("candidate quote_key is not canonical event|market|selection")
+        _canonical_identity_text(market_id, "market_id")
+        _canonical_identity_text(selection_id, "selection_id")
         return self.event_id, market_id, selection_id
 
 
@@ -241,22 +249,18 @@ class BeamParlayCandidateSearch:
         for index, leg in enumerate(legs):
             if type(leg) is not CandidateLeg:
                 raise ValueError(f"candidate leg {index} must be an exact CandidateLeg")
-            if (
-                type(leg.quote_key) is not str
-                or not leg.quote_key
-                or leg.quote_key != leg.quote_key.strip()
-            ):
+            try:
+                _canonical_identity_text(leg.quote_key, "quote_key")
+            except ValueError as exc:
                 raise ValueError(
                     f"candidate leg {index} quote_key must be a non-empty canonical string"
-                )
-            if (
-                type(leg.event_id) is not str
-                or not leg.event_id
-                or leg.event_id != leg.event_id.strip()
-            ):
+                ) from exc
+            try:
+                _canonical_identity_text(leg.event_id, "event_id")
+            except ValueError as exc:
                 raise ValueError(
                     f"candidate leg {index} event_id must be a non-empty canonical string"
-                )
+                ) from exc
             if leg.market_id is not None or leg.selection_id is not None:
                 try:
                     leg.ticket_identity()

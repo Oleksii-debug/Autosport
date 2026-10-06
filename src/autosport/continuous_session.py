@@ -1813,11 +1813,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     @staticmethod
     def _detached_settlement_resolutions(
         resolutions: tuple[SettlementResolution, ...],
+        _replace: Callable[..., SettlementResolution] = replace,
+        _replace_code: object = replace.__code__,
     ) -> tuple[SettlementResolution, ...]:
+        if (
+            replace is not _replace
+            or getattr(_replace, "__code__", None) is not _replace_code
+        ):
+            raise ContinuousSessionError(
+                "settlement callback copy authority changed"
+            )
         return tuple(
-            replace(
+            _replace(
                 resolution,
-                quote_outcomes=dict(resolution.quote_outcomes),
+                quote_outcomes=resolution.quote_outcomes.copy(),
             )
             for resolution in resolutions
         )

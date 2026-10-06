@@ -222,33 +222,33 @@ def _validate_provenance_bound(
 ) -> None:
     """Validate provenance through captured slot descriptors."""
     if _type(self) is not _provenance_type:
-        raise _error__type("provenance must use the exact evidence type")
+        raise _error_type("provenance must use the exact evidence type")
     schema, schema_version, goal_id, revision, bankroll_id, contract_sha256 = _snapshot(self)
     if _type(schema) is not str or schema != _schema:
-        raise _error__type("unsupported provenance schema")
+        raise _error_type("unsupported provenance schema")
     if _type(schema_version) is not int or schema_version != _schema_version:
-        raise _error__type("unsupported provenance schema version")
+        raise _error_type("unsupported provenance schema version")
     for name, value in (("goal_id", goal_id), ("bankroll_id", bankroll_id)):
         if _type(value) is not str or not value:
-            raise _error__type(f"{name} must be a non-empty string")
+            raise _error_type(f"{name} must be a non-empty string")
         if value != value.strip():
-            raise _error__type(f"{name} must be canonical text")
+            raise _error_type(f"{name} must be canonical text")
         if _len(value) > _max_identity_chars:
-            raise _error__type(f"{name} exceeds the identity size limit")
+            raise _error_type(f"{name} exceeds the identity size limit")
         if "\x00" in value:
-            raise _error__type(f"{name} must not contain NUL")
+            raise _error_type(f"{name} must not contain NUL")
         try:
             value.encode("utf-8", errors="strict")
         except UnicodeEncodeError as exc:
-            raise _error__type(f"{name} must be valid UTF-8 text") from exc
+            raise _error_type(f"{name} must be valid UTF-8 text") from exc
     if _type(revision) is not int or revision <= 0:
-        raise _error__type("revision must be a positive integer")
+        raise _error_type("revision must be a positive integer")
     if (
         _type(contract_sha256) is not str
         or _len(contract_sha256) != 64
         or _any(ch not in "0123456789abcdef" for ch in contract_sha256)
     ):
-        raise _error__type("contract_sha256 must be lowercase SHA-256 hex")
+        raise _error_type("contract_sha256 must be lowercase SHA-256 hex")
 
 def _capture_callable_authority_graph(
     root,

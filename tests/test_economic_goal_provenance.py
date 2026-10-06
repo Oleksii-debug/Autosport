@@ -692,3 +692,17 @@ def test_provenance_for_rejects_in_place_builder_keyword_default_mutation() -> N
             provenance_for(contract)
     finally:
         original_kwdefaults["_validator"] = original_validator
+
+
+def test_provenance_contract_field_order_ignores_runtime_rebinding(monkeypatch) -> None:
+    contract = _goal()
+    canonical = provenance_for(contract)
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_PROVENANCE_CONTRACT_FIELD_NAMES",
+        tuple(reversed(economic_goal_provenance_module._PROVENANCE_CONTRACT_FIELD_NAMES)),
+    )
+
+    rebound = provenance_for(contract)
+    assert rebound == canonical

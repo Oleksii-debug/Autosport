@@ -12,6 +12,7 @@ from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.economic_session import ProductEconomicSessionStore
 from autosport.paper import PaperBook
+from autosport.risk_day_window import ProductDayRiskWindowStore
 from autosport.risk_session_turnover_evidence import (
     PaperSessionTurnoverEvidenceError,
     PaperSessionTurnoverEvidenceIncompleteError,
@@ -76,6 +77,41 @@ def _open(
     )
 
 
+def _fixture_causal_advance():
+    record = PaperBook.__dict__["_record_product_day_admission"]
+    closure = record.__closure__
+    assert closure is not None
+    freevars = record.__code__.co_freevars
+    assert "causal_advance" in freevars
+    return closure[freevars.index("causal_advance")].cell_contents
+
+
+def _save_authoritative(workspace: Path, book: PaperBook) -> None:
+    for ticket_id, ticket in book.tickets.items():
+        if ticket_id in book._product_day_admissions:
+            continue
+        epoch_ns = _epoch_ns(ticket.placed_at)
+        day_store = ProductDayRiskWindowStore(
+            workspace,
+            _test_clock=lambda value=epoch_ns: value,
+        )
+        window = day_store.current()
+        witness = book._validate_product_day_admission_witness(
+            (
+                ticket.placed_at,
+                window.day_key,
+                window.window_start,
+                window.window_end_exclusive,
+                window.state_sha256,
+                window.authority_generation,
+            ),
+            ticket_id=ticket_id,
+        )
+        book._product_day_admissions[ticket_id] = witness
+        _fixture_causal_advance()(book, ticket_id, witness)
+    _save_authoritative(workspace, book)
+
+
 def _setup(tmp_path, *, max_turnover: str = "1"):
     workspace = tmp_path / "workspace"
     authority_root = tmp_path / "authority"
@@ -112,7 +148,7 @@ def test_session_turnover_counts_parlay_stake_once(tmp_path):
         placed_at="2026-10-05T12:30:00Z",
         legs=(_leg("a"), _leg("b", "1.5")),
     )
-    book.save(workspace / "paper_book.json")
+    _save_authoritative(workspace, book)
 
     evidence = _resolve(store, session)
 
@@ -137,7 +173,7 @@ def test_restart_and_midnight_do_not_reset_session_turnover(tmp_path):
         suffix="before-midnight",
         placed_at="2026-10-05T23:59:59Z",
     )
-    book.save(workspace / "paper_book.json")
+    _save_authoritative(workspace, book)
     first = _resolve(store, session)
 
     clock.set("2026-10-06T12:00:00Z")
@@ -163,7 +199,7 @@ def test_explicit_successor_resets_only_session_scope(tmp_path):
         suffix="first-session",
         placed_at="2026-10-05T12:30:00Z",
     )
-    book.save(workspace / "paper_book.json")
+    _save_authoritative(workspace, book)
     assert _resolve(store, first_session).confirmed_turnover == Decimal("30")
 
     EconomicGoalStore(workspace).persist_automatic_successor(
@@ -179,7 +215,7 @@ def test_explicit_successor_resets_only_session_scope(tmp_path):
         suffix="second-session",
         placed_at="2026-10-05T14:30:00Z",
     )
-    book.save(workspace / "paper_book.json")
+    _save_authoritative(workspace, book)
 
     evidence = _resolve(store, successor)
     assert successor.session_id != first_session.session_id
@@ -213,7 +249,7 @@ def test_settlement_does_not_change_accepted_session_turnover(tmp_path):
         placed_at="2026-10-05T12:30:00Z",
         legs=(_leg("settled-a"), _leg("settled-b", "1.5")),
     )
-    book.save(workspace / "paper_book.json")
+    _save_authoritative(workspace, book)
     before = _resolve(store, session)
 
     book = PaperBook.load(workspace / "paper_book.json")
@@ -222,7 +258,7 @@ def test_settlement_does_not_change_accepted_session_turnover(tmp_path):
         {leg.quote_key for leg in ticket.legs},
         settled_at="2026-10-05T13:00:00Z",
     )
-    book.save(workspace / "paper_book.json")
+    _save_authoritative(workspace, book)
     after = _resolve(store, session)
 
     assert after.confirmed_turnover == Decimal("10")
@@ -240,7 +276,7 @@ def test_session_turnover_rejects_cross_currency_laundering(tmp_path):
         placed_at="2026-10-05T12:30:00Z",
         currency="USD",
     )
-    book.save(workspace / "paper_book.json")
+    _save_authoritative(workspace, book)
 
     with pytest.raises(
         PaperSessionTurnoverEvidenceIncompleteError,
@@ -258,7 +294,7 @@ def test_require_current_rejects_modified_evidence(tmp_path):
         suffix="candidate",
         placed_at="2026-10-05T12:30:00Z",
     )
-    book.save(workspace / "paper_book.json")
+    _save_authoritative(workspace, book)
     evidence = _resolve(store, session)
 
     with pytest.raises(PaperSessionTurnoverEvidenceMismatchError):
@@ -295,7 +331,7 @@ def test_session_evidence_digest_is_input_order_independent(tmp_path):
         suffix="b",
         placed_at="2026-10-05T12:40:00Z",
     )
-    book.save(workspace / "paper_book.json")
+    _save_authoritative(workspace, book)
 
     evidence = _resolve(store, session)
     restarted = _resolve(store, store.current())

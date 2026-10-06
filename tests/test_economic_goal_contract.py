@@ -436,6 +436,24 @@ def test_contract_constructor_rejects_bound_default_rebinding() -> None:
         operation.__defaults__ = original_defaults
 
 
+def test_contract_constructor_rejects_code_rebinding() -> None:
+    operation = economic_goal_module._contract_init_authority
+    original_code = operation.__code__
+
+    def forged(self):
+        return None
+
+    operation.__code__ = forged.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="constructor authority changed",
+        ):
+            _goal()
+    finally:
+        operation.__code__ = original_code
+
+
 def test_contract_constructor_ignores_rebound_post_init(monkeypatch) -> None:
     def forged_post_init(self) -> None:
         raise AssertionError("rebound contract post-init executed")

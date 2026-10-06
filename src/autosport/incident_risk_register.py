@@ -210,6 +210,15 @@ def _operator_safe_text(name: str, value: object, *, allow_empty: bool = False) 
     return text
 
 
+def _operator_safe_tuple(name: str, values: tuple[str, ...]) -> tuple[str, ...]:
+    """Sanitize operator-visible canonical identifiers without mutating register truth."""
+
+    return tuple(
+        _operator_safe_text(f"{name} member", value)
+        for value in values
+    )
+
+
 def _enum_value(enum_type, name: str, value: object):
     if not isinstance(value, enum_type):
         raise IncidentRiskRegisterError(f"{name} must be {enum_type.__name__}")
@@ -583,10 +592,22 @@ def operator_projection(entry: IncidentRiskEntry) -> OperatorRiskProjection:
         summary=_operator_safe_text("summary", entry.summary),
         mitigation=_operator_safe_text("mitigation", entry.mitigation, allow_empty=True),
         residual_risk=_operator_safe_text("residual_risk", entry.residual_risk, allow_empty=True),
-        affected_components=entry.affected_components,
-        occurrence_evidence_refs=entry.occurrence_evidence_refs,
-        evidence_refs=entry.evidence_refs,
-        model_version_ids=entry.model_version_ids,
+        affected_components=_operator_safe_tuple(
+            "affected_components",
+            entry.affected_components,
+        ),
+        occurrence_evidence_refs=_operator_safe_tuple(
+            "occurrence_evidence_refs",
+            entry.occurrence_evidence_refs,
+        ),
+        evidence_refs=_operator_safe_tuple(
+            "evidence_refs",
+            entry.evidence_refs,
+        ),
+        model_version_ids=_operator_safe_tuple(
+            "model_version_ids",
+            entry.model_version_ids,
+        ),
         requires_operator_action=entry.requires_operator_action,
         fingerprint_sha256=entry.fingerprint_sha256,
     )

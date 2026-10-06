@@ -779,6 +779,24 @@ class BetfairSettlementRevisionStore:
             prior = chain[-1]
             if (revision.plan_id, revision.action_id, revision.attempt_id) != (prior.plan_id, prior.action_id, prior.attempt_id):
                 raise BetfairSettlementRevisionError("settlement revision changes execution attempt")
+            if (
+                revision.event_id,
+                revision.market_id,
+                revision.selection_id,
+                revision.side,
+            ) != (
+                prior.event_id,
+                prior.market_id,
+                prior.selection_id,
+                prior.side,
+            ):
+                raise BetfairSettlementRevisionError(
+                    "settlement revision changes durable execution identity"
+                )
+            if revision.price_requested != prior.price_requested:
+                raise BetfairSettlementRevisionError(
+                    "settlement revision changes durable requested price"
+                )
             if revision.previous_revision_id != prior.revision_id or revision.revision_number != prior.revision_number + 1:
                 raise BetfairSettlementRevisionError("settlement revision lineage is not contiguous")
             if _time(revision.available_at, "available_at") <= _time(prior.available_at, "available_at"):

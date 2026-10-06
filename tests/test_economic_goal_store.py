@@ -1468,6 +1468,41 @@ def test_payload_uses_captured_contract_field_values_after_descriptor_rebinding(
     assert isinstance(body, dict)
     assert body["max_stake_fraction"] == "0.03"
 
+def test_store_public_authority_operations_reject_instance_shadowing(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+
+    for name, replacement in (
+        ("load", lambda _self: None),
+        ("initialize_owner", lambda _self, _contract: None),
+        ("persist_automatic_successor", lambda _self, _contract: None),
+    ):
+        try:
+            object.__setattr__(store, name, replacement)
+        except TypeError as exc:
+            assert "authority operation binding is immutable" in str(exc)
+        else:
+            raise AssertionError(f"{name} instance binding was shadowable")
+
+    assert callable(store.load)
+    assert callable(store.initialize_owner)
+    assert callable(store.persist_automatic_successor)
+
+
+def test_store_public_authority_operations_reject_class_rebinding() -> None:
+    for name, replacement in (
+        ("__init__", lambda self, _workspace: None),
+        ("load", lambda self: None),
+        ("initialize_owner", lambda self, _contract: None),
+        ("persist_automatic_successor", lambda self, _contract: None),
+    ):
+        try:
+            setattr(EconomicGoalStore, name, replacement)
+        except TypeError as exc:
+            assert "authority operation binding is immutable" in str(exc)
+        else:
+            raise AssertionError(f"{name} class binding was mutable")
+
+
 def test_store_successor_ignores_runtime_post_init_rebinding(monkeypatch, tmp_path) -> None:
     previous = _goal()
     candidate = replace(

@@ -614,6 +614,95 @@ def test_transition_proof_uses_isolated_candidate_snapshot() -> None:
     assert candidate.max_stake_fraction == Decimal("0.99")
 
 
+def test_automatic_transition_ignores_rebound_contract_field_descriptor(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.03"),
+    )
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return Decimal("0.02")
+
+    monkeypatch.setattr(
+        EconomicGoalContract,
+        "max_stake_fraction",
+        ForgedDescriptor(),
+    )
+
+    with pytest.raises(EconomicGoalContractError, match="must not increase"):
+        validate_automatic_transition(previous, candidate)
+
+
+
+
+def test_transition_snapshot_covers_every_captured_contract_slot(monkeypatch) -> None:
+    goal = _goal()
+    field_names = economic_goal_module._CONTRACT_FIELD_NAMES
+    expected = economic_goal_module._canonical_contract_snapshot(goal)
+
+    for index, name in enumerate(field_names):
+        class ForgedDescriptor:
+            def __get__(self, instance, owner=None):
+                return object()
+
+        monkeypatch.setattr(EconomicGoalContract, name, ForgedDescriptor())
+        snapshot = economic_goal_module._canonical_contract_snapshot(goal)
+        assert snapshot[index] == expected[index]
+        monkeypatch.undo()
+
+
+
+
+def test_transition_snapshot_helper_ignores_rebound_contract_descriptors(monkeypatch) -> None:
+    goal = _goal(max_stake_fraction=Decimal("0.03"))
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return Decimal("0.02")
+
+    monkeypatch.setattr(
+        EconomicGoalContract,
+        "max_stake_fraction",
+        ForgedDescriptor(),
+    )
+
+    snapshot = economic_goal_module._snapshot_transition_contract(goal)
+    assert snapshot.max_stake_fraction == Decimal("0.03")
+
+
+
+
+def test_transition_proof_detects_mutation_between_canonical_snapshots() -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+    canonical_snapshot = economic_goal_module._canonical_contract_snapshot
+    mutated = False
+
+    def snapshot_then_mutate(contract):
+        nonlocal mutated
+        snapshot = canonical_snapshot(contract)
+        if contract is candidate and not mutated:
+            object.__setattr__(candidate, "max_stake_fraction", Decimal("0.99"))
+            mutated = True
+        return snapshot
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="changed during automatic transition validation",
+    ):
+        economic_goal_module._validate_automatic_transition_bound(
+            previous,
+            candidate,
+            _snapshot=snapshot_then_mutate,
+        )
+
+    assert mutated is True
+
+
+
 def test_public_transition_ignores_rebound_snapshotter_alias(monkeypatch) -> None:
     previous = _goal()
     candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))

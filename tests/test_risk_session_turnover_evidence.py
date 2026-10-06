@@ -300,7 +300,7 @@ def test_require_current_rejects_modified_evidence(tmp_path):
 
     with pytest.raises(PaperSessionTurnoverEvidenceMismatchError):
         PaperSessionTurnoverResolver.require_current(
-            replace(evidence, confirmed_turnover=Decimal("0")),
+            replace(evidence, evidence_sha256="b" * 64),
             session_store=store,
             session=session,
         )
@@ -340,3 +340,23 @@ def test_session_evidence_digest_is_input_order_independent(tmp_path):
     assert restarted == evidence
     assert evidence.confirmed_turnover == Decimal("25")
     assert evidence.constituent_count == 2
+
+
+def test_evidence_value_contract_rejects_incoherent_headroom(tmp_path):
+    workspace, _, _, store, session = _setup(tmp_path)
+    book = PaperBook.load(workspace / "paper_book.json")
+    _open(
+        book,
+        stake="10",
+        suffix="value-contract",
+        placed_at="2026-10-05T12:30:00Z",
+    )
+    _save_authoritative(workspace, book)
+    evidence = _resolve(store, session)
+
+    with pytest.raises(PaperSessionTurnoverEvidenceError):
+        replace(evidence, residual_headroom=Decimal("100"))
+    with pytest.raises(PaperSessionTurnoverEvidenceError):
+        replace(evidence, schema_version=True)
+    with pytest.raises(PaperSessionTurnoverEvidenceError):
+        replace(evidence, session_state_sha256="A" * 64)

@@ -532,7 +532,7 @@ def _issue_evidence(
     _write_adapter_version=_CANONICAL_WRITE_ADAPTER_VERSION,
 ) -> BetfairStandardLimitPriceBoundEvidence:
     item = object.__new__(BetfairStandardLimitPriceBoundEvidence)
-    action_payload = ExecutionAction.to_dict(action)
+    action_payload = _canonical_action_payload(action)
     values = {
         "execution_plan_id": bound.execution_plan.plan_id,
         "execution_plan_sha256": bound.execution_plan.fingerprint,

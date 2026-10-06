@@ -1248,6 +1248,34 @@ class _ContinuousSessionState:
                         raise ContinuousSessionError(
                             "source-state projection revision position does not match predecessor"
                         )
+                    if revised.source_cursor != delta.source_cursor:
+                        raise ContinuousSessionError(
+                            "source-state projection revision cursor does not match predecessor"
+                        )
+                    if revised.event_dedupe_key != delta.event_dedupe_key:
+                        raise ContinuousSessionError(
+                            "source-state projection revision dedupe key does not match predecessor"
+                        )
+                    if revised.event_id != delta.event_id:
+                        raise ContinuousSessionError(
+                            "source-state projection revision event does not match predecessor"
+                        )
+                    if (
+                        revised.gap_from_cursor != delta.gap_from_cursor
+                        or revised.gap_to_cursor != delta.gap_to_cursor
+                    ):
+                        raise ContinuousSessionError(
+                            "source-state projection revision gap bounds do not match predecessor"
+                        )
+                    if revised.gap_state is GapState.DETECTED:
+                        if delta.gap_state is not GapState.RECOVERED:
+                            raise ContinuousSessionError(
+                                "detected source gap can only be revised by recovery"
+                            )
+                    elif delta.gap_state is GapState.RECOVERED:
+                        raise ContinuousSessionError(
+                            "source gap recovery must revise a detected gap"
+                        )
                     if delta.revision_number != revised.revision_number + 1:
                         raise ContinuousSessionError(
                             "source-state projection revision_number must advance exactly one step"

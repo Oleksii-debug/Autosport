@@ -935,6 +935,46 @@ def test_attempt_executor_uses_sealed_nonresponse_and_execution_type(monkeypatch
     assert transport.calls == []
 
 
+def test_attempt_executor_ignores_rebound_execution_post_init(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    rebound_called = False
+
+    def rebound_post_init(self):
+        nonlocal rebound_called
+        rebound_called = True
+        raise AssertionError("rebound execution validator must not run")
+
+    monkeypatch.setattr(
+        MarketBookBatchAttemptExecution,
+        "__post_init__",
+        rebound_post_init,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="attempt-sealed-execution-validator",
+        required=True,
+        request_id="sealed-execution-validator",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert rebound_called is False
+    assert isinstance(execution, MarketBookBatchAttemptExecution)
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert execution.result is not None
+    assert execution.history.records[-1].attempt_id == (
+        "attempt-sealed-execution-validator"
+    )
+    assert len(transport.calls) == 1
+
+
 def test_invalid_client_fails_before_gate_mutation():
     plan = _plan()
     batch = plan.batches[0]

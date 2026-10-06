@@ -846,7 +846,10 @@ def _execute_market_book_batch_attempt(
     read_batch: Callable[..., MarketBookBatchTransportResult],
     append_response: Callable[..., MarketBookAttemptHistory],
     append_nonresponse: Callable[..., MarketBookAttemptHistory],
-    execution_type: type[MarketBookBatchAttemptExecution],
+    make_execution: Callable[
+        [MarketBookAttemptHistory, MarketBookAttemptOutcome, MarketBookBatchTransportResult | None],
+        MarketBookBatchAttemptExecution,
+    ],
 ) -> MarketBookBatchAttemptExecution:
     """Execute one admitted read and durably classify its structural attempt truth."""
 
@@ -889,7 +892,7 @@ def _execute_market_book_batch_attempt(
             required=required,
             outcome=outcome,
         )
-        return execution_type(updated, outcome, None)
+        return make_execution(updated, outcome, None)
     except (MarketBookPostDispatchFailure, _transport.BetfairMarketBookTransportError):
         outcome = MarketBookAttemptOutcome.TRANSPORT_FAILURE
         updated = append_nonresponse(
@@ -899,7 +902,7 @@ def _execute_market_book_batch_attempt(
             required=required,
             outcome=outcome,
         )
-        return execution_type(updated, outcome, None)
+        return make_execution(updated, outcome, None)
     except _transport.BetfairMarketBookProviderError:
         outcome = MarketBookAttemptOutcome.PROVIDER_FAILURE
         updated = append_nonresponse(
@@ -909,7 +912,7 @@ def _execute_market_book_batch_attempt(
             required=required,
             outcome=outcome,
         )
-        return execution_type(updated, outcome, None)
+        return make_execution(updated, outcome, None)
     except _transport.BetfairMarketBookProtocolError:
         outcome = MarketBookAttemptOutcome.PARSE_FAILURE
         updated = append_nonresponse(
@@ -919,7 +922,7 @@ def _execute_market_book_batch_attempt(
             required=required,
             outcome=outcome,
         )
-        return execution_type(updated, outcome, None)
+        return make_execution(updated, outcome, None)
 
     updated = append_response(
         frozen_history,
@@ -932,7 +935,7 @@ def _execute_market_book_batch_attempt(
         if result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
         else MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
     )
-    return execution_type(updated, outcome, result)
+    return make_execution(updated, outcome, result)
 
 
 def _install_attempt_executor() -> None:
@@ -941,6 +944,22 @@ def _install_attempt_executor() -> None:
     canonical_append_response = append_market_book_transport_attempt
     canonical_append_nonresponse = _append_nonresponse_attempt
     canonical_execution_type = MarketBookBatchAttemptExecution
+    canonical_execution_validate = MarketBookBatchAttemptExecution.__post_init__
+
+    def make_execution(
+        history: MarketBookAttemptHistory,
+        outcome: MarketBookAttemptOutcome,
+        result: MarketBookBatchTransportResult | None,
+    ) -> MarketBookBatchAttemptExecution:
+        # Avoid generated dataclass __init__ -> mutable self.__post_init__
+        # dispatch on the canonical executor path. Construct the exact frozen
+        # DTO and invoke the already closure-bound validator directly.
+        execution = object.__new__(canonical_execution_type)
+        object.__setattr__(execution, "history", history)
+        object.__setattr__(execution, "outcome", outcome)
+        object.__setattr__(execution, "result", result)
+        canonical_execution_validate(execution)
+        return execution
 
     def execute_market_book_batch_attempt(
         client: _base.BetfairReadOnlyClient,
@@ -967,7 +986,7 @@ def _install_attempt_executor() -> None:
             read_batch=canonical_read_batch,
             append_response=canonical_append_response,
             append_nonresponse=canonical_append_nonresponse,
-            execution_type=canonical_execution_type,
+            make_execution=make_execution,
         )
 
     globals()["execute_market_book_batch_attempt"] = execute_market_book_batch_attempt

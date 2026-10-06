@@ -91,28 +91,28 @@ def _sha256_token(value: object, field: str) -> str:
     return token
 
 
-def _dispatch_instant(
-    client: _base.BetfairReadOnlyClient,
-    value: object,
-) -> datetime:
+def _transport_now(client: _base.BetfairReadOnlyClient) -> datetime:
     if type(client) is not _base.BetfairReadOnlyClient:
         raise TypeError("client must be an exact BetfairReadOnlyClient")
-    if type(value) is not datetime:
-        raise TypeError("scheduled_at must be an exact datetime")
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("scheduled_at must be timezone-aware")
-    normalized = value.astimezone(timezone.utc)
-
     # Mirror the canonical physical MarketBook transport's time-origin rule.
     # The unmodified production network transport is always measured by real
     # UTC; injected transports use the client's validated clock so replay and
     # deterministic tests do not acquire a second wall-clock authority.
     if _transport._canonical_network_transport(client):
-        dispatch_now = datetime.now(timezone.utc)
-    else:
-        dispatch_now = datetime.fromisoformat(client._observed_at()).astimezone(
-            timezone.utc
-        )
+        return datetime.now(timezone.utc)
+    return datetime.fromisoformat(client._observed_at()).astimezone(timezone.utc)
+
+
+def _dispatch_instant(
+    client: _base.BetfairReadOnlyClient,
+    value: object,
+) -> datetime:
+    if type(value) is not datetime:
+        raise TypeError("scheduled_at must be an exact datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("scheduled_at must be timezone-aware")
+    normalized = value.astimezone(timezone.utc)
+    dispatch_now = _transport_now(client)
 
     if normalized > dispatch_now:
         raise ValueError("scheduled_at must not be in the future")
@@ -124,6 +124,7 @@ def _dispatch_instant(
 
 
 def _release_projection_lease(
+    client: _base.BetfairReadOnlyClient,
     gate: BetfairMarketBookProjectionConcurrencyGate,
     request_id: str,
     lease_generation: int | None,
@@ -133,11 +134,12 @@ def _release_projection_lease(
     gate.complete(
         request_id,
         lease_generation=lease_generation,
-        observed_at=datetime.now(timezone.utc),
+        observed_at=_transport_now(client),
     )
 
 
 def _release_projection_lease_after_failure(
+    client: _base.BetfairReadOnlyClient,
     gate: BetfairMarketBookProjectionConcurrencyGate,
     request_id: str,
     lease_generation: int | None,
@@ -146,7 +148,7 @@ def _release_projection_lease_after_failure(
     """Best-effort cleanup without masking the primary dispatch failure."""
 
     try:
-        _release_projection_lease(gate, request_id, lease_generation)
+        _release_projection_lease(client, gate, request_id, lease_generation)
     except BaseException as cleanup_exc:
         # A fresh process-control interruption during cleanup supersedes an
         # ordinary primary error. If process control is already the primary,
@@ -586,6 +588,7 @@ def _install_transport_result_authority() -> None:
                 "MarketBook per-market rate gate could not establish local admission",
             )
             _release_projection_lease_after_failure(
+                client,
                 concurrency_gate,
                 request,
                 lease_generation,
@@ -598,6 +601,7 @@ def _install_transport_result_authority() -> None:
                 "MarketBook per-market rate gate denied local admission",
             )
             _release_projection_lease_after_failure(
+                client,
                 concurrency_gate,
                 request,
                 lease_generation,
@@ -612,6 +616,7 @@ def _install_transport_result_authority() -> None:
             # admitted projection lease. Cleanup is bounded/local and the
             # original BaseException is re-raised unchanged.
             _release_projection_lease_after_failure(
+                client,
                 concurrency_gate,
                 request,
                 lease_generation,
@@ -621,6 +626,7 @@ def _install_transport_result_authority() -> None:
         else:
             try:
                 _release_projection_lease(
+                    client,
                     concurrency_gate,
                     request,
                     lease_generation,
@@ -634,6 +640,7 @@ def _install_transport_result_authority() -> None:
                 # before local lease release completes. Retry that local cleanup
                 # once, then preserve the original interruption unchanged.
                 _release_projection_lease_after_failure(
+                    client,
                     concurrency_gate,
                     request,
                     lease_generation,

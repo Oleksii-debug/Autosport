@@ -697,6 +697,42 @@ def test_successful_projection_read_releases_local_concurrency_lease():
     assert concurrency_gate.snapshot().active == ()
 
 
+def test_injected_projection_release_keeps_client_clock_authority():
+    plan = _plan(
+        market_ids=("1.001",),
+        order_projection="EXECUTABLE",
+    )
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+
+    first = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="projection-clock-1",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+    second = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="projection-clock-2",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert first.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+    assert second.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+    assert len(transport.calls) == 2
+    state = concurrency_gate.snapshot()
+    assert state.active == ()
+    assert state.last_observed_at_utc_us == int(NOW.timestamp() * 1_000_000)
+
+
 def test_attempt_executor_rejects_invalid_required_before_transport():
     plan = _plan(market_ids=("1.001",))
     batch = plan.batches[0]

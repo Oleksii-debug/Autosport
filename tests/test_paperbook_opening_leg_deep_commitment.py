@@ -2746,7 +2746,7 @@ def test_lay_selection_winner_is_a_loss_without_additional_debit() -> None:
     book = PaperBook("100")
     ticket = book.open_ticket([_lay_leg(odds="3.00")], "10", placed_at=_TS)
 
-    settled = book.settle(ticket.ticket_id, {ticket.legs[0].quote_key}, settled_at=_TS)
+    settled = book.settle(ticket.ticket_id, {ticket.legs[0].settlement_key}, settled_at=_TS)
 
     assert settled.status is paper_module.TicketStatus.LOST
     assert settled.payout == Decimal("0")
@@ -3152,3 +3152,25 @@ def test_schema8_preserves_provider_provenance_and_settlement_time(tmp_path) -> 
     assert restored.currency == "USD"
     assert restored.settled_at == "2026-10-05T00:05:00+00:00"
     assert restored.legs[0].market_semantics_id == "exchange.match.odds.v3"
+
+
+def test_lay_settlement_requires_market_semantics_bound_key() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_lay_leg(semantics="exchange.match.odds.v9")], "10", placed_at=_TS)
+
+    with pytest.raises(
+        ValueError,
+        match="unknown winning settlement key",
+    ):
+        book.settle(ticket.ticket_id, {ticket.legs[0].quote_key}, settled_at=_TS)
+
+    assert ticket.status is paper_module.TicketStatus.OPEN
+    assert book.balance == Decimal("80")
+
+    settled = book.settle(
+        ticket.ticket_id,
+        {ticket.legs[0].settlement_key},
+        settled_at=_TS,
+    )
+    assert settled.status is paper_module.TicketStatus.LOST
+    assert settled.payout == Decimal("0")

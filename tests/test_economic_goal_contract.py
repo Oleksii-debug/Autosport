@@ -399,6 +399,18 @@ def test_contract_successor_ignores_rebound_public_transition_validator(monkeypa
     previous.validate_automatic_successor(candidate)
 
 
+def test_contract_authority_seal_cannot_be_cleared() -> None:
+    assert EconomicGoalContract._authority_operations_sealed is True
+
+    with pytest.raises(
+        TypeError,
+        match="public authority operation binding is immutable",
+    ):
+        EconomicGoalContract._authority_operations_sealed = False
+
+    assert EconomicGoalContract._authority_operations_sealed is True
+
+
 def test_contract_successor_public_method_cannot_be_rebound() -> None:
     original = EconomicGoalContract.validate_automatic_successor
 

@@ -4078,6 +4078,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         collector_config = getattr(collector, "config", None)
         collector_max_items = getattr(collector_config, "max_items", None)
         lifecycle = self.lifecycle
+        if (
+            isinstance(lifecycle, _lifecycle_type)
+            and type(lifecycle) is not _lifecycle_type
+        ):
+            raise ContinuousSessionError(
+                "canonical event lifecycle subtype is not supported"
+            )
         lifecycle_register_eligible = getattr(lifecycle, "register_eligible", None)
         lifecycle_records = getattr(lifecycle, "records", None)
         market_store = self.market_store

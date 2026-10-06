@@ -658,3 +658,40 @@ def test_class_level_client_getattribute_replacement_revokes_issued_identity(
     monkeypatch.setattr(BetfairReadOnlyClient, "__getattribute__", replacement)
 
     assert not is_authoritative_betfair_account_identity(value, client=client)
+
+
+@pytest.mark.parametrize(
+    ("owner",),
+    (
+        (_identity._http_client.HTTPSConnection,),
+        (_identity._http_client.HTTPConnection,),
+        (_identity._ssl.SSLContext,),
+        (_identity._ssl.SSLSocket,),
+    ),
+)
+def test_deep_provider_network_attribute_dispatch_is_sealed(
+    monkeypatch: pytest.MonkeyPatch,
+    owner,
+) -> None:
+    anchor = object()
+
+    def canonical_caller():
+        return anchor
+
+    _issue, _verify, dispatch_is_current = (
+        _identity._bind_betfair_execution_readback_origin_authority(
+            canonical_caller.__code__,
+            (("anchor", anchor),),
+        )
+    )
+
+    assert dispatch_is_current()
+
+    original = owner.__getattribute__
+
+    def replacement(self, name):
+        return original(self, name)
+
+    monkeypatch.setattr(owner, "__getattribute__", replacement)
+
+    assert not dispatch_is_current()

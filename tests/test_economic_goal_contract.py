@@ -399,6 +399,27 @@ def test_contract_successor_ignores_rebound_public_transition_validator(monkeypa
     previous.validate_automatic_successor(candidate)
 
 
+def test_contract_successor_public_method_cannot_be_rebound() -> None:
+    original = EconomicGoalContract.validate_automatic_successor
+
+    def forged_validator(*args, **kwargs):
+        raise AssertionError("rebound public successor executed")
+
+    with pytest.raises(
+        TypeError,
+        match="public authority operation binding is immutable",
+    ):
+        EconomicGoalContract.validate_automatic_successor = forged_validator
+
+    assert EconomicGoalContract.validate_automatic_successor is original
+
+    with pytest.raises(
+        TypeError,
+        match="public authority operation binding is immutable",
+    ):
+        del EconomicGoalContract.validate_automatic_successor
+
+
 def test_contract_successor_ignores_rebound_canonical_transition_alias(monkeypatch) -> None:
     previous = _goal()
     candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))

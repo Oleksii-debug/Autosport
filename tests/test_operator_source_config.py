@@ -196,3 +196,24 @@ def test_invalid_override_is_invalid_not_configuration_required():
 def test_payload_size_is_bounded():
     with pytest.raises(OperatorSourceConfigError, match="size"):
         parse_operator_source_config(b"x" * 4097)
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        bytearray(b"x" * 4097),
+        memoryview(bytearray(b"x" * 4097)),
+    ),
+)
+def test_oversized_mutable_bytes_like_payload_fails_before_copy(payload) -> None:
+    with pytest.raises(OperatorSourceConfigError, match="size"):
+        parse_operator_source_config(payload)
+
+
+def test_memoryview_size_uses_bytes_not_element_count() -> None:
+    payload = memoryview(bytearray(4097)).cast("I")
+    assert len(payload) < payload.nbytes
+    assert payload.nbytes > 4096
+
+    with pytest.raises(OperatorSourceConfigError, match="size"):
+        parse_operator_source_config(payload)
+

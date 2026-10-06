@@ -91,9 +91,12 @@ def build_operator_source_config(source_id: str) -> OperatorSourceConfig:
 def parse_operator_source_config(payload: bytes | bytearray | memoryview) -> OperatorSourceConfig:
     if not isinstance(payload, (bytes, bytearray, memoryview)):
         raise TypeError("payload must be bytes-like")
-    raw = bytes(payload)
-    if not raw or len(raw) > 4096:
+    payload_size = payload.nbytes if isinstance(payload, memoryview) else len(payload)
+    if payload_size < 1 or payload_size > 4096:
         raise OperatorSourceConfigError("operator source configuration payload size is invalid")
+    raw = bytes(payload)
+    if len(raw) != payload_size:
+        raise OperatorSourceConfigError("operator source configuration byte view is inconsistent")
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError:

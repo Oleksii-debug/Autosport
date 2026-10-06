@@ -233,7 +233,10 @@ class ProviderCapabilityManifestFact:
     values: tuple[str, ...] = ()
     evidence: ProviderCapabilityEvidenceRef | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _canonical_capability_for=_canonical_capability_for,
+    ) -> None:
         if type(self.capability) is not ProviderManifestCapability:
             raise ProviderCapabilityManifestError(
                 "capability must be an exact ProviderManifestCapability value"
@@ -368,6 +371,8 @@ class ProviderCapabilityManifest:
         self,
         integration_at: datetime,
         observed_at: datetime,
+        _canonical_capability_for=_canonical_capability_for,
+        _profile_state=_profile_state,
     ) -> None:
         if type(self.facts) is not tuple:
             raise ProviderCapabilityManifestError("facts must be an exact tuple")
@@ -516,83 +521,95 @@ class ProviderCapabilityManifest:
             "source_ref": self.source_ref,
         }
 
-
-def build_provider_capability_manifest(
-    profile: BookmakerCapabilityProfile,
-    integration: BookmakerIntegrationEvidence,
-    *,
-    manifest_ref: str,
-    manifest_version: int,
-    observed_at: str,
-    source_ref: str,
-    source_payload_sha256: str,
-    extension_facts: tuple[ProviderCapabilityManifestFact, ...] = (),
-) -> ProviderCapabilityManifest:
-    """Build a complete fail-closed manifest over canonical provider truth.
-
-    Missing extension facts are materialized as ''NOT_PROVEN''.  Canonical capabilities
-    cannot be supplied in ''extension_facts'' and therefore cannot be caller-overridden.
-    Public extension evidence remains structural only; conclusive extension facts fail
-    closed until a separate product-owned, re-resolvable issuer is composed.
-    """
-
-    _validate_exact_profile(profile)
-    if type(integration) is not BookmakerIntegrationEvidence:
-        raise ProviderCapabilityManifestError(
-            "integration must be an exact BookmakerIntegrationEvidence"
-        )
-    integration.verify_profile(profile)
-    if type(extension_facts) is not tuple:
-        raise ProviderCapabilityManifestError("extension_facts must be an exact tuple")
-    if any(type(fact) is not ProviderCapabilityManifestFact for fact in extension_facts):
-        raise ProviderCapabilityManifestError(
-            "extension_facts must contain exact ProviderCapabilityManifestFact values"
-        )
-
-    by_capability: dict[ProviderManifestCapability, ProviderCapabilityManifestFact] = {}
-    for fact in extension_facts:
-        if _canonical_capability_for(fact.capability) is not None:
+def _make_provider_capability_manifest_builder(
+    _canonical_capability_for,
+    _profile_state,
+):
+    def build_provider_capability_manifest(
+        profile: BookmakerCapabilityProfile,
+        integration: BookmakerIntegrationEvidence,
+        *,
+        manifest_ref: str,
+        manifest_version: int,
+        observed_at: str,
+        source_ref: str,
+        source_payload_sha256: str,
+        extension_facts: tuple[ProviderCapabilityManifestFact, ...] = (),
+    ) -> ProviderCapabilityManifest:
+        """Build a complete fail-closed manifest over canonical provider truth.
+    
+        Missing extension facts are materialized as ''NOT_PROVEN''.  Canonical capabilities
+        cannot be supplied in ''extension_facts'' and therefore cannot be caller-overridden.
+        Public extension evidence remains structural only; conclusive extension facts fail
+        closed until a separate product-owned, re-resolvable issuer is composed.
+        """
+    
+        _validate_exact_profile(profile)
+        if type(integration) is not BookmakerIntegrationEvidence:
             raise ProviderCapabilityManifestError(
-                f"{fact.capability.value} is canonical and cannot be caller-overridden"
+                "integration must be an exact BookmakerIntegrationEvidence"
             )
-        if fact.capability in by_capability:
+        integration.verify_profile(profile)
+        if type(extension_facts) is not tuple:
+            raise ProviderCapabilityManifestError("extension_facts must be an exact tuple")
+        if any(type(fact) is not ProviderCapabilityManifestFact for fact in extension_facts):
             raise ProviderCapabilityManifestError(
-                f"duplicate extension fact: {fact.capability.value}"
+                "extension_facts must contain exact ProviderCapabilityManifestFact values"
             )
-        by_capability[fact.capability] = fact
-
-    facts: list[ProviderCapabilityManifestFact] = []
-    for capability in ProviderManifestCapability:
-        canonical = _canonical_capability_for(capability)
-        if canonical is not None:
-            facts.append(
-                ProviderCapabilityManifestFact(
-                    capability=capability,
-                    state=_profile_state(profile, canonical),
-                    authority=ProviderManifestFactAuthority.CANONICAL_PROFILE,
+    
+        by_capability: dict[ProviderManifestCapability, ProviderCapabilityManifestFact] = {}
+        for fact in extension_facts:
+            if _canonical_capability_for(fact.capability) is not None:
+                raise ProviderCapabilityManifestError(
+                    f"{fact.capability.value} is canonical and cannot be caller-overridden"
                 )
-            )
-            continue
-
-        supplied = by_capability.get(capability)
-        if supplied is not None:
-            facts.append(supplied)
-        else:
-            facts.append(
-                ProviderCapabilityManifestFact(
-                    capability=capability,
-                    state=ProviderManifestState.NOT_PROVEN,
-                    authority=ProviderManifestFactAuthority.NOT_PROVEN,
+            if fact.capability in by_capability:
+                raise ProviderCapabilityManifestError(
+                    f"duplicate extension fact: {fact.capability.value}"
                 )
-            )
+            by_capability[fact.capability] = fact
+    
+        facts: list[ProviderCapabilityManifestFact] = []
+        for capability in ProviderManifestCapability:
+            canonical = _canonical_capability_for(capability)
+            if canonical is not None:
+                facts.append(
+                    ProviderCapabilityManifestFact(
+                        capability=capability,
+                        state=_profile_state(profile, canonical),
+                        authority=ProviderManifestFactAuthority.CANONICAL_PROFILE,
+                    )
+                )
+                continue
+    
+            supplied = by_capability.get(capability)
+            if supplied is not None:
+                facts.append(supplied)
+            else:
+                facts.append(
+                    ProviderCapabilityManifestFact(
+                        capability=capability,
+                        state=ProviderManifestState.NOT_PROVEN,
+                        authority=ProviderManifestFactAuthority.NOT_PROVEN,
+                    )
+                )
+    
+        return ProviderCapabilityManifest(
+            manifest_ref=manifest_ref,
+            manifest_version=manifest_version,
+            profile=profile,
+            integration=integration,
+            facts=tuple(facts),
+            observed_at=observed_at,
+            source_ref=source_ref,
+            source_payload_sha256=source_payload_sha256,
+        )
 
-    return ProviderCapabilityManifest(
-        manifest_ref=manifest_ref,
-        manifest_version=manifest_version,
-        profile=profile,
-        integration=integration,
-        facts=tuple(facts),
-        observed_at=observed_at,
-        source_ref=source_ref,
-        source_payload_sha256=source_payload_sha256,
-    )
+    return build_provider_capability_manifest
+
+
+build_provider_capability_manifest = _make_provider_capability_manifest_builder(
+    _canonical_capability_for,
+    _profile_state,
+)
+del _make_provider_capability_manifest_builder

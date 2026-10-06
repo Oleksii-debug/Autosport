@@ -574,6 +574,7 @@ def _atomic_json(path: Path, raw: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor: int | None = None
     temp_path: Path | None = None
+    primary_error: BaseException | None = None
     try:
         descriptor, temp_name = tempfile.mkstemp(
             prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -581,11 +582,18 @@ def _atomic_json(path: Path, raw: Mapping[str, Any]) -> None:
         temp_path = Path(temp_name)
         try:
             handle = os.fdopen(descriptor, "wb")
-        except BaseException:
+        except BaseException as exc:
             try:
                 os.close(descriptor)
-            except OSError:
-                pass
+            except OSError as cleanup_error:
+                try:
+                    BaseException.add_note(
+                        exc,
+                        "campaign economic descriptor cleanup also failed: "
+                        f"{cleanup_error}",
+                    )
+                except BaseException:
+                    pass
             else:
                 descriptor = None
             raise
@@ -598,17 +606,40 @@ def _atomic_json(path: Path, raw: Mapping[str, Any]) -> None:
         os.replace(temp_path, path)
         temp_path = None
         _fsync_dir(path.parent)
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
         if descriptor is not None:
             try:
                 os.close(descriptor)
-            except OSError:
-                pass
+            except OSError as cleanup_error:
+                if primary_error is None:
+                    raise
+                try:
+                    BaseException.add_note(
+                        primary_error,
+                        "campaign economic descriptor cleanup retry also failed: "
+                        f"{cleanup_error}",
+                    )
+                except BaseException:
+                    pass
         if temp_path is not None:
             try:
                 temp_path.unlink()
             except FileNotFoundError:
                 pass
+            except OSError as cleanup_error:
+                if primary_error is None:
+                    raise
+                try:
+                    BaseException.add_note(
+                        primary_error,
+                        "campaign economic temporary path cleanup also failed: "
+                        f"{cleanup_error}",
+                    )
+                except BaseException:
+                    pass
 
 
 def _fsync_dir(path: Path) -> None:

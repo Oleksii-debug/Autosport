@@ -1263,3 +1263,126 @@ def test_tick_rejects_class_rebound_success_publication(
             match="canonical coordinator running-fence authority changed",
         ):
             coordinator.tick()
+
+
+def test_tick_ignores_instance_shadowed_settlement_history_validator() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _, state = _state(root)
+        original = continuous_session.SettlementResolution(
+            event_identity="event-1",
+            settlement_ref="settlement-1",
+            quote_outcomes={"quote-1": "win"},
+            evidence_id="evidence-1",
+            evidence_sha256="a" * 64,
+            available_at=_AT,
+        )
+        state.record_success(
+            at=_AT,
+            full_refresh=False,
+            settlement_evidence=(original,),
+        )
+        conflicting = continuous_session.SettlementResolution(
+            event_identity="event-1",
+            settlement_ref="settlement-1",
+            quote_outcomes={"quote-1": "win"},
+            evidence_id="evidence-1",
+            evidence_sha256="b" * 64,
+            available_at=_AT,
+        )
+
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+        coordinator.causal_view = continuous_session.CausalView.AS_KNOWN_AT_DECISION
+        coordinator.required_history = None
+        coordinator.market_store = object()
+        coordinator.settlement_learning_handoff = None
+
+        class SuccessfulCycle:
+            provider_unavailable = False
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+        class Collector:
+            def run_cycle(self):
+                return SuccessfulCycle()
+
+        class DesktopConsumer:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = DesktopConsumer()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = type(
+            "DependencyIndexStub",
+            (),
+            {"input_ids": frozenset()},
+        )()
+        coordinator._refresh_source_state_projection = (  # type: ignore[method-assign]
+            lambda: state.snapshot()
+        )
+        coordinator._drain_invalidations = (  # type: ignore[method-assign]
+            lambda: ((), False, False)
+        )
+        coordinator._settlement_resolutions = (  # type: ignore[method-assign]
+            lambda **_kwargs: (conflicting,)
+        )
+
+        def attacker_validate_settlement_evidence(**_kwargs) -> None:
+            return None
+
+        state.validate_settlement_evidence = (  # type: ignore[method-assign]
+            attacker_validate_settlement_evidence
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="settlement evidence id conflicts with durable evidence",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_class_rebound_settlement_history_validator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+
+        class Collector:
+            def run_cycle(self):
+                raise AssertionError(
+                    "collector ran after settlement validator authority changed"
+                )
+
+        coordinator.collector = Collector()
+
+        def attacker_validate_settlement_evidence(
+            _self: continuous_session._ContinuousSessionState,
+            **_kwargs,
+        ) -> None:
+            return None
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "validate_settlement_evidence",
+            attacker_validate_settlement_evidence,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical coordinator running-fence authority changed",
+        ):
+            coordinator.tick()

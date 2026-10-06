@@ -2655,6 +2655,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _record_failure_method_code: object = _ContinuousSessionState.record_failure.__code__,
         _record_success_method: Callable[..., int] = _ContinuousSessionState.record_success,
         _record_success_method_code: object = _ContinuousSessionState.record_success.__code__,
+        _validate_settlement_evidence_method: Callable[..., None] = (
+            _ContinuousSessionState.validate_settlement_evidence
+        ),
+        _validate_settlement_evidence_method_code: object = (
+            _ContinuousSessionState.validate_settlement_evidence.__code__
+        ),
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
     ) -> ContinuousTickResult:
@@ -2670,6 +2676,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             or type(self._state).record_success is not _record_success_method
             or getattr(_record_success_method, "__code__", None)
             is not _record_success_method_code
+            or type(self._state).validate_settlement_evidence
+            is not _validate_settlement_evidence_method
+            or getattr(_validate_settlement_evidence_method, "__code__", None)
+            is not _validate_settlement_evidence_method_code
             or _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
@@ -2809,8 +2819,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         newly_registered.append(input_id)
 
                 resolutions = self._settlement_resolutions(as_of=now)
-                self._state.validate_settlement_evidence(
-                    settlement_evidence=resolutions
+                _validate_settlement_evidence_method(
+                    self._state,
+                    settlement_evidence=resolutions,
                 )
                 if self.settlement_learning_handoff is not None:
                     prepare = getattr(

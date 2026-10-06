@@ -710,6 +710,132 @@ def test_handler_result_handle_close_failure_cannot_escape_or_claim_success(monk
     assert error == "HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
 
 
+def test_handler_unexpected_process_handle_close_failure_becomes_terminal_truth(monkeypatch):
+    expected = SkillExecutionResult(output={})
+
+    class FakeReceiver:
+        def close(self):
+            return None
+
+        def poll(self):
+            return True
+
+        def recv(self):
+            return "OK", expected
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            raise RuntimeError("simulated unexpected process handle close failure")
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeReceiver(), FakeSender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return FakeProcess()
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+
+
+@pytest.mark.parametrize("failure_point", ("poll", "recv"))
+def test_handler_result_pipe_value_error_becomes_terminal_truth(monkeypatch, failure_point):
+    class FakeReceiver:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+        def poll(self):
+            if failure_point == "poll":
+                raise ValueError("simulated closed result pipe during poll")
+            return True
+
+        def recv(self):
+            if failure_point == "recv":
+                raise ValueError("simulated closed result pipe during recv")
+            raise AssertionError("unexpected recv")
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FakeReceiver()
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, FakeSender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_RESULT_UNAVAILABLE"
+    assert receiver.closed is True
+    assert process.closed is True
+
+
 def test_handler_timeout_terminates_and_persists_terminal_failure(tmp_path):
     registry = SkillRegistry.initialize(tmp_path / "skills.json")
     definition = SkillDefinition(

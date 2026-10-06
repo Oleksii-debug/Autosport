@@ -5,7 +5,11 @@ from decimal import Decimal
 
 import pytest
 
-from autosport.economic_goal import (\n    AutomationLevel,\n    EconomicGoalContract,\n    EconomicGoalContractError,\n)
+from autosport.economic_goal import (
+    AutomationLevel,
+    EconomicGoalContract,
+    EconomicGoalContractError,
+)
 from autosport.economic_goal_provenance import (
     EconomicGoalProvenance,
     EconomicGoalProvenanceError,

@@ -421,6 +421,62 @@ class IncidentRiskStoreTests(unittest.TestCase):
         ):
             self.store.load()
 
+    def test_pristine_store_rejects_hard_link_alias_before_state_is_established(self) -> None:
+        empty = self.store.empty_snapshot()
+        payload = {
+            "schema": STORE_SCHEMA,
+            "schema_version": STORE_SCHEMA_VERSION,
+            "histories": [],
+            "availability": [],
+            "content_sha256": empty.content_sha256,
+        }
+        target = self.workspace / "external-empty-store.json"
+        target.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        try:
+            try:
+                os.link(target, self.store.path)
+            except OSError as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+            with self.assertRaisesRegex(
+                IncidentRiskStoreError,
+                "regular non-aliased file",
+            ):
+                self.store.load()
+        finally:
+            self.store.path.unlink(missing_ok=True)
+            target.unlink(missing_ok=True)
+
+    def test_pristine_store_rejects_symlink_alias_before_state_is_established(self) -> None:
+        empty = self.store.empty_snapshot()
+        payload = {
+            "schema": STORE_SCHEMA,
+            "schema_version": STORE_SCHEMA_VERSION,
+            "histories": [],
+            "availability": [],
+            "content_sha256": empty.content_sha256,
+        }
+        target = self.workspace / "external-empty-store.json"
+        target.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        try:
+            try:
+                os.symlink(target, self.store.path)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            with self.assertRaisesRegex(
+                IncidentRiskStoreError,
+                "regular non-aliased file",
+            ):
+                self.store.load()
+        finally:
+            self.store.path.unlink(missing_ok=True)
+            target.unlink(missing_ok=True)
+
     def test_store_rejects_hard_link_alias_before_state_is_loaded(self) -> None:
         self.store.append(self._entry())
         alias = self.workspace / "incident_model_risk_store.alias.json"

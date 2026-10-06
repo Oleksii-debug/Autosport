@@ -11,7 +11,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from autosport.economic_goal import EconomicGoalContract
-from autosport.economic_goal_store import EconomicGoalStore
+from autosport.economic_goal_store import EconomicGoalStore, economic_goal_to_payload
+from autosport.integrity import atomic_write_json
 from autosport.economic_session import (
     EconomicSessionIntegrityError,
     EconomicSessionMismatchError,
@@ -23,6 +24,7 @@ from autosport.monotonic_workspace_authority import (
     MonotonicAuthorityRollbackError,
 )
 from autosport.paper import PaperBook
+from autosport.workspace_lock import WorkspaceEconomicLock
 
 
 def _epoch_ns(value: str) -> int:
@@ -60,6 +62,18 @@ def _goal(
         max_risk_of_ruin=Decimal("0.05"),
         max_concurrent_positions=10,
     )
+
+
+def _seed_distinct_owner_goal_for_transition_test(
+    workspace: Path,
+    goal: EconomicGoalContract,
+) -> None:
+    """Model a future separate owner replacement authority without widening the automatic writer."""
+    with WorkspaceEconomicLock(workspace):
+        atomic_write_json(
+            workspace / EconomicGoalStore.FILE_NAME,
+            economic_goal_to_payload(goal),
+        )
 
 
 class EconomicSessionBoundaryTests(unittest.TestCase):
@@ -2117,13 +2131,14 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         first = store.current()
         durable_before = store.state_path.read_bytes()
 
-        EconomicGoalStore(self.workspace).persist_automatic_successor(
+        _seed_distinct_owner_goal_for_transition_test(
+            self.workspace,
             _goal(
                 revision=2,
                 max_turnover="5",
                 bankroll_id="bankroll-eur",
                 currency="EUR",
-            )
+            ),
         )
 
         with self.assertRaisesRegex(
@@ -2144,8 +2159,9 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         first = store.current()
         durable_before = store.state_path.read_bytes()
 
-        EconomicGoalStore(self.workspace).persist_automatic_successor(
-            _goal(revision=2, max_turnover="5", currency="EUR")
+        _seed_distinct_owner_goal_for_transition_test(
+            self.workspace,
+            _goal(revision=2, max_turnover="5", currency="EUR"),
         )
 
         with self.assertRaisesRegex(
@@ -2161,8 +2177,9 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         first = store.current()
         durable_before = store.state_path.read_bytes()
 
-        EconomicGoalStore(self.workspace).persist_automatic_successor(
-            _goal(revision=2, max_turnover="5", bankroll_id="bankroll-2")
+        _seed_distinct_owner_goal_for_transition_test(
+            self.workspace,
+            _goal(revision=2, max_turnover="5", bankroll_id="bankroll-2"),
         )
 
         with self.assertRaisesRegex(
@@ -2172,6 +2189,25 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             self._store().transition_to_current_goal(first)
 
         self.assertEqual(store.state_path.read_bytes(), durable_before)
+
+    def test_automatic_goal_writer_rejects_denomination_rebinding(self) -> None:
+        goal_store = EconomicGoalStore(self.workspace)
+
+        for candidate, field in (
+            (_goal(revision=2, max_turnover="5", currency="EUR"), "currency"),
+            (_goal(revision=2, max_turnover="5", bankroll_id="bankroll-2"), "bankroll_id"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    Exception,
+                    f"automatic transition must preserve {field}",
+                ):
+                    goal_store.persist_automatic_successor(candidate)
+
+        persisted = goal_store.load()
+        self.assertEqual(persisted.bankroll_id, "paper-bankroll")
+        self.assertEqual(persisted.currency, "USD")
+        self.assertEqual(persisted.revision, 1)
 
     def test_explicit_successor_survives_fresh_store_re_resolution(self) -> None:
         first_store = self._store()

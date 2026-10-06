@@ -1331,8 +1331,8 @@ class PaperExecutionEvidenceRegistry:
     """Immutable resolver for configured/empirical PAPER execution observations."""
 
     def __init__(self, ledger: PaperExecutionLedger) -> None:
-        if type(ledger) is not _CANONICAL_PAPER_EXECUTION_LEDGER_TYPE:
-            raise TypeError("ledger must be exact PaperExecutionLedger")
+        if not isinstance(ledger, _CANONICAL_PAPER_EXECUTION_LEDGER_TYPE):
+            raise TypeError("ledger must be PaperExecutionLedger")
         self._ledger = ledger
 
     def register(self, record: PaperExecutionEvidenceRecord) -> str:

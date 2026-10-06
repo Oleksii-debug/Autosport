@@ -642,7 +642,12 @@ class IncidentRiskStore:
         *,
         authority_root: str | Path | None = None,
     ) -> None:
-        self.workspace = Path(workspace).expanduser().absolute()
+        workspace_path = Path(workspace).expanduser()
+        if not workspace_path.is_absolute():
+            raise IncidentRiskStoreError(
+                "incident/model-risk workspace must be absolute"
+            )
+        self.workspace = workspace_path
         self.path = self.workspace / self.FILE_NAME
         try:
             self._authority = MonotonicWorkspaceAuthority(

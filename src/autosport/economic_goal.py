@@ -560,32 +560,95 @@ def _make_contract_constructor_authority(operation):
     operation_kwdefaults = operation.__kwdefaults__
     error_type = EconomicGoalContractError
 
-    @wraps(operation)
+    def require_authority() -> None:
+        if operation.__code__ is not operation_code:
+            raise error_type("economic-goal constructor authority changed")
+        if operation.__defaults__ is not operation_defaults:
+            raise error_type("economic-goal constructor defaults authority changed")
+        if operation.__kwdefaults__ is not operation_kwdefaults:
+            raise error_type(
+                "economic-goal constructor keyword defaults authority changed"
+            )
+
     def bound(*args, **kwargs):
-        if operation.__code__ is not operation_code:
-            raise error_type("economic-goal constructor authority changed")
-        if operation.__defaults__ is not operation_defaults:
-            raise error_type("economic-goal constructor defaults authority changed")
-        if operation.__kwdefaults__ is not operation_kwdefaults:
-            raise error_type(
-                "economic-goal constructor keyword defaults authority changed"
-            )
+        require_authority()
         result = operation(*args, **kwargs)
-        if operation.__code__ is not operation_code:
-            raise error_type("economic-goal constructor authority changed")
-        if operation.__defaults__ is not operation_defaults:
-            raise error_type("economic-goal constructor defaults authority changed")
-        if operation.__kwdefaults__ is not operation_kwdefaults:
-            raise error_type(
-                "economic-goal constructor keyword defaults authority changed"
-            )
+        require_authority()
         return result
 
+    return bound
 
-_CANONICAL_CONTRACT_INIT: Final = _make_contract_constructor_authority(
+
+def _bind_contract_constructor(operation):
+    bound_operation = _make_contract_constructor_authority(operation)
+
+    def bound(
+        self: EconomicGoalContract,
+        goal_id: str,
+        revision: int,
+        bankroll_id: str,
+        currency: str,
+        objective: EconomicObjective = EconomicObjective.LONG_RUN_RISK_ADJUSTED_BANKROLL_GROWTH,
+        max_stake_fraction: Decimal = Decimal("0.02"),
+        max_stake_amount: Decimal | None = None,
+        max_session_loss_fraction: Decimal = Decimal("0.05"),
+        max_day_loss_fraction: Decimal = Decimal("0.05"),
+        max_drawdown_fraction: Decimal = Decimal("0.20"),
+        max_capital_at_risk_fraction: Decimal = Decimal("0.20"),
+        max_event_concentration_fraction: Decimal = Decimal("1"),
+        max_market_concentration_fraction: Decimal = Decimal("1"),
+        max_provider_concentration_fraction: Decimal = Decimal("1"),
+        max_sport_concentration_fraction: Decimal = Decimal("1"),
+        max_turnover_fraction: Decimal = Decimal("1"),
+        max_risk_of_ruin: Decimal = Decimal("0.01"),
+        max_execution_slippage_fraction: Decimal = Decimal("0.01"),
+        max_quote_age_seconds: Decimal = Decimal("5"),
+        minimum_data_quality: Decimal = Decimal("0"),
+        max_concurrent_positions: int = 1,
+        max_parlay_legs: int = 1,
+        automation_level: AutomationLevel = AutomationLevel.ANALYSIS_ONLY,
+        emergency_stop: bool = False,
+        blocked_sports: frozenset[str] = frozenset(),
+        blocked_providers: frozenset[str] = frozenset(),
+        blocked_markets: frozenset[str] = frozenset(),
+    ) -> None:
+        bound_operation(
+            self,
+            goal_id,
+            revision,
+            bankroll_id,
+            currency,
+            objective,
+            max_stake_fraction,
+            max_stake_amount,
+            max_session_loss_fraction,
+            max_day_loss_fraction,
+            max_drawdown_fraction,
+            max_capital_at_risk_fraction,
+            max_event_concentration_fraction,
+            max_market_concentration_fraction,
+            max_provider_concentration_fraction,
+            max_sport_concentration_fraction,
+            max_turnover_fraction,
+            max_risk_of_ruin,
+            max_execution_slippage_fraction,
+            max_quote_age_seconds,
+            minimum_data_quality,
+            max_concurrent_positions,
+            max_parlay_legs,
+            automation_level,
+            emergency_stop,
+            blocked_sports,
+            blocked_providers,
+            blocked_markets,
+        )
+
+    return bound
+
+
+_CANONICAL_CONTRACT_INIT: Final = _bind_contract_constructor(
     _contract_init_authority
 )
-EconomicGoalContract.__init__ = _CANONICAL_CONTRACT_INIT
 
 
 def _snapshot_transition_contract(

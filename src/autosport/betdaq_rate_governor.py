@@ -54,32 +54,8 @@ _DEFAULT_ANY_OTHER_PER_MINUTE: Final = 100
 # Exact provider service operations without a stricter named CallsAndFees row.
 # They all consume ONE conservative shared Default Any Other=100/min axis.
 _ANY_OTHER_OPERATION_IDS: Final[tuple[str, ...]] = (
-    "CancelAllOrders",
-    "CancelAllOrdersOnMarket",
-    "CancelOrders",
-    "ChangeHeartbeatRegistration",
-    "DeregisterHeartbeat",
-    "GetAccountBalances",
-    "GetCurrentSelectionSequenceNumber",
-    "GetMarketInformation",
     "GetOddsLadder",
-    "GetOrderDetails",
-    "GetSPEnabledMarketsInformation",
-    "ListAccountPostings",
-    "ListAccountPostingsById",
     "ListBlacklistInformation",
-    "ListMarketWithdrawalHistory",
-    "ListSelectionsChangedSince",
-    "ListTaggedValues",
-    "ListTopLevelEvents",
-    "Pulse",
-    "RegisterHeartbeat",
-    "SuspendAllOrders",
-    "SuspendAllOrdersOnMarket",
-    "SuspendFromTrading",
-    "SuspendOrders",
-    "UnsuspendFromTrading",
-    "UnsuspendOrders",
 )
 # BETDAQ ListBlacklistInformation exposes RemainingMS as provider `int` milliseconds.
 # XML/WSDL `int` is the signed 32-bit domain; negative remaining time is invalid here.

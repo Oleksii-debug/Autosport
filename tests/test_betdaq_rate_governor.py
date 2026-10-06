@@ -989,114 +989,48 @@ def test_named_provider_rows_dominate_generic_any_other_policy() -> None:
     )
     assert by_method["UpdateOrdersNoReceipt"].capacity == 100
 
-    for operation_id in (
-        "GetMarketInformation",
-        "GetAccountBalances",
-        "Pulse",
-        "CancelOrders",
-    ):
+    for operation_id in ("GetOddsLadder", "ListBlacklistInformation"):
         assert by_method[operation_id].rate_policy_key == "Any Other"
         assert by_method[operation_id].capacity == 100
 
 
-def test_default_policy_covers_exact_current_provider_service_inventory() -> None:
+def test_default_policy_covers_only_named_rows_and_explicit_any_other_allowlist() -> None:
     configured = default_betdaq_rate_policy()
     expected_operations = {
-        "GetCurrentSelectionSequenceNumber",
         "GetEventSubTreeNoSelections",
         "GetEventSubTreeWithSelections",
-        "GetMarketInformation",
         "GetOddsLadder",
         "GetPrices",
-        "GetSPEnabledMarketsInformation",
-        "ListMarketWithdrawalHistory",
-        "ListSelectionTrades",
-        "ListSelectionsChangedSince",
-        "ListTaggedValues",
-        "ListTopLevelEvents",
-        "CancelAllOrders",
-        "CancelAllOrdersOnMarket",
-        "CancelOrders",
-        "ChangeHeartbeatRegistration",
-        "DeregisterHeartbeat",
-        "GetAccountBalances",
-        "GetOrderDetails",
-        "ListAccountPostings",
-        "ListAccountPostingsById",
         "ListBlacklistInformation",
         "ListBootstrapOrders",
         "ListOrdersChangedSince",
+        "ListSelectionTrades",
         "PlaceOrdersNoReceipt",
         "PlaceOrdersWithReceipt",
-        "Pulse",
-        "RegisterHeartbeat",
-        "SuspendAllOrders",
-        "SuspendAllOrdersOnMarket",
-        "SuspendFromTrading",
-        "SuspendOrders",
-        "UnsuspendFromTrading",
-        "UnsuspendOrders",
         "UpdateOrdersNoReceipt",
     }
 
     assert set(configured.by_method()) == expected_operations
 
 
-def test_extended_any_other_inventory_shares_one_conservative_axis(
+def test_unlisted_service_operations_do_not_inherit_any_other_axis(
     tmp_path: Path,
 ) -> None:
     governor, _, _, _, _ = make_ready(
         tmp_path,
         default_betdaq_rate_policy(),
     )
-    mixed_operations = (
-        "GetMarketInformation",
+
+    for operation_id in (
         "GetAccountBalances",
+        "GetMarketInformation",
         "Pulse",
         "CancelOrders",
-    )
-
-    for _ in range(25):
-        for operation_id in mixed_operations:
-            receipt = governor.admit(operation_id)
-            assert receipt.rate_policy_key == "Any Other"
-            assert receipt.grants_execution_authority is False
-            assert receipt.grants_write_permission is False
-            assert receipt.grants_freshness is False
-
-    with pytest.raises(BetdaqRateDeferred) as denied:
-        governor.admit("ListTopLevelEvents")
-
-    assert denied.value.reason == "provider_rate_capacity_exhausted"
-    assert denied.value.retry_after_seconds == pytest.approx(60.0)
-
-
-def test_extended_any_other_blacklist_fence_remains_operation_scoped(
-    tmp_path: Path,
-) -> None:
-    governor, _, _, _, _ = make_ready(
-        tmp_path,
-        default_betdaq_rate_policy(),
-    )
-
-    observation = governor.observe_blacklist(
-        api_name="CancelOrders",
-        remaining_ms=60_000,
-        provider_observation_sha256=SHA_A,
-    )
-
-    assert observation.operation_id == "CancelOrders"
-    with pytest.raises(BetdaqRateDeferred) as denied:
-        governor.admit(
-            "CancelOrders",
-            priority=BetdaqRatePriority.SAFETY,
-        )
-    assert denied.value.reason == "provider_api_blacklisted"
-
-    sibling = governor.admit("Pulse", priority=BetdaqRatePriority.SAFETY)
-    assert sibling.rate_policy_key == "Any Other"
-    assert sibling.blacklist_status is BetdaqBlacklistStatus.UNKNOWN
-    assert sibling.grants_write_permission is False
+    ):
+        with pytest.raises(BetdaqRateDeferred) as denied:
+            governor.admit(operation_id)
+        assert denied.value.reason == "unmodeled_provider_rate_axis"
+        assert denied.value.retry_after_seconds is None
 
 
 def test_rate_table_label_still_cannot_be_used_as_transport_operation(

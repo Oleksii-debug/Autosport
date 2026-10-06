@@ -1665,6 +1665,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "outcome authority returned invalid settlement resolution"
                 ) from exc
+            # Detach mutable quote_outcomes from the authority-owned object so
+            # external mutation after resolve() cannot alter validated product
+            # settlement truth.
+            resolution = replace(
+                resolution,
+                quote_outcomes=dict(resolution.quote_outcomes),
+            )
             existing = evidence_by_id.get(resolution.evidence_id)
             if existing is not None:
                 if existing != resolution:
@@ -1675,6 +1682,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             evidence_by_id[resolution.evidence_id] = resolution
             resolutions.append(resolution)
         return tuple(resolutions)
+
+    @staticmethod
+    def _detached_settlement_resolutions(
+        resolutions: tuple[SettlementResolution, ...],
+    ) -> tuple[SettlementResolution, ...]:
+        return tuple(
+            replace(
+                resolution,
+                quote_outcomes=dict(resolution.quote_outcomes),
+            )
+            for resolution in resolutions
+        )
 
     def _load_book(self) -> PaperBook:
         if self.paper_book_path.exists():
@@ -1836,14 +1855,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 if prepare is not None:
                     prepare(
                         paper_book_path=self.paper_book_path,
-                        resolutions=resolutions,
+                        resolutions=self._detached_settlement_resolutions(
+                            resolutions
+                        ),
                         at=now,
                     )
             settled, evidence_ids = self._settle(resolutions=resolutions)
             if self.settlement_learning_handoff is not None:
                 self.settlement_learning_handoff.reconcile_after_settlement(
                     paper_book_path=self.paper_book_path,
-                    resolutions=resolutions,
+                    resolutions=self._detached_settlement_resolutions(
+                        resolutions
+                    ),
                     settled_ticket_ids=settled,
                     at=now,
                 )

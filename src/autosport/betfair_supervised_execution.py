@@ -814,6 +814,7 @@ def _build_canonical_place_action_dispatch():
     canonical_workspace_lock_setattr = canonical_workspace_lock_type.__setattr__
     canonical_goal_store_type = EconomicGoalStore
     canonical_goal_store_getattribute = canonical_goal_store_type.__getattribute__
+    canonical_goal_store_setattr = canonical_goal_store_type.__setattr__
     canonical_goal_contract_type = EconomicGoalContract
     canonical_automation_level_type = AutomationLevel
     canonical_acknowledgement_type = ExternalAcknowledgement
@@ -1385,6 +1386,8 @@ def _build_canonical_place_action_dispatch():
             is canonical_workspace_lock_getattribute
             and canonical_workspace_lock_type.__setattr__
             is canonical_workspace_lock_setattr
+            and type(canonical_workspace_lock_type.__dict__.get("FILE_NAME"))
+            is str
             and canonical_workspace_lock_type.__dict__.get("FILE_NAME")
             == canonical_workspace_lock_file_name
             and workspace_lock_init.__defaults__ is workspace_lock_init_defaults
@@ -1404,6 +1407,11 @@ def _build_canonical_place_action_dispatch():
             and EconomicGoalStore is canonical_goal_store_type
             and canonical_goal_store_type.__getattribute__
             is canonical_goal_store_getattribute
+            and canonical_goal_store_type.__setattr__
+            is canonical_goal_store_setattr
+            and type(canonical_goal_store_type.__dict__.get("FILE_NAME")) is str
+            and canonical_goal_store_type.__dict__.get("FILE_NAME")
+            == canonical_goal_store_file_name
             and EconomicGoalContract is canonical_goal_contract_type
             and AutomationLevel is canonical_automation_level_type
             and canonical_automation_level_type.SUPERVISED_EXECUTION
@@ -1497,8 +1505,6 @@ def _build_canonical_place_action_dispatch():
             is canonical_goal_store_load
             and getattr(canonical_goal_store_load, "__code__", None)
             is canonical_goal_store_load_code
-            and canonical_goal_store_type.__dict__.get("FILE_NAME")
-            == canonical_goal_store_file_name
             and provenance_for is canonical_provenance_for
             and getattr(canonical_provenance_for, "__code__", None)
             is canonical_provenance_for_code

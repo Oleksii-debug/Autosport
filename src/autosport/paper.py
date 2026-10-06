@@ -872,6 +872,8 @@ def _serialized_paperbook_operation(method):
 
 def _make_paperbook_runtime_helper_authority():
     helper_authorities = None
+    exact_type = type
+    authority_error_type = ValueError
     helper_names = (
         "_require_finite",
         "_require_utf8_string",
@@ -905,7 +907,7 @@ def _make_paperbook_runtime_helper_authority():
                 raise RuntimeError(
                     f"PaperBook runtime helper {helper_name} is unavailable"
                 )
-            if type(descriptor) in {classmethod, staticmethod}:
+            if exact_type(descriptor) in {classmethod, staticmethod}:
                 function = descriptor.__func__
             else:
                 function = descriptor
@@ -920,18 +922,18 @@ def _make_paperbook_runtime_helper_authority():
     def require(book: object) -> None:
         if helper_authorities is None:
             raise RuntimeError("PaperBook runtime helper authority is unavailable")
-        canonical_type = type(book)
+        canonical_type = exact_type(book)
         for helper_name, (
             expected_descriptor,
             function,
             expected_code,
         ) in helper_authorities.items():
             if canonical_type.__dict__.get(helper_name) is not expected_descriptor:
-                raise ValueError(
+                raise authority_error_type(
                     f"PaperBook runtime helper dispatch changed: {helper_name}"
                 )
             if function.__code__ is not expected_code:
-                raise ValueError(
+                raise authority_error_type(
                     f"PaperBook runtime helper authority changed: {helper_name}"
                 )
 
@@ -958,6 +960,7 @@ def _guard_paperbook_runtime_authority(method):
     runtime_helper_authority = _require_paperbook_runtime_helper_authority
     runtime_helper_authority_code = runtime_helper_authority.__code__
     runtime_module_globals = globals()
+    runtime_error_type = ValueError
     runtime_module_dependencies = {
         "Context": Context,
         "Decimal": Decimal,
@@ -975,6 +978,8 @@ def _guard_paperbook_runtime_authority(method):
         "_CANONICAL_LOCKED_CAPITAL_FOR_TICKET": _CANONICAL_LOCKED_CAPITAL_FOR_TICKET,
         "localcontext": localcontext,
         "parse_iso_timestamp": parse_iso_timestamp,
+        "type": type,
+        "ValueError": ValueError,
     }
     runtime_module_dependency_codes = {
         name: getattr(dependency, "__code__", None)
@@ -997,7 +1002,7 @@ def _guard_paperbook_runtime_authority(method):
     def require_runtime_module_dependencies() -> None:
         for name, dependency in runtime_module_dependencies.items():
             if runtime_module_globals.get(name) is not dependency:
-                raise ValueError(
+                raise runtime_error_type(
                     f"PaperBook runtime module dependency changed: {name}"
                 )
             expected_code = runtime_module_dependency_codes[name]
@@ -1005,7 +1010,7 @@ def _guard_paperbook_runtime_authority(method):
                 expected_code is not None
                 and getattr(dependency, "__code__", None) is not expected_code
             ):
-                raise ValueError(
+                raise runtime_error_type(
                     f"PaperBook runtime module dependency authority changed: {name}"
                 )
             closure_witness = runtime_authority_closure_witnesses.get(name)
@@ -1013,7 +1018,7 @@ def _guard_paperbook_runtime_authority(method):
                 continue
             expected_closure, expected_values = closure_witness
             if dependency.__closure__ is not expected_closure:
-                raise ValueError(
+                raise runtime_error_type(
                     f"PaperBook runtime module dependency closure changed: {name}"
                 )
             if expected_values is not None:

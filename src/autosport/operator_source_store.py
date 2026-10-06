@@ -92,9 +92,21 @@ class OperatorSourceConfigStore:
         """Atomically publish and re-read one validated configuration."""
         if type(config) is not OperatorSourceConfig:
             raise TypeError("config must be an exact OperatorSourceConfig")
-        # to_json_bytes is already strict and secret-free; decode our own trusted
-        # canonical bytes into the dict shape expected by atomic_write_json.
-        payload = json.loads(config.to_json_bytes().decode("utf-8"))
+        # Revalidate immediately before publication. Frozen dataclasses are a useful
+        # API boundary, not an authority boundary: low-level mutation must not turn
+        # post-write readback into the first integrity check and replace last-good
+        # durable state with bytes we already know are invalid.
+        try:
+            canonical = parse_operator_source_config(config.to_json_bytes())
+            if canonical != config:
+                raise OperatorSourceConfigError(
+                    "operator source configuration changed after validation"
+                )
+            payload = json.loads(canonical.to_json_bytes().decode("utf-8"))
+        except (OperatorSourceConfigError, TypeError, ValueError, RecursionError) as exc:
+            raise OperatorSourceStoreError(
+                "operator source configuration failed pre-publication validation"
+            ) from exc
         try:
             with durable_path_lock(self.path):
                 atomic_write_json(self.path, payload)

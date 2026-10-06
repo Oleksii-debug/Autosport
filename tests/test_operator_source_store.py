@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 
 import autosport.operator_source_store as operator_source_store
-from autosport.operator_source_config import OperatorSourceSelectionState
+from autosport.operator_source_config import (
+    OperatorSourceSelectionState,
+    build_operator_source_config,
+)
 from autosport.operator_source_store import (
     OperatorSourceConfigStore,
     OperatorSourceStoreError,
@@ -298,4 +301,30 @@ def test_oversized_store_allocation_is_capped_at_max_plus_one(
         store.read()
 
     assert requested_sizes == [operator_source_store._MAX_PERSISTED_BYTES + 1]
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value"),
+    (
+        ("source_id", "paper-fixture"),
+        ("integrity_sha256", "0" * 64),
+    ),
+)
+def test_invalid_mutated_config_fails_before_replacing_last_good_state(
+    tmp_path: Path,
+    field_name: str,
+    bad_value: str,
+) -> None:
+    path = tmp_path / "operator-source.json"
+    store = OperatorSourceConfigStore(path)
+    last_good = store.write_source_id("betfair-exchange")
+    candidate = build_operator_source_config("betfair-exchange")
+    object.__setattr__(candidate, field_name, bad_value)
+
+    with pytest.raises(
+        OperatorSourceStoreError,
+        match="pre-publication validation",
+    ):
+        store.write(candidate)
+
+    assert store.read() == last_good
 

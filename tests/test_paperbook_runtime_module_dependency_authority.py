@@ -285,3 +285,76 @@ def test_load_rejects_rebound_read_bytes_before_execution(
         monkeypatch.setattr(path_type, "read_bytes", original)
 
     assert attacker_calls == 0
+
+
+
+def test_save_rejects_rebound_directory_open_before_parent_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound os.open executed")
+
+    monkeypatch.setattr(paper_module.os, "open", hostile)
+    destination = tmp_path / "nested" / "paper.json"
+
+    with pytest.raises(
+        ValueError,
+        match=r"directory open authority changed",
+    ):
+        book.save(destination)
+
+    assert attacker_calls == 0
+    assert not destination.exists()
+    assert not destination.parent.exists()
+
+
+def test_save_rejects_rebound_directory_close_before_parent_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound os.close executed")
+
+    monkeypatch.setattr(paper_module.os, "close", hostile)
+    destination = tmp_path / "nested-close" / "paper.json"
+
+    with pytest.raises(
+        ValueError,
+        match=r"directory close authority changed",
+    ):
+        book.save(destination)
+
+    assert attacker_calls == 0
+    assert not destination.exists()
+    assert not destination.parent.exists()
+
+
+def test_save_rejects_directory_flag_authority_drift_before_parent_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    original = getattr(paper_module.os, "O_DIRECTORY", None)
+    replacement = 1 if original is None else original + 1
+    monkeypatch.setattr(paper_module.os, "O_DIRECTORY", replacement, raising=False)
+    destination = tmp_path / "nested-flag" / "paper.json"
+
+    with pytest.raises(
+        ValueError,
+        match=r"directory flag authority changed",
+    ):
+        book.save(destination)
+
+    assert not destination.exists()
+    assert not destination.parent.exists()

@@ -320,6 +320,13 @@ class ProductEconomicSession:
                 raise EconomicSessionIntegrityError(
                     f"{field} must be exact non-empty canonical text"
                 )
+        if (
+            len(self.session_id) != 32
+            or any(character not in _HEX for character in self.session_id)
+        ):
+            raise EconomicSessionIntegrityError(
+                "session_id must be canonical UUID hex"
+            )
         if type(self.goal_revision) is not int or self.goal_revision < 1:
             raise EconomicSessionIntegrityError("goal_revision must be a positive exact integer")
         if type(self.authority_generation) is not int or self.authority_generation < 1:
@@ -351,11 +358,14 @@ class ProductEconomicSession:
             assert self.predecessor_ended_at is not None
             if (
                 type(self.predecessor_session_id) is not str
-                or not self.predecessor_session_id
-                or self.predecessor_session_id != self.predecessor_session_id.strip()
+                or len(self.predecessor_session_id) != 32
+                or any(
+                    character not in _HEX
+                    for character in self.predecessor_session_id
+                )
             ):
                 raise EconomicSessionIntegrityError(
-                    "predecessor_session_id must be canonical text"
+                    "predecessor_session_id must be canonical UUID hex"
                 )
             if not _sha_validator(self.predecessor_state_sha256):
                 raise EconomicSessionIntegrityError(
@@ -625,6 +635,7 @@ def _decode_state(
     _schema=_STATE_SCHEMA,
     _version=_STATE_SCHEMA_VERSION,
     _transition_validator=_is_transition_id,
+    _session_validator=_is_transition_id,
     _sha_validator=_is_sha256,
     _parse=_parse_instant,
     _payload=_state_payload,
@@ -643,8 +654,7 @@ def _decode_state(
         or parsed["schema_version"] != _version
         or parsed["workspace_instance_id"] != workspace_instance_id
         or not _transition_validator(parsed["transition_id"])
-        or type(parsed["session_id"]) is not str
-        or not parsed["session_id"]
+        or not _session_validator(parsed["session_id"])
         or type(parsed["goal_id"]) is not str
         or not parsed["goal_id"]
         or type(parsed["goal_revision"]) is not int
@@ -664,8 +674,7 @@ def _decode_state(
             )
             != (None, None, None)
             and (
-                type(parsed["predecessor_session_id"]) is not str
-                or not parsed["predecessor_session_id"]
+                not _session_validator(parsed["predecessor_session_id"])
                 or not _sha_validator(parsed["predecessor_state_sha256"])
                 or type(parsed["predecessor_ended_at"]) is not str
                 or not parsed["predecessor_ended_at"]

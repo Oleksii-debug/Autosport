@@ -4202,3 +4202,77 @@ def test_post_commit_cleanup_failure_keeps_success_generation_authoritative() ->
         assert publication.last_success_at == committed["last_success_at"]
         assert state.snapshot().last_error_code == "POST_SUCCESS_FAILURE"
 
+
+def test_success_generation_tombstone_fences_stale_failure_without_prior_sidecar() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        stale = _state_with_history(root, _SMALL_HISTORY)
+        current = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        current.record_success(
+            at="2026-09-22T06:21:00+00:00",
+            full_refresh=False,
+            settlement_evidence=(),
+        )
+
+        canonical = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        sidecar = json.loads(
+            (root / "continuous_session.json.operational_error.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert sidecar["observed_generation"] == canonical["generation"]
+        assert sidecar["observed_cycles_completed"] == canonical["cycles_completed"]
+        assert sidecar["observed_last_success_at"] == canonical["last_success_at"]
+        assert sidecar["last_error_code"] is None
+
+        try:
+            stale.record_failure(code="STALE_PRE_SUCCESS_FAILURE")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "stale continuous session instance" in str(exc)
+        else:
+            raise AssertionError("stale pre-success instance returned a failure receipt")
+
+
+def test_projection_generation_tombstone_fences_stale_failure_publisher() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        stale = _state_with_history(root, _SMALL_HISTORY)
+        current = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        current.record_source_projection(
+            deltas=(_projection_delta(1),),
+            backlog=False,
+        )
+
+        canonical = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        sidecar = json.loads(
+            (root / "continuous_session.json.operational_error.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert sidecar["observed_generation"] == canonical["generation"]
+        assert sidecar["observed_state"] == canonical["state"]
+        assert sidecar["last_error_code"] is None
+
+        try:
+            stale.record_failure(code="STALE_PRE_PROJECTION_FAILURE")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "stale continuous session instance" in str(exc)
+        else:
+            raise AssertionError("stale pre-projection instance returned a failure receipt")
+

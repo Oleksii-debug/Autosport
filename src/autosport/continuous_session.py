@@ -855,7 +855,7 @@ class _ContinuousSessionState:
             raw["generation"] = 0
         try:
             _text(raw["session_id"], "session_id")
-            _instant(raw["started_at"], "started_at")
+            started_at = _instant(raw["started_at"], "started_at")
         except (TypeError, ValueError) as exc:
             raise ContinuousSessionError(
                 "continuous session state contains invalid identity/timestamp field"
@@ -871,9 +871,32 @@ class _ContinuousSessionState:
         if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 0:
             raise ContinuousSessionError("cycles_completed must be a non-negative integer")
         try:
-            for name in ("last_success_at", "last_full_refresh_at"):
-                if raw[name] is not None:
-                    _instant(raw[name], name)
+            last_success_at = (
+                None
+                if raw["last_success_at"] is None
+                else _instant(raw["last_success_at"], "last_success_at")
+            )
+            last_full_refresh_at = (
+                None
+                if raw["last_full_refresh_at"] is None
+                else _instant(raw["last_full_refresh_at"], "last_full_refresh_at")
+            )
+            if (cycles == 0) != (last_success_at is None):
+                raise ContinuousSessionError(
+                    "continuous session cycle count and last_success_at disagree"
+                )
+            if last_success_at is not None and last_success_at < started_at:
+                raise ContinuousSessionError(
+                    "continuous session last_success_at precedes session start"
+                )
+            if last_full_refresh_at is not None and (
+                last_success_at is None
+                or last_full_refresh_at < started_at
+                or last_full_refresh_at > last_success_at
+            ):
+                raise ContinuousSessionError(
+                    "continuous session full-refresh timestamp is not causally valid"
+                )
             if raw["last_error_code"] is not None:
                 _text(raw["last_error_code"], "last_error_code")
             evidence = _validate_settlement_evidence(raw["settlement_evidence"])

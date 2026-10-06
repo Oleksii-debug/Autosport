@@ -4979,12 +4979,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         refresh_tick_dependency_routing_authority()
 
-        def require_economic_context() -> None:
-            if (
+        def restore_economic_context() -> bool:
+            changed = (
                 self.workspace != workspace
                 or self.paper_book_path != paper_book_path
                 or self.initial_bankroll != initial_bankroll
-            ):
+            )
+            if changed:
+                self.workspace = workspace
+                self.paper_book_path = paper_book_path
+                self.initial_bankroll = initial_bankroll
+            return changed
+
+        def require_economic_context() -> None:
+            if restore_economic_context():
                 raise ContinuousSessionError(
                     "settlement economic configuration changed during tick"
                 )

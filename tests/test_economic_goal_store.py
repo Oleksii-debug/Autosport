@@ -1044,6 +1044,38 @@ def test_store_rejects_equal_but_distinct_path_rebind(tmp_path) -> None:
 
 
 
+def test_store_binding_registry_cannot_be_mutated_to_redirect_authority(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    original = _goal()
+    store.initialize_owner(original)
+
+    registry = economic_goal_store_module._STORE_BINDINGS_BY_ID
+    binding = registry[id(store)]
+    attacker_workspace = (tmp_path / "attacker").resolve()
+    attacker_workspace.mkdir()
+    attacker_path = attacker_workspace / "economic_goal_contract.json"
+    forged_binding = (
+        binding[0],
+        attacker_workspace,
+        attacker_path,
+        binding[3],
+        attacker_path.open,
+    )
+
+    with pytest.raises(TypeError):
+        registry[id(store)] = forged_binding  # type: ignore[index]
+
+    instance_state = object.__getattribute__(store, "__dict__")
+    instance_state["workspace"] = attacker_workspace
+    instance_state["path"] = attacker_path
+
+    with pytest.raises(EconomicGoalContractError, match="binding was rebound"):
+        store.load()
+
+    assert not attacker_path.exists()
+    assert (tmp_path.resolve() / "economic_goal_contract.json").exists()
+
+
 def test_store_binding_registry_releases_dead_store_entries(tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
     store_id = id(store)

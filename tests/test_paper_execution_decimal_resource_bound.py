@@ -69,6 +69,30 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         ):
             evidence(stake="1E-100000000")
 
+    def test_oversized_decimal_input_text_is_rejected_before_decimal_parse(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "must be a finite Decimal",
+        ):
+            evidence(odds="1" * 8193)
+
+    def test_decimal_ingress_rejects_float_and_custom_string_coercion(self) -> None:
+        class DecimalLike:
+            def __str__(self) -> str:
+                raise AssertionError("caller-defined string coercion executed")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "must be a Decimal, decimal string, or int",
+        ):
+            legacy._decimal(1.25, "value")
+        with self.assertRaisesRegex(
+            ValueError,
+            "must be a Decimal, decimal string, or int",
+        ):
+            legacy._decimal(DecimalLike(), "value")
+
+
     def test_evidence_hash_and_id_fail_closed_for_mutated_oversized_decimal(self) -> None:
         record = evidence()
         object.__setattr__(record, "accepted_odds", Decimal("1E+100000000"))

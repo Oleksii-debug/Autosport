@@ -6,6 +6,7 @@ from pathlib import Path
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
+import autosport.risk as risk_module
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 
 
@@ -542,6 +543,168 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
                 currency="USD",
                 proposal_ts="2026-09-16T15:00:02+00:00",
             )
+
+    def test_zero_stake_cannot_bypass_lay_proposal_shape_validation(self) -> None:
+        first = TicketLeg(
+            event_id="event-zero-a",
+            market_id="market-zero-a",
+            selection_id="selection-zero-a",
+            locked_odds=Decimal("5"),
+            exchange_side="lay",
+        )
+        second = TicketLeg(
+            event_id="event-zero-b",
+            market_id="market-zero-b",
+            selection_id="selection-zero-b",
+            locked_odds=Decimal("2"),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exactly one canonical single-leg proposal",
+        ):
+            risk_module._CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                Decimal("0"),
+                (first, second),
+            )
+
+    def test_zero_stake_still_rejects_noncanonical_proposal_leg(self) -> None:
+        leg = TicketLeg(
+            event_id="event-zero",
+            market_id="market-zero",
+            selection_id="selection-zero",
+            locked_odds=Decimal("2"),
+        )
+        object.__setattr__(leg, "locked_odds", Decimal("NaN"))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "proposal exposure leg is not canonical",
+        ):
+            risk_module._CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                Decimal("0"),
+                (leg,),
+            )
+
+    def test_lay_liability_drives_aggregate_committed_capital_limit(self) -> None:
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("1"),
+            max_committed_fraction=Decimal("0.30"),
+            minimum_cash_reserve_fraction=Decimal("0"),
+        )
+        context = ProposedTicketRiskContext(
+            legs=(
+                TicketLeg(
+                    event_id="event-lay",
+                    market_id="market-lay",
+                    selection_id="selection-lay",
+                    locked_odds=Decimal("5"),
+                    exchange_side="lay",
+                ),
+            ),
+        )
+
+        decision = policy.evaluate(
+            PaperBook("100"),
+            Decimal("10"),
+            context=context,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "aggregate committed stake limit exceeded",
+        )
+
+    def test_lay_liability_drives_minimum_cash_reserve(self) -> None:
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("1"),
+            max_committed_fraction=Decimal("1"),
+            minimum_cash_reserve_fraction=Decimal("0.20"),
+        )
+        context = ProposedTicketRiskContext(
+            legs=(
+                TicketLeg(
+                    event_id="event-lay",
+                    market_id="market-lay",
+                    selection_id="selection-lay",
+                    locked_odds=Decimal("5"),
+                    exchange_side="lay",
+                ),
+            ),
+        )
+
+        decision = policy.evaluate(
+            PaperBook("100"),
+            Decimal("21"),
+            context=context,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "minimum virtual cash reserve would be violated",
+        )
+
+    def test_lay_liability_drives_owner_session_loss_room(self) -> None:
+        goal = self._goal(
+            max_session_loss_fraction=Decimal("0.50"),
+            max_day_loss_fraction=Decimal("1"),
+            max_drawdown_fraction=Decimal("1"),
+            max_turnover_fraction=Decimal("1000"),
+        )
+        context = ProposedTicketRiskContext(
+            legs=(
+                TicketLeg(
+                    event_id="event-lay",
+                    market_id="market-lay",
+                    selection_id="selection-lay",
+                    locked_odds=Decimal("4"),
+                    exchange_side="lay",
+                ),
+            ),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+
+        decision = self._permissive_policy(goal).evaluate(
+            PaperBook("100"),
+            Decimal("20"),
+            context=context,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "economic goal conservative session loss limit exceeded",
+        )
+
+    def test_lay_ticket_fraction_remains_stake_denominated(self) -> None:
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("0.20"),
+            max_committed_fraction=Decimal("1"),
+            minimum_cash_reserve_fraction=Decimal("0"),
+        )
+        context = ProposedTicketRiskContext(
+            legs=(
+                TicketLeg(
+                    event_id="event-lay",
+                    market_id="market-lay",
+                    selection_id="selection-lay",
+                    locked_odds=Decimal("5"),
+                    exchange_side="lay",
+                ),
+            ),
+        )
+
+        decision = policy.evaluate(
+            PaperBook("100"),
+            Decimal("19"),
+            context=context,
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed")
 
     def test_sport_concentration_remains_fail_closed_without_canonical_identity(self) -> None:
         sport = self._permissive_policy(

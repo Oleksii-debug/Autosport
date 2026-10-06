@@ -28,6 +28,7 @@ from .domain import (
     _canonical_semantic_identity,
     utc_now_iso,
 )
+from .exchange_exposure import locked_capital_for_exchange_side
 from .forecasting import parse_iso_timestamp
 
 
@@ -78,6 +79,44 @@ _CANONICAL_OS_RDONLY = os.O_RDONLY
 _CANONICAL_OS_RDWR = os.O_RDWR
 _CANONICAL_OS_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _CANONICAL_OS_NAME = os.name
+_CANONICAL_EXCHANGE_LOCKED_CAPITAL = locked_capital_for_exchange_side
+_CANONICAL_EXCHANGE_LOCKED_CAPITAL_CODE = getattr(
+    _CANONICAL_EXCHANGE_LOCKED_CAPITAL,
+    "__code__",
+    None,
+)
+
+
+def _locked_capital_for_ticket_leg(
+    stake: Decimal,
+    leg: TicketLeg,
+) -> Decimal:
+    if (
+        locked_capital_for_exchange_side
+        is not _CANONICAL_EXCHANGE_LOCKED_CAPITAL
+        or getattr(_CANONICAL_EXCHANGE_LOCKED_CAPITAL, "__code__", None)
+        is not _CANONICAL_EXCHANGE_LOCKED_CAPITAL_CODE
+    ):
+        raise ValueError("PaperBook exchange exposure authority changed")
+    if type(stake) is not _CANONICAL_PAPER_DECIMAL_TYPE:
+        raise ValueError("PaperBook locked-capital stake must be canonical Decimal")
+    if type(leg) is not _CANONICAL_TICKET_LEG_TYPE:
+        raise ValueError("PaperBook locked-capital leg must be canonical TicketLeg")
+    if leg.exchange_side == "lay":
+        return _CANONICAL_EXCHANGE_LOCKED_CAPITAL(
+            stake=stake,
+            odds=leg.locked_odds,
+            exchange_side="LAY",
+        )
+    return stake
+
+
+_CANONICAL_LOCKED_CAPITAL_FOR_TICKET = _locked_capital_for_ticket_leg
+_CANONICAL_LOCKED_CAPITAL_FOR_TICKET_CODE = getattr(
+    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET,
+    "__code__",
+    None,
+)
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 
@@ -549,6 +588,48 @@ class PaperBook:
 
     @property
     @_serialized_paperbook_operation
+    def committed_capital(self) -> Decimal:
+        if type(self) is not __class__:
+            raise TypeError("PaperBook economic authority requires the exact book type")
+        _CANONICAL_VALIDATE_LOADED_STATE(self)
+        _CANONICAL_REQUIRE_OPENING_AUTHORITY(self)
+        _CANONICAL_REQUIRE_CAUSAL_AUTHORITY(self)
+        try:
+            with _CANONICAL_LOCALCONTEXT(
+                _CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()
+            ) as context:
+                total = _CANONICAL_PAPER_DECIMAL_TYPE("0")
+                for ticket in self.tickets.values():
+                    if ticket.status is not _CANONICAL_TICKET_STATUS_OPEN:
+                        continue
+                    if any(
+                        leg.exchange_side == "lay"
+                        for leg in ticket.legs
+                    ) and len(ticket.legs) != 1:
+                        raise ValueError(
+                            "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                        )
+                    total += (
+                        _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                            ticket.stake,
+                            ticket.legs[0],
+                        )
+                        if len(ticket.legs) == 1
+                        else ticket.stake
+                    )
+                if context.flags[_CANONICAL_INEXACT_SIGNAL]:
+                    raise ValueError(
+                        "PaperBook committed capital loses Decimal precision"
+                    )
+        except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+            raise ValueError(
+                "PaperBook committed capital arithmetic is not representable"
+            ) from exc
+        _CANONICAL_REQUIRE_FINITE(total, "committed_capital")
+        return total
+
+    @property
+    @_serialized_paperbook_operation
     def committed_stake(self) -> Decimal:
         if type(self) is not __class__:
             raise TypeError("PaperBook economic authority requires the exact book type")
@@ -628,7 +709,6 @@ class PaperBook:
         _CANONICAL_REQUIRE_OPENING_AUTHORITY(self)
         _CANONICAL_REQUIRE_CAUSAL_AUTHORITY(self)
         amount = _CANONICAL_DECIMAL_INPUT(stake, "stake")
-        new_balance = _CANONICAL_DEBIT_BALANCE(self.balance, amount)
 
         ticket_placed_at = _CANONICAL_VALIDATE_PLACED_AT(
             placed_at if placed_at is not None else _CANONICAL_UTC_NOW_ISO()
@@ -655,6 +735,16 @@ class PaperBook:
         quote_keys = [leg.quote_key for leg in ticket_legs]
         if len(quote_keys) != len(set(quote_keys)):
             raise ValueError("ticket contains duplicate quote_key leg")
+        if any(leg.exchange_side == "lay" for leg in ticket_legs) and len(ticket_legs) != 1:
+            raise ValueError(
+                "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+            )
+        locked_capital = (
+            _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(amount, ticket_legs[0])
+            if len(ticket_legs) == 1
+            else amount
+        )
+        new_balance = _CANONICAL_DEBIT_BALANCE(self.balance, locked_capital)
         ticket = _CANONICAL_PAPER_TICKET_CONSTRUCTOR(
             ticket_id=str(_CANONICAL_UUID4()),
             stake=amount,
@@ -705,6 +795,64 @@ class PaperBook:
             raise ValueError("PaperBook settlement contains unknown void settlement key")
         if winning_quote_keys & void_quote_keys:
             raise ValueError("PaperBook settlement key cannot be both winning and void")
+
+        if any(leg.exchange_side == "lay" for leg in ticket.legs):
+            if len(ticket.legs) != 1:
+                raise ValueError(
+                    "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                )
+            leg = ticket.legs[0]
+            locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                ticket.stake,
+                leg,
+            )
+            if leg.settlement_key in void_quote_keys:
+                status = _CANONICAL_TICKET_STATUS_VOID
+                payout = locked_capital
+            elif leg.settlement_key in winning_quote_keys:
+                status = _CANONICAL_TICKET_STATUS_LOST
+                payout = _CANONICAL_PAPER_DECIMAL_TYPE("0")
+            else:
+                status = _CANONICAL_TICKET_STATUS_WON
+                try:
+                    with _CANONICAL_LOCALCONTEXT(
+                        _CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()
+                    ) as context:
+                        payout = locked_capital + ticket.stake
+                        if context.flags[_CANONICAL_INEXACT_SIGNAL]:
+                            raise ValueError(
+                                "PaperBook LAY payout loses Decimal precision"
+                            )
+                except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+                    raise ValueError(
+                        "PaperBook LAY settlement arithmetic is not representable"
+                    ) from exc
+            _CANONICAL_REQUIRE_FINITE(
+                payout,
+                f"settlement payout for ticket {ticket.ticket_id}",
+            )
+            try:
+                with _CANONICAL_LOCALCONTEXT(
+                    _CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()
+                ) as context:
+                    new_balance = balance + payout
+                    if context.flags[_CANONICAL_INEXACT_SIGNAL]:
+                        raise ValueError(
+                            "PaperBook LAY balance credit loses Decimal precision"
+                        )
+            except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+                raise ValueError(
+                    "PaperBook LAY settlement arithmetic is not representable"
+                ) from exc
+            _CANONICAL_REQUIRE_FINITE(
+                new_balance,
+                f"balance after settling ticket {ticket.ticket_id}",
+            )
+            if payout != 0 and new_balance == balance:
+                raise ValueError(
+                    "PaperBook settlement payout loses all Decimal balance effect"
+                )
+            return status, payout, new_balance
 
         effective_legs = tuple(
             leg for leg in ticket.legs if leg.settlement_key not in void_quote_keys
@@ -1173,10 +1321,6 @@ class PaperBook:
                 raise ValueError(
                     "PaperBook ticket exchange_side must be canonical 'back' or 'lay'"
                 )
-            if exchange_side == "lay":
-                raise ValueError(
-                    "PaperBook LAY economic materialization is not supported"
-                )
         if leg.market_semantics_id is not None:
             try:
                 _CANONICAL_SEMANTIC_IDENTITY(
@@ -1238,11 +1382,26 @@ class PaperBook:
             if action == "open":
                 if ticket_id in opened:
                     raise ValueError("PaperBook lifecycle opens a ticket more than once")
+                if any(leg.exchange_side == "lay" for leg in ticket.legs) and len(ticket.legs) != 1:
+                    raise ValueError(
+                        "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                    )
                 try:
-                    replay_balance = _CANONICAL_DEBIT_BALANCE(replay_balance, ticket.stake)
+                    locked_capital = (
+                        _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                            ticket.stake,
+                            ticket.legs[0],
+                        )
+                        if len(ticket.legs) == 1
+                        else ticket.stake
+                    )
+                    replay_balance = _CANONICAL_DEBIT_BALANCE(
+                        replay_balance,
+                        locked_capital,
+                    )
                 except ValueError as exc:
                     raise ValueError(
-                        f"PaperBook lifecycle stake for ticket {ticket_id} was not affordable"
+                        f"PaperBook lifecycle locked capital for ticket {ticket_id} was not affordable"
                     ) from exc
                 opened.add(ticket_id)
                 open_order.append(ticket_id)
@@ -1352,13 +1511,71 @@ class PaperBook:
             quote_keys = [leg.quote_key for leg in ticket.legs]
             if len(quote_keys) != len(set(quote_keys)):
                 raise ValueError("PaperBook snapshot ticket contains duplicate quote_key leg")
+            if any(leg.exchange_side == "lay" for leg in ticket.legs) and len(ticket.legs) != 1:
+                raise ValueError(
+                    "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                )
 
-            if ticket.status in {_CANONICAL_TICKET_STATUS_OPEN, _CANONICAL_TICKET_STATUS_LOST} and ticket.payout != 0:
-                raise ValueError("PaperBook snapshot open/lost ticket payout must be zero")
-            if ticket.status is _CANONICAL_TICKET_STATUS_VOID and ticket.payout != ticket.stake:
-                raise ValueError("PaperBook snapshot void ticket payout must equal stake")
-            if ticket.status is _CANONICAL_TICKET_STATUS_WON and ticket.payout <= ticket.stake:
-                raise ValueError("PaperBook snapshot won ticket payout must exceed stake")
+            is_lay = (
+                len(ticket.legs) == 1
+                and ticket.legs[0].exchange_side == "lay"
+            )
+            if is_lay:
+                locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                    ticket.stake,
+                    ticket.legs[0],
+                )
+                if ticket.status in {
+                    _CANONICAL_TICKET_STATUS_OPEN,
+                    _CANONICAL_TICKET_STATUS_LOST,
+                }:
+                    expected_payout = _CANONICAL_PAPER_DECIMAL_TYPE("0")
+                elif ticket.status is _CANONICAL_TICKET_STATUS_VOID:
+                    expected_payout = locked_capital
+                elif ticket.status is _CANONICAL_TICKET_STATUS_WON:
+                    try:
+                        with _CANONICAL_LOCALCONTEXT(
+                            _CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()
+                        ) as context:
+                            expected_payout = locked_capital + ticket.stake
+                            if context.flags[_CANONICAL_INEXACT_SIGNAL]:
+                                raise ValueError(
+                                    "PaperBook LAY payout witness loses Decimal precision"
+                                )
+                    except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+                        raise ValueError(
+                            "PaperBook LAY payout witness is not representable"
+                        ) from exc
+                else:
+                    raise ValueError(
+                        "PaperBook snapshot ticket status is unsupported"
+                    )
+                if ticket.payout != expected_payout:
+                    raise ValueError(
+                        "PaperBook snapshot LAY payout is inconsistent with locked-capital economics"
+                    )
+            else:
+                if ticket.status in {
+                    _CANONICAL_TICKET_STATUS_OPEN,
+                    _CANONICAL_TICKET_STATUS_LOST,
+                } and ticket.payout != 0:
+                    raise ValueError(
+                        "PaperBook snapshot open/lost ticket payout must be zero"
+                    )
+                if (
+                    ticket.status is _CANONICAL_TICKET_STATUS_VOID
+                    and ticket.payout != ticket.stake
+                ):
+                    raise ValueError(
+                        "PaperBook snapshot void ticket payout must equal stake"
+                    )
+                if (
+                    ticket.status is _CANONICAL_TICKET_STATUS_WON
+                    and ticket.payout <= ticket.stake
+                ):
+                    raise ValueError(
+                        "PaperBook snapshot won ticket payout must exceed stake"
+                    )
 
         _CANONICAL_VALIDATE_LIFECYCLE_REACHABILITY(book)
 

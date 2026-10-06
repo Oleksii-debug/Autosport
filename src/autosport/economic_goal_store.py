@@ -8,19 +8,27 @@ non-expanding successor of the already persisted owner contract.
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
 import json
 import os
 import stat
-import threading
-from pathlib import Path
-from typing import Final
+import tempfile
 import weakref
+from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from types import MappingProxyType, MethodType
+from typing import Final
 
 from .economic_goal import (
+    AutomationLevel,
     EconomicGoalContract,
     EconomicGoalContractError,
+    EconomicObjective,
     validate_automatic_transition,
+    _CANONICAL_AUTOMATION_LEVEL_MEMBERS as _CONTRACT_AUTOMATION_LEVEL_MEMBERS,
+    _CANONICAL_OBJECTIVE_MEMBER as _CONTRACT_OBJECTIVE_MEMBER,
+    _CANONICAL_CONTRACT_FIELD_SETTERS,
+    _canonical_contract_snapshot,
 )
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
@@ -29,41 +37,11 @@ from .workspace_lock import WorkspaceEconomicLock, _open_read_only_descriptor
 
 ECONOMIC_GOAL_SCHEMA: Final = "autosport.economic_goal_contract"
 ECONOMIC_GOAL_SCHEMA_VERSION: Final = 1
-_CANONICAL_ECONOMIC_GOAL_SCHEMA: Final = "autosport.economic_goal_contract"
-_CANONICAL_ECONOMIC_GOAL_SCHEMA_VERSION: Final = 1
-_ECONOMIC_GOAL_FILE_NAME: Final = "economic_goal_contract.json"
-_MAX_ECONOMIC_GOAL_JSON_CHARS: Final = 65_536
-_MAX_ECONOMIC_GOAL_JSON_BYTES: Final = 262_144
 _MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS: Final = 512
 _MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS: Final = 1024
 _MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS: Final = 512
-_CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
-_CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
-_CANONICAL_OBJECTIVE_TYPE: Final = type(
-    EconomicGoalContract.__dataclass_fields__["objective"].default
-)
-_CANONICAL_AUTOMATION_TYPE: Final = type(
-    EconomicGoalContract.__dataclass_fields__["automation_level"].default
-)
-_CANONICAL_PATH_CONSTRUCTOR: Final = Path
-_CANONICAL_PATH_TYPE: Final = type(Path("."))
-_CANONICAL_PATH_RESOLVE: Final = Path.resolve
-_CANONICAL_PATH_EXISTS: Final = Path.exists
-_CANONICAL_PATH_JOIN: Final = Path.__truediv__
-_CANONICAL_TRANSITION_VALIDATOR: Final = validate_automatic_transition
-_CANONICAL_ATOMIC_WRITE_JSON: Final = atomic_write_json
-_CANONICAL_WORKSPACE_LOCK_TYPE: Final = WorkspaceEconomicLock
-_CANONICAL_OPEN_READ_ONLY_DESCRIPTOR: Final = _open_read_only_descriptor
-_CANONICAL_STRICT_JSON_LOADS: Final = strict_json_loads
-_CANONICAL_DECIMAL_TYPE: Final = Decimal
-_CANONICAL_INVALID_OPERATION: Final = InvalidOperation
-_CANONICAL_JSON_DUMPS: Final = json.dumps
-_CANONICAL_OS_FSTAT: Final = os.fstat
-_CANONICAL_OS_STAT: Final = os.stat
-_CANONICAL_OS_FDOPEN: Final = os.fdopen
-_CANONICAL_OS_SAMEOPENFILE: Final = os.path.sameopenfile
-_CANONICAL_OS_CLOSE: Final = os.close
-_CANONICAL_STAT_ISREG: Final = stat.S_ISREG
+_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS: Final = 2 * 1024 * 1024
+_MAX_ECONOMIC_GOAL_JSON_BYTES: Final = 4 * _MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS
 
 _CONTRACT_KEYS: Final = frozenset(
     {
@@ -97,6 +75,35 @@ _CONTRACT_KEYS: Final = frozenset(
     }
 )
 _ROOT_KEYS: Final = frozenset({"schema", "schema_version", "contract"})
+_CONTRACT_KEYS_ORDERED: Final = (
+    "goal_id",
+    "revision",
+    "bankroll_id",
+    "currency",
+    "objective",
+    "max_stake_fraction",
+    "max_stake_amount",
+    "max_session_loss_fraction",
+    "max_day_loss_fraction",
+    "max_drawdown_fraction",
+    "max_capital_at_risk_fraction",
+    "max_event_concentration_fraction",
+    "max_market_concentration_fraction",
+    "max_provider_concentration_fraction",
+    "max_sport_concentration_fraction",
+    "max_turnover_fraction",
+    "max_risk_of_ruin",
+    "max_execution_slippage_fraction",
+    "max_quote_age_seconds",
+    "minimum_data_quality",
+    "max_concurrent_positions",
+    "max_parlay_legs",
+    "automation_level",
+    "emergency_stop",
+    "blocked_sports",
+    "blocked_providers",
+    "blocked_markets",
+)
 _DECIMAL_FIELDS: Final = (
     "max_stake_fraction",
     "max_session_loss_fraction",
@@ -118,132 +125,449 @@ _RESTRICTION_FIELDS: Final = (
     "blocked_providers",
     "blocked_markets",
 )
-_CANONICAL_CONTRACT_KEYS: Final = _CONTRACT_KEYS
-_CANONICAL_ROOT_KEYS: Final = _ROOT_KEYS
-_CANONICAL_DECIMAL_FIELDS: Final = _DECIMAL_FIELDS
-_CANONICAL_RESTRICTION_FIELDS: Final = _RESTRICTION_FIELDS
 
 
 def _require_exact_keys(
-    name: str, value: dict[str, object], expected: frozenset[str]
+    name: str,
+    value: dict[str, object],
+    expected: frozenset[str],
+    _error_type=EconomicGoalContractError,
+    _frozenset=frozenset,
 ) -> None:
-    keys = frozenset(value)
+    keys = _frozenset(value)
     if keys != expected:
         missing = sorted(expected - keys)
         extra = sorted(keys - expected)
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"{name} keys must match schema exactly; missing={missing!r} extra={extra!r}"
         )
 
 
-def _decimal_text(name: str, value: object) -> Decimal:
-    if type(value) is not str:
-        raise EconomicGoalContractError(f"{name} must be a Decimal string")
+def _decimal_text(
+    name: str,
+    value: object,
+    _decimal_type=Decimal,
+    _invalid_operation=InvalidOperation,
+    _type=type,
+    _error_type=EconomicGoalContractError,
+    _max_chars=_MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS,
+) -> Decimal:
+    if _type(value) is not str:
+        raise _error_type(f"{name} must be a Decimal string")
     if not value or value != value.strip():
-        raise EconomicGoalContractError(f"{name} must be a canonical Decimal string")
-    if len(value) > _MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS:
-        raise EconomicGoalContractError(
+        raise _error_type(f"{name} must be a canonical Decimal string")
+    if len(value) > _max_chars:
+        raise _error_type(
             f"{name} Decimal text exceeds the canonical size limit"
         )
     try:
-        parsed = _CANONICAL_DECIMAL_TYPE(value)
-    except _CANONICAL_INVALID_OPERATION as exc:
-        raise EconomicGoalContractError(f"{name} is not a valid Decimal string") from exc
+        parsed = _decimal_type(value)
+    except _invalid_operation as exc:
+        raise _error_type(f"{name} is not a valid Decimal string") from exc
     if not parsed.is_finite():
-        raise EconomicGoalContractError(f"{name} must be finite")
+        raise _error_type(f"{name} must be finite")
     if str(parsed) != value:
-        raise EconomicGoalContractError(f"{name} must use canonical Decimal text")
+        raise _error_type(f"{name} must use canonical Decimal text")
     return parsed
 
 
-def _restriction_set(name: str, value: object) -> frozenset[str]:
-    if type(value) is not list:
-        raise EconomicGoalContractError(f"{name} must be a sorted JSON array")
-    if len(value) > _MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS:
-        raise EconomicGoalContractError(
+def _restriction_set(
+    name: str,
+    value: object,
+    _type=type,
+    _error_type=EconomicGoalContractError,
+    _max_members=_MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS,
+    _max_text_chars=_MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS,
+    _frozenset=frozenset,
+) -> frozenset[str]:
+    if _type(value) is not list:
+        raise _error_type(f"{name} must be a sorted JSON array")
+    if len(value) > _max_members:
+        raise _error_type(
             f"{name} exceeds the canonical restriction-count limit"
         )
     for item in value:
-        if type(item) is not str:
-            raise EconomicGoalContractError(f"{name} must contain only strings")
+        if _type(item) is not str:
+            raise _error_type(f"{name} must contain only strings")
         if (
             not item
             or item != item.strip()
-            or len(item) > _MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS
+            or len(item) > _max_text_chars
             or "\x00" in item
         ):
-            raise EconomicGoalContractError(
+            raise _error_type(
                 f"{name} contains non-canonical restriction text"
             )
     if value != sorted(value) or len(value) != len(set(value)):
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"{name} must be sorted and contain unique strings"
         )
-    return frozenset(value)
+    return _frozenset(value)
 
 
-_CANONICAL_REQUIRE_EXACT_KEYS: Final = _require_exact_keys
-_CANONICAL_DECIMAL_TEXT: Final = _decimal_text
-_CANONICAL_RESTRICTION_SET: Final = _restriction_set
+_CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
+_CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
+_CANONICAL_OBJECTIVE_TYPE: Final = EconomicObjective
+_CANONICAL_AUTOMATION_TYPE: Final = AutomationLevel
+_CANONICAL_OBJECTIVE_MEMBER: Final = _CONTRACT_OBJECTIVE_MEMBER
+_CANONICAL_AUTOMATION_MEMBERS: Final = _CONTRACT_AUTOMATION_LEVEL_MEMBERS
+_CANONICAL_OBJECTIVE_VALUE_GETTER: Final = str.__str__
+_CANONICAL_AUTOMATION_VALUE_GETTER: Final = int.__index__
+_CANONICAL_OBJECTIVE_VALUE: Final = _CANONICAL_OBJECTIVE_VALUE_GETTER(
+    _CANONICAL_OBJECTIVE_MEMBER
+)
+_CANONICAL_AUTOMATION_VALUE_MEMBERS: Final = tuple(
+    (_CANONICAL_AUTOMATION_VALUE_GETTER(member), member)
+    for member in _CANONICAL_AUTOMATION_MEMBERS
+)
+_CANONICAL_TRANSITION_VALIDATOR: Final = validate_automatic_transition
+_CANONICAL_STRICT_JSON_LOADS: Final = strict_json_loads
+_CANONICAL_ATOMIC_WRITE_JSON: Final = atomic_write_json
+_CANONICAL_WORKSPACE_LOCK_TYPE: Final = WorkspaceEconomicLock
+_CANONICAL_WORKSPACE_LOCK_ENTER: Final = WorkspaceEconomicLock.__enter__
+_CANONICAL_WORKSPACE_LOCK_EXIT: Final = WorkspaceEconomicLock.__exit__
+_CANONICAL_WORKSPACE_LOCK_ACQUIRE: Final = WorkspaceEconomicLock.acquire
+_CANONICAL_WORKSPACE_LOCK_RELEASE: Final = WorkspaceEconomicLock.release
+_CANONICAL_WORKSPACE_LOCK_NEW: Final = WorkspaceEconomicLock.__new__
+_CANONICAL_WORKSPACE_LOCK_INIT: Final = WorkspaceEconomicLock.__init__
+_CANONICAL_PATH_CONSTRUCTOR: Final = Path
+_CANONICAL_PATH_TYPE: Final = type(Path("."))
+_CANONICAL_PATH_RESOLVE: Final = Path.resolve
+_CANONICAL_PATH_JOIN: Final = Path.__truediv__
+_CANONICAL_PATH_LSTAT: Final = Path.lstat
+_CANONICAL_STORE_FILE_NAME: Final = "economic_goal_contract.json"
+_CANONICAL_OPEN_READ_ONLY_DESCRIPTOR: Final = _open_read_only_descriptor
+_CANONICAL_OS_FSTAT: Final = os.fstat
+_CANONICAL_OS_STAT: Final = os.stat
+_CANONICAL_OS_FDOPEN: Final = os.fdopen
+_CANONICAL_OS_SAMEOPENFILE: Final = os.path.sameopenfile
+_CANONICAL_OS_CLOSE: Final = os.close
+_CANONICAL_STAT_ISREG: Final = stat.S_ISREG
+_CANONICAL_JSON_DUMPS: Final = json.dumps
+_CANONICAL_JSON_DUMP: Final = json.dump
+_CANONICAL_NAMED_TEMPORARY_FILE: Final = tempfile.NamedTemporaryFile
+_CANONICAL_OS_LINK: Final = os.link
+_CANONICAL_OS_UNLINK: Final = os.unlink
+_CANONICAL_OS_FSYNC: Final = os.fsync
 
 
-def economic_goal_to_payload(contract: EconomicGoalContract) -> dict[str, object]:
+def _atomic_create_owner_json(
+    path: Path,
+    payload: dict[str, object],
+    _named_temporary_file=_CANONICAL_NAMED_TEMPORARY_FILE,
+    _json_dump=_CANONICAL_JSON_DUMP,
+    _fsync=_CANONICAL_OS_FSYNC,
+    _link=_CANONICAL_OS_LINK,
+    _unlink=_CANONICAL_OS_UNLINK,
+    _error_type=EconomicGoalContractError,
+    _file_exists_error=FileExistsError,
+    _file_not_found_error=FileNotFoundError,
+    _os_error=OSError,
+    _base_exception=BaseException,
+) -> None:
+    """Atomically publish the first owner contract without replacing an incumbent.
+
+    The fully-written same-directory staging file is hard-linked into the authority
+    pathname. Hard-link creation is an atomic create-if-absent operation: if another
+    actor wins the pathname after the caller's existence precheck, publication fails
+    closed instead of using os.replace() to overwrite that newly durable authority.
+    """
+
+    temporary_name: str | None = None
+    primary_error: BaseException | None = None
+    linked = False
+    try:
+        with _named_temporary_file(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".owner-init.tmp",
+            delete=False,
+        ) as handle:
+            temporary_name = handle.name
+            _json_dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            handle.write("\n")
+            handle.flush()
+            _fsync(handle.fileno())
+
+        try:
+            _link(temporary_name, path)
+            linked = True
+        except _file_exists_error as exc:
+            primary_error = _error_type(
+                "persisted economic goal already exists; owner replacement requires "
+                "a separate authority boundary"
+            )
+            raise primary_error from exc
+        except _os_error as exc:
+            primary_error = _error_type(
+                f"cannot atomically create persisted economic goal: {exc}"
+            )
+            raise primary_error from exc
+    except _base_exception as exc:
+        if primary_error is None:
+            primary_error = exc
+        raise
+    finally:
+        if temporary_name is not None:
+            try:
+                _unlink(temporary_name)
+            except _file_not_found_error:
+                pass
+            except _os_error as exc:
+                if primary_error is None:
+                    if linked:
+                        raise _error_type(
+                            "cannot remove economic goal owner-initialization staging link"
+                        ) from exc
+                    raise _error_type(
+                        "cannot remove economic goal owner-initialization staging file"
+                    ) from exc
+
+
+_CANONICAL_ATOMIC_CREATE_OWNER_JSON: Final = _atomic_create_owner_json
+
+
+def _make_store_binding_registry(
+    _mapping_proxy=MappingProxyType,
+):
+    bindings: dict[int, tuple[object, Path, Path, object]] = {}
+    public_view = _mapping_proxy(bindings)
+
+    def register(
+        store_id: int,
+        entry: tuple[object, Path, Path, object],
+    ) -> None:
+        bindings[store_id] = entry
+
+    def release(store_id: int, store_ref: object) -> None:
+        entry = bindings.get(store_id)
+        if entry is not None and entry[0] is store_ref:
+            bindings.pop(store_id, None)
+
+    def lookup(store_id: int):
+        return bindings.get(store_id)
+
+    return public_view, register, release, lookup
+
+
+(
+    _STORE_BINDINGS_BY_ID,
+    _CANONICAL_STORE_BINDING_REGISTER,
+    _CANONICAL_STORE_BINDING_RELEASE,
+    _CANONICAL_STORE_BINDING_LOOKUP,
+) = _make_store_binding_registry()
+_CANONICAL_OBJECT_GETATTRIBUTE: Final = object.__getattribute__
+_CANONICAL_OBJECT_SETATTR: Final = object.__setattr__
+_CANONICAL_METHOD_TYPE: Final = MethodType
+
+_CANONICAL_WORKSPACE_CONTEXTMANAGER: Final = contextmanager
+
+
+@_CANONICAL_WORKSPACE_CONTEXTMANAGER
+def _workspace_lock_scope(
+    workspace: str | Path,
+    _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
+    _canonical_lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
+    _lock_new=_CANONICAL_WORKSPACE_LOCK_NEW,
+    _lock_init=_CANONICAL_WORKSPACE_LOCK_INIT,
+    _lock_acquire=_CANONICAL_WORKSPACE_LOCK_ACQUIRE,
+    _lock_release=_CANONICAL_WORKSPACE_LOCK_RELEASE,
+    _object_setattr=_CANONICAL_OBJECT_SETATTR,
+    _method_type=_CANONICAL_METHOD_TYPE,
+    _enter=_CANONICAL_WORKSPACE_LOCK_ENTER,
+    _exit=_CANONICAL_WORKSPACE_LOCK_EXIT,
+):
+    if _lock_type is _canonical_lock_type:
+        lock = _lock_new(_lock_type)
+        _lock_init(lock, workspace)
+    else:
+        lock = _lock_type(workspace)
+    _object_setattr(
+        lock,
+        "acquire",
+        _method_type(_lock_acquire, lock),
+    )
+    _object_setattr(
+        lock,
+        "release",
+        _method_type(_lock_release, lock),
+    )
+    _enter(lock)
+    try:
+        yield lock
+    except BaseException as exc:
+        if _exit(lock, type(exc), exc, exc.__traceback__):
+            return
+        raise
+    else:
+        _exit(lock, None, None, None)
+
+
+
+def _resolve_store_binding(
+    store: object,
+    _binding_lookup=_CANONICAL_STORE_BINDING_LOOKUP,
+    _error_type=EconomicGoalContractError,
+    _object_getattribute=_CANONICAL_OBJECT_GETATTRIBUTE,
+):
+    entry = _binding_lookup(id(store))
+    if entry is None or entry[0]() is not store:
+        raise _error_type("economic goal store binding is unavailable")
+    workspace, path, path_exists = entry[1:]
+    instance_state = _object_getattribute(store, "__dict__")
+    if instance_state.get("workspace") is not workspace:
+        raise _error_type("economic goal store workspace binding was rebound")
+    if instance_state.get("path") is not path:
+        raise _error_type("economic goal store path binding was rebound")
+    return workspace, path, path_exists
+
+
+def _snapshot_economic_goal_contract(
+    contract: EconomicGoalContract,
+    _type=type,
+    _goal_type=EconomicGoalContract,
+    _goal_validator=EconomicGoalContract.__post_init__,
+    _object_new=object.__new__,
+    _error_type=EconomicGoalContractError,
+    _snapshot=_canonical_contract_snapshot,
+    _field_setters=_CANONICAL_CONTRACT_FIELD_SETTERS,
+    _zip=zip,
+) -> EconomicGoalContract:
+    """Capture one validated, non-shared contract image for authority decisions."""
+
+    if _type(contract) is not _goal_type:
+        raise _error_type(
+            "economic goal persistence requires an EconomicGoalContract"
+        )
+    _goal_validator(contract)
+    values = _snapshot(contract)
+    _goal_validator(contract)
+    final_values = _snapshot(contract)
+    if values != final_values:
+        raise _error_type("economic goal changed during persistence snapshot")
+    snapshot = _object_new(_goal_type)
+    for setter, value in _zip(_field_setters, final_values):
+        setter(snapshot, value)
+    _goal_validator(snapshot)
+    return snapshot
+
+
+def economic_goal_to_payload(
+    contract: EconomicGoalContract,
+    _type=type,
+    _goal_type=EconomicGoalContract,
+    _goal_validator=EconomicGoalContract.__post_init__,
+    _schema=ECONOMIC_GOAL_SCHEMA,
+    _schema_version=ECONOMIC_GOAL_SCHEMA_VERSION,
+    _error_type=EconomicGoalContractError,
+    _json_dumps=_CANONICAL_JSON_DUMPS,
+    _max_json_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
+    _max_json_bytes=_MAX_ECONOMIC_GOAL_JSON_BYTES,
+    _objective_value_getter=_CANONICAL_OBJECTIVE_VALUE_GETTER,
+    _automation_value_getter=_CANONICAL_AUTOMATION_VALUE_GETTER,
+    _snapshot=_canonical_contract_snapshot,
+    _ordered_field_names=_CONTRACT_KEYS_ORDERED,
+) -> dict[str, object]:
     """Return the canonical schema-v1 JSON payload for ``contract``."""
 
-    if type(contract) is not _CANONICAL_GOAL_TYPE:
-        raise EconomicGoalContractError(
-            "economic goal persistence requires a canonical EconomicGoalContract"
+    if _type(contract) is not _goal_type:
+        raise _error_type(
+            "economic goal persistence requires an EconomicGoalContract"
         )
-    _CANONICAL_GOAL_VALIDATOR(contract)
+    _goal_validator(contract)
+    first_snapshot = _snapshot(contract)
+    _goal_validator(contract)
+    second_snapshot = _snapshot(contract)
+    if first_snapshot != second_snapshot:
+        raise _error_type("economic goal changed during payload encoding")
+
+    values = dict(zip(_ordered_field_names, second_snapshot))
+    goal_id = values["goal_id"]
+    revision = values["revision"]
+    bankroll_id = values["bankroll_id"]
+    currency = values["currency"]
+    objective = values["objective"]
+    max_stake_fraction = values["max_stake_fraction"]
+    max_stake_amount = values["max_stake_amount"]
+    max_session_loss_fraction = values["max_session_loss_fraction"]
+    max_day_loss_fraction = values["max_day_loss_fraction"]
+    max_drawdown_fraction = values["max_drawdown_fraction"]
+    max_capital_at_risk_fraction = values["max_capital_at_risk_fraction"]
+    max_event_concentration_fraction = values["max_event_concentration_fraction"]
+    max_market_concentration_fraction = values["max_market_concentration_fraction"]
+    max_provider_concentration_fraction = values["max_provider_concentration_fraction"]
+    max_sport_concentration_fraction = values["max_sport_concentration_fraction"]
+    max_turnover_fraction = values["max_turnover_fraction"]
+    max_risk_of_ruin = values["max_risk_of_ruin"]
+    max_execution_slippage_fraction = values["max_execution_slippage_fraction"]
+    max_quote_age_seconds = values["max_quote_age_seconds"]
+    minimum_data_quality = values["minimum_data_quality"]
+    max_concurrent_positions = values["max_concurrent_positions"]
+    max_parlay_legs = values["max_parlay_legs"]
+    automation_level = values["automation_level"]
+    emergency_stop = values["emergency_stop"]
+    blocked_sports = values["blocked_sports"]
+    blocked_providers = values["blocked_providers"]
+    blocked_markets = values["blocked_markets"]
 
     body: dict[str, object] = {
-        "goal_id": contract.goal_id,
-        "revision": contract.revision,
-        "bankroll_id": contract.bankroll_id,
-        "currency": contract.currency,
-        "objective": contract.objective.value,
-        "max_stake_fraction": str(contract.max_stake_fraction),
+        "goal_id": goal_id,
+        "revision": revision,
+        "bankroll_id": bankroll_id,
+        "currency": currency,
+        "objective": _objective_value_getter(objective),
+        "max_stake_fraction": str(max_stake_fraction),
         "max_stake_amount": (
-            None if contract.max_stake_amount is None else str(contract.max_stake_amount)
+            None if max_stake_amount is None else str(max_stake_amount)
         ),
-        "max_session_loss_fraction": str(contract.max_session_loss_fraction),
-        "max_day_loss_fraction": str(contract.max_day_loss_fraction),
-        "max_drawdown_fraction": str(contract.max_drawdown_fraction),
-        "max_capital_at_risk_fraction": str(contract.max_capital_at_risk_fraction),
+        "max_session_loss_fraction": str(max_session_loss_fraction),
+        "max_day_loss_fraction": str(max_day_loss_fraction),
+        "max_drawdown_fraction": str(max_drawdown_fraction),
+        "max_capital_at_risk_fraction": str(max_capital_at_risk_fraction),
         "max_event_concentration_fraction": str(
-            contract.max_event_concentration_fraction
+            max_event_concentration_fraction
         ),
         "max_market_concentration_fraction": str(
-            contract.max_market_concentration_fraction
+            max_market_concentration_fraction
         ),
         "max_provider_concentration_fraction": str(
-            contract.max_provider_concentration_fraction
+            max_provider_concentration_fraction
         ),
         "max_sport_concentration_fraction": str(
-            contract.max_sport_concentration_fraction
+            max_sport_concentration_fraction
         ),
-        "max_turnover_fraction": str(contract.max_turnover_fraction),
-        "max_risk_of_ruin": str(contract.max_risk_of_ruin),
+        "max_turnover_fraction": str(max_turnover_fraction),
+        "max_risk_of_ruin": str(max_risk_of_ruin),
         "max_execution_slippage_fraction": str(
-            contract.max_execution_slippage_fraction
+            max_execution_slippage_fraction
         ),
-        "max_quote_age_seconds": str(contract.max_quote_age_seconds),
-        "minimum_data_quality": str(contract.minimum_data_quality),
-        "max_concurrent_positions": contract.max_concurrent_positions,
-        "max_parlay_legs": contract.max_parlay_legs,
-        "automation_level": int(contract.automation_level),
-        "emergency_stop": contract.emergency_stop,
-        "blocked_sports": sorted(contract.blocked_sports),
-        "blocked_providers": sorted(contract.blocked_providers),
-        "blocked_markets": sorted(contract.blocked_markets),
+        "max_quote_age_seconds": str(max_quote_age_seconds),
+        "minimum_data_quality": str(minimum_data_quality),
+        "max_concurrent_positions": max_concurrent_positions,
+        "max_parlay_legs": max_parlay_legs,
+        "automation_level": _automation_value_getter(automation_level),
+        "emergency_stop": emergency_stop,
+        "blocked_sports": sorted(blocked_sports),
+        "blocked_providers": sorted(blocked_providers),
+        "blocked_markets": sorted(blocked_markets),
     }
     payload: dict[str, object] = {
-        "schema": _CANONICAL_ECONOMIC_GOAL_SCHEMA,
-        "schema_version": _CANONICAL_ECONOMIC_GOAL_SCHEMA_VERSION,
+        "schema": _schema,
+        "schema_version": _schema_version,
         "contract": body,
     }
     try:
-        persisted_text = _CANONICAL_JSON_DUMPS(
+        persisted_text = _json_dumps(
             payload,
             ensure_ascii=False,
             indent=2,
@@ -252,248 +576,398 @@ def economic_goal_to_payload(contract: EconomicGoalContract) -> dict[str, object
         ) + "\n"
         persisted_bytes = persisted_text.encode("utf-8", errors="strict")
     except (TypeError, ValueError, UnicodeEncodeError) as exc:
-        raise EconomicGoalContractError(
+        raise _error_type(
             "economic goal payload is not canonically serializable"
         ) from exc
-    if (
-        len(persisted_text) > _MAX_ECONOMIC_GOAL_JSON_CHARS
-        or len(persisted_bytes) > _MAX_ECONOMIC_GOAL_JSON_BYTES
-    ):
-        raise EconomicGoalContractError(
-            "economic goal payload exceeds the canonical persistence size limit"
+    if len(persisted_text) > _max_json_chars:
+        raise _error_type(
+            "economic goal payload exceeds the canonical persistence text-size limit"
+        )
+    if len(persisted_bytes) > _max_json_bytes:
+        raise _error_type(
+            "economic goal payload exceeds the canonical persistence byte-size limit"
         )
     return payload
 
 
-_CANONICAL_GOAL_SERIALIZER: Final = economic_goal_to_payload
+def _build_economic_goal_contract(
+    values: dict[str, object],
+    _goal_type=EconomicGoalContract,
+    _goal_validator=EconomicGoalContract.__post_init__,
+    _object_new=object.__new__,
+    _field_setters=_CANONICAL_CONTRACT_FIELD_SETTERS,
+    _field_names=_CONTRACT_KEYS_ORDERED,
+    _zip=zip,
+) -> EconomicGoalContract:
+    contract = _object_new(_goal_type)
+    for setter, name in _zip(_field_setters, _field_names):
+        setter(contract, values[name])
+    _goal_validator(contract)
+    return contract
 
 
-def economic_goal_from_payload(payload: object) -> EconomicGoalContract:
+def economic_goal_from_payload(
+    payload: object,
+    _type=type,
+    _goal_type=EconomicGoalContract,
+    _goal_builder=_build_economic_goal_contract,
+    _goal_error=EconomicGoalContractError,
+    _objective_value=_CANONICAL_OBJECTIVE_VALUE,
+    _objective_member=_CANONICAL_OBJECTIVE_MEMBER,
+    _automation_value_members=_CANONICAL_AUTOMATION_VALUE_MEMBERS,
+    _exact_keys=_require_exact_keys,
+    _decimal_decoder=_decimal_text,
+    _restriction_decoder=_restriction_set,
+    _root_keys=_ROOT_KEYS,
+    _contract_keys=_CONTRACT_KEYS,
+    _decimal_fields=_DECIMAL_FIELDS,
+    _restriction_fields=_RESTRICTION_FIELDS,
+    _schema=ECONOMIC_GOAL_SCHEMA,
+    _schema_version=ECONOMIC_GOAL_SCHEMA_VERSION,
+) -> EconomicGoalContract:
     """Decode schema-v1 persistence input and fail closed on any ambiguity."""
 
-    if type(payload) is not dict or not all(
-        type(key) is str for key in payload
+    if _type(payload) is not dict or not all(
+        _type(key) is str for key in payload
     ):
-        raise EconomicGoalContractError("economic goal payload must be a JSON object")
+        raise _goal_error("economic goal payload must be a JSON object")
     root: dict[str, object] = payload
-    _CANONICAL_REQUIRE_EXACT_KEYS("economic goal payload", root, _CANONICAL_ROOT_KEYS)
+    _exact_keys("economic goal payload", root, _root_keys)
 
-    schema = root["schema"]
-    if type(schema) is not str or schema != _CANONICAL_ECONOMIC_GOAL_SCHEMA:
-        raise EconomicGoalContractError("unsupported economic goal schema")
+    if _type(root["schema"]) is not str or root["schema"] != _schema:
+        raise _goal_error("unsupported economic goal schema")
     version = root["schema_version"]
-    if (
-        type(version) is not int
-        or version != _CANONICAL_ECONOMIC_GOAL_SCHEMA_VERSION
-    ):
-        raise EconomicGoalContractError("unsupported economic goal schema_version")
+    if _type(version) is not int or version != _schema_version:
+        raise _goal_error("unsupported economic goal schema_version")
 
     raw_contract = root["contract"]
-    if type(raw_contract) is not dict or not all(
-        type(key) is str for key in raw_contract
+    if _type(raw_contract) is not dict or not all(
+        _type(key) is str for key in raw_contract
     ):
-        raise EconomicGoalContractError("contract must be a JSON object")
+        raise _goal_error("contract must be a JSON object")
     body: dict[str, object] = raw_contract
-    _CANONICAL_REQUIRE_EXACT_KEYS("contract", body, _CANONICAL_CONTRACT_KEYS)
+    _exact_keys("contract", body, _contract_keys)
 
     decoded = dict(body)
-    for field in _CANONICAL_DECIMAL_FIELDS:
-        decoded[field] = _CANONICAL_DECIMAL_TEXT(field, body[field])
+    for field in _decimal_fields:
+        decoded[field] = _decimal_decoder(field, body[field])
     if body["max_stake_amount"] is None:
         decoded["max_stake_amount"] = None
     else:
-        decoded["max_stake_amount"] = _CANONICAL_DECIMAL_TEXT(
+        decoded["max_stake_amount"] = _decimal_decoder(
             "max_stake_amount", body["max_stake_amount"]
         )
 
-    objective = body["objective"]
-    if type(objective) is not str:
-        raise EconomicGoalContractError("economic objective must be a string")
-    try:
-        decoded["objective"] = _CANONICAL_OBJECTIVE_TYPE(objective)
-    except ValueError as exc:
-        raise EconomicGoalContractError("unsupported economic objective") from exc
+    if _type(body["objective"]) is not str:
+        raise _goal_error("objective must be a string")
+    if body["objective"] != _objective_value:
+        raise _goal_error("unsupported economic objective")
+    decoded["objective"] = _objective_member
 
     automation = body["automation_level"]
-    if type(automation) is not int:
-        raise EconomicGoalContractError("automation_level must be an integer")
-    try:
-        decoded["automation_level"] = _CANONICAL_AUTOMATION_TYPE(automation)
-    except ValueError as exc:
-        raise EconomicGoalContractError("unsupported automation_level") from exc
+    if _type(automation) is not int:
+        raise _goal_error("automation_level must be an integer")
+    decoded_automation = None
+    for expected_value, member in _automation_value_members:
+        if automation == expected_value:
+            decoded_automation = member
+            break
+    if decoded_automation is None:
+        raise _goal_error("unsupported automation_level")
+    decoded["automation_level"] = decoded_automation
 
-    for field in _CANONICAL_RESTRICTION_FIELDS:
-        decoded[field] = _CANONICAL_RESTRICTION_SET(field, body[field])
+    for field in _restriction_fields:
+        decoded[field] = _restriction_decoder(field, body[field])
 
     try:
-        return _CANONICAL_GOAL_TYPE(**decoded)  # type: ignore[arg-type]
-    except EconomicGoalContractError:
+        contract = _goal_builder(decoded)
+        if _type(contract) is not _goal_type:
+            raise _goal_error("malformed economic goal contract")
+        return contract
+    except _goal_error:
         raise
-    except (TypeError, ValueError) as exc:
-        raise EconomicGoalContractError("malformed economic goal contract") from exc
+    except (TypeError, ValueError, KeyError) as exc:
+        raise _goal_error("malformed economic goal contract") from exc
 
 
-_CANONICAL_PAYLOAD_DECODER: Final = economic_goal_from_payload
+def economic_goal_from_json(
+    text: str,
+    _type=type,
+    _loads=strict_json_loads,
+    _payload_decoder=economic_goal_from_payload,
+    _error_type=EconomicGoalContractError,
+    _max_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
+) -> EconomicGoalContract:
+    """Decode one strict JSON document into a validated contract."""
+
+    if _type(text) is not str:
+        raise _error_type("economic goal JSON must be text")
+    if len(text) > _max_chars:
+        raise _error_type("economic goal JSON text exceeds the canonical size limit")
+    try:
+        payload = _loads(text)
+    except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+        raise _error_type("invalid economic goal JSON") from exc
+    return _payload_decoder(payload)
 
 
-def _require_canonical_goal_file(stat_result: os.stat_result) -> None:
-    if not _CANONICAL_STAT_ISREG(stat_result.st_mode):
-        raise EconomicGoalContractError(
+
+def _require_canonical_goal_file(
+    stat_result: os.stat_result,
+    _is_regular=_CANONICAL_STAT_ISREG,
+    _error_type=EconomicGoalContractError,
+) -> None:
+    if not _is_regular(stat_result.st_mode):
+        raise _error_type(
             "persisted economic goal must be a regular non-symlink file"
         )
     if stat_result.st_nlink != 1:
-        raise EconomicGoalContractError(
+        raise _error_type(
             "persisted economic goal must not have hard-link aliases"
         )
 
 
-def _read_economic_goal_text(path: Path) -> str:
-    descriptor: int | None = None
-    final_descriptor: int | None = None
-    path_verification_descriptor: int | None = None
-    post_read_descriptor: int | None = None
+def _read_economic_goal_text(
+    path: Path,
+    _open_descriptor=_CANONICAL_OPEN_READ_ONLY_DESCRIPTOR,
+    _fstat=_CANONICAL_OS_FSTAT,
+    _stat=_CANONICAL_OS_STAT,
+    _fdopen=_CANONICAL_OS_FDOPEN,
+    _sameopenfile=_CANONICAL_OS_SAMEOPENFILE,
+    _close=_CANONICAL_OS_CLOSE,
+    _validate_file=_require_canonical_goal_file,
+    _max_bytes=_MAX_ECONOMIC_GOAL_JSON_BYTES,
+    _max_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
+    _error_type=EconomicGoalContractError,
+) -> str:
+    descriptor = None
+    final_descriptor = None
+    verification_descriptor = None
+    post_read_descriptor = None
+    raw = b""
+    primary_error: BaseException | None = None
     try:
-        descriptor = _CANONICAL_OPEN_READ_ONLY_DESCRIPTOR(path)
-        opened_before = _CANONICAL_OS_FSTAT(descriptor)
-        path_before = _CANONICAL_OS_STAT(path, follow_symlinks=False)
-        _require_canonical_goal_file(opened_before)
-        _require_canonical_goal_file(path_before)
+        descriptor = _open_descriptor(path)
+        opened_before = _fstat(descriptor)
+        path_before = _stat(path, follow_symlinks=False)
+        _validate_file(opened_before)
+        _validate_file(path_before)
 
-        with _CANONICAL_OS_FDOPEN(descriptor, "rb", closefd=False) as handle:
-            raw = handle.read(_MAX_ECONOMIC_GOAL_JSON_BYTES + 1)
+        with _fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(_max_bytes + 1)
 
-        final_descriptor = _CANONICAL_OPEN_READ_ONLY_DESCRIPTOR(path)
-        opened_after = _CANONICAL_OS_FSTAT(descriptor)
-        final_stat = _CANONICAL_OS_FSTAT(final_descriptor)
-        path_after = _CANONICAL_OS_STAT(path, follow_symlinks=False)
-        path_verification_descriptor = _CANONICAL_OPEN_READ_ONLY_DESCRIPTOR(path)
-        path_verification_stat = _CANONICAL_OS_FSTAT(path_verification_descriptor)
-        _require_canonical_goal_file(opened_after)
-        _require_canonical_goal_file(final_stat)
-        _require_canonical_goal_file(path_after)
-        _require_canonical_goal_file(path_verification_stat)
-        if (
-            not _CANONICAL_OS_SAMEOPENFILE(descriptor, final_descriptor)
-            or not _CANONICAL_OS_SAMEOPENFILE(descriptor, path_verification_descriptor)
+        final_descriptor = _open_descriptor(path)
+        opened_after = _fstat(descriptor)
+        final_stat = _fstat(final_descriptor)
+        path_after = _stat(path, follow_symlinks=False)
+        verification_descriptor = _open_descriptor(path)
+        verification_stat = _fstat(verification_descriptor)
+
+        for stat_result in (
+            opened_after,
+            final_stat,
+            path_after,
+            verification_stat,
         ):
-            raise EconomicGoalContractError(
+            _validate_file(stat_result)
+
+        if (
+            not _sameopenfile(descriptor, final_descriptor)
+            or not _sameopenfile(descriptor, verification_descriptor)
+        ):
+            raise _error_type(
                 "persisted economic goal changed during verified read"
             )
-        with _CANONICAL_OS_FDOPEN(final_descriptor, "rb", closefd=False) as final_handle:
-            final_raw = final_handle.read(_MAX_ECONOMIC_GOAL_JSON_BYTES + 1)
+
+        with _fdopen(final_descriptor, "rb", closefd=False) as final_handle:
+            final_raw = final_handle.read(_max_bytes + 1)
         if raw != final_raw:
-            raise EconomicGoalContractError(
+            raise _error_type(
                 "persisted economic goal bytes changed during verified read"
             )
 
-        # The pathname must still name the verified inode after the second byte
-        # image has been read. A checkpoint opened before that read cannot detect
-        # replacement during the read window.
-        post_read_descriptor = _CANONICAL_OPEN_READ_ONLY_DESCRIPTOR(path)
-        post_read_stat = _CANONICAL_OS_FSTAT(post_read_descriptor)
-        _require_canonical_goal_file(post_read_stat)
-        if not _CANONICAL_OS_SAMEOPENFILE(descriptor, post_read_descriptor):
-            raise EconomicGoalContractError(
+        post_read_descriptor = _open_descriptor(path)
+        post_read_stat = _fstat(post_read_descriptor)
+        _validate_file(post_read_stat)
+        if not _sameopenfile(descriptor, post_read_descriptor):
+            raise _error_type(
                 "persisted economic goal changed after verified read"
             )
-    except EconomicGoalContractError:
+        with _fdopen(post_read_descriptor, "rb", closefd=False) as post_read_handle:
+            post_read_raw = post_read_handle.read(_max_bytes + 1)
+        if raw != post_read_raw:
+            raise _error_type(
+                "persisted economic goal bytes changed after verified read"
+            )
+    except _error_type as exc:
+        primary_error = exc
         raise
     except OSError as exc:
-        raise EconomicGoalContractError(
+        primary_error = _error_type(
             f"cannot safely read persisted economic goal: {exc}"
-        ) from exc
+        )
+        raise primary_error from exc
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
+        cleanup_error: OSError | None = None
         for candidate in (
             post_read_descriptor,
-            path_verification_descriptor,
+            verification_descriptor,
             final_descriptor,
             descriptor,
         ):
             if candidate is None:
                 continue
             try:
-                _CANONICAL_OS_CLOSE(candidate)
-            except OSError:
-                pass
+                _close(candidate)
+            except OSError as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None and primary_error is None:
+            raise _error_type(
+                "cannot close persisted economic goal read descriptor"
+            ) from cleanup_error
 
-    if len(raw) > _MAX_ECONOMIC_GOAL_JSON_BYTES:
-        raise EconomicGoalContractError(
+    if len(raw) > _max_bytes:
+        raise _error_type(
             "economic goal JSON exceeds the canonical byte-size limit"
         )
     try:
-        return raw.decode("utf-8", errors="strict")
+        text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
-        raise EconomicGoalContractError(
+        raise _error_type(
             "persisted economic goal must be valid UTF-8"
         ) from exc
+    if len(text) > _max_chars:
+        raise _error_type(
+            "economic goal JSON text exceeds the canonical size limit"
+        )
+    return text
 
 
 _CANONICAL_GOAL_TEXT_READER: Final = _read_economic_goal_text
 
 
-def economic_goal_from_json(text: str) -> EconomicGoalContract:
-    """Decode one strict JSON document into a validated contract."""
-
-    if type(text) is not str:
-        raise EconomicGoalContractError("economic goal JSON must be text")
-    if len(text) > _MAX_ECONOMIC_GOAL_JSON_CHARS:
-        raise EconomicGoalContractError(
-            "economic goal JSON exceeds the canonical size limit"
-        )
-    try:
-        payload = _CANONICAL_STRICT_JSON_LOADS(text)
-    except (TypeError, ValueError, RecursionError, OverflowError) as exc:
-        raise EconomicGoalContractError("invalid economic goal JSON") from exc
-    return _CANONICAL_PAYLOAD_DECODER(payload)
+_ECONOMIC_GOAL_STORE_AUTHORITY_NAMES: Final = frozenset(
+    {
+        "__init__",
+        "load",
+        "initialize_owner",
+        "persist_automatic_successor",
+        "_authority_operations_sealed",
+    }
+)
 
 
-_CANONICAL_GOAL_JSON_DECODER: Final = economic_goal_from_json
+class _EconomicGoalStoreMeta(type):
+    """Seal public store authority entrypoints against class-level rebinding."""
+
+    _AUTHORITY_NAMES: Final = _ECONOMIC_GOAL_STORE_AUTHORITY_NAMES
+
+    def __setattr__(
+        cls,
+        name: str,
+        value: object,
+        _authority_names=_ECONOMIC_GOAL_STORE_AUTHORITY_NAMES,
+    ) -> None:
+        if (
+            cls.__dict__.get("_authority_operations_sealed", False)
+            and name in _authority_names
+        ):
+            raise TypeError(
+                "economic goal store authority operation binding is immutable"
+            )
+        super().__setattr__(name, value)
+
+    def __delattr__(
+        cls,
+        name: str,
+        _authority_names=_ECONOMIC_GOAL_STORE_AUTHORITY_NAMES,
+    ) -> None:
+        if (
+            cls.__dict__.get("_authority_operations_sealed", False)
+            and name in _authority_names
+        ):
+            raise TypeError(
+                "economic goal store authority operation binding is immutable"
+            )
+        super().__delattr__(name)
 
 
-def _make_store_binding_registry():
-    # Workspace/path identity is authority-bearing. Keep the canonical binding
-    # outside caller-visible mutable attributes. The registry is keyed by the
-    # builtin object identity integer rather than by the store object itself so
-    # hostile __hash__/__eq__ implementations can never participate in authority
-    # lookup. A weak reference prevents stale id reuse from inheriting a binding.
-    bindings: dict[int, tuple[weakref.ReferenceType[object], Path, Path]] = {}
-    guard = threading.RLock()
+def _build_store_class_guard(
+    name: str,
+    _getattr=getattr,
+    _attribute_error=AttributeError,
+    _type_error=TypeError,
+):
+    """Block direct base-metaclass replacement of sealed store authority names."""
 
-    def register(store: object, workspace: Path, path: Path) -> None:
-        identity = id(store)
+    class _StoreClassGuard:
+        __slots__ = ()
 
-        def cleanup(reference: weakref.ReferenceType[object]) -> None:
-            with guard:
-                current = bindings.get(identity)
-                if current is not None and current[0] is reference:
-                    bindings.pop(identity, None)
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            for ancestor in instance.__mro__:
+                if name in ancestor.__dict__:
+                    binding = ancestor.__dict__[name]
+                    break
+            else:
+                raise _attribute_error(name)
+            descriptor_get = _getattr(binding, "__get__", None)
+            if descriptor_get is None:
+                return binding
+            return descriptor_get(None, instance)
 
-        reference = weakref.ref(store, cleanup)
-        with guard:
-            current = bindings.get(identity)
-            if current is not None and current[0]() is store:
-                raise RuntimeError(
-                    "EconomicGoalStore canonical binding is already registered"
+        def __set__(self, _instance, _value) -> None:
+            raise _type_error(
+                "economic goal store authority operation binding is immutable"
+            )
+
+        def __delete__(self, _instance) -> None:
+            raise _type_error(
+                "economic goal store authority operation binding is immutable"
+            )
+
+    return _StoreClassGuard()
+
+
+def _make_store_operation_descriptor(
+    operation,
+    _type=type,
+    _method_type=MethodType,
+    _type_error=TypeError,
+):
+    """Make a closure-owned public store operation non-shadowable on an instance."""
+
+    class _ImmutableStoreOperation:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return operation
+            if _type(instance) is not owner:
+                raise _type_error(
+                    "economic goal store authority requires the exact store type"
                 )
-            bindings[identity] = (reference, workspace, path)
+            return _method_type(operation, instance)
 
-    def require(store: object) -> tuple[Path, Path]:
-        identity = id(store)
-        with guard:
-            binding = bindings.get(identity)
-        if binding is None or binding[0]() is not store:
-            raise RuntimeError("EconomicGoalStore canonical binding is unavailable")
-        return binding[1], binding[2]
+        def __set__(self, _instance, _value) -> None:
+            raise _type_error(
+                "economic goal store authority operation binding is immutable"
+            )
 
-    return register, require
+        def __delete__(self, _instance) -> None:
+            raise _type_error(
+                "economic goal store authority operation binding is immutable"
+            )
 
-
-_register_store_binding, _require_store_binding = _make_store_binding_registry()
-_CANONICAL_REGISTER_STORE_BINDING: Final = _register_store_binding
-_CANONICAL_REQUIRE_STORE_BINDING: Final = _require_store_binding
+    return _ImmutableStoreOperation()
 
 
-class EconomicGoalStore:
+class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
     """Workspace-local durable owner-contract store.
 
     ``initialize_owner`` is creation-only. Automatic actors have only
@@ -504,66 +978,334 @@ class EconomicGoalStore:
     overwrite a newly tightened authority state.
     """
 
-    FILE_NAME: Final = _ECONOMIC_GOAL_FILE_NAME
+    FILE_NAME: Final = "economic_goal_contract.json"
 
-    def __init__(self, workspace: str | Path) -> None:
-        if type(self) is not __class__:
-            raise TypeError("EconomicGoalStore authority requires the exact store type")
-        if type(workspace) not in {str, _CANONICAL_PATH_TYPE}:
-            raise TypeError(
+    def __init__(
+        self,
+        workspace: str | Path,
+        _type=type,
+        _str_type=str,
+        _type_error=TypeError,
+        _path_constructor=_CANONICAL_PATH_CONSTRUCTOR,
+        _path_type=_CANONICAL_PATH_TYPE,
+        _path_resolve=_CANONICAL_PATH_RESOLVE,
+        _path_join=_CANONICAL_PATH_JOIN,
+        _path_lstat=_CANONICAL_PATH_LSTAT,
+        _binding_register=_CANONICAL_STORE_BINDING_REGISTER,
+        _binding_release=_CANONICAL_STORE_BINDING_RELEASE,
+        _weakref_ref=weakref.ref,
+        _file_name=_CANONICAL_STORE_FILE_NAME,
+        _object_getattribute=_CANONICAL_OBJECT_GETATTRIBUTE,
+        _error_type=EconomicGoalContractError,
+    ) -> None:
+        if _type(self) is not __class__:
+            raise _type_error("EconomicGoalStore authority requires the exact store type")
+        if _type(workspace) not in {_str_type, _path_type}:
+            raise _type_error(
                 "EconomicGoalStore workspace must be exact str or exact Path"
             )
         try:
-            canonical_workspace = _CANONICAL_PATH_RESOLVE(_CANONICAL_PATH_CONSTRUCTOR(workspace), strict=False)
+            workspace_path = _path_resolve(
+                _path_constructor(workspace),
+                strict=False,
+            )
         except (OSError, RuntimeError) as exc:
-            raise EconomicGoalContractError(
+            raise _error_type(
                 "EconomicGoalStore workspace cannot be canonically resolved"
             ) from exc
-        _CANONICAL_REGISTER_STORE_BINDING(
-            self,
-            canonical_workspace,
-            _CANONICAL_PATH_JOIN(canonical_workspace, _ECONOMIC_GOAL_FILE_NAME),
+        path = _path_join(workspace_path, _file_name)
+        instance_state = _object_getattribute(self, "__dict__")
+        instance_state["workspace"] = workspace_path
+        instance_state["path"] = path
+        store_id = id(self)
+
+        def release_binding(store_ref) -> None:
+            _binding_release(store_id, store_ref)
+
+        store_ref = _weakref_ref(self, release_binding)
+        def path_exists(
+            _error_type=EconomicGoalContractError,
+            _lstat=_path_lstat,
+            _path=path,
+        ) -> bool:
+            try:
+                _lstat(_path)
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise _error_type(
+                    f"cannot inspect persisted economic goal path: {exc}"
+                ) from exc
+            return True
+
+        _binding_register(
+            store_id,
+            (
+                store_ref,
+                workspace_path,
+                path,
+                path_exists,
+            ),
         )
 
-    @property
-    def workspace(self) -> Path:
-        if type(self) is not __class__:
-            raise TypeError("EconomicGoalStore authority requires the exact store type")
-        return _CANONICAL_REQUIRE_STORE_BINDING(self)[0]
+    def load(
+        self,
+        _type=type,
+        _type_error=TypeError,
+        _json_decoder=economic_goal_from_json,
+        _binding_resolver=_resolve_store_binding,
+        _text_reader=_CANONICAL_GOAL_TEXT_READER,
+    ) -> EconomicGoalContract:
+        if _type(self) is not __class__:
+            raise _type_error("EconomicGoalStore authority requires the exact store type")
+        _, path, _ = _binding_resolver(self)
+        return _json_decoder(_text_reader(path))
 
-    @property
-    def path(self) -> Path:
-        if type(self) is not __class__:
-            raise TypeError("EconomicGoalStore authority requires the exact store type")
-        return _CANONICAL_REQUIRE_STORE_BINDING(self)[1]
-
-    def load(self) -> EconomicGoalContract:
-        if type(self) is not __class__:
-            raise TypeError("EconomicGoalStore authority requires the exact store type")
-        _, path = _CANONICAL_REQUIRE_STORE_BINDING(self)
-        return _CANONICAL_GOAL_JSON_DECODER(_CANONICAL_GOAL_TEXT_READER(path))
-
-    def initialize_owner(self, contract: EconomicGoalContract) -> None:
+    def initialize_owner(
+        self,
+        contract: EconomicGoalContract,
+        _type=type,
+        _type_error=TypeError,
+        _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
+        _payload_encoder=economic_goal_to_payload,
+        _writer=_CANONICAL_ATOMIC_CREATE_OWNER_JSON,
+        _binding_resolver=_resolve_store_binding,
+        _error_type=EconomicGoalContractError,
+        _lock_scope=_workspace_lock_scope,
+    ) -> None:
         """Create the first owner contract while holding the economic writer lock."""
 
-        if type(self) is not __class__:
-            raise TypeError("EconomicGoalStore authority requires the exact store type")
-        workspace, path = _CANONICAL_REQUIRE_STORE_BINDING(self)
-        with _CANONICAL_WORKSPACE_LOCK_TYPE(workspace):
-            if _CANONICAL_PATH_EXISTS(path):
-                raise EconomicGoalContractError(
+        if _type(self) is not __class__:
+            raise _type_error("EconomicGoalStore authority requires the exact store type")
+        workspace, path, path_exists = _binding_resolver(self)
+        with _lock_scope(workspace, _lock_type):
+            if path_exists():
+                raise _error_type(
                     "persisted economic goal already exists; owner replacement requires "
                     "a separate authority boundary"
                 )
-            _CANONICAL_ATOMIC_WRITE_JSON(path, _CANONICAL_GOAL_SERIALIZER(contract))
+            _writer(path, _payload_encoder(contract))
 
-    def persist_automatic_successor(self, candidate: EconomicGoalContract) -> None:
-        """Publish one machine revision only when durable authority cannot expand."""
+    def persist_automatic_successor(
+        self,
+        candidate: EconomicGoalContract,
+        _type=type,
+        _type_error=TypeError,
+        _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
+        _transition_validator=_CANONICAL_TRANSITION_VALIDATOR,
+        _payload_encoder=economic_goal_to_payload,
+        _payload_decoder=economic_goal_from_payload,
+        _writer=_CANONICAL_ATOMIC_WRITE_JSON,
+        _json_decoder=economic_goal_from_json,
+        _binding_resolver=_resolve_store_binding,
+        _text_reader=_CANONICAL_GOAL_TEXT_READER,
+        _lock_scope=_workspace_lock_scope,
+    ) -> None:
+        """Publish one machine revision only when durable authority cannot expand.
 
-        if type(self) is not __class__:
-            raise TypeError("EconomicGoalStore authority requires the exact store type")
-        workspace, path = _CANONICAL_REQUIRE_STORE_BINDING(self)
-        with _CANONICAL_WORKSPACE_LOCK_TYPE(workspace):
-            previous = _CANONICAL_GOAL_JSON_DECODER(_CANONICAL_GOAL_TEXT_READER(path))
-            _CANONICAL_TRANSITION_VALIDATOR(previous, candidate)
-            _CANONICAL_ATOMIC_WRITE_JSON(path, _CANONICAL_GOAL_SERIALIZER(candidate))
+        The candidate is serialized before the monotonic transition proof and the
+        proof is applied to a canonical decode of that exact payload. Publication
+        then writes the same payload object. This binds validation to the durable
+        image and prevents an object.__setattr__ race from widening the candidate
+        between validation and serialization.
+        """
+
+        if _type(self) is not __class__:
+            raise _type_error("EconomicGoalStore authority requires the exact store type")
+        workspace, path, _ = _binding_resolver(self)
+        with _lock_scope(workspace, _lock_type):
+            previous = _json_decoder(_text_reader(path))
+            candidate_payload = _payload_encoder(candidate)
+            candidate_snapshot = _payload_decoder(candidate_payload)
+            _transition_validator(previous, candidate_snapshot)
+            _writer(path, candidate_payload)
+
+
+# Freeze public codec/store call shapes.  Authority-bearing dependencies remain
+# captured by the implementations above, but external callers cannot inject
+# replacement validators, writers, parsers, locks, paths, or transition proofs.
+_BOUND_ECONOMIC_GOAL_TO_PAYLOAD = economic_goal_to_payload
+_BOUND_ECONOMIC_GOAL_FROM_PAYLOAD = economic_goal_from_payload
+_BOUND_ECONOMIC_GOAL_FROM_JSON = economic_goal_from_json
+_BOUND_STORE_INIT = EconomicGoalStore.__init__
+_BOUND_STORE_LOAD = EconomicGoalStore.load
+_BOUND_STORE_INITIALIZE_OWNER = EconomicGoalStore.initialize_owner
+_BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR = EconomicGoalStore.persist_automatic_successor
+
+
+def _capture_callable_authority_graph(root):
+    """Capture transitive Python-function defaults used as authority dependencies."""
+
+    captured: list[tuple[object, object, object, object, tuple[tuple[str, object], ...]]] = []
+    seen: set[int] = set()
+
+    def visit(candidate) -> None:
+        if not callable(candidate):
+            return
+        identity = id(candidate)
+        if identity in seen:
+            return
+        seen.add(identity)
+
+        code = getattr(candidate, "__code__", None)
+        defaults = getattr(candidate, "__defaults__", None)
+        kwdefaults = getattr(candidate, "__kwdefaults__", None)
+        kwdefault_items = tuple((kwdefaults or {}).items())
+        captured.append((candidate, code, defaults, kwdefaults, kwdefault_items))
+
+        for value in defaults or ():
+            if callable(value):
+                visit(value)
+        for _, value in kwdefault_items:
+            if callable(value):
+                visit(value)
+
+    visit(root)
+    return tuple(captured)
+
+
+def _make_store_callable_authority(
+    operation,
+    label: str,
+    _enumerate=enumerate,
+    _getattr=getattr,
+    _tuple=tuple,
+    _error_type=EconomicGoalContractError,
+):
+    authority_graph = _capture_callable_authority_graph(operation)
+
+    def require_authority() -> None:
+        for index, (
+            callable_object,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_kwdefault_items,
+        ) in _enumerate(authority_graph):
+            suffix = "" if index == 0 else " transitive nested"
+            if _getattr(callable_object, "__code__", None) is not expected_code:
+                raise _error_type(
+                    f"{label}{suffix} authority changed"
+                )
+            if _getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                raise _error_type(
+                    f"{label}{suffix} defaults authority changed"
+                )
+            current_kwdefaults = _getattr(callable_object, "__kwdefaults__", None)
+            if (
+                current_kwdefaults is not expected_kwdefaults
+                or _tuple((current_kwdefaults or {}).items())
+                != expected_kwdefault_items
+            ):
+                raise _error_type(
+                    f"{label}{suffix} keyword defaults authority changed"
+                )
+
+    def bound(*args, **kwargs):
+        require_authority()
+        result = operation(*args, **kwargs)
+        require_authority()
+        return result
+
+    return bound
+
+
+def _bind_goal_encoder(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal payload encoder"
+    )
+
+    def bound(contract: EconomicGoalContract) -> dict[str, object]:
+        return bound_operation(contract)
+
+    return bound
+
+
+def _bind_goal_payload_decoder(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal payload decoder"
+    )
+
+    def bound(payload: object) -> EconomicGoalContract:
+        return bound_operation(payload)
+
+    return bound
+
+
+def _bind_goal_json_decoder(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal JSON decoder"
+    )
+
+    def bound(text: str) -> EconomicGoalContract:
+        return bound_operation(text)
+
+    return bound
+
+
+def _bind_store_init(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal store constructor"
+    )
+
+    def bound(self: EconomicGoalStore, workspace: str | Path) -> None:
+        bound_operation(self, workspace)
+
+    return bound
+
+
+def _bind_store_load(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal store load"
+    )
+
+    def bound(self: EconomicGoalStore) -> EconomicGoalContract:
+        return bound_operation(self)
+
+    return bound
+
+
+def _bind_store_contract_write(operation):
+    bound_operation = _make_store_callable_authority(
+        operation, "economic-goal store write"
+    )
+
+    def bound(self: EconomicGoalStore, contract: EconomicGoalContract) -> None:
+        bound_operation(self, contract)
+
+    return bound
+
+
+economic_goal_to_payload = _bind_goal_encoder(_BOUND_ECONOMIC_GOAL_TO_PAYLOAD)
+economic_goal_from_payload = _bind_goal_payload_decoder(_BOUND_ECONOMIC_GOAL_FROM_PAYLOAD)
+economic_goal_from_json = _bind_goal_json_decoder(_BOUND_ECONOMIC_GOAL_FROM_JSON)
+EconomicGoalStore.__init__ = _bind_store_init(_BOUND_STORE_INIT)
+EconomicGoalStore.load = _make_store_operation_descriptor(
+    _bind_store_load(_BOUND_STORE_LOAD)
+)
+EconomicGoalStore.initialize_owner = _make_store_operation_descriptor(
+    _bind_store_contract_write(_BOUND_STORE_INITIALIZE_OWNER)
+)
+EconomicGoalStore.persist_automatic_successor = _make_store_operation_descriptor(
+    _bind_store_contract_write(_BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR)
+)
+EconomicGoalStore._authority_operations_sealed = True
+
+# Constructor/resolver defaults already hold the only mutation-capable registry
+# functions. Remove their module-level handles so ordinary module access exposes
+# only the read-only compatibility view.
+del _CANONICAL_STORE_BINDING_REGISTER
+del _CANONICAL_STORE_BINDING_RELEASE
+del _CANONICAL_STORE_BINDING_LOOKUP
+
+# A custom metaclass __setattr__/__delattr__ is bypassable by explicitly calling
+# type.__setattr__/type.__delattr__ on the class. Install data descriptors on the
+# metaclass after the canonical class bindings are final so even those base-type
+# operations must cross the immutable authority guard.
+for _sealed_store_name in _EconomicGoalStoreMeta._AUTHORITY_NAMES:
+    setattr(
+        _EconomicGoalStoreMeta,
+        _sealed_store_name,
+        _build_store_class_guard(_sealed_store_name),
+    )
+del _sealed_store_name

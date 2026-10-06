@@ -10,6 +10,7 @@ from decimal import (
     Inexact,
     InvalidOperation,
     Overflow,
+    ROUND_DOWN,
     ROUND_HALF_EVEN,
     Underflow,
     localcontext,
@@ -18,11 +19,100 @@ from decimal import (
 from pathlib import Path
 
 from .domain import MarketEvent, MarketType, PaperTicket, TicketLeg, TicketStatus
+from .exchange_exposure import locked_capital_for_exchange_side
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 _CANONICAL_ECONOMIC_GOAL_TYPE = EconomicGoalContract
 _CANONICAL_ECONOMIC_GOAL_VALIDATOR = EconomicGoalContract.__post_init__
 from .paper import PaperBook
+
+
+def _make_locked_capital_authority():
+    calculator = locked_capital_for_exchange_side
+    calculator_code = calculator.__code__
+
+    def require_calculator() -> None:
+        if calculator.__code__ is not calculator_code:
+            raise ValueError("risk locked-capital exposure authority changed")
+
+    def calculate(ticket: PaperTicket) -> Decimal:
+        require_calculator()
+        if (
+            type(ticket) is not PaperTicket
+            or type(ticket.stake) is not Decimal
+            or not ticket.stake.is_finite()
+            or ticket.stake < Decimal("0")
+            or type(ticket.legs) is not tuple
+            or not ticket.legs
+        ):
+            raise ValueError("risk ticket must be canonical")
+        for leg in ticket.legs:
+            if (
+                type(leg) is not TicketLeg
+                or type(leg.locked_odds) is not Decimal
+                or not leg.locked_odds.is_finite()
+                or leg.locked_odds <= Decimal("1")
+                or leg.exchange_side not in {None, "back", "lay"}
+            ):
+                raise ValueError("risk ticket leg must be canonical")
+        if any(leg.exchange_side == "lay" for leg in ticket.legs):
+            if len(ticket.legs) != 1:
+                raise ValueError(
+                    "risk LAY exposure requires exactly one canonical single-leg ticket"
+                )
+            if ticket.stake.is_zero():
+                return Decimal("0")
+            return calculator(
+                stake=ticket.stake,
+                odds=ticket.legs[0].locked_odds,
+                exchange_side="LAY",
+            )
+        return ticket.stake
+
+    def calculate_proposal(
+        stake: Decimal,
+        legs: tuple[TicketLeg, ...],
+    ) -> Decimal:
+        require_calculator()
+        if (
+            type(stake) is not Decimal
+            or not stake.is_finite()
+            or stake < Decimal("0")
+            or type(legs) is not tuple
+            or not legs
+        ):
+            raise ValueError("risk proposal exposure must use canonical stake and legs")
+        for leg in legs:
+            if (
+                type(leg) is not TicketLeg
+                or type(leg.locked_odds) is not Decimal
+                or not leg.locked_odds.is_finite()
+                or leg.locked_odds <= Decimal("1")
+                or leg.exchange_side not in {None, "back", "lay"}
+            ):
+                raise ValueError("risk proposal exposure leg is not canonical")
+        if any(leg.exchange_side == "lay" for leg in legs):
+            if len(legs) != 1:
+                raise ValueError(
+                    "risk LAY exposure requires exactly one canonical single-leg proposal"
+                )
+            if stake.is_zero():
+                return Decimal("0")
+            return calculator(
+                stake=stake,
+                odds=legs[0].locked_odds,
+                exchange_side="LAY",
+            )
+        return stake
+
+    return calculate, calculate_proposal
+
+
+(
+    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET,
+    _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL,
+) = _make_locked_capital_authority()
+del _make_locked_capital_authority
 
 # Capture the source-defined MarketEvent serialization entrypoints once. Risk
 # validation must not dispatch through later mutable class attributes on an
@@ -854,7 +944,10 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 ticket for ticket in tickets.values() if ticket.status is TicketStatus.OPEN
             )
             committed_stake = cls._exact_positive_sum(
-                tuple(ticket.stake for ticket in open_tickets)
+                tuple(
+                    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
+                    for ticket in open_tickets
+                )
             )
             open_position_count = len(open_tickets)
         except (ArithmeticError, AttributeError, TypeError, ValueError):
@@ -902,6 +995,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                                 "locked_odds": str(leg.locked_odds),
                                 "sport": leg.sport,
                                 "exchange_side": leg.exchange_side,
+                                "market_semantics_id": leg.market_semantics_id,
                             }
                             for leg in ticket.legs
                         ],
@@ -1304,12 +1398,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     return None
 
                 if action == "open":
+                    locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(
                         replay_balance,
-                        ticket.stake,
+                        locked_capital,
                     )
                     replay_committed = cls._exact_positive_sum(
-                        (replay_committed, ticket.stake)
+                        (replay_committed, locked_capital)
                     )
                     turnover = cls._exact_positive_sum((turnover, ticket.stake))
                 else:
@@ -1319,11 +1414,12 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                         set(winners_raw),
                         set(voids_raw),
                     )
+                    locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     with localcontext(cls._decimal_context()):
-                        replay_committed = replay_committed - ticket.stake
+                        replay_committed = replay_committed - locked_capital
                         loss = (
-                            ticket.stake - payout
-                            if payout < ticket.stake
+                            locked_capital - payout
+                            if payout < locked_capital
                             else Decimal("0")
                         )
                     if replay_committed < 0:
@@ -1358,7 +1454,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
 
             current_committed = cls._exact_positive_sum(
                 tuple(
-                    ticket.stake
+                    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
                     for ticket in book.tickets.values()
                     if ticket.status is TicketStatus.OPEN
                 )
@@ -1547,7 +1643,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         _, _, committed_stake, _ = state
 
         try:
-            total_exposure = cls._exact_positive_sum((committed_stake, amount))
+            proposed_locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                amount,
+                context.legs,
+            )
+            total_exposure = cls._exact_positive_sum(
+                (committed_stake, proposed_locked_capital)
+            )
             exposure_by_identity: dict[str, Decimal] = {}
             for ticket in book.tickets.values():
                 if ticket.status is not TicketStatus.OPEN:
@@ -1578,7 +1680,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     exposure_by_identity[identity] = cls._exact_positive_sum(
                         (
                             exposure_by_identity.get(identity, Decimal("0")),
-                            ticket.stake,
+                            _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket),
                         )
                     )
 
@@ -1586,7 +1688,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 proposed_exposure = cls._exact_positive_sum(
                     (
                         exposure_by_identity.get(identity, Decimal("0")),
-                        amount,
+                        proposed_locked_capital,
                     )
                 )
                 if cls._fraction_exceeds(
@@ -1786,6 +1888,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         history_rooms = self._goal_history_rooms(book, goal, context=context)
         if history_rooms is None:
             return None
+        session_room, day_room, drawdown_room, turnover_room = history_rooms
 
         try:
             ticket_fraction, committed_fraction = self._effective_fraction_limits()
@@ -1797,21 +1900,71 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 reserve_limit = initial_bankroll * self.minimum_cash_reserve_fraction
                 committed_room = committed_limit - committed_stake
                 reserve_room = balance - reserve_limit
-            caps = [
-                signal_limit,
-                ticket_limit,
+
+            capital_factor = (
+                Decimal("1")
+                if context is None
+                else _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                    Decimal("1"),
+                    context.legs,
+                )
+            )
+            if not capital_factor.is_finite() or capital_factor <= 0:
+                return None
+
+            capital_rooms = (
                 committed_room,
                 reserve_room,
                 balance,
-                *history_rooms,
+                session_room,
+                day_room,
+                drawdown_room,
+            )
+            capital_stake_caps: list[Decimal] = []
+            for room in capital_rooms:
+                if type(room) is not Decimal or not room.is_finite():
+                    return None
+                with localcontext(self._decimal_context()) as inverse_context:
+                    inverse_context.traps[Inexact] = False
+                    inverse_context.rounding = ROUND_DOWN
+                    stake_cap = room / capital_factor
+                if type(stake_cap) is not Decimal or not stake_cap.is_finite():
+                    return None
+                capital_stake_caps.append(stake_cap)
+
+            caps = [
+                signal_limit,
+                ticket_limit,
+                turnover_room,
+                *capital_stake_caps,
             ]
             if goal.max_stake_amount is not None:
                 caps.append(goal.max_stake_amount)
             amount = min(caps)
-        except (ArithmeticError, TypeError, ValueError):
+            exact_capital = (
+                amount
+                if context is None
+                else _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                    amount,
+                    context.legs,
+                )
+            )
+            if amount > 0 and any(
+                exact_capital > room for room in capital_rooms
+            ):
+                return None
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
             return None
 
         if type(amount) is not Decimal or not amount.is_finite() or amount <= 0:
+            return None
+        if self._derived_risk_values(
+            initial_bankroll,
+            balance,
+            committed_stake,
+            amount,
+            exact_capital,
+        ) is None:
             return None
         if goal.max_risk_of_ruin < Decimal("1"):
             assert context is not None
@@ -2150,8 +2303,9 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         self,
         initial_bankroll: Decimal,
         balance: Decimal,
-        committed_stake: Decimal,
-        amount: Decimal,
+        committed_capital: Decimal,
+        stake_amount: Decimal,
+        capital_amount: Decimal,
     ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | None:
         try:
             ticket_fraction, committed_fraction = self._effective_fraction_limits()
@@ -2159,11 +2313,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             with localcontext(self._decimal_context()):
                 ticket_limit = initial_bankroll * ticket_fraction
                 committed_limit = initial_bankroll * committed_fraction
-                remaining_balance = balance - amount
+                remaining_balance = balance - capital_amount
                 reserve_limit = initial_bankroll * self.minimum_cash_reserve_fraction
             # Exposure itself can legitimately require more than 28 significant digits even
             # when every PaperBook debit was canonical, so aggregate it exactly.
-            aggregate_committed = self._exact_positive_sum((committed_stake, amount))
+            aggregate_committed = self._exact_positive_sum(
+                (committed_capital, capital_amount)
+            )
         except (ArithmeticError, TypeError, ValueError):
             return None
 
@@ -2229,6 +2385,18 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         if amount <= 0:
             return RiskDecision(False, "stake must be positive")
 
+        try:
+            capital_amount = (
+                amount
+                if context is None
+                else _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                    amount,
+                    context.legs,
+                )
+            )
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            return RiskDecision(False, "proposed ticket capital exposure is invalid")
+
         state = self._book_state(book)
         if state is None:
             return RiskDecision(False, "virtual bankroll state is invalid")
@@ -2278,17 +2446,27 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             history_limits = (
                 (
                     session_room,
+                    capital_amount,
                     "economic goal conservative session loss limit exceeded",
                 ),
                 (
                     day_room,
+                    capital_amount,
                     "economic goal conservative day loss limit exceeded",
                 ),
-                (drawdown_room, "economic goal drawdown limit exceeded"),
-                (turnover_room, "economic goal turnover limit exceeded"),
+                (
+                    drawdown_room,
+                    capital_amount,
+                    "economic goal drawdown limit exceeded",
+                ),
+                (
+                    turnover_room,
+                    amount,
+                    "economic goal turnover limit exceeded",
+                ),
             )
-            for room, reason in history_limits:
-                if amount > room:
+            for room, exposure, reason in history_limits:
+                if exposure > room:
                     return RiskDecision(False, reason)
 
             quote_decision = self._quote_risk_decision(goal, context)
@@ -2306,7 +2484,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 if ruin_decision is not None:
                     return ruin_decision
 
-        derived = self._derived_risk_values(initial_bankroll, balance, committed_stake, amount)
+        derived = self._derived_risk_values(
+            initial_bankroll,
+            balance,
+            committed_stake,
+            amount,
+            capital_amount,
+        )
         if derived is None:
             return RiskDecision(False, "virtual bankroll state is invalid")
         ticket_limit, aggregate_committed, committed_limit, remaining_balance, reserve_limit = derived

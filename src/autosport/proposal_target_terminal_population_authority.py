@@ -97,6 +97,20 @@ def _make_identity_capability():
 
 
 _IDENTITY_PROVEN, _BIND_IDENTITY = _make_identity_capability()
+_IDENTITY_PROVEN_EXPECTED = _IDENTITY_PROVEN
+_IDENTITY_PROVEN_CODE = getattr(_IDENTITY_PROVEN, "__code__", None)
+_IDENTITY_PROVEN_CLOSURE = getattr(_IDENTITY_PROVEN, "__closure__", None)
+_IDENTITY_PROVEN_CLOSURE_WITNESSES = tuple(
+    (cell, cell.cell_contents)
+    for cell in (_IDENTITY_PROVEN_CLOSURE or ())
+)
+_BIND_IDENTITY_EXPECTED = _BIND_IDENTITY
+_BIND_IDENTITY_CODE = getattr(_BIND_IDENTITY, "__code__", None)
+_BIND_IDENTITY_CLOSURE = getattr(_BIND_IDENTITY, "__closure__", None)
+_BIND_IDENTITY_CLOSURE_WITNESSES = tuple(
+    (cell, cell.cell_contents)
+    for cell in (_BIND_IDENTITY_CLOSURE or ())
+)
 del _make_identity_capability
 
 
@@ -200,6 +214,22 @@ _POPULATION_AUTHORITY_PROPERTY_WITNESSES = tuple(
         _POPULATION_TYPE.__dict__[name],
         _POPULATION_TYPE.__dict__[name].fget,
         getattr(_POPULATION_TYPE.__dict__[name].fget, "__code__", None),
+        getattr(_POPULATION_TYPE.__dict__[name].fget, "__defaults__", None),
+        tuple(
+            (
+                default,
+                getattr(default, "__code__", None),
+                getattr(default, "__closure__", None),
+                tuple(
+                    (cell, cell.cell_contents)
+                    for cell in (getattr(default, "__closure__", None) or ())
+                ),
+            )
+            for default in (
+                getattr(_POPULATION_TYPE.__dict__[name].fget, "__defaults__", None)
+                or ()
+            )
+        ),
     )
     for name in _POPULATION_AUTHORITY_PROPERTY_NAMES
 )
@@ -242,6 +272,32 @@ def _require_dispatch() -> None:
         is not _ENSURE_DURABLE_FILE_CODE
         or ProductProposalTargetTerminalPopulation is not _POPULATION_TYPE_EXPECTED
         or _POPULATION_TYPE is not _POPULATION_TYPE_EXPECTED
+        or _IDENTITY_PROVEN is not _IDENTITY_PROVEN_EXPECTED
+        or getattr(_IDENTITY_PROVEN, "__code__", None) is not _IDENTITY_PROVEN_CODE
+        or getattr(_IDENTITY_PROVEN, "__closure__", None) is not _IDENTITY_PROVEN_CLOSURE
+        or len(_IDENTITY_PROVEN_CLOSURE or ())
+        != len(_IDENTITY_PROVEN_CLOSURE_WITNESSES)
+        or any(
+            cell is not expected_cell or cell.cell_contents is not expected_value
+            for cell, (expected_cell, expected_value)
+            in zip(
+                _IDENTITY_PROVEN_CLOSURE or (),
+                _IDENTITY_PROVEN_CLOSURE_WITNESSES,
+            )
+        )
+        or _BIND_IDENTITY is not _BIND_IDENTITY_EXPECTED
+        or getattr(_BIND_IDENTITY, "__code__", None) is not _BIND_IDENTITY_CODE
+        or getattr(_BIND_IDENTITY, "__closure__", None) is not _BIND_IDENTITY_CLOSURE
+        or len(_BIND_IDENTITY_CLOSURE or ())
+        != len(_BIND_IDENTITY_CLOSURE_WITNESSES)
+        or any(
+            cell is not expected_cell or cell.cell_contents is not expected_value
+            for cell, (expected_cell, expected_value)
+            in zip(
+                _BIND_IDENTITY_CLOSURE or (),
+                _BIND_IDENTITY_CLOSURE_WITNESSES,
+            )
+        )
         or _POPULATION_AUTHORITY_PROPERTY_WITNESSES
         is not _POPULATION_AUTHORITY_PROPERTY_WITNESSES_EXPECTED
         or any(
@@ -254,7 +310,36 @@ def _require_dispatch() -> None:
             )
             is not getter
             or getattr(getter, "__code__", None) is not code
-            for name, descriptor, getter, code
+            or getattr(getter, "__defaults__", None) is not defaults
+            or len(defaults or ()) != len(default_witnesses)
+            or any(
+                defaults[index] is not expected_default
+                or getattr(defaults[index], "__code__", None) is not expected_code
+                or getattr(defaults[index], "__closure__", None)
+                is not expected_closure
+                or len(expected_closure or ()) != len(expected_cells)
+                or any(
+                    cell is not expected_cell
+                    or cell.cell_contents is not expected_value
+                    for cell, (expected_cell, expected_value)
+                    in zip(expected_closure or (), expected_cells)
+                )
+                for index, (
+                    expected_default,
+                    expected_code,
+                    expected_closure,
+                    expected_cells,
+                )
+                in enumerate(default_witnesses)
+            )
+            for (
+                name,
+                descriptor,
+                getter,
+                code,
+                defaults,
+                default_witnesses,
+            )
             in _POPULATION_AUTHORITY_PROPERTY_WITNESSES_EXPECTED
         )
         or _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
@@ -279,6 +364,7 @@ def _require_dispatch() -> None:
 
 
 _REQUIRE_DISPATCH_ORIGINAL = _require_dispatch
+_REQUIRE_DISPATCH_CODE = getattr(_REQUIRE_DISPATCH_ORIGINAL, "__code__", None)
 
 
 def _workspace_path(value: object) -> Path:
@@ -489,6 +575,7 @@ def _leg_key(value: Mapping[str, object]) -> tuple[object, ...]:
         value.get("selection_id"),
         value.get("sport"),
         value.get("exchange_side"),
+        value.get("market_semantics_id"),
     )
 
 
@@ -564,10 +651,6 @@ def _material(
             if not isinstance(leg, Mapping):
                 raise ProductProposalTargetTerminalPopulationError(
                     "candidate leg is invalid"
-                )
-            if leg.get("exchange_side") is not None:
-                raise ProductProposalTargetTerminalPopulationError(
-                    "provider terminal population does not yet prove exchange-side semantics"
                 )
             sport = leg.get("sport")
             if type(sport) is not str or not sport:
@@ -738,6 +821,25 @@ def _build(
     material: dict[str, object],
     population_sha256: str,
 ) -> ProductProposalTargetTerminalPopulation:
+    population_type = _POPULATION_TYPE
+    bind_identity = _BIND_IDENTITY
+    dispatch_guard = _REQUIRE_DISPATCH_ORIGINAL
+    if (
+        _require_dispatch is not dispatch_guard
+        or getattr(dispatch_guard, "__code__", None) is not _REQUIRE_DISPATCH_CODE
+    ):
+        raise ProductProposalTargetTerminalPopulationError(
+            "terminal-population build dispatch guard changed"
+        )
+    dispatch_guard()
+    if (
+        population_type is not _POPULATION_TYPE_EXPECTED
+        or bind_identity is not _BIND_IDENTITY_EXPECTED
+    ):
+        raise ProductProposalTargetTerminalPopulationError(
+            "terminal-population build construction root changed"
+        )
+
     population_sha256 = _sha(population_sha256, "population_sha256")
     action_id = _ACTION_PREFIX + target.target_sha256
     if (
@@ -763,7 +865,7 @@ def _build(
             "terminal-population digest does not re-derive"
         )
 
-    result = object.__new__(_POPULATION_TYPE)
+    result = object.__new__(population_type)
     values = {
         "workspace_instance_id": material["workspace_instance_id"],
         "decision_id": action_id,
@@ -792,7 +894,7 @@ def _build(
     }
     for field_name, value in values.items():
         object.__setattr__(result, field_name, value)
-    _BIND_IDENTITY(result)
+    bind_identity(result)
     return result
 
 
@@ -831,7 +933,11 @@ def issue_product_proposal_target_terminal_population(
 ) -> ProductProposalTargetTerminalPopulation:
     """Persist one target-specific provider terminal-space precommit."""
 
-    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+    if (
+        _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL
+        or getattr(_REQUIRE_DISPATCH_ORIGINAL, "__code__", None)
+        is not _REQUIRE_DISPATCH_CODE
+    ):
         raise ProductProposalTargetTerminalPopulationError(
             "terminal-population dispatch guard root changed"
         )
@@ -953,7 +1059,11 @@ def resolve_product_proposal_target_terminal_population(
 ) -> ProductProposalTargetTerminalPopulation:
     """Re-resolve a terminal population against separately reverified source authority."""
 
-    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+    if (
+        _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL
+        or getattr(_REQUIRE_DISPATCH_ORIGINAL, "__code__", None)
+        is not _REQUIRE_DISPATCH_CODE
+    ):
         raise ProductProposalTargetTerminalPopulationError(
             "terminal-population dispatch guard root changed"
         )

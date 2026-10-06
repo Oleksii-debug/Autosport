@@ -98,10 +98,10 @@ _TICKET_LEG_POST_INIT_CODE = getattr(
     "__code__",
     None,
 )
-_TICKET_LEG_QUOTE_KEY = TicketLeg.__dict__["quote_key"]
-_TICKET_LEG_QUOTE_KEY_GETTER = _TICKET_LEG_QUOTE_KEY.fget
-_TICKET_LEG_QUOTE_KEY_GETTER_CODE = getattr(
-    _TICKET_LEG_QUOTE_KEY_GETTER,
+_TICKET_LEG_SETTLEMENT_KEY = TicketLeg.__dict__["settlement_key"]
+_TICKET_LEG_SETTLEMENT_KEY_GETTER = _TICKET_LEG_SETTLEMENT_KEY.fget
+_TICKET_LEG_SETTLEMENT_KEY_GETTER_CODE = getattr(
+    _TICKET_LEG_SETTLEMENT_KEY_GETTER,
     "__code__",
     None,
 )
@@ -170,6 +170,46 @@ _PAPER_REQUIRE_UTF8_FUNCTION_CODE = getattr(
 
 _PORTFOLIO_SNAPSHOT = _portfolio_module._snapshot_open_tickets_for_analysis
 _PORTFOLIO_SNAPSHOT_CODE = getattr(_PORTFOLIO_SNAPSHOT, "__code__", None)
+_PORTFOLIO_TICKET_FINGERPRINT = _portfolio_module._analysis_ticket_fingerprint
+_PORTFOLIO_TICKET_FINGERPRINT_CODE = getattr(
+    _PORTFOLIO_TICKET_FINGERPRINT,
+    "__code__",
+    None,
+)
+_PORTFOLIO_LOCKED_CAPITAL = (
+    _portfolio_module._CANONICAL_LOCKED_CAPITAL_FOR_TICKET
+)
+_PORTFOLIO_LOCKED_CAPITAL_CODE = getattr(
+    _PORTFOLIO_LOCKED_CAPITAL,
+    "__code__",
+    None,
+)
+_PORTFOLIO_LOCKED_CAPITAL_CLOSURE = getattr(
+    _PORTFOLIO_LOCKED_CAPITAL,
+    "__closure__",
+    None,
+)
+_PORTFOLIO_LOCKED_CAPITAL_CLOSURE_VALUES = tuple(
+    cell.cell_contents
+    for cell in (_PORTFOLIO_LOCKED_CAPITAL_CLOSURE or ())
+)
+_PORTFOLIO_EXCHANGE_CALCULATOR = (
+    _portfolio_module.locked_capital_for_exchange_side
+)
+_PORTFOLIO_EXCHANGE_CALCULATOR_CODE = getattr(
+    _PORTFOLIO_EXCHANGE_CALCULATOR,
+    "__code__",
+    None,
+)
+_PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE = getattr(
+    _PORTFOLIO_EXCHANGE_CALCULATOR,
+    "__closure__",
+    None,
+)
+_PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE_VALUES = tuple(
+    cell.cell_contents
+    for cell in (_PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE or ())
+)
 _PORTFOLIO_REQUIRE_FINITE = _portfolio_module._require_finite_decimal
 _PORTFOLIO_REQUIRE_FINITE_CODE = getattr(
     _PORTFOLIO_REQUIRE_FINITE,
@@ -197,11 +237,17 @@ _PAPER_DECIMAL_EMIN = _paper_module._PAPER_DECIMAL_EMIN
 _PAPER_DECIMAL_EMAX = _paper_module._PAPER_DECIMAL_EMAX
 _PAPER_ROUNDING = _paper_module.ROUND_HALF_EVEN
 _PAPER_LOCALCONTEXT = _paper_module.localcontext
+_PAPER_CONTEXT_TYPE = _paper_module.Context
+_PAPER_INVALID_OPERATION = _paper_module.InvalidOperation
+_PAPER_OVERFLOW = _paper_module.Overflow
+_PAPER_UNDERFLOW = _paper_module.Underflow
 
 _JSON_DUMPS = json.dumps
 _JSON_DUMPS_EXPECTED = _JSON_DUMPS
+_JSON_DUMPS_CODE = getattr(_JSON_DUMPS, "__code__", None)
 _JSON_LOADS = json.loads
 _JSON_LOADS_EXPECTED = _JSON_LOADS
+_JSON_LOADS_CODE = getattr(_JSON_LOADS, "__code__", None)
 _JSON_DECODE_ERROR = json.JSONDecodeError
 _HASHLIB_SHA256 = hashlib.sha256
 _HASHLIB_SHA256_EXPECTED = _HASHLIB_SHA256
@@ -303,10 +349,15 @@ def _decimal_text(value: object, name: str) -> str:
     return "0" if text in {"", "-0"} else text
 
 
-def _canonical_bytes(value: object) -> bytes:
+def _canonical_bytes(
+    value: object,
+    _json_dumps_code=_JSON_DUMPS_CODE,
+) -> bytes:
     if (
         _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
         or json.dumps is not _JSON_DUMPS_EXPECTED
+        or getattr(_JSON_DUMPS, "__code__", None) is not _json_dumps_code
+        or getattr(json.dumps, "__code__", None) is not _json_dumps_code
         or _HASHLIB_SHA256 is not _HASHLIB_SHA256_EXPECTED
         or hashlib.sha256 is not _HASHLIB_SHA256_EXPECTED
     ):
@@ -350,10 +401,16 @@ def _reject_nonfinite(_value: str) -> None:
     )
 
 
-def _canonical_json_object(value: object, name: str) -> dict[str, object]:
+def _canonical_json_object(
+    value: object,
+    name: str,
+    _json_loads_code=_JSON_LOADS_CODE,
+) -> dict[str, object]:
     if (
         _JSON_LOADS is not _JSON_LOADS_EXPECTED
         or json.loads is not _JSON_LOADS_EXPECTED
+        or getattr(_JSON_LOADS, "__code__", None) is not _json_loads_code
+        or getattr(json.loads, "__code__", None) is not _json_loads_code
         or json.JSONDecodeError is not _JSON_DECODE_ERROR
     ):
         raise ProductProposalRiskTerminalPayoffEvaluationError(
@@ -715,14 +772,10 @@ def _candidate_tickets(
                 "locked_odds",
                 "sport",
                 "exchange_side",
+                "market_semantics_id",
             }:
                 raise ProductProposalRiskTerminalPayoffEvaluationError(
                     "proposal target TicketLeg schema changed"
-                )
-            if leg_raw["exchange_side"] is not None:
-                raise ProductProposalRiskTerminalPayoffEvaluationError(
-                    "terminal payoff does not support exchange-side settlement "
-                    "semantics"
                 )
             try:
                 leg = _TICKET_LEG_TYPE(
@@ -744,6 +797,7 @@ def _candidate_tickets(
                     ),
                     sport=leg_raw["sport"],
                     exchange_side=leg_raw["exchange_side"],
+                    market_semantics_id=leg_raw["market_semantics_id"],
                 )
             except (ArithmeticError, TypeError, ValueError) as exc:
                 raise ProductProposalRiskTerminalPayoffEvaluationError(
@@ -766,11 +820,11 @@ def _candidate_tickets(
             legs.append(leg)
 
         quote_keys = tuple(
-            _TICKET_LEG_QUOTE_KEY_GETTER(leg) for leg in legs
+            _TICKET_LEG_SETTLEMENT_KEY_GETTER(leg) for leg in legs
         )
         if len(quote_keys) != len(set(quote_keys)):
             raise ProductProposalRiskTerminalPayoffEvaluationError(
-                "proposal target candidate contains duplicate quote_key legs"
+                "proposal target candidate contains duplicate settlement-key legs"
             )
         stake = _decimal(
             target.evaluated_stakes[index],
@@ -869,12 +923,12 @@ def _settlement_map_for_candidate(
             raise ProductProposalRiskTerminalPayoffEvaluationError(
                 "mapped terminal state does not settle the target selection"
             )
-        quote_key = _TICKET_LEG_QUOTE_KEY_GETTER(leg)
+        quote_key = _TICKET_LEG_SETTLEMENT_KEY_GETTER(leg)
         result_text = result.value
         prior = settlement_by_quote.get(quote_key)
         if prior is not None and prior != result_text:
             raise ProductProposalRiskTerminalPayoffEvaluationError(
-                "one target quote_key has conflicting terminal settlements"
+                "one target settlement key has conflicting terminal settlements"
             )
         settlement_by_quote[quote_key] = result_text
     return settlement_by_quote
@@ -1130,6 +1184,7 @@ class ProductProposalRiskTerminalPayoffEvaluation:
 
 
 _RESULT_TYPE = ProductProposalRiskTerminalPayoffEvaluation
+_RESULT_TYPE_EXPECTED = _RESULT_TYPE
 _RESULT_FIELDS = (
     "workspace_instance_id",
     "precommit_binding_sha256",
@@ -1152,6 +1207,13 @@ _RESULT_FIELDS = (
     "evaluation_sha256",
 )
 _RESULT_FIELDS_EXPECTED = _RESULT_FIELDS
+_RESULT_FIELD_DESCRIPTOR_WITNESSES = tuple(
+    (name, _RESULT_TYPE.__dict__[name])
+    for name in _RESULT_FIELDS
+)
+_RESULT_FIELD_DESCRIPTOR_WITNESSES_EXPECTED = (
+    _RESULT_FIELD_DESCRIPTOR_WITNESSES
+)
 _RESULT_AUTHORITY_PROPERTY_NAMES = (
     "evaluation_identity_proven",
     "terminal_mapping_consumed_proven",
@@ -1189,6 +1251,11 @@ _RESULT_AUTHORITY_PROPERTY_WITNESSES = tuple(
             (
                 default,
                 getattr(default, "__code__", None),
+                getattr(default, "__closure__", None),
+                tuple(
+                    (cell, cell.cell_contents)
+                    for cell in (getattr(default, "__closure__", None) or ())
+                ),
             )
             for default in (
                 getattr(_RESULT_TYPE.__dict__[name].fget, "__defaults__", None)
@@ -1210,7 +1277,17 @@ def _resolve_values(
     authorities: tuple[MarketSettlementOutcomeAuthority, ...],
     member_market_state_ids: tuple[tuple[str, ...], ...],
 ) -> dict[str, object]:
-    _require_dispatch()
+    if (
+        _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL
+        or getattr(_REQUIRE_DISPATCH_ORIGINAL, "__code__", None)
+        is not _REQUIRE_DISPATCH_CODE
+        or getattr(_REQUIRE_DISPATCH_ORIGINAL, "__defaults__", None)
+        is not _REQUIRE_DISPATCH_DEFAULTS
+    ):
+        raise ProductProposalRiskTerminalPayoffEvaluationError(
+            "terminal payoff dispatch guard root changed"
+        )
+    _REQUIRE_DISPATCH_ORIGINAL()
     workspace = _workspace_path(workspace)
     precommit = _require_precommit(precommit)
 
@@ -1420,6 +1497,8 @@ def _resolve_values(
 def _make_public_resolver(
     _bind_identity,
     _resolve_core,
+    _result_type,
+    _result_fields,
 ):
     _bind_code = getattr(_bind_identity, "__code__", None)
     _resolve_core_code = getattr(_resolve_core, "__code__", None)
@@ -1431,24 +1510,29 @@ def _make_public_resolver(
         authorities: tuple[MarketSettlementOutcomeAuthority, ...],
         member_market_state_ids: tuple[tuple[str, ...], ...],
     ) -> ProductProposalRiskTerminalPayoffEvaluation:
+        bind_identity = _bind_identity
+        resolve_core = _resolve_core
+        result_type = _result_type
+        result_fields = _result_fields
+        expected_bind_code = _bind_code
+        expected_core_code = _resolve_core_code
         if (
-            getattr(_bind_identity, "__code__", None) is not _bind_code
-            or getattr(_resolve_core, "__code__", None)
-            is not _resolve_core_code
+            getattr(bind_identity, "__code__", None) is not expected_bind_code
+            or getattr(resolve_core, "__code__", None) is not expected_core_code
         ):
             raise ProductProposalRiskTerminalPayoffEvaluationError(
                 "terminal payoff public resolver closure changed"
             )
-        values = _resolve_core(
+        values = resolve_core(
             workspace,
             precommit=precommit,
             authorities=authorities,
             member_market_state_ids=member_market_state_ids,
         )
-        instance = object.__new__(_RESULT_TYPE)
-        for name in _RESULT_FIELDS_EXPECTED:
+        instance = object.__new__(result_type)
+        for name in result_fields:
             object.__setattr__(instance, name, values[name])
-        _bind_identity(instance)
+        bind_identity(instance)
         return instance
 
     resolver.__name__ = (
@@ -1466,6 +1550,8 @@ resolve_product_proposal_risk_terminal_payoff_evaluation = (
     _make_public_resolver(
         _BIND_IDENTITY,
         _resolve_values,
+        _RESULT_TYPE,
+        _RESULT_FIELDS_EXPECTED,
     )
 )
 _PUBLIC_RESOLVER = resolve_product_proposal_risk_terminal_payoff_evaluation
@@ -1476,8 +1562,18 @@ _PUBLIC_RESOLVER_CLOSURE_WITNESSES = tuple(
         cell,
         cell.cell_contents,
         getattr(cell.cell_contents, "__code__", None),
+        getattr(cell.cell_contents, "__closure__", None),
+        tuple(
+            (nested_cell, nested_cell.cell_contents)
+            for nested_cell in (
+                getattr(cell.cell_contents, "__closure__", None) or ()
+            )
+        ),
     )
     for cell in (_PUBLIC_RESOLVER_CLOSURE or ())
+)
+_PUBLIC_RESOLVER_CLOSURE_WITNESSES_EXPECTED = (
+    _PUBLIC_RESOLVER_CLOSURE_WITNESSES
 )
 del _make_public_resolver
 
@@ -1527,10 +1623,10 @@ def _require_dispatch() -> None:
         or TicketLeg.__post_init__ is not _TICKET_LEG_POST_INIT
         or getattr(_TICKET_LEG_POST_INIT, "__code__", None)
         is not _TICKET_LEG_POST_INIT_CODE
-        or TicketLeg.__dict__.get("quote_key")
-        is not _TICKET_LEG_QUOTE_KEY
-        or getattr(_TICKET_LEG_QUOTE_KEY.fget, "__code__", None)
-        is not _TICKET_LEG_QUOTE_KEY_GETTER_CODE
+        or TicketLeg.__dict__.get("settlement_key")
+        is not _TICKET_LEG_SETTLEMENT_KEY
+        or getattr(_TICKET_LEG_SETTLEMENT_KEY.fget, "__code__", None)
+        is not _TICKET_LEG_SETTLEMENT_KEY_GETTER_CODE
         or PaperTicket.__init__ is not _PAPER_TICKET_INIT
         or getattr(_PAPER_TICKET_INIT, "__code__", None)
         is not _PAPER_TICKET_INIT_CODE
@@ -1605,6 +1701,40 @@ def _require_dispatch() -> None:
         is not _PORTFOLIO_SNAPSHOT
         or getattr(_PORTFOLIO_SNAPSHOT, "__code__", None)
         is not _PORTFOLIO_SNAPSHOT_CODE
+        or _portfolio_module._analysis_ticket_fingerprint
+        is not _PORTFOLIO_TICKET_FINGERPRINT
+        or getattr(_PORTFOLIO_TICKET_FINGERPRINT, "__code__", None)
+        is not _PORTFOLIO_TICKET_FINGERPRINT_CODE
+        or _portfolio_module._CANONICAL_LOCKED_CAPITAL_FOR_TICKET
+        is not _PORTFOLIO_LOCKED_CAPITAL
+        or getattr(_PORTFOLIO_LOCKED_CAPITAL, "__code__", None)
+        is not _PORTFOLIO_LOCKED_CAPITAL_CODE
+        or getattr(_PORTFOLIO_LOCKED_CAPITAL, "__closure__", None)
+        is not _PORTFOLIO_LOCKED_CAPITAL_CLOSURE
+        or len(_PORTFOLIO_LOCKED_CAPITAL_CLOSURE or ())
+        != len(_PORTFOLIO_LOCKED_CAPITAL_CLOSURE_VALUES)
+        or any(
+            cell.cell_contents is not expected
+            for cell, expected in zip(
+                _PORTFOLIO_LOCKED_CAPITAL_CLOSURE or (),
+                _PORTFOLIO_LOCKED_CAPITAL_CLOSURE_VALUES,
+            )
+        )
+        or _portfolio_module.locked_capital_for_exchange_side
+        is not _PORTFOLIO_EXCHANGE_CALCULATOR
+        or getattr(_PORTFOLIO_EXCHANGE_CALCULATOR, "__code__", None)
+        is not _PORTFOLIO_EXCHANGE_CALCULATOR_CODE
+        or getattr(_PORTFOLIO_EXCHANGE_CALCULATOR, "__closure__", None)
+        is not _PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE
+        or len(_PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE or ())
+        != len(_PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE_VALUES)
+        or any(
+            cell.cell_contents is not expected
+            for cell, expected in zip(
+                _PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE or (),
+                _PORTFOLIO_EXCHANGE_CALCULATOR_CLOSURE_VALUES,
+            )
+        )
         or _portfolio_module._require_finite_decimal
         is not _PORTFOLIO_REQUIRE_FINITE
         or getattr(_PORTFOLIO_REQUIRE_FINITE, "__code__", None)
@@ -1632,21 +1762,42 @@ def _require_dispatch() -> None:
         or _paper_module._PAPER_DECIMAL_EMIN != _PAPER_DECIMAL_EMIN
         or _paper_module._PAPER_DECIMAL_EMAX != _PAPER_DECIMAL_EMAX
         or _paper_module.ROUND_HALF_EVEN != _PAPER_ROUNDING
+        or _paper_module.Context is not _PAPER_CONTEXT_TYPE
+        or _paper_module.InvalidOperation is not _PAPER_INVALID_OPERATION
+        or _paper_module.Overflow is not _PAPER_OVERFLOW
+        or _paper_module.Underflow is not _PAPER_UNDERFLOW
         or _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
         or json.dumps is not _JSON_DUMPS_EXPECTED
+        or getattr(_JSON_DUMPS, "__code__", None) is not _JSON_DUMPS_CODE
+        or getattr(json.dumps, "__code__", None) is not _JSON_DUMPS_CODE
         or _JSON_LOADS is not _JSON_LOADS_EXPECTED
         or json.loads is not _JSON_LOADS_EXPECTED
+        or getattr(_JSON_LOADS, "__code__", None) is not _JSON_LOADS_CODE
+        or getattr(json.loads, "__code__", None) is not _JSON_LOADS_CODE
         or json.JSONDecodeError is not _JSON_DECODE_ERROR
         or _HASHLIB_SHA256 is not _HASHLIB_SHA256_EXPECTED
         or hashlib.sha256 is not _HASHLIB_SHA256_EXPECTED
+        or _RESULT_TYPE is not _RESULT_TYPE_EXPECTED
         or _RESULT_FIELDS is not _RESULT_FIELDS_EXPECTED
+        or _RESULT_FIELD_DESCRIPTOR_WITNESSES
+        is not _RESULT_FIELD_DESCRIPTOR_WITNESSES_EXPECTED
         or _RESULT_AUTHORITY_PROPERTY_NAMES
         is not _RESULT_AUTHORITY_PROPERTY_NAMES_EXPECTED
-        or ProductProposalRiskTerminalPayoffEvaluation is not _RESULT_TYPE
+        or ProductProposalRiskTerminalPayoffEvaluation is not _RESULT_TYPE_EXPECTED
+        or _PUBLIC_RESOLVER_CLOSURE_WITNESSES
+        is not _PUBLIC_RESOLVER_CLOSURE_WITNESSES_EXPECTED
+        or _HELPER_WITNESSES is not _HELPER_WITNESSES_EXPECTED
+        or type(_HELPER_WITNESSES_EXPECTED) is not tuple
     ):
         raise ProductProposalRiskTerminalPayoffEvaluationError(
             "terminal payoff dispatch root changed"
         )
+
+    for name, expected_descriptor in _RESULT_FIELD_DESCRIPTOR_WITNESSES_EXPECTED:
+        if _RESULT_TYPE.__dict__.get(name) is not expected_descriptor:
+            raise ProductProposalRiskTerminalPayoffEvaluationError(
+                "terminal payoff result field surface changed"
+            )
 
     for (
         name,
@@ -1669,7 +1820,21 @@ def _require_dispatch() -> None:
                 current_defaults[index] is not expected_default
                 or getattr(current_defaults[index], "__code__", None)
                 is not expected_code
-                for index, (expected_default, expected_code)
+                or getattr(current_defaults[index], "__closure__", None)
+                is not expected_closure
+                or len(expected_closure or ()) != len(expected_nested_cells)
+                or any(
+                    nested_cell is not expected_cell
+                    or nested_cell.cell_contents is not expected_value
+                    for nested_cell, (expected_cell, expected_value)
+                    in zip(expected_closure or (), expected_nested_cells)
+                )
+                for index, (
+                    expected_default,
+                    expected_code,
+                    expected_closure,
+                    expected_nested_cells,
+                )
                 in enumerate(default_witnesses)
             )
         ):
@@ -1693,16 +1858,34 @@ def _require_dispatch() -> None:
         )
         is not _PUBLIC_RESOLVER_CLOSURE
         or len(_PUBLIC_RESOLVER_CLOSURE or ())
-        != len(_PUBLIC_RESOLVER_CLOSURE_WITNESSES)
+        != len(_PUBLIC_RESOLVER_CLOSURE_WITNESSES_EXPECTED)
         or any(
             cell is not expected_cell
             or cell.cell_contents is not expected_value
             or getattr(expected_value, "__code__", None)
             is not expected_code
-            for cell, (expected_cell, expected_value, expected_code)
+            or getattr(expected_value, "__closure__", None)
+            is not expected_nested_closure
+            or len(expected_nested_closure or ()) != len(expected_nested_cells)
+            or any(
+                nested_cell is not expected_nested_cell
+                or nested_cell.cell_contents is not expected_nested_value
+                for nested_cell, (
+                    expected_nested_cell,
+                    expected_nested_value,
+                )
+                in zip(expected_nested_closure or (), expected_nested_cells)
+            )
+            for cell, (
+                expected_cell,
+                expected_value,
+                expected_code,
+                expected_nested_closure,
+                expected_nested_cells,
+            )
             in zip(
                 _PUBLIC_RESOLVER_CLOSURE or (),
-                _PUBLIC_RESOLVER_CLOSURE_WITNESSES,
+                _PUBLIC_RESOLVER_CLOSURE_WITNESSES_EXPECTED,
             )
         )
     ):
@@ -1710,16 +1893,42 @@ def _require_dispatch() -> None:
             "terminal payoff public resolver root changed"
         )
 
-    for name, expected, code in _HELPER_WITNESSES_EXPECTED:
+    for (
+        name,
+        expected,
+        code,
+        defaults,
+        kwdefaults,
+        kwdefault_items,
+    ) in _HELPER_WITNESSES_EXPECTED:
         current = globals().get(name)
-        if current is not expected or getattr(current, "__code__", None) is not code:
+        current_kwdefaults = getattr(current, "__kwdefaults__", None)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not code
+            or getattr(current, "__defaults__", None) is not defaults
+            or current_kwdefaults is not kwdefaults
+            or tuple(sorted((current_kwdefaults or {}).items()))
+            != kwdefault_items
+        ):
             raise ProductProposalRiskTerminalPayoffEvaluationError(
                 "terminal payoff helper root changed"
             )
 
 
-_HELPER_WITNESSES_EXPECTED = tuple(
-    (name, globals()[name], getattr(globals()[name], "__code__", None))
+_HELPER_WITNESSES = tuple(
+    (
+        name,
+        globals()[name],
+        getattr(globals()[name], "__code__", None),
+        getattr(globals()[name], "__defaults__", None),
+        getattr(globals()[name], "__kwdefaults__", None),
+        tuple(
+            sorted(
+                (getattr(globals()[name], "__kwdefaults__", None) or {}).items()
+            )
+        ),
+    )
     for name in (
         "_text",
         "_sha",
@@ -1745,6 +1954,15 @@ _HELPER_WITNESSES_EXPECTED = tuple(
         "_scenario_payoff",
         "_resolve_values",
     )
+)
+_HELPER_WITNESSES_EXPECTED = _HELPER_WITNESSES
+
+_REQUIRE_DISPATCH_ORIGINAL = _require_dispatch
+_REQUIRE_DISPATCH_CODE = getattr(_REQUIRE_DISPATCH_ORIGINAL, "__code__", None)
+_REQUIRE_DISPATCH_DEFAULTS = getattr(
+    _REQUIRE_DISPATCH_ORIGINAL,
+    "__defaults__",
+    None,
 )
 
 

@@ -16,6 +16,7 @@ from decimal import (
 )
 
 from .domain import PaperTicket, TicketLeg, TicketStatus
+from .exchange_exposure import locked_capital_for_exchange_side
 from .paper import PaperBook
 
 
@@ -46,6 +47,52 @@ def _portfolio_arithmetic_error(exc: DecimalException) -> ValueError:
     )
 
 
+def _make_locked_capital_authority():
+    calculator = locked_capital_for_exchange_side
+    calculator_code = calculator.__code__
+
+    def calculate(ticket: PaperTicket) -> Decimal:
+        if calculator.__code__ is not calculator_code:
+            raise ValueError("portfolio locked-capital exposure authority changed")
+        if (
+            type(ticket) is not PaperTicket
+            or type(ticket.stake) is not Decimal
+            or not ticket.stake.is_finite()
+            or ticket.stake < Decimal("0")
+            or type(ticket.legs) is not tuple
+            or not ticket.legs
+        ):
+            raise ValueError("portfolio ticket must be canonical")
+        for leg in ticket.legs:
+            if (
+                type(leg) is not TicketLeg
+                or type(leg.locked_odds) is not Decimal
+                or not leg.locked_odds.is_finite()
+                or leg.locked_odds <= Decimal("1")
+                or leg.exchange_side not in {None, "back", "lay"}
+            ):
+                raise ValueError("portfolio ticket leg must be canonical")
+        if any(leg.exchange_side == "lay" for leg in ticket.legs):
+            if len(ticket.legs) != 1:
+                raise ValueError(
+                    "portfolio LAY exposure requires exactly one canonical single-leg ticket"
+                )
+            if ticket.stake.is_zero():
+                return Decimal("0")
+            return calculator(
+                stake=ticket.stake,
+                odds=ticket.legs[0].locked_odds,
+                exchange_side="LAY",
+            )
+        return ticket.stake
+
+    return calculate
+
+
+_CANONICAL_LOCKED_CAPITAL_FOR_TICKET = _make_locked_capital_authority()
+del _make_locked_capital_authority
+
+
 def _analysis_ticket_fingerprint(
     ticket: PaperTicket,
 ) -> tuple[
@@ -58,6 +105,22 @@ def _analysis_ticket_fingerprint(
 ]:
     """Return exactly the mutable ticket fields consumed by scenario analysis."""
 
+    if type(ticket) is not PaperTicket:
+        raise ValueError("portfolio analysis requires exact PaperTicket values")
+    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
+    if (
+        type(ticket.ticket_id) is not str
+        or not ticket.ticket_id
+        or type(ticket.placed_at) is not str
+        or not ticket.placed_at
+        or type(ticket.status) is not TicketStatus
+        or type(ticket.provider_source_ids) is not tuple
+        or any(
+            type(source_id) is not str or not source_id
+            for source_id in ticket.provider_source_ids
+        )
+    ):
+        raise ValueError("portfolio analysis ticket identity is not canonical")
     return (
         ticket.ticket_id,
         ticket.stake,
@@ -139,17 +202,25 @@ def _scenario_profit_in_context(
             ticket.stake,
             f"portfolio ticket {ticket.ticket_id} stake",
         )
-        combined_odds = Decimal("1")
-        for leg in ticket.legs:
-            odds = _require_finite_decimal(
-                leg.locked_odds,
-                f"portfolio ticket {ticket.ticket_id} locked_odds",
-            )
-            combined_odds *= odds
-        if all(leg.quote_key in winning_quote_keys for leg in ticket.legs):
-            scenario_value = stake * combined_odds - stake
+        if any(leg.exchange_side == "lay" for leg in ticket.legs):
+            locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
+            settlement_keys = {leg.settlement_key for leg in ticket.legs}
+            if all(key in winning_quote_keys for key in settlement_keys):
+                scenario_value = locked_capital.copy_negate()
+            else:
+                scenario_value = stake
         else:
-            scenario_value = stake.copy_negate()
+            combined_odds = Decimal("1")
+            for leg in ticket.legs:
+                odds = _require_finite_decimal(
+                    leg.locked_odds,
+                    f"portfolio ticket {ticket.ticket_id} locked_odds",
+                )
+                combined_odds *= odds
+            if all(leg.settlement_key in winning_quote_keys for leg in ticket.legs):
+                scenario_value = stake * combined_odds - stake
+            else:
+                scenario_value = stake.copy_negate()
         if not scenario_value.is_finite():
             raise ValueError(
                 f"portfolio ticket {ticket.ticket_id} scenario profit must be finite"
@@ -192,7 +263,12 @@ class PortfolioEngine:
 
     @staticmethod
     def affected_tickets(tickets: list[PaperTicket], quote_key: str) -> list[str]:
-        return [ticket.ticket_id for ticket in tickets if ticket.status is TicketStatus.OPEN and any(leg.quote_key == quote_key for leg in ticket.legs)]
+        return [
+            ticket.ticket_id
+            for ticket in tickets
+            if ticket.status is TicketStatus.OPEN
+            and any(leg.settlement_key == quote_key for leg in ticket.legs)
+        ]
 
     @staticmethod
     def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:
@@ -243,7 +319,14 @@ class PortfolioEngine:
                         ticket.stake,
                         f"portfolio ticket {ticket.ticket_id} stake",
                     )
-                    leg_keys = {leg.quote_key for leg in ticket.legs}
+                    if any(
+                        leg.exchange_side == "lay"
+                        for leg in ticket.legs
+                    ) and len(ticket.legs) != 1:
+                        raise ValueError(
+                            "portfolio LAY economics require exactly one canonical single-leg LAY ticket"
+                        )
+                    leg_keys = {leg.settlement_key for leg in ticket.legs}
                     missing = leg_keys.difference(snapshot)
                     if missing:
                         raise ValueError(
@@ -265,7 +348,15 @@ class PortfolioEngine:
                         winners,
                         voids,
                     )
-                    scenario_value = payout - stake
+                    economic_cost = (
+                        _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
+                        if any(
+                            leg.exchange_side == "lay"
+                            for leg in ticket.legs
+                        )
+                        else stake
+                    )
+                    scenario_value = payout - economic_cost
                     if not scenario_value.is_finite():
                         raise ValueError(
                             f"portfolio ticket {ticket.ticket_id} scenario profit must be finite"
@@ -289,7 +380,11 @@ class PortfolioEngine:
         groups.sort(key=lambda group: tuple(sorted(group)))
 
         open_tickets = _snapshot_open_tickets_for_analysis(tickets)
-        all_keys = {leg.quote_key for ticket in open_tickets for leg in ticket.legs}
+        all_keys = {
+            leg.settlement_key
+            for ticket in open_tickets
+            for leg in ticket.legs
+        }
         grouped = set().union(*groups) if groups else set()
         if not grouped.issubset(all_keys):
             raise ValueError("exclusive group contains quote not present in portfolio")

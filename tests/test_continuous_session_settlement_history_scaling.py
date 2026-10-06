@@ -1944,3 +1944,54 @@ def test_resume_from_paused_reason_clears_predecessor_reason() -> None:
         resumed = state.snapshot()
         assert resumed.state is continuous_session.SessionState.RUNNING
         assert resumed.last_error_code is None
+
+
+def test_invalid_main_session_id_is_normalized_to_domain_error() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state_path = root / "continuous_session.json"
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        payload["session_id"] = " bad-session "
+        state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        try:
+            state._read()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "identity/timestamp" in str(exc)
+        else:
+            raise AssertionError("invalid main session_id escaped domain normalization")
+
+
+def test_invalid_main_success_timestamp_is_normalized_to_domain_error() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state_path = root / "continuous_session.json"
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        payload["last_success_at"] = "not-an-instant"
+        state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        try:
+            state._read()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "invalid durable field" in str(exc)
+        else:
+            raise AssertionError("invalid main success timestamp escaped validation")
+
+
+def test_invalid_settlement_evidence_digest_is_normalized_to_domain_error() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state_path = root / "continuous_session.json"
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        payload["settlement_evidence"][0]["evidence_sha256"] = "not-a-digest"
+        state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        try:
+            state._read()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "invalid durable field" in str(exc)
+        else:
+            raise AssertionError("invalid settlement evidence digest escaped validation")

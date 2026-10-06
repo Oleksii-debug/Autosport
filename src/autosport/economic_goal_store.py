@@ -210,23 +210,30 @@ _CANONICAL_WORKSPACE_CONTEXTMANAGER: Final = contextmanager
 def _workspace_lock_scope(
     workspace: str | Path,
     _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
+    _canonical_lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
+    _lock_new=_CANONICAL_WORKSPACE_LOCK_NEW,
+    _lock_init=_CANONICAL_WORKSPACE_LOCK_INIT,
+    _lock_acquire=_CANONICAL_WORKSPACE_LOCK_ACQUIRE,
+    _lock_release=_CANONICAL_WORKSPACE_LOCK_RELEASE,
+    _object_setattr=_CANONICAL_OBJECT_SETATTR,
+    _method_type=_CANONICAL_METHOD_TYPE,
     _enter=_CANONICAL_WORKSPACE_LOCK_ENTER,
     _exit=_CANONICAL_WORKSPACE_LOCK_EXIT,
 ):
-    if _lock_type is _CANONICAL_WORKSPACE_LOCK_TYPE:
-        lock = _CANONICAL_WORKSPACE_LOCK_NEW(_lock_type)
-        _CANONICAL_WORKSPACE_LOCK_INIT(lock, workspace)
+    if _lock_type is _canonical_lock_type:
+        lock = _lock_new(_lock_type)
+        _lock_init(lock, workspace)
     else:
         lock = _lock_type(workspace)
-    _CANONICAL_OBJECT_SETATTR(
+    _object_setattr(
         lock,
         "acquire",
-        _CANONICAL_METHOD_TYPE(_CANONICAL_WORKSPACE_LOCK_ACQUIRE, lock),
+        _method_type(_lock_acquire, lock),
     )
-    _CANONICAL_OBJECT_SETATTR(
+    _object_setattr(
         lock,
         "release",
-        _CANONICAL_METHOD_TYPE(_CANONICAL_WORKSPACE_LOCK_RELEASE, lock),
+        _method_type(_lock_release, lock),
     )
     _enter(lock)
     try:

@@ -42,6 +42,7 @@ from .real_execution_ledger import (
     AttemptState,
     EventType,
     ExecutionAction,
+    ExecutionPlan,
     ExecutionStateError,
     ExternalAcknowledgement,
     RealExecutionLedger,
@@ -49,6 +50,8 @@ from .real_execution_ledger import (
 from . import supervised_execution as _supervised_execution_runtime
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
+    ExecutionLegConstraint,
+    ProfileBinding,
     SupervisedApproval,
     _require_approval,
     _require_durable_approval,
@@ -794,7 +797,11 @@ def _build_canonical_place_action_dispatch():
     canonical_default_transport_type = UrllibBetfairHttpTransport
     canonical_profile_type = BookmakerCapabilityProfile
     canonical_bound_type = BoundSupervisedExecutionPlan
+    canonical_approval_type = SupervisedApproval
+    canonical_constraint_type = ExecutionLegConstraint
+    canonical_profile_binding_type = ProfileBinding
     canonical_action_type = ExecutionAction
+    canonical_plan_type = ExecutionPlan
     canonical_ledger_type = RealExecutionLedger
     canonical_workspace_lock_type = WorkspaceEconomicLock
     canonical_instruction_report_type = BetfairInstructionReport
@@ -808,6 +815,34 @@ def _build_canonical_place_action_dispatch():
         None,
     )
     canonical_action_to_dict = canonical_action_type.__dict__.get("to_dict")
+    canonical_plan_to_dict = canonical_plan_type.__dict__.get("to_dict")
+    canonical_plan_fingerprint_descriptor = canonical_plan_type.__dict__.get(
+        "fingerprint"
+    )
+    canonical_plan_fingerprint_getter = getattr(
+        canonical_plan_fingerprint_descriptor,
+        "fget",
+        None,
+    )
+    canonical_approval_require_active = canonical_approval_type.__dict__.get(
+        "require_active"
+    )
+    canonical_approval_fingerprint_descriptor = canonical_approval_type.__dict__.get(
+        "fingerprint"
+    )
+    canonical_approval_fingerprint_getter = getattr(
+        canonical_approval_fingerprint_descriptor,
+        "fget",
+        None,
+    )
+    canonical_approval_ledger_identity_descriptor = canonical_approval_type.__dict__.get(
+        "ledger_identity"
+    )
+    canonical_approval_ledger_identity_getter = getattr(
+        canonical_approval_ledger_identity_descriptor,
+        "fget",
+        None,
+    )
     canonical_instruction_post_init = canonical_instruction_report_type.__dict__.get(
         "__post_init__"
     )
@@ -844,6 +879,31 @@ def _build_canonical_place_action_dispatch():
         "__code__",
         None,
     )
+    canonical_plan_to_dict_code = getattr(
+        canonical_plan_to_dict,
+        "__code__",
+        None,
+    )
+    canonical_plan_fingerprint_getter_code = getattr(
+        canonical_plan_fingerprint_getter,
+        "__code__",
+        None,
+    )
+    canonical_approval_require_active_code = getattr(
+        canonical_approval_require_active,
+        "__code__",
+        None,
+    )
+    canonical_approval_fingerprint_getter_code = getattr(
+        canonical_approval_fingerprint_getter,
+        "__code__",
+        None,
+    )
+    canonical_approval_ledger_identity_getter_code = getattr(
+        canonical_approval_ledger_identity_getter,
+        "__code__",
+        None,
+    )
     canonical_instruction_post_init_code = getattr(
         canonical_instruction_post_init,
         "__code__",
@@ -874,7 +934,12 @@ def _build_canonical_place_action_dispatch():
         "__code__",
         None,
     )
-    bound_method_names = ("action_for", "profile_for", "constraint_for")
+    bound_method_names = (
+        "verify_binding",
+        "action_for",
+        "profile_for",
+        "constraint_for",
+    )
     bound_methods = tuple(
         (
             name,
@@ -910,6 +975,16 @@ def _build_canonical_place_action_dispatch():
         or canonical_profile_id_getter_code is None
         or not callable(canonical_action_to_dict)
         or canonical_action_to_dict_code is None
+        or not callable(canonical_plan_to_dict)
+        or canonical_plan_to_dict_code is None
+        or not callable(canonical_plan_fingerprint_getter)
+        or canonical_plan_fingerprint_getter_code is None
+        or not callable(canonical_approval_require_active)
+        or canonical_approval_require_active_code is None
+        or not callable(canonical_approval_fingerprint_getter)
+        or canonical_approval_fingerprint_getter_code is None
+        or not callable(canonical_approval_ledger_identity_getter)
+        or canonical_approval_ledger_identity_getter_code is None
         or not callable(canonical_instruction_post_init)
         or canonical_instruction_post_init_code is None
         or not callable(canonical_execution_report_post_init)
@@ -959,6 +1034,70 @@ def _build_canonical_place_action_dispatch():
     action_field_descriptors = tuple(
         (name, canonical_action_type.__dict__.get(name))
         for name in action_field_names
+    )
+    plan_field_names = (
+        "plan_id",
+        "bookmaker_profile_version",
+        "decision_id",
+        "approval_id",
+        "created_at",
+        "actions",
+        "schema_version",
+    )
+    plan_field_descriptors = tuple(
+        (name, canonical_plan_type.__dict__.get(name))
+        for name in plan_field_names
+    )
+    bound_field_names = (
+        "execution_plan",
+        "portfolio_plan_sha256",
+        "economic_goal_contract_sha256",
+        "intent_id",
+        "intent_sha256",
+        "approval_fingerprint",
+        "profile_bindings",
+        "constraints",
+    )
+    bound_field_descriptors = tuple(
+        (name, canonical_bound_type.__dict__.get(name))
+        for name in bound_field_names
+    )
+    approval_field_names = (
+        "approval_id",
+        "portfolio_plan_sha256",
+        "intent_id",
+        "routing_request_id",
+        "execution_terms_sha256",
+        "approved_at",
+        "expires_at",
+        "evidence_sha256",
+        "state",
+    )
+    approval_field_descriptors = tuple(
+        (name, canonical_approval_type.__dict__.get(name))
+        for name in approval_field_names
+    )
+    constraint_field_names = (
+        "leg_id",
+        "side",
+        "quote_expires_at",
+        "max_slippage_fraction",
+    )
+    constraint_field_descriptors = tuple(
+        (name, canonical_constraint_type.__dict__.get(name))
+        for name in constraint_field_names
+    )
+    profile_binding_field_names = (
+        "venue_id",
+        "account_id",
+        "adapter_id",
+        "adapter_version",
+        "profile_version",
+        "profile_sha256",
+    )
+    profile_binding_field_descriptors = tuple(
+        (name, canonical_profile_binding_type.__dict__.get(name))
+        for name in profile_binding_field_names
     )
     instruction_field_names = (
         "status",
@@ -1073,7 +1212,11 @@ def _build_canonical_place_action_dispatch():
             and UrllibBetfairHttpTransport is canonical_default_transport_type
             and BookmakerCapabilityProfile is canonical_profile_type
             and BoundSupervisedExecutionPlan is canonical_bound_type
+            and SupervisedApproval is canonical_approval_type
+            and ExecutionLegConstraint is canonical_constraint_type
+            and ProfileBinding is canonical_profile_binding_type
             and ExecutionAction is canonical_action_type
+            and ExecutionPlan is canonical_plan_type
             and RealExecutionLedger is canonical_ledger_type
             and WorkspaceEconomicLock is canonical_workspace_lock_type
             and BetfairInstructionReport is canonical_instruction_report_type
@@ -1092,6 +1235,32 @@ def _build_canonical_place_action_dispatch():
             is canonical_action_to_dict
             and getattr(canonical_action_to_dict, "__code__", None)
             is canonical_action_to_dict_code
+            and canonical_plan_type.__dict__.get("to_dict")
+            is canonical_plan_to_dict
+            and getattr(canonical_plan_to_dict, "__code__", None)
+            is canonical_plan_to_dict_code
+            and canonical_plan_type.__dict__.get("fingerprint")
+            is canonical_plan_fingerprint_descriptor
+            and getattr(canonical_plan_fingerprint_descriptor, "fget", None)
+            is canonical_plan_fingerprint_getter
+            and getattr(canonical_plan_fingerprint_getter, "__code__", None)
+            is canonical_plan_fingerprint_getter_code
+            and canonical_approval_type.__dict__.get("require_active")
+            is canonical_approval_require_active
+            and getattr(canonical_approval_require_active, "__code__", None)
+            is canonical_approval_require_active_code
+            and canonical_approval_type.__dict__.get("fingerprint")
+            is canonical_approval_fingerprint_descriptor
+            and getattr(canonical_approval_fingerprint_descriptor, "fget", None)
+            is canonical_approval_fingerprint_getter
+            and getattr(canonical_approval_fingerprint_getter, "__code__", None)
+            is canonical_approval_fingerprint_getter_code
+            and canonical_approval_type.__dict__.get("ledger_identity")
+            is canonical_approval_ledger_identity_descriptor
+            and getattr(canonical_approval_ledger_identity_descriptor, "fget", None)
+            is canonical_approval_ledger_identity_getter
+            and getattr(canonical_approval_ledger_identity_getter, "__code__", None)
+            is canonical_approval_ledger_identity_getter_code
             and canonical_instruction_report_type.__dict__.get("__post_init__")
             is canonical_instruction_post_init
             and getattr(canonical_instruction_post_init, "__code__", None)
@@ -1134,6 +1303,26 @@ def _build_canonical_place_action_dispatch():
             and all(
                 canonical_action_type.__dict__.get(name) is descriptor
                 for name, descriptor in action_field_descriptors
+            )
+            and all(
+                canonical_plan_type.__dict__.get(name) is descriptor
+                for name, descriptor in plan_field_descriptors
+            )
+            and all(
+                canonical_bound_type.__dict__.get(name) is descriptor
+                for name, descriptor in bound_field_descriptors
+            )
+            and all(
+                canonical_approval_type.__dict__.get(name) is descriptor
+                for name, descriptor in approval_field_descriptors
+            )
+            and all(
+                canonical_constraint_type.__dict__.get(name) is descriptor
+                for name, descriptor in constraint_field_descriptors
+            )
+            and all(
+                canonical_profile_binding_type.__dict__.get(name) is descriptor
+                for name, descriptor in profile_binding_field_descriptors
             )
             and all(
                 canonical_instruction_report_type.__dict__.get(name) is descriptor
@@ -1800,6 +1989,8 @@ def execute_betfair_supervised_action(
         raise TypeError("ledger must be exact RealExecutionLedger")
     if type(bound) is not BoundSupervisedExecutionPlan:
         raise TypeError("bound must be exact BoundSupervisedExecutionPlan")
+    if type(approval) is not SupervisedApproval:
+        raise TypeError("approval must be exact SupervisedApproval")
     if type(profile) is not BookmakerCapabilityProfile:
         raise TypeError("profile must be exact BookmakerCapabilityProfile")
     if type(client) is not BetfairSupervisedPlaceOrdersClient:

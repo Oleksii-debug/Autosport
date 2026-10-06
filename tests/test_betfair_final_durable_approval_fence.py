@@ -2102,3 +2102,140 @@ def test_workspace_lock_enter_rebinding_fails_closed_before_attempt(monkeypatch)
 
         assert transport.calls == []
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_bound_verify_binding_rebinding_fails_closed_before_attempt(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        def hostile_verify(self):
+            del self
+            return None
+
+        monkeypatch.setattr(
+            betfair_execution.BoundSupervisedExecutionPlan,
+            "verify_binding",
+            hostile_verify,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-rebound-bound-verify",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_approval_require_active_rebinding_fails_closed_before_attempt(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        def hostile_require_active(self, at):
+            del self, at
+            return None
+
+        monkeypatch.setattr(
+            betfair_execution.SupervisedApproval,
+            "require_active",
+            hostile_require_active,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-rebound-approval-active",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_approval_fingerprint_getter_rebinding_fails_closed_before_attempt(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        monkeypatch.setattr(
+            betfair_execution.SupervisedApproval,
+            "fingerprint",
+            property(lambda self: bound.approval_fingerprint),
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-rebound-approval-fingerprint",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_execution_plan_fingerprint_getter_rebinding_fails_before_attempt(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        durable = ledger.saga(bound.execution_plan.plan_id).plan_fingerprint
+
+        monkeypatch.setattr(
+            betfair_execution.ExecutionPlan,
+            "fingerprint",
+            property(lambda self: durable),
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-rebound-plan-fingerprint",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}

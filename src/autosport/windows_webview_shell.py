@@ -39,6 +39,10 @@ from .product_gui_worker import (
     ProductGuiMessage,
     ProductGuiWorker,
 )
+from .product_runtime import (
+    ProductCompositionError,
+    read_product_composition_manifest,
+)
 from .recovery_worker import OneShotRecoveryWorker, recover_workspace_once
 from .replay_worker import OneShotReplayWorker, run_workspace_dataset_once, workspace_for_strategy
 from .research_strategy import RESEARCH_STRATEGY_ID, ResearchStrategyPlan
@@ -1862,13 +1866,32 @@ class AutosportWebController:
                 + self._product_source_status(source_selection, source_entry)
             )
         source_factory = source_entry.factory_spec
+        try:
+            composition = read_product_composition_manifest(workspace)
+        except ProductCompositionError:
+            return self._fail(
+                "Тривалий імітаційний режим не запущено: "
+                "наявна композиція продукту пошкоджена або недійсна."
+            )
+        if (
+            composition is not None
+            and composition.source_id != source_entry.expected_provider_source_id
+        ):
+            return self._fail(
+                "Тривалий імітаційний режим не запущено: "
+                "збережене джерело не збігається з уже зафіксованою "
+                "композицією продукту."
+            )
+        initial_bankroll = (
+            "10000" if composition is None else composition.initial_bankroll
+        )
 
         try:
             started = self.product_worker.start(
                 workspace=workspace,
                 source_factory=source_factory,
                 expected_source_id=source_entry.expected_provider_source_id,
-                initial_bankroll="10000",
+                initial_bankroll=initial_bankroll,
                 poll_seconds=_PRODUCT_POLL_SECONDS,
             )
         except Exception:

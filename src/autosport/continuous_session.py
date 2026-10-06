@@ -2150,6 +2150,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         snapshot = _snapshot_method(self._state)
         invalidation_buffer = self.invalidation_buffer
+        if (
+            isinstance(invalidation_buffer, _invalidation_buffer_type)
+            and type(invalidation_buffer) is not _invalidation_buffer_type
+        ):
+            raise ContinuousSessionError(
+                "canonical invalidation buffer subtype is not supported"
+            )
         if type(invalidation_buffer) is _invalidation_buffer_type:
             pending_descriptor = _invalidation_buffer_type.__dict__.get(
                 "pending_count"
@@ -2852,6 +2859,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         ):
             raise ContinuousSessionError(
                 "continuous-session invalidation routing authority is unavailable"
+            )
+        if (
+            isinstance(invalidation_buffer, _invalidation_buffer_type)
+            and type(invalidation_buffer) is not _invalidation_buffer_type
+        ):
+            raise ContinuousSessionError(
+                "canonical invalidation buffer subtype is not supported"
             )
         if type(invalidation_buffer) is _invalidation_buffer_type:
             pending_descriptor = _invalidation_buffer_type.__dict__.get(
@@ -3968,6 +3982,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         desktop_consumer = self.desktop_consumer
         desktop_drain = getattr(desktop_consumer, "drain", None)
         invalidation_buffer = self.invalidation_buffer
+        if (
+            isinstance(invalidation_buffer, _invalidation_buffer_type)
+            and type(invalidation_buffer) is not _invalidation_buffer_type
+        ):
+            raise ContinuousSessionError(
+                "canonical invalidation buffer subtype is not supported"
+            )
         invalidation_drain = getattr(invalidation_buffer, "drain", None)
         invalidation_buffer_mirror: object | None = None
         invalidation_dirty_storage: object | None = None

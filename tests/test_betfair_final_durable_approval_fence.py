@@ -1599,3 +1599,54 @@ def test_post_response_dependency_drift_fails_closed_after_submission() -> None:
         assert attempt.submitted_at is not None
         assert attempt.provider_evidence is None
 
+def test_rebound_place_response_parser_cannot_mint_provider_origin_authority(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_parser = betfair_execution._parse_place_orders_response
+
+        def hostile_parser(*args, **kwargs):
+            report = original_parser(*args, **kwargs)
+            return replace(
+                report,
+                provider_origin_authoritative=True,
+            )
+
+        monkeypatch.setattr(
+            betfair_execution,
+            "_parse_place_orders_response",
+            hostile_parser,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-rebound-place-parser",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert (
+            ledger.verified_attempt(
+                "attempt-rebound-place-parser"
+            )
+            is None
+        )
+

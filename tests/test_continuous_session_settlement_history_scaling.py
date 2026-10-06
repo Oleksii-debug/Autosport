@@ -3562,3 +3562,63 @@ def test_learning_resolution_detach_rejects_runtime_replace_rebinding(monkeypatc
         assert "callback copy authority changed" in str(exc)
     else:
         raise AssertionError("runtime-rebound learning callback copy was accepted")
+
+
+def test_settlement_consumer_rejects_runtime_paperbook_save_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    def attacker_save(_self: object, _path: object) -> None:
+        raise AssertionError("runtime-rebound PaperBook.save executed")
+
+    monkeypatch.setattr(continuous_session.PaperBook, "save", attacker_save)
+
+    try:
+        coordinator._settle(resolutions=(_resolution(),))
+    except continuous_session.ContinuousSessionError as exc:
+        assert "persistence authority changed" in str(exc)
+    else:
+        raise AssertionError("runtime-rebound settlement persistence was accepted")
+
+
+def test_settlement_book_loader_rejects_runtime_load_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+        coordinator.paper_book_path = Path(directory) / "paper_book.json"
+        coordinator.initial_bankroll = "10000"
+
+        def attacker_load(_cls: type, _path: object) -> object:
+            raise AssertionError("runtime-rebound PaperBook.load executed")
+
+        monkeypatch.setattr(
+            continuous_session.PaperBook,
+            "load",
+            classmethod(attacker_load),
+        )
+
+        try:
+            coordinator._load_book()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "book loader authority changed" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound PaperBook.load was accepted")
+
+
+def test_settlement_book_loader_rejects_module_paperbook_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+        coordinator.paper_book_path = Path(directory) / "paper_book.json"
+        coordinator.initial_bankroll = "10000"
+
+        canonical = continuous_session.PaperBook
+
+        class AttackerPaperBook(canonical):
+            pass
+
+        monkeypatch.setattr(continuous_session, "PaperBook", AttackerPaperBook)
+
+        try:
+            coordinator._load_book()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "book loader authority changed" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound PaperBook type was accepted")

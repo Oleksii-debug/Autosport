@@ -3269,6 +3269,49 @@ def test_settlement_consumer_rejects_conflicting_outcomes_across_evidence_ids() 
         raise AssertionError("conflicting settlement outcomes reached book I/O")
 
 
+def test_settlement_consumer_rejects_invalid_resolution_before_workspace_io() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    invalid = continuous_session.SettlementResolution(
+        event_identity="provider-a:event-1",
+        settlement_ref="settlement-1",
+        quote_outcomes={"quote-1": "attacker-invalid"},
+        evidence_id="evidence-1",
+        evidence_sha256="a" * 64,
+        available_at=_AT,
+    )
+
+    try:
+        coordinator._settle(resolutions=(invalid,))
+    except continuous_session.ContinuousSessionError as exc:
+        assert "invalid settlement resolution" in str(exc)
+    else:
+        raise AssertionError("invalid settlement resolution reached economic I/O")
+
+
+def test_settlement_consumer_rejects_runtime_validator_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    def attacker_validate(
+        self: continuous_session.SettlementResolution,
+        *,
+        as_of: str,
+    ) -> None:
+        del self, as_of
+
+    monkeypatch.setattr(
+        continuous_session.SettlementResolution,
+        "validate",
+        attacker_validate,
+    )
+
+    try:
+        coordinator._settle(resolutions=(_resolution(),))
+    except continuous_session.ContinuousSessionError as exc:
+        assert "consumer validator authority changed" in str(exc)
+    else:
+        raise AssertionError("runtime-rebound consumer validator was accepted")
+
+
 def test_settlement_consumer_rejects_noncanonical_outcome_mapping_before_io() -> None:
     class ExplodingDict(dict[str, str]):
         def copy(self):

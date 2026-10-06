@@ -1168,9 +1168,16 @@ def test_payload_encoder_ignores_rebound_enum_serialization_protocols(monkeypatc
         raise AssertionError("rebound IntEnum __int__ executed")
 
     monkeypatch.setattr(
-        economic_goal_store_module.Enum,
+        economic_goal_store_module.EconomicObjective,
         "value",
         property(forged_value),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        AutomationLevel,
+        "value",
+        property(forged_value),
+        raising=False,
     )
     monkeypatch.setattr(
         AutomationLevel,

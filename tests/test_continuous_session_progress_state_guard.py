@@ -722,3 +722,53 @@ def test_operator_controls_reject_class_rebound_state_authority(
 
         assert path.read_bytes() == before
 
+def test_snapshot_ignores_instance_shadowed_main_reader() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+
+        def attacker_read() -> dict[str, object]:
+            raise AssertionError("instance-shadowed snapshot main reader executed")
+
+        state._read = attacker_read  # type: ignore[method-assign]
+        snapshot = state.snapshot()
+
+        assert snapshot.state is continuous_session.SessionState.RUNNING
+        assert snapshot.cycles_completed == 0
+
+
+def test_bounded_state_ignores_instance_shadowed_main_reader_on_refresh() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _, stale = _state(root)
+        current = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-progress-state-guard",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        current.set_state(
+            continuous_session.SessionState.PAUSED,
+            reason="OPERATOR_PAUSE",
+        )
+
+        def attacker_read() -> dict[str, object]:
+            raise AssertionError("instance-shadowed bounded-state reader executed")
+
+        stale._read = attacker_read  # type: ignore[method-assign]
+
+        assert stale.bounded_state() is continuous_session.SessionState.PAUSED
+
+
+def test_session_rmw_uses_canonical_predecessor_reader() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+
+        def attacker_read() -> dict[str, object]:
+            raise AssertionError("instance-shadowed RMW predecessor reader executed")
+
+        state._read = attacker_read  # type: ignore[method-assign]
+        updated = state._update(lambda _raw: False)
+
+        assert updated["generation"] == 0
+        assert json.loads(path.read_text(encoding="utf-8"))["generation"] == 0
+

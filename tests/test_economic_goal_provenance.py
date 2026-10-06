@@ -246,3 +246,37 @@ def test_provenance_operations_revalidate_post_construction_mutation() -> None:
     object.__setattr__(clean_provenance, "revision", 0)
     with pytest.raises(EconomicGoalProvenanceError):
         verify_provenance(clean_goal, clean_provenance)
+
+
+def test_contract_sha256_ignores_rebound_hashing_dispatch(monkeypatch) -> None:
+    goal = _goal()
+    expected = contract_sha256(goal)
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound provenance hashing dependency executed")
+
+    monkeypatch.setattr(economic_goal_provenance_module, "_canonical_json", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "economic_goal_to_payload", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_CANONICAL_GOAL_VALIDATOR", forged)
+    monkeypatch.setattr(economic_goal_provenance_module.hashlib, "sha256", forged)
+
+    assert contract_sha256(goal) == expected
+
+
+def test_provenance_operations_ignore_rebound_internal_authorities(monkeypatch) -> None:
+    goal = _goal()
+    expected = provenance_for(goal)
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound provenance authority executed")
+
+    monkeypatch.setattr(economic_goal_provenance_module, "contract_sha256", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_CANONICAL_GOAL_VALIDATOR", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_CANONICAL_PROVENANCE_VALIDATOR", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_CANONICAL_PROVENANCE_TYPE", object)
+    monkeypatch.setattr(economic_goal_provenance_module, "PROVENANCE_SCHEMA", "forged")
+    monkeypatch.setattr(economic_goal_provenance_module, "PROVENANCE_SCHEMA_VERSION", 999)
+
+    evidence = provenance_for(goal)
+    assert evidence == expected
+    verify_provenance(goal, evidence)

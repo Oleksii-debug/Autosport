@@ -1430,7 +1430,11 @@ class _ContinuousSessionState:
             )
             return after != before
 
-        self._update(mutate, advance_generation=True)
+        # Source projection persistence is not a semantic success/state transition
+        # and therefore must not advance the failure-generation authority. Advancing
+        # it would make an active same-generation operational failure sidecar stale
+        # merely because projection bookkeeping was durably refreshed.
+        self._update(mutate)
 
     def record_success(
         self,

@@ -120,6 +120,31 @@ class MarketMirror:
             raise ValueError("max_age must be non-negative")
         return as_of.astimezone(timezone.utc), max_age
 
+    @classmethod
+    def _decision_event_is_visible(
+        cls,
+        event: MarketEvent,
+        *,
+        boundary: datetime,
+        age_limit: timedelta,
+    ) -> bool:
+        """Fail closed unless one event was locally knowable by the decision cutoff."""
+        if event.status not in cls._DECISION_ELIGIBLE_STATUSES:
+            return False
+
+        observed = cls._utc_timestamp(event.observed_ts)
+        ingested = cls._utc_timestamp(event.ingest_ts)
+        if observed is None or ingested is None:
+            return False
+        if observed > boundary or ingested > boundary:
+            return False
+
+        freshness_time = cls._utc_timestamp(event.source_ts or event.observed_ts)
+        if freshness_time is None:
+            return False
+        age = boundary - freshness_time
+        return timedelta(0) <= age <= age_limit
+
     def apply(self, event: MarketEvent) -> MirrorApplyResult:
         """Apply one event iff it advances source-local sequence state.
 
@@ -255,9 +280,10 @@ class MarketMirror:
         """Return one revision-bearing focused view safe for decision consumption.
 
         Identity selectors and freshness/status fencing are applied to the same captured
-        mirror revision. Unknown/inactive, future, over-age or malformed observations
-        fail closed while remaining available through ``view``/``snapshot`` for audit.
-        ``source_ts`` is preferred over the local observation clock when available.
+        mirror revision. A quote must have been both observed and ingested locally by
+        ``as_of``; provider ``source_ts`` still owns freshness when available. Unknown,
+        inactive, future, over-age or malformed evidence fails closed while remaining
+        available through ``view``/``snapshot`` for audit.
         """
         boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
         captured = self.view(
@@ -267,17 +293,16 @@ class MarketMirror:
             market_ids=market_ids,
             selection_ids=selection_ids,
         )
-        eligible: list[MarketEvent] = []
-        for event in captured.events:
-            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
-                continue
-            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
-            if timestamp is None:
-                continue
-            age = boundary - timestamp
-            if timedelta(0) <= age <= age_limit:
-                eligible.append(event)
-        return MirrorSnapshot(revision=captured.revision, events=tuple(eligible))
+        eligible = tuple(
+            event
+            for event in captured.events
+            if self._decision_event_is_visible(
+                event,
+                boundary=boundary,
+                age_limit=age_limit,
+            )
+        )
+        return MirrorSnapshot(revision=captured.revision, events=eligible)
 
     def event_for_quote_key(
         self,
@@ -334,17 +359,16 @@ class MarketMirror:
                 if key in self._latest
             )
 
-        eligible: list[MarketEvent] = []
-        for event in events:
-            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
-                continue
-            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
-            if timestamp is None:
-                continue
-            age = boundary - timestamp
-            if timedelta(0) <= age <= age_limit:
-                eligible.append(event)
-        return MirrorSnapshot(revision=revision, events=tuple(eligible))
+        eligible = tuple(
+            event
+            for event in events
+            if self._decision_event_is_visible(
+                event,
+                boundary=boundary,
+                age_limit=age_limit,
+            )
+        )
+        return MirrorSnapshot(revision=revision, events=eligible)
 
     def snapshot(self) -> tuple[MarketEvent, ...]:
         """Return a deterministic, ownership-isolated snapshot by source and quote."""

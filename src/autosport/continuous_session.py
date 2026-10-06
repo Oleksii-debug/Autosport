@@ -2981,6 +2981,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         workspace = self.workspace
         paper_book_path = self.paper_book_path
         initial_bankroll = self.initial_bankroll
+
+        def require_economic_context() -> None:
+            if (
+                self.workspace != workspace
+                or self.paper_book_path != paper_book_path
+                or self.initial_bankroll != initial_bankroll
+            ):
+                raise ContinuousSessionError(
+                    "settlement economic configuration changed during tick"
+                )
+
         now = self.clock()
         _instant_validator(now, "now")
 
@@ -3085,6 +3096,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "canonical session generation"
                 )
             try:
+                require_economic_context()
                 source_snapshot = _refresh_source_state_projection_method(
                     self,
                     collector=collector,
@@ -3192,14 +3204,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     self._state,
                     settlement_evidence=resolutions,
                 )
-                if (
-                    self.workspace != workspace
-                    or self.paper_book_path != paper_book_path
-                    or self.initial_bankroll != initial_bankroll
-                ):
-                    raise ContinuousSessionError(
-                        "settlement economic configuration changed during tick"
-                    )
+                require_economic_context()
                 if prepare_settlement is not None:
                     prepare_settlement(
                         paper_book_path=paper_book_path,
@@ -3208,23 +3213,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         ),
                         at=now,
                     )
-                    if (
-                        self.workspace != workspace
-                        or self.paper_book_path != paper_book_path
-                        or self.initial_bankroll != initial_bankroll
-                    ):
-                        raise ContinuousSessionError(
-                            "settlement economic configuration changed during tick"
-                        )
+                    require_economic_context()
                 settled, evidence_ids = self._settle(resolutions=resolutions)
-                if (
-                    self.workspace != workspace
-                    or self.paper_book_path != paper_book_path
-                    or self.initial_bankroll != initial_bankroll
-                ):
-                    raise ContinuousSessionError(
-                        "settlement economic configuration changed during tick"
-                    )
+                require_economic_context()
                 if reconcile_after_settlement is not None:
                     reconcile_after_settlement(
                         paper_book_path=paper_book_path,
@@ -3234,14 +3225,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         settled_ticket_ids=settled,
                         at=now,
                     )
-                    if (
-                        self.workspace != workspace
-                        or self.paper_book_path != paper_book_path
-                        or self.initial_bankroll != initial_bankroll
-                    ):
-                        raise ContinuousSessionError(
-                            "settlement economic configuration changed during tick"
-                        )
+                    require_economic_context()
 
                 cycle_index = _record_success_method(
                     self._state,

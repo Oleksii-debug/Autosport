@@ -290,8 +290,10 @@ def test_cross_instance_revocation_cannot_commit_during_provider_send() -> None:
 
         assert revocation_was_fenced
         assert len(transport.calls) == 1
-        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
-        assert result.attempt_state is AttemptState.ACCEPTED
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
         assert ledger.supervised_approval_is_active(
             plan_id=bound.execution_plan.plan_id,
             approval_id=approval.ledger_identity,
@@ -357,8 +359,10 @@ def test_submitted_fact_is_durable_and_cross_instance_visible_before_post(
         )
 
         assert observed_submitted
-        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
-        assert result.attempt_state is AttemptState.ACCEPTED
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
 
 
 
@@ -379,7 +383,10 @@ def test_final_send_persists_exact_serialized_request_digest_across_restart() ->
             clock=lambda: SUBMITTED_AT,
         )
 
-        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
         assert len(transport.calls) == 1
         request = transport.calls[0]["request"]
         expected_digest = hashlib.sha256(
@@ -397,8 +404,7 @@ def test_final_send_persists_exact_serialized_request_digest_across_restart() ->
             == "attempt-durable-request-digest"
         )
         assert attempt.submitted_request_sha256 == expected_digest
-        assert attempt.provider_evidence is not None
-        assert attempt.provider_evidence.request_sha256 == expected_digest
+        assert attempt.provider_evidence is None
 
         reconstructed = dict(request)
         reconstructed["id"] = request["id"] + 1
@@ -1283,3 +1289,47 @@ def test_provider_write_dependency_proof_mutation_fails_closed() -> None:
 
         assert transport.calls == []
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_provider_network_origin_predicate_is_immutable() -> None:
+    predicate = betfair_execution._execution_provider_network_dispatch_is_current
+    assert predicate.__closure__ is None
+    assert type(predicate.__defaults__) is tuple
+
+
+def test_structural_transport_response_cannot_mint_durable_provider_truth() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-structural-origin",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert ledger.provider_evidence_binding("attempt-structural-origin") is None
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        attempt = next(
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id == "attempt-structural-origin"
+        )
+        assert attempt.submitted_at is not None
+        assert attempt.provider_evidence is None

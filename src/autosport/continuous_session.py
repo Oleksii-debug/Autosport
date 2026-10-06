@@ -2439,6 +2439,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         affected_inputs: Callable[[MirrorInvalidationBatch], tuple[str, ...]] | None = None,
         max_batches: int | None = None,
         max_items: int | None = None,
+        _dependency_reader: Callable[
+            [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
+        ] = FocusedMirrorDependencyIndex._dependency,
+        _dependency_reader_code: object = FocusedMirrorDependencyIndex._dependency.__code__,
     ) -> tuple[
         tuple[str, ...],
         bool,
@@ -2502,6 +2506,35 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index input identity state is invalid"
             )
+        dependency_authority: tuple[FocusedMirrorDependency, ...] | None = None
+        dependency_mirror: object | None = None
+        if type(dependency_index) is FocusedMirrorDependencyIndex:
+            if (
+                FocusedMirrorDependencyIndex._dependency is not _dependency_reader
+                or getattr(_dependency_reader, "__code__", None)
+                is not _dependency_reader_code
+            ):
+                raise ContinuousSessionError(
+                    "canonical dependency routing reader authority changed"
+                )
+            dependency_authority = tuple(
+                _dependency_reader(dependency_index, input_id)
+                for input_id in indexed_input_ids
+            )
+            dependency_mirror = dependency_index._mirror
+
+        def require_dependency_authority(message: str) -> None:
+            if dependency_authority is None:
+                return
+            if dependency_index._mirror is not dependency_mirror:
+                raise ContinuousSessionError(message)
+            current = tuple(
+                _dependency_reader(dependency_index, input_id)
+                for input_id in indexed_input_ids
+            )
+            if current != dependency_authority:
+                raise ContinuousSessionError(message)
+
         affected: list[str] = []
         full_refresh_required = False
         last_has_more = False
@@ -2516,6 +2549,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "invalidation drain mutated dependency index input identity state"
                 )
+            require_dependency_authority(
+                "dependency index routing authority changed during invalidation drain"
+            )
             if (
                 type(batch) is not MirrorInvalidationBatch
                 or type(batch.changed_keys) is not tuple
@@ -2546,6 +2582,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "dependency index routing mutated input identity state"
                 )
+            require_dependency_authority(
+                "dependency index routing authority changed during affected-input routing"
+            )
             if (
                 type(routed) is not tuple
                 or any(

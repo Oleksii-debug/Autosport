@@ -969,6 +969,7 @@ class _ContinuousSessionState:
         mutate: Callable[[dict[str, Any]], None],
         *,
         advance_generation: bool = False,
+        finalize_under_lock: Callable[[dict[str, Any]], None] | None = None,
         _atomic_write_json: Callable[[str | Path, dict[str, Any]], None] = atomic_write_json,
         _atomic_write_json_code: object = atomic_write_json.__code__,
         _durable_path_lock: Callable[..., Any] = durable_path_lock,
@@ -983,6 +984,8 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "canonical session read-modify-write authority changed"
             )
+        if finalize_under_lock is not None and not callable(finalize_under_lock):
+            raise TypeError("finalize_under_lock must be callable or None")
         # The generation is a monotonic durable authority only if reading the
         # predecessor image, applying the mutation, publishing the successor,
         # and rereading it are one serialized transaction. atomic_write_json()
@@ -994,10 +997,12 @@ class _ContinuousSessionState:
                 raw["generation"] = int(raw["generation"]) + 1
             _atomic_write_json(self.path, raw)
             updated = self._read()
-        self._generation = updated["generation"]
-        self._cycles_completed = updated["cycles_completed"]
-        self._last_success_at = updated["last_success_at"]
-        self._state = updated["state"]
+            self._generation = updated["generation"]
+            self._cycles_completed = updated["cycles_completed"]
+            self._last_success_at = updated["last_success_at"]
+            self._state = updated["state"]
+            if finalize_under_lock is not None:
+                finalize_under_lock(updated)
         return updated
 
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:
@@ -1009,14 +1014,18 @@ class _ContinuousSessionState:
             if reason is not None:
                 raw["last_error_code"] = _text(reason, "reason")
 
-        updated = self._update(mutate, advance_generation=True)
-        self._state = updated["state"]
-        # Any committed state transition supersedes an operational failure that
-        # was observed in the predecessor state.  Leaving that sidecar intact
-        # allows a later transition back to the same enum value to resurrect a
-        # stale failure because the bounded marker tuple becomes equal again.
-        if self._error_checkpoint_present():
-            self._write_error_checkpoint(None)
+        def finalize(_updated: dict[str, Any]) -> None:
+            # Any committed state transition supersedes an operational failure
+            # observed in the predecessor state. Keep cleanup under the same
+            # session lock so a newer failure cannot be erased after commit.
+            if self._error_checkpoint_present():
+                self._write_error_checkpoint(None)
+
+        self._update(
+            mutate,
+            advance_generation=True,
+            finalize_under_lock=finalize,
+        )
 
     @staticmethod
     def _normalized_settlement_evidence(
@@ -1169,16 +1178,34 @@ class _ContinuousSessionState:
                 sorted(known.values(), key=lambda item: item["evidence_id"])
             )
 
-        updated = self._update(mutate, advance_generation=True)
-        self._cycles_completed = updated["cycles_completed"]
-        self._last_success_at = updated["last_success_at"]
-        self._state = updated["state"]
-        if self._error_checkpoint_present():
-            self._write_error_checkpoint(None)
+        def finalize(_updated: dict[str, Any]) -> None:
+            if self._error_checkpoint_present():
+                self._write_error_checkpoint(None)
 
-    def record_failure(self, *, code: str) -> None:
+        self._update(
+            mutate,
+            advance_generation=True,
+            finalize_under_lock=finalize,
+        )
+
+    def record_failure(
+        self,
+        *,
+        code: str,
+        _durable_path_lock: Callable[..., Any] = durable_path_lock,
+        _durable_path_lock_code: object = durable_path_lock.__code__,
+    ) -> None:
         code = _text(code, "code")
-        self._write_error_checkpoint(code)
+        if (
+            durable_path_lock is not _durable_path_lock
+            or getattr(_durable_path_lock, "__code__", None)
+            is not _durable_path_lock_code
+        ):
+            raise ContinuousSessionError(
+                "canonical failure publication lock authority changed"
+            )
+        with _durable_path_lock(self.path):
+            self._write_error_checkpoint(code)
 
 
 class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):

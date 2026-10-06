@@ -1629,3 +1629,73 @@ def test_session_update_rejects_runtime_rmw_lock_rebinding(monkeypatch) -> None:
             assert "read-modify-write authority" in str(exc)
         else:
             raise AssertionError("runtime-rebound durable path lock was accepted")
+
+
+def test_state_transition_cleanup_cannot_erase_newer_failure() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="OLDER_FAILURE")
+
+        original_write = state._write_error_checkpoint
+        cleanup_entered = threading.Event()
+        release_cleanup = threading.Event()
+        failure_started = threading.Event()
+        failure_completed = threading.Event()
+
+        def gated_write(code: str | None) -> None:
+            if code is None:
+                cleanup_entered.set()
+                assert release_cleanup.wait(2.0)
+            original_write(code)
+
+        state._write_error_checkpoint = gated_write  # type: ignore[method-assign]
+
+        transition = threading.Thread(
+            target=lambda: state.set_state(continuous_session.SessionState.PAUSED),
+            daemon=True,
+        )
+        transition.start()
+        assert cleanup_entered.wait(1.0)
+
+        def publish_new_failure() -> None:
+            failure_started.set()
+            state.record_failure(code="NEWER_FAILURE")
+            failure_completed.set()
+
+        failure = threading.Thread(target=publish_new_failure, daemon=True)
+        failure.start()
+        assert failure_started.wait(1.0)
+        assert not failure_completed.wait(0.15)
+
+        release_cleanup.set()
+        transition.join(timeout=2.0)
+        failure.join(timeout=2.0)
+        assert not transition.is_alive()
+        assert not failure.is_alive()
+        assert failure_completed.is_set()
+
+        snapshot = state.snapshot()
+        assert snapshot.state is continuous_session.SessionState.PAUSED
+        assert snapshot.last_error_code == "NEWER_FAILURE"
+
+
+def test_record_failure_rejects_runtime_session_lock_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        def attacker_lock(_path: object):
+            raise AssertionError("runtime-rebound failure lock executed")
+
+        monkeypatch.setattr(
+            continuous_session,
+            "durable_path_lock",
+            attacker_lock,
+        )
+        try:
+            state.record_failure(code="FAIL")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "failure publication lock authority" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound failure lock was accepted")

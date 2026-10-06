@@ -105,10 +105,16 @@ def test_current_session_turnover_counts_product_admissions_after_session_start(
     book = PaperBook("100")
     book.save(tmp_path / "paper_book.json")
     session_store = ProductEconomicSessionStore(tmp_path)
-    session_store.current()
+    session = session_store.current()
 
     book = PaperBook.load(tmp_path / "paper_book.json")
-    ticket_id = _add_current_admission(tmp_path, book, stake="4", suffix="current")
+    ticket_id = _add_current_admission(
+        tmp_path,
+        book,
+        stake="4",
+        suffix="current",
+        placed_at=session.started_at,
+    )
     book.save(tmp_path / "paper_book.json")
     current = PaperBook.load(tmp_path / "paper_book.json")
 
@@ -129,10 +135,16 @@ def test_session_turnover_restarts_to_same_identity_and_digest(tmp_path):
     EconomicGoalStore(tmp_path).initialize_owner(_goal())
     book = PaperBook("100")
     book.save(tmp_path / "paper_book.json")
-    ProductEconomicSessionStore(tmp_path).current()
+    initial_session = ProductEconomicSessionStore(tmp_path).current()
 
     book = PaperBook.load(tmp_path / "paper_book.json")
-    _add_current_admission(tmp_path, book, stake="3", suffix="restart")
+    _add_current_admission(
+        tmp_path,
+        book,
+        stake="3",
+        suffix="restart",
+        placed_at=initial_session.started_at,
+    )
     book.save(tmp_path / "paper_book.json")
     current = PaperBook.load(tmp_path / "paper_book.json")
 
@@ -154,7 +166,13 @@ def test_explicit_successor_resets_session_scope_without_erasing_paper_history(t
     predecessor = session_store.current()
 
     book = PaperBook.load(tmp_path / "paper_book.json")
-    ticket_id = _add_current_admission(tmp_path, book, stake="4", suffix="predecessor")
+    ticket_id = _add_current_admission(
+        tmp_path,
+        book,
+        stake="4",
+        suffix="predecessor",
+        placed_at=predecessor.started_at,
+    )
     book.save(tmp_path / "paper_book.json")
     current = PaperBook.load(tmp_path / "paper_book.json")
     before = _resolve(tmp_path, current, session_store)
@@ -232,7 +250,13 @@ def test_session_turnover_require_current_rejects_stale_book_projection(tmp_path
     )
 
     changed = PaperBook.load(tmp_path / "paper_book.json")
-    _add_current_admission(tmp_path, changed, stake="2", suffix="stale-projection")
+    _add_current_admission(
+        tmp_path,
+        changed,
+        stake="2",
+        suffix="stale-projection",
+        placed_at=session.started_at,
+    )
     changed.save(tmp_path / "paper_book.json")
     durable = PaperBook.load(tmp_path / "paper_book.json")
 
@@ -269,10 +293,10 @@ def test_session_turnover_require_current_rejects_predecessor_after_goal_transit
 
     import pytest
     from autosport.risk_turnover_evidence import (
-        PaperSessionTurnoverEvidenceIncompleteError,
+        PaperSessionTurnoverEvidenceMismatchError,
     )
 
-    with pytest.raises(PaperSessionTurnoverEvidenceIncompleteError):
+    with pytest.raises(PaperSessionTurnoverEvidenceMismatchError):
         PaperSessionTurnoverResolver.require_current(
             evidence,
             book=PaperBook.load(tmp_path / "paper_book.json"),

@@ -235,6 +235,20 @@ def _install() -> None:
         for name in cycle_receipt_field_names
     )
 
+    def require_authority_field_surfaces(
+        *,
+        expected_type: type,
+        descriptors: tuple[tuple[str, object], ...],
+        label: str,
+    ) -> None:
+        if any(
+            expected_type.__dict__.get(name) is not descriptor
+            for name, descriptor in descriptors
+        ):
+            raise _origin.PaperExecutionDecisionOriginError(
+                f"{label} descriptor authority changed"
+            )
+
     def read_authority_fields(
         value: object,
         *,
@@ -246,24 +260,20 @@ def _install() -> None:
             raise _origin.PaperExecutionDecisionOriginError(
                 f"{label} requires exact canonical type"
             )
-        if any(
-            expected_type.__dict__.get(name) is not descriptor
-            for name, descriptor in descriptors
-        ):
-            raise _origin.PaperExecutionDecisionOriginError(
-                f"{label} descriptor authority changed"
-            )
+        require_authority_field_surfaces(
+            expected_type=expected_type,
+            descriptors=descriptors,
+            label=label,
+        )
         values = {
             name: descriptor.__get__(value, expected_type)
             for name, descriptor in descriptors
         }
-        if any(
-            expected_type.__dict__.get(name) is not descriptor
-            for name, descriptor in descriptors
-        ):
-            raise _origin.PaperExecutionDecisionOriginError(
-                f"{label} descriptor authority changed"
-            )
+        require_authority_field_surfaces(
+            expected_type=expected_type,
+            descriptors=descriptors,
+            label=label,
+        )
         return values
 
     campaign_binding_keys = _FORWARD_OBSERVATION_BINDING_KEYS
@@ -323,6 +333,22 @@ def _install() -> None:
             raise TypeError(
                 "forward campaign execution requires exact precommit locator, "
                 "collector store, source spec, forward protocol, and cycle receipt"
+            )
+
+        # Reject receipt-authority drift before the base execution runtime may
+        # materialize or bind PaperBook state. The stored receipt fields are direct
+        # causal inputs to the later decision-time Observation and must already be
+        # bound to their canonical descriptors at constructor entry.
+        if campaign_requested:
+            require_authority_field_surfaces(
+                expected_type=campaign_receipt_type,
+                descriptors=campaign_receipt_field_descriptors,
+                label="campaign inception receipt",
+            )
+            require_authority_field_surfaces(
+                expected_type=campaign_cycle_receipt_type,
+                descriptors=cycle_receipt_field_descriptors,
+                label="campaign cycle receipt",
             )
 
         # Reject malformed forward capability before the base execution runtime may

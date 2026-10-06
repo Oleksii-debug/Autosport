@@ -79,61 +79,89 @@ _CANONICAL_PROVENANCE_TYPE: Final = EconomicGoalProvenance
 _CANONICAL_PROVENANCE_VALIDATOR: Final = EconomicGoalProvenance.__post_init__
 
 
-def _canonical_json(payload: object) -> bytes:
+def _canonical_json(
+    payload: object,
+    _dumps=json.dumps,
+    _error_type=EconomicGoalProvenanceError,
+) -> bytes:
     try:
-        return json.dumps(
+        return _dumps(
             payload,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeEncodeError) as exc:
-        raise EconomicGoalProvenanceError("economic-goal payload is not canonically serializable") from exc
+        raise _error_type("economic-goal payload is not canonically serializable") from exc
 
 
-def contract_sha256(contract: EconomicGoalContract) -> str:
+def contract_sha256(
+    contract: EconomicGoalContract,
+    _goal_type=_CANONICAL_GOAL_TYPE,
+    _goal_validator=_CANONICAL_GOAL_VALIDATOR,
+    _payload_encoder=economic_goal_to_payload,
+    _json_encoder=_canonical_json,
+    _sha256=hashlib.sha256,
+    _goal_error=EconomicGoalContractError,
+) -> str:
     """Hash the exact canonical persisted representation of ``contract``."""
 
-    if type(contract) is not _CANONICAL_GOAL_TYPE:
-        raise EconomicGoalContractError("provenance hashing requires an EconomicGoalContract")
-    _CANONICAL_GOAL_VALIDATOR(contract)
-    return hashlib.sha256(_canonical_json(economic_goal_to_payload(contract))).hexdigest()
+    if type(contract) is not _goal_type:
+        raise _goal_error("provenance hashing requires an EconomicGoalContract")
+    _goal_validator(contract)
+    return _sha256(_json_encoder(_payload_encoder(contract))).hexdigest()
 
 
-def provenance_for(contract: EconomicGoalContract) -> EconomicGoalProvenance:
+def provenance_for(
+    contract: EconomicGoalContract,
+    _goal_type=_CANONICAL_GOAL_TYPE,
+    _goal_validator=_CANONICAL_GOAL_VALIDATOR,
+    _provenance_type=_CANONICAL_PROVENANCE_TYPE,
+    _contract_sha256=contract_sha256,
+    _schema=PROVENANCE_SCHEMA,
+    _schema_version=PROVENANCE_SCHEMA_VERSION,
+    _goal_error=EconomicGoalContractError,
+) -> EconomicGoalProvenance:
     """Derive immutable provenance identity without introducing another authority."""
 
-    if type(contract) is not _CANONICAL_GOAL_TYPE:
-        raise EconomicGoalContractError("provenance requires an EconomicGoalContract")
-    _CANONICAL_GOAL_VALIDATOR(contract)
-    return _CANONICAL_PROVENANCE_TYPE(
-        schema=PROVENANCE_SCHEMA,
-        schema_version=PROVENANCE_SCHEMA_VERSION,
+    if type(contract) is not _goal_type:
+        raise _goal_error("provenance requires an EconomicGoalContract")
+    _goal_validator(contract)
+    return _provenance_type(
+        schema=_schema,
+        schema_version=_schema_version,
         goal_id=contract.goal_id,
         revision=contract.revision,
         bankroll_id=contract.bankroll_id,
-        contract_sha256=contract_sha256(contract),
+        contract_sha256=_contract_sha256(contract),
     )
 
 
 def verify_provenance(
     contract: EconomicGoalContract,
     provenance: EconomicGoalProvenance,
+    _goal_type=_CANONICAL_GOAL_TYPE,
+    _provenance_type=_CANONICAL_PROVENANCE_TYPE,
+    _goal_validator=_CANONICAL_GOAL_VALIDATOR,
+    _provenance_validator=_CANONICAL_PROVENANCE_VALIDATOR,
+    _contract_sha256=contract_sha256,
+    _goal_error=EconomicGoalContractError,
+    _provenance_error=EconomicGoalProvenanceError,
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
-    if type(contract) is not _CANONICAL_GOAL_TYPE:
-        raise EconomicGoalContractError("provenance verification requires an EconomicGoalContract")
-    if type(provenance) is not _CANONICAL_PROVENANCE_TYPE:
-        raise EconomicGoalProvenanceError("provenance must be EconomicGoalProvenance")
-    _CANONICAL_GOAL_VALIDATOR(contract)
-    _CANONICAL_PROVENANCE_VALIDATOR(provenance)
+    if type(contract) is not _goal_type:
+        raise _goal_error("provenance verification requires an EconomicGoalContract")
+    if type(provenance) is not _provenance_type:
+        raise _provenance_error("provenance must be EconomicGoalProvenance")
+    _goal_validator(contract)
+    _provenance_validator(provenance)
     if provenance.goal_id != contract.goal_id:
-        raise EconomicGoalProvenanceError("provenance goal_id mismatch")
+        raise _provenance_error("provenance goal_id mismatch")
     if provenance.revision != contract.revision:
-        raise EconomicGoalProvenanceError("provenance revision mismatch")
+        raise _provenance_error("provenance revision mismatch")
     if provenance.bankroll_id != contract.bankroll_id:
-        raise EconomicGoalProvenanceError("provenance bankroll_id mismatch")
-    actual = contract_sha256(contract)
+        raise _provenance_error("provenance bankroll_id mismatch")
+    actual = _contract_sha256(contract)
     if provenance.contract_sha256 != actual:
-        raise EconomicGoalProvenanceError("provenance contract_sha256 mismatch")
+        raise _provenance_error("provenance contract_sha256 mismatch")

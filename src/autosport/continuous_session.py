@@ -424,11 +424,16 @@ class _ContinuousSessionState:
         return True
 
     @staticmethod
-    def _bounded_descriptor_read(descriptor: int, limit: int) -> bytes:
+    def _bounded_descriptor_read(
+        descriptor: int,
+        limit: int,
+        *,
+        _os_read: Callable[[int, int], bytes] = os.read,
+    ) -> bytes:
         chunks: list[bytes] = []
         remaining = limit
         while remaining > 0:
-            chunk = os.read(descriptor, remaining)
+            chunk = _os_read(descriptor, remaining)
             if not chunk:
                 break
             chunks.append(chunk)
@@ -448,8 +453,15 @@ class _ContinuousSessionState:
         _os_o_binary: int = getattr(os, "O_BINARY", 0),
         _os_o_nofollow: int = getattr(os, "O_NOFOLLOW", 0),
         _os_o_nonblock: int = getattr(os, "O_NONBLOCK", 0),
+        _os_seek_set: int = os.SEEK_SET,
         _path_lstat: Callable[[Path], os.stat_result] = Path.lstat,
         _path_lstat_code: object = Path.lstat.__code__,
+        _stat_islnk: Callable[[int], bool] = stat.S_ISLNK,
+        _stat_isreg: Callable[[int], bool] = stat.S_ISREG,
+        _bounded_descriptor_read: Callable[..., bytes] = _bounded_descriptor_read.__func__,
+        _bounded_descriptor_read_code: object = _bounded_descriptor_read.__func__.__code__,
+        _file_identity: Callable[[os.stat_result], tuple[int, int]] = _file_identity.__func__,
+        _file_identity_code: object = _file_identity.__func__.__code__,
     ) -> bytes:
         if (
             os.open is not _os_open
@@ -463,6 +475,12 @@ class _ContinuousSessionState:
             or getattr(os, "O_BINARY", 0) != _os_o_binary
             or getattr(os, "O_NOFOLLOW", 0) != _os_o_nofollow
             or getattr(os, "O_NONBLOCK", 0) != _os_o_nonblock
+            or os.SEEK_SET != _os_seek_set
+            or stat.S_ISLNK is not _stat_islnk
+            or stat.S_ISREG is not _stat_isreg
+            or getattr(_bounded_descriptor_read, "__code__", None)
+            is not _bounded_descriptor_read_code
+            or getattr(_file_identity, "__code__", None) is not _file_identity_code
         ):
             raise ContinuousSessionError(
                 "canonical operational-checkpoint filesystem authority changed"
@@ -473,11 +491,11 @@ class _ContinuousSessionState:
         # opening a FIFO/device-like replacement without O_NONBLOCK could hang
         # the coordinator before descriptor-type verification gets a chance to
         # fail closed.  Regular files ignore this flag.
-        flags |= getattr(os, "O_NONBLOCK", 0)
+        flags |= _os_o_nonblock
         descriptor: int | None = None
         try:
-            before = self._error_path.lstat()
-            if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            before = _path_lstat(self._error_path)
+            if _stat_islnk(before.st_mode) or not _stat_isreg(before.st_mode):
                 raise ContinuousSessionError(
                     "continuous session operational error checkpoint "
                     "must be a regular file"
@@ -488,37 +506,37 @@ class _ContinuousSessionState:
                     "must not have multiple hard links"
                 )
 
-            descriptor = os.open(self._error_path, flags)
-            opened = os.fstat(descriptor)
-            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            descriptor = _os_open(self._error_path, flags)
+            opened = _os_fstat(descriptor)
+            if not _stat_isreg(opened.st_mode) or opened.st_nlink != 1:
                 raise ContinuousSessionError(
                     "continuous session operational error checkpoint "
                     "file identity is not trustworthy"
                 )
-            if self._file_identity(opened) != self._file_identity(before):
+            if _file_identity(opened) != _file_identity(before):
                 raise ContinuousSessionError(
                     "continuous session operational error checkpoint "
                     "was replaced before verification"
                 )
 
             read_limit = _max_bytes + 1
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            first_image = self._bounded_descriptor_read(descriptor, read_limit)
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            encoded = self._bounded_descriptor_read(descriptor, read_limit)
+            _os_lseek(descriptor, 0, _os_seek_set)
+            first_image = _bounded_descriptor_read(descriptor, read_limit)
+            _os_lseek(descriptor, 0, _os_seek_set)
+            encoded = _bounded_descriptor_read(descriptor, read_limit)
             if encoded != first_image:
                 raise ContinuousSessionError(
                     "continuous session operational error checkpoint "
                     "changed during bounded read"
                 )
 
-            current = os.fstat(descriptor)
-            after = self._error_path.lstat()
+            current = _os_fstat(descriptor)
+            after = _path_lstat(self._error_path)
             if (
-                self._file_identity(current) != self._file_identity(opened)
-                or self._file_identity(after) != self._file_identity(opened)
-                or stat.S_ISLNK(after.st_mode)
-                or not stat.S_ISREG(after.st_mode)
+                _file_identity(current) != _file_identity(opened)
+                or _file_identity(after) != _file_identity(opened)
+                or _stat_islnk(after.st_mode)
+                or not _stat_isreg(after.st_mode)
                 or after.st_nlink != 1
             ):
                 raise ContinuousSessionError(
@@ -535,7 +553,7 @@ class _ContinuousSessionState:
         finally:
             if descriptor is not None:
                 try:
-                    os.close(descriptor)
+                    _os_close(descriptor)
                 except OSError as exc:
                     raise ContinuousSessionError(
                         "cannot close continuous session operational error checkpoint"

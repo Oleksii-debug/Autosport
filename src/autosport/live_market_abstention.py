@@ -98,8 +98,8 @@ class LiveMarketEligibilityInput:
     def __post_init__(self) -> None:
         _require_aware(self.quote_observed_at, "quote_observed_at")
         _require_aware(self.decision_observed_at, "decision_observed_at")
-        if type(self.max_quote_age) is not timedelta or self.max_quote_age <= timedelta(0):
-            raise LiveMarketAbstentionError("max_quote_age must be a positive timedelta")
+        if type(self.max_quote_age) is not timedelta or self.max_quote_age < timedelta(0):
+            raise LiveMarketAbstentionError("max_quote_age must be a non-negative timedelta")
         if type(self.market_status) is not MarketStatus:
             raise LiveMarketAbstentionError("market_status must be MarketStatus")
         if self.market_data_delayed is not None:
@@ -188,7 +188,7 @@ def evaluate_live_market_eligibility(
 
     if age < timedelta(0):
         reasons.append(AbstentionReason.FUTURE_QUOTE)
-    elif age >= evidence.max_quote_age:
+    elif age > evidence.max_quote_age:
         reasons.append(AbstentionReason.STALE_QUOTE)
 
     if evidence.market_status is not MarketStatus.OPEN:

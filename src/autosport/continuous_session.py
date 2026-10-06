@@ -61,13 +61,6 @@ def _validate_canonical_invalidation_buffer_state(
         or type(full_refresh_required) is not bool
         or len(dirty) > max_dirty_keys
         or (full_refresh_required and bool(dirty))
-        or any(
-            type(key) is not tuple
-            or len(key) != 2
-            or any(type(part) is not str for part in key)
-            or value is not None
-            for key, value in dirty.items()
-        )
     ):
         raise ContinuousSessionError(
             "canonical invalidation buffer state is invalid"

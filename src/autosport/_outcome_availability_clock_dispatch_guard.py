@@ -1,0 +1,525 @@
+"""Seal product outcome-availability clock dispatch and causal ordering.
+
+The two-phase RunRegistry outcome publication is causal only if its post-publication
+clock sampler cannot be replaced. Python function defaults, globals and closure-
+reachable predecessor functions are mutable authority surfaces. This composition
+therefore keeps the already-canonical begin/clock implementations behind checked
+callable objects and exposes only one tiny public method wrapper whose function
+metadata contains no authority-bearing predecessor ``FunctionType``.
+
+The checked objects validate the exact import-time public clock identity, the exact
+installed sampler/begin identities and every directly-read global binding of the
+private clones before delegating. They also snapshot the registry-wide established
+outcome-availability high-water while holding the existing re-entrant durable path
+lock. Any clock sample used to mint NEW availability must be strictly later than
+that fence. Equal representable ticks and cross-lineage wall-clock rollback therefore
+fail closed instead of making later durable knowledge appear causally simultaneous
+with, or earlier than, already-established product knowledge.
+
+This proves fail-closed behavior for the supported public dispatch/function-metadata
+threat model. It does not claim capability security against arbitrary same-process
+reflection that reaches private object slots and then mutates or directly invokes
+raw FunctionType instances; that stronger property remains explicitly unproven. No
+second registry, clock, lock, or availability authority is introduced.
+"""
+from __future__ import annotations
+
+from contextvars import ContextVar
+from types import FunctionType
+
+from . import _outcome_availability_registry_serialization as _availability
+from . import run_registry as _run_registry
+
+
+_REGISTRY_AVAILABILITY_FENCE: ContextVar[str | None] = ContextVar(
+    "autosport_outcome_registry_availability_fence_v1",
+    default=None,
+)
+
+
+def _strictly_after_registry_fence(
+    candidate: str,
+    fence: str | None,
+    *,
+    canonical_timestamp,
+    parse_timestamp,
+    error_type,
+) -> str:
+    """Return canonical candidate iff it is strictly after established history."""
+
+    canonical_candidate = canonical_timestamp(
+        candidate,
+        field="outcome lineage product acceptance time",
+    )
+    if fence is not None:
+        canonical_fence = canonical_timestamp(
+            fence,
+            field="registry-wide outcome availability fence",
+        )
+        if parse_timestamp(canonical_candidate) <= parse_timestamp(canonical_fence):
+            raise error_type(
+                "product acceptance time must be strictly later than registry-wide established outcome availability"
+            )
+    return canonical_candidate
+
+
+def _registry_availability_fence(
+    registry,
+    *,
+    read_state,
+    trust_bindings,
+    canonical_timestamp,
+    parse_timestamp,
+) -> str | None:
+    """Read the maximum established first-availability across every outcome identity."""
+
+    state = read_state(registry)
+    bindings = trust_bindings(state)
+    established: list[str] = []
+    for binding in bindings.values():
+        for revision in binding.revisions:
+            if revision.first_available_at is not None:
+                established.append(
+                    canonical_timestamp(
+                        revision.first_available_at,
+                        field="registry-wide established outcome availability",
+                    )
+                )
+    if not established:
+        return None
+    return max(established, key=parse_timestamp)
+
+
+def _install_guard() -> None:
+    registry_type = _run_registry.RunRegistry
+    outcome_trust = _availability._outcome_trust
+    error_type = outcome_trust.OutcomeLineageTrustError
+    canonical_timestamp = outcome_trust._canonical_timestamp
+    parse_timestamp = outcome_trust._parse_timestamp
+    canonical_path_lock = _availability.durable_path_lock
+    canonical_path_lock_code = getattr(canonical_path_lock, "__code__", None)
+    canonical_read = registry_type._read
+    canonical_read_code = canonical_read.__code__
+    canonical_trust_bindings = registry_type._outcome_lineage_trust_bindings
+    canonical_trust_bindings_code = canonical_trust_bindings.__code__
+    canonical_lineage_parser = _run_registry.outcome_lineage_binding_from_payload
+    canonical_lineage_parser_code = canonical_lineage_parser.__code__
+    canonical_public_clock = _run_registry._utc_now
+    canonical_public_clock_code = canonical_public_clock.__code__
+    canonical_begin = registry_type.begin
+    canonical_timestamp_code = canonical_timestamp.__code__
+    parse_timestamp_code = parse_timestamp.__code__
+    strict_fence_code = _strictly_after_registry_fence.__code__
+    fence_reader_code = _registry_availability_fence.__code__
+
+    if not getattr(canonical_begin, "_autosport_outcome_two_phase", False):
+        raise RuntimeError("causal outcome publication guard is not installed")
+    if type(canonical_public_clock) is not FunctionType:
+        raise RuntimeError("canonical RunRegistry product clock is not a plain function")
+    if type(canonical_begin) is not FunctionType:
+        raise RuntimeError("canonical causal RunRegistry begin is not a plain function")
+    if type(canonical_read) is not FunctionType:
+        raise RuntimeError("canonical RunRegistry read authority is not a plain function")
+    if type(canonical_trust_bindings) is not FunctionType:
+        raise RuntimeError("canonical RunRegistry outcome trust parser is not a plain function")
+    if not callable(canonical_path_lock):
+        raise RuntimeError("canonical outcome availability path lock is unavailable")
+
+    def clone_function(
+        function: FunctionType,
+        *,
+        globals_overrides: dict[str, object] | None = None,
+    ) -> FunctionType:
+        globals_copy = dict(function.__globals__)
+        if globals_overrides:
+            globals_copy.update(globals_overrides)
+        cloned = FunctionType(
+            function.__code__,
+            globals_copy,
+            function.__name__,
+            function.__defaults__,
+            function.__closure__,
+        )
+        cloned.__kwdefaults__ = (
+            None if function.__kwdefaults__ is None else dict(function.__kwdefaults__)
+        )
+        cloned.__annotations__ = dict(function.__annotations__)
+        return cloned
+
+    def snapshot_globals(function: FunctionType) -> tuple[tuple[str, object], ...]:
+        names = sorted(
+            name for name in set(function.__code__.co_names) if name in function.__globals__
+        )
+        if "__builtins__" in function.__globals__:
+            names.append("__builtins__")
+        return tuple((name, function.__globals__[name]) for name in names)
+
+    class CheckedClock:
+        """Callable clock boundary with no raw clock function in public metadata."""
+
+        __slots__ = (
+            "_function",
+            "_snapshot",
+            "_run_registry_module",
+            "_canonical_public_clock",
+            "_canonical_public_clock_code",
+            "_fence_context",
+            "_canonical_timestamp",
+            "_canonical_timestamp_code",
+            "_parse_timestamp",
+            "_parse_timestamp_code",
+            "_strict_check",
+            "_strict_check_code",
+            "_error_type",
+        )
+
+        def __init__(
+            self,
+            function: FunctionType,
+            snapshot: tuple[tuple[str, object], ...],
+            run_registry_module,
+            canonical_clock: FunctionType,
+            canonical_clock_code,
+            fence_context,
+            canonicalize,
+            canonicalize_code,
+            parse,
+            parse_code,
+            strict_check,
+            strict_check_code,
+            error,
+        ) -> None:
+            self._function = function
+            self._snapshot = snapshot
+            self._run_registry_module = run_registry_module
+            self._canonical_public_clock = canonical_clock
+            self._canonical_public_clock_code = canonical_clock_code
+            self._fence_context = fence_context
+            self._canonical_timestamp = canonicalize
+            self._canonical_timestamp_code = canonicalize_code
+            self._parse_timestamp = parse
+            self._parse_timestamp_code = parse_code
+            self._strict_check = strict_check
+            self._strict_check_code = strict_check_code
+            self._error_type = error
+
+        def __call__(self) -> str:
+            if (
+                self._run_registry_module._utc_now is not self._canonical_public_clock
+                or self._canonical_public_clock.__code__
+                is not self._canonical_public_clock_code
+            ):
+                raise self._error_type("product UTC clock authority was rebound")
+            if (
+                self._canonical_timestamp.__code__
+                is not self._canonical_timestamp_code
+                or self._parse_timestamp.__code__ is not self._parse_timestamp_code
+                or self._strict_check.__code__ is not self._strict_check_code
+            ):
+                raise self._error_type(
+                    "outcome availability clock dependency implementation changed"
+                )
+            globals_dict = self._function.__globals__
+            for name, expected in self._snapshot:
+                if globals_dict.get(name, self) is not expected:
+                    raise self._error_type(
+                        f"frozen product UTC clock global {name!r} was rebound"
+                    )
+            return self._strict_check(
+                self._function(),
+                self._fence_context.get(),
+                canonical_timestamp=self._canonical_timestamp,
+                parse_timestamp=self._parse_timestamp,
+                error_type=self._error_type,
+            )
+
+    # Freeze the canonical formatter over its import-time datetime/timezone objects.
+    # The raw clone is retained only inside CheckedClock, not in any installed
+    # FunctionType closure/default/wrapped chain.
+    clock_clone = clone_function(canonical_public_clock)
+    checked_clock = CheckedClock(
+        clock_clone,
+        snapshot_globals(clock_clone),
+        _run_registry,
+        canonical_public_clock,
+        canonical_public_clock_code,
+        _REGISTRY_AVAILABILITY_FENCE,
+        canonical_timestamp,
+        canonical_timestamp_code,
+        parse_timestamp,
+        parse_timestamp_code,
+        _strictly_after_registry_fence,
+        strict_fence_code,
+        error_type,
+    )
+    del clock_clone
+
+    # Clone the already-canonical two-phase begin and bind it to the checked clock.
+    # The raw begin clone will likewise live only inside CheckedBegin below.
+    begin_clone = clone_function(
+        canonical_begin,
+        globals_overrides={"_sealed_product_utc_now": checked_clock},
+    )
+    begin_snapshot = snapshot_globals(begin_clone)
+
+    class CheckedBegin:
+        """Self-checking causal begin implementation hidden behind one public wrapper."""
+
+        __slots__ = (
+            "_function",
+            "_snapshot",
+            "_registry_type",
+            "_run_registry_module",
+            "_availability_module",
+            "_canonical_public_clock",
+            "_canonical_public_clock_code",
+            "_clock",
+            "_outcome_trust_dependencies",
+            "_path_lock",
+            "_path_lock_code",
+            "_read_state",
+            "_read_state_code",
+            "_trust_bindings",
+            "_trust_bindings_code",
+            "_lineage_parser",
+            "_lineage_parser_code",
+            "_fence_context",
+            "_canonical_timestamp",
+            "_canonical_timestamp_code",
+            "_parse_timestamp",
+            "_parse_timestamp_code",
+            "_fence_reader",
+            "_fence_reader_code",
+            "_error_type",
+            "_public_wrapper",
+        )
+
+        def __init__(
+            self,
+            function: FunctionType,
+            snapshot: tuple[tuple[str, object], ...],
+            registry,
+            run_registry_module,
+            availability_module,
+            canonical_clock: FunctionType,
+            canonical_clock_code,
+            clock,
+            outcome_trust_dependencies: tuple[
+                tuple[object, str, object, object | None], ...
+            ],
+            path_lock,
+            path_lock_code,
+            read_state,
+            read_state_code,
+            trust_bindings,
+            trust_bindings_code,
+            lineage_parser,
+            lineage_parser_code,
+            fence_context,
+            canonicalize,
+            canonicalize_code,
+            parse,
+            parse_code,
+            fence_reader,
+            fence_reader_code,
+            error,
+        ) -> None:
+            self._function = function
+            self._snapshot = snapshot
+            self._registry_type = registry
+            self._run_registry_module = run_registry_module
+            self._availability_module = availability_module
+            self._canonical_public_clock = canonical_clock
+            self._canonical_public_clock_code = canonical_clock_code
+            self._clock = clock
+            self._outcome_trust_dependencies = outcome_trust_dependencies
+            self._path_lock = path_lock
+            self._path_lock_code = path_lock_code
+            self._read_state = read_state
+            self._read_state_code = read_state_code
+            self._trust_bindings = trust_bindings
+            self._trust_bindings_code = trust_bindings_code
+            self._lineage_parser = lineage_parser
+            self._lineage_parser_code = lineage_parser_code
+            self._fence_context = fence_context
+            self._canonical_timestamp = canonicalize
+            self._canonical_timestamp_code = canonicalize_code
+            self._parse_timestamp = parse
+            self._parse_timestamp_code = parse_code
+            self._fence_reader = fence_reader
+            self._fence_reader_code = fence_reader_code
+            self._error_type = error
+            self._public_wrapper = None
+
+        def bind_public_wrapper(self, wrapper: FunctionType) -> None:
+            if self._public_wrapper is not None:
+                raise RuntimeError("causal RunRegistry begin wrapper was already bound")
+            self._public_wrapper = wrapper
+
+        def __call__(self, registry, *args, **kwargs):
+            if type(registry) is not self._registry_type:
+                raise self._error_type("causal RunRegistry begin requires exact registry type")
+            if self._registry_type.begin is not self._public_wrapper:
+                raise self._error_type("causal RunRegistry begin dispatch was rebound")
+            if (
+                self._registry_type._read is not self._read_state
+                or self._read_state.__code__ is not self._read_state_code
+            ):
+                raise self._error_type("RunRegistry read authority dispatch was rebound")
+            if (
+                self._registry_type._outcome_lineage_trust_bindings
+                is not self._trust_bindings
+                or self._trust_bindings.__code__ is not self._trust_bindings_code
+            ):
+                raise self._error_type("RunRegistry outcome trust parser dispatch was rebound")
+            if (
+                self._run_registry_module.outcome_lineage_binding_from_payload
+                is not self._lineage_parser
+                or self._lineage_parser.__code__ is not self._lineage_parser_code
+            ):
+                raise self._error_type(
+                    "RunRegistry outcome lineage payload parser dispatch was rebound"
+                )
+            if (
+                self._availability_module._outcome_trust.outcome_lineage_binding_from_payload
+                is not self._lineage_parser
+            ):
+                raise self._error_type(
+                    "outcome trust lineage payload parser dispatch was rebound"
+                )
+            if (
+                self._run_registry_module._utc_now is not self._canonical_public_clock
+                or self._canonical_public_clock.__code__
+                is not self._canonical_public_clock_code
+            ):
+                raise self._error_type("product UTC clock authority was rebound")
+            if (
+                self._canonical_timestamp.__code__
+                is not self._canonical_timestamp_code
+                or self._parse_timestamp.__code__ is not self._parse_timestamp_code
+                or self._fence_reader.__code__ is not self._fence_reader_code
+            ):
+                raise self._error_type(
+                    "outcome availability fence dependency implementation changed"
+                )
+            if self._availability_module._sealed_product_utc_now is not self._clock:
+                raise self._error_type(
+                    "outcome availability clock sampler dispatch was rebound"
+                )
+            if (
+                self._availability_module.durable_path_lock is not self._path_lock
+                or (
+                    self._path_lock_code is not None
+                    and getattr(self._path_lock, "__code__", None)
+                    is not self._path_lock_code
+                )
+            ):
+                raise self._error_type(
+                    "outcome availability path-lock authority was rebound"
+                )
+            for module, name, expected, expected_code in self._outcome_trust_dependencies:
+                if (
+                    getattr(module, name, self) is not expected
+                    or (
+                        expected_code is not None
+                        and getattr(expected, "__code__", None) is not expected_code
+                    )
+                ):
+                    raise self._error_type(
+                        f"outcome availability transitive dependency {name!r} was rebound"
+                    )
+            globals_dict = self._function.__globals__
+            for name, expected in self._snapshot:
+                if globals_dict.get(name, self) is not expected:
+                    raise self._error_type(
+                        f"frozen causal RunRegistry begin global {name!r} was rebound"
+                    )
+
+            # Acquire the same existing re-entrant path lock before deriving the
+            # registry-wide causal fence. The cloned canonical begin acquires this
+            # lock again, so no stale writer can advance established history between
+            # the fence snapshot and the two-phase UNKNOWN -> available transition.
+            with self._path_lock(registry.path):
+                fence = self._fence_reader(
+                    registry,
+                    read_state=self._read_state,
+                    trust_bindings=self._trust_bindings,
+                    canonical_timestamp=self._canonical_timestamp,
+                    parse_timestamp=self._parse_timestamp,
+                )
+                token = self._fence_context.set(fence)
+                try:
+                    return self._function(registry, *args, **kwargs)
+                finally:
+                    self._fence_context.reset(token)
+
+    outcome_trust_dependencies = tuple(
+        (
+            outcome_trust,
+            name,
+            getattr(outcome_trust, name),
+            getattr(getattr(outcome_trust, name), "__code__", None),
+        )
+        for name in (
+            "_canonical_timestamp",
+            "_parse_timestamp",
+            "assert_compatible_outcome_lineages",
+            "TrustedOutcomeRevision",
+            "OutcomeLineageBinding",
+            "outcome_lineage_payload",
+        )
+    )
+    checked_begin = CheckedBegin(
+        begin_clone,
+        begin_snapshot,
+        registry_type,
+        _run_registry,
+        _availability,
+        canonical_public_clock,
+        canonical_public_clock_code,
+        checked_clock,
+        outcome_trust_dependencies,
+        canonical_path_lock,
+        canonical_path_lock_code,
+        canonical_read,
+        canonical_read_code,
+        canonical_trust_bindings,
+        canonical_trust_bindings_code,
+        canonical_lineage_parser,
+        canonical_lineage_parser_code,
+        _REGISTRY_AVAILABILITY_FENCE,
+        canonical_timestamp,
+        canonical_timestamp_code,
+        parse_timestamp,
+        parse_timestamp_code,
+        _registry_availability_fence,
+        fence_reader_code,
+        error_type,
+    )
+    del begin_clone
+    del begin_snapshot
+
+    def guarded_begin(self, *args, **kwargs):
+        # Deliberately retain only a non-FunctionType checked boundary in this
+        # closure. Recursive ordinary function-metadata traversal cannot recover
+        # and invoke the authority-bearing predecessor/clone directly.
+        return checked_begin(self, *args, **kwargs)
+
+    checked_begin.bind_public_wrapper(guarded_begin)
+    guarded_begin._autosport_registry_rmw_serialized = True
+    guarded_begin._autosport_outcome_two_phase = True
+    guarded_begin._autosport_product_clock_sealed = True
+    guarded_begin._autosport_clock_metadata_sealed = True
+    guarded_begin._autosport_global_strict_availability_fence = True
+    guarded_begin._autosport_predecessor_unreachable = True
+    # Machine-readable truth boundary: the supported public dispatch/metadata seals
+    # above do not prove capability security against arbitrary same-process private
+    # object reflection or raw FunctionType mutation/direct invocation.
+    guarded_begin._autosport_same_process_reflection_tamper_resistance_proven = False
+
+    _availability._sealed_product_utc_now = checked_clock
+    registry_type.begin = guarded_begin
+
+
+_install_guard()
+del _install_guard

@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from .agents import AgentContext, AgentOrchestrator
-from .dataset import ReplayDataset
+from .dataset import ReplayDataset, load_dataset
 from .decision_ledger import JsonlDecisionLedger, VerifiedDecisionLedgerSnapshot
 from .domain import MarketEvent
 from .economic_goal import EconomicGoalContract
@@ -33,6 +33,17 @@ from .recovery import transaction_history_requires_recovery
 from .replay import ReplayEngine, ReplayRun
 from .research_strategy import ResearchStrategyPlan
 from .risk import PaperRiskPolicy
+from .risk_sampling_membership import ResolvedFixedNRiskMembership
+from .risk_sampling_occurrence_authority import (
+    ProductIidDrawPlanError,
+    ProductIidRunExecutionReceipt,
+    expected_replay_consumed_payload_multiset_sha256,
+    expected_replay_input_payload_sequence_sha256,
+    issue_product_iid_run_admission,
+    materialize_product_iid_member_market_events,
+    resolve_product_iid_expected_draw_plan,
+    resolve_product_iid_run_execution,
+)
 from .run_registry import MixedStrategyWorkspaceError, RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
 from .settlement import SettlementEngine
@@ -44,6 +55,67 @@ from .strategies import (
     validate_strategy_configuration,
 )
 from .workspace_lock import WorkspaceEconomicLock
+
+
+_IID_PLAN_RESOLVER = resolve_product_iid_expected_draw_plan
+_IID_PLAN_RESOLVER_CODE = getattr(_IID_PLAN_RESOLVER, "__code__", None)
+_IID_MATERIALIZER = materialize_product_iid_member_market_events
+_IID_MATERIALIZER_CODE = getattr(_IID_MATERIALIZER, "__code__", None)
+_IID_ADMISSION_ISSUER = issue_product_iid_run_admission
+_IID_ADMISSION_ISSUER_CODE = getattr(_IID_ADMISSION_ISSUER, "__code__", None)
+_IID_EXECUTION_RESOLVER = resolve_product_iid_run_execution
+_IID_EXECUTION_RESOLVER_CODE = getattr(_IID_EXECUTION_RESOLVER, "__code__", None)
+_IID_EXPECTED_SEQUENCE = expected_replay_input_payload_sequence_sha256
+_IID_EXPECTED_SEQUENCE_CODE = getattr(_IID_EXPECTED_SEQUENCE, "__code__", None)
+_IID_EXPECTED_MULTISET = expected_replay_consumed_payload_multiset_sha256
+_IID_EXPECTED_MULTISET_CODE = getattr(_IID_EXPECTED_MULTISET, "__code__", None)
+_IID_REPLAY_ENGINE = ReplayEngine
+_IID_REPLAY_RUN = ReplayEngine.__dict__.get("run")
+_IID_REPLAY_RUN_CODE = getattr(_IID_REPLAY_RUN, "__code__", None)
+_IID_DATASET_TYPE = ReplayDataset
+_IID_MEMBERSHIP_TYPE = ResolvedFixedNRiskMembership
+_IID_PATH_TYPE = type(Path("."))
+_IID_DATASET_LOADER = load_dataset
+_IID_DATASET_LOADER_CODE = getattr(_IID_DATASET_LOADER, "__code__", None)
+_IID_EXECUTION_RECEIPT_TYPE = ProductIidRunExecutionReceipt
+
+
+def _require_iid_session_dispatch() -> None:
+    if (
+        resolve_product_iid_expected_draw_plan is not _IID_PLAN_RESOLVER
+        or getattr(_IID_PLAN_RESOLVER, "__code__", None)
+        is not _IID_PLAN_RESOLVER_CODE
+        or materialize_product_iid_member_market_events is not _IID_MATERIALIZER
+        or getattr(_IID_MATERIALIZER, "__code__", None)
+        is not _IID_MATERIALIZER_CODE
+        or issue_product_iid_run_admission is not _IID_ADMISSION_ISSUER
+        or getattr(_IID_ADMISSION_ISSUER, "__code__", None)
+        is not _IID_ADMISSION_ISSUER_CODE
+        or resolve_product_iid_run_execution is not _IID_EXECUTION_RESOLVER
+        or getattr(_IID_EXECUTION_RESOLVER, "__code__", None)
+        is not _IID_EXECUTION_RESOLVER_CODE
+        or expected_replay_input_payload_sequence_sha256
+        is not _IID_EXPECTED_SEQUENCE
+        or getattr(_IID_EXPECTED_SEQUENCE, "__code__", None)
+        is not _IID_EXPECTED_SEQUENCE_CODE
+        or expected_replay_consumed_payload_multiset_sha256
+        is not _IID_EXPECTED_MULTISET
+        or getattr(_IID_EXPECTED_MULTISET, "__code__", None)
+        is not _IID_EXPECTED_MULTISET_CODE
+        or ReplayEngine is not _IID_REPLAY_ENGINE
+        or ReplayEngine.__dict__.get("run") is not _IID_REPLAY_RUN
+        or getattr(_IID_REPLAY_RUN, "__code__", None)
+        is not _IID_REPLAY_RUN_CODE
+        or ReplayDataset is not _IID_DATASET_TYPE
+        or ResolvedFixedNRiskMembership is not _IID_MEMBERSHIP_TYPE
+        or load_dataset is not _IID_DATASET_LOADER
+        or getattr(_IID_DATASET_LOADER, "__code__", None)
+        is not _IID_DATASET_LOADER_CODE
+        or ProductIidRunExecutionReceipt is not _IID_EXECUTION_RECEIPT_TYPE
+    ):
+        raise ProductIidDrawPlanError(
+            "IID session execution authority dispatch changed"
+        )
 
 
 def _bind_canonical_settlement_engine(method):
@@ -163,6 +235,12 @@ class ObservationResult:
     stats: IngestionStats
     health: SourceHealthState
     current_quotes: tuple[MarketEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class IidMemberSessionResult:
+    session: SessionResult
+    execution: ProductIidRunExecutionReceipt
 
 
 class AutosportSession(metaclass=_AutosportSessionMeta):
@@ -333,6 +411,207 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 runtime_strategy_id=runtime_strategy_id,
             )
 
+    def run_iid_member_dataset(
+        self,
+        dataset: ReplayDataset,
+        *,
+        membership: ResolvedFixedNRiskMembership,
+        registry_path: str | Path,
+        sampling_manifest_json: str,
+        sampling_frame_json: str,
+        horizon_json: str,
+        member_index: int,
+        authority_root: str | Path | None = None,
+        speed: float = 0.0,
+    ) -> IidMemberSessionResult:
+        """Execute one fixed-N IID member from the frozen product draw plan.
+
+        This path never weakens ReplayEngine ordering or MarketMirror suppression.
+        A sampled transcript is admitted only when the exact materialized event
+        sequence is already replay-compatible; otherwise the run fails before
+        RunRegistry or economic state mutation.
+        """
+
+        _require_iid_session_dispatch()
+        if type(dataset) is not _IID_DATASET_TYPE:
+            raise TypeError("dataset must be an exact ReplayDataset")
+        if type(membership) is not _IID_MEMBERSHIP_TYPE:
+            raise TypeError(
+                "membership must be an exact ResolvedFixedNRiskMembership"
+            )
+        if type(dataset.root) is not _IID_PATH_TYPE:
+            raise TypeError("dataset.root must be an exact platform Path")
+        dataset_root = dataset.root.expanduser().resolve(strict=True)
+        manifest_path = dataset_root / "manifest.json"
+        try:
+            manifest_before = manifest_path.read_bytes()
+            canonical_dataset = _IID_DATASET_LOADER(dataset_root)
+            manifest_after = manifest_path.read_bytes()
+        except (OSError, ValueError) as exc:
+            raise ProductIidDrawPlanError(
+                "IID runtime dataset cannot be canonically re-resolved"
+            ) from exc
+        _require_iid_session_dispatch()
+        if manifest_before != manifest_after:
+            raise ProductIidDrawPlanError(
+                "IID runtime dataset manifest changed during canonical re-resolution"
+            )
+        if (
+            hashlib.sha256(manifest_before).hexdigest()
+            != membership.dataset_manifest_sha256
+        ):
+            raise ProductIidDrawPlanError(
+                "IID runtime dataset manifest differs from the frozen DatasetSnapshot"
+            )
+
+        with WorkspaceEconomicLock(self.workspace):
+            plan = _IID_PLAN_RESOLVER(
+                membership,
+                registry_path=registry_path,
+                workspace=self.workspace,
+                sampling_manifest_json=sampling_manifest_json,
+                sampling_frame_json=sampling_frame_json,
+                horizon_json=horizon_json,
+                authority_root=authority_root,
+            )
+            if type(member_index) is not int or member_index < 0:
+                raise ProductIidDrawPlanError(
+                    "member_index must be a non-negative exact integer"
+                )
+            if member_index >= len(plan.member_draws):
+                raise ProductIidDrawPlanError(
+                    "member_index is outside the expected draw plan"
+                )
+            draw = plan.member_draws[member_index]
+
+            corpus_events = canonical_dataset.load_market_events()
+            canonical_dataset._assert_sport_scope(corpus_events)
+            if self.research_plan is not None:
+                self.research_plan.preflight(corpus_events)
+            _require_iid_session_dispatch()
+            member_events = _IID_MATERIALIZER(
+                plan,
+                member_index=member_index,
+                market_events=corpus_events,
+            )
+            verified_sports = canonical_dataset._assert_sport_scope(
+                list(member_events)
+            )
+            if self.research_plan is not None:
+                self.research_plan.preflight(list(member_events))
+
+            _require_iid_session_dispatch()
+            expected_sequence = _IID_EXPECTED_SEQUENCE(draw)
+            expected_multiset = _IID_EXPECTED_MULTISET(draw)
+            preflight = _IID_REPLAY_ENGINE(member_events).run(
+                lambda _event: None,
+                speed=0.0,
+                run_id=draw.member_id,
+            )
+            if (
+                preflight.event_count != draw.draw_count
+                or preflight.input_event_payload_sequence_sha256
+                != expected_sequence
+                or preflight.consumed_event_payload_sequence_sha256
+                != expected_sequence
+                or preflight.applied_event_payload_sequence_sha256
+                != expected_sequence
+                or preflight.consumed_event_payload_multiset_sha256
+                != expected_multiset
+            ):
+                raise ProductIidDrawPlanError(
+                    "IID draw is not replay-compatible without causal reordering "
+                    "or current-state suppression"
+                )
+
+            _require_iid_session_dispatch()
+            admission = _IID_ADMISSION_ISSUER(
+                membership,
+                registry_path=registry_path,
+                workspace=self.workspace,
+                sampling_manifest_json=sampling_manifest_json,
+                sampling_frame_json=sampling_frame_json,
+                horizon_json=horizon_json,
+                member_index=member_index,
+                authority_root=authority_root,
+            )
+            if (
+                admission.member_id != draw.member_id
+                or admission.member_index != member_index
+                or admission.expected_draw_plan_sha256 != plan.plan_sha256
+                or admission.expected_draw_transcript_sha256
+                != draw.draw_transcript_sha256
+                or admission.run_admission_bound is not False
+            ):
+                raise ProductIidDrawPlanError(
+                    "IID run-admission differs from the frozen member draw"
+                )
+
+            economic_goal, risk_policy = self._capture_economic_authority()
+            prior_strategy_ids = self.registry.strategy_ids()
+            if economic_goal is None and any(
+                value.startswith(self.strategy_id + "::economic:")
+                for value in prior_strategy_ids
+            ):
+                raise ValueError(
+                    "persisted EconomicGoal authority is missing for a workspace "
+                    "with economic-goal runtime history"
+                )
+            if (
+                economic_goal is not None
+                and self.strategy.strategy_id == "baseline-v1"
+            ):
+                raise ValueError(
+                    "baseline-v1 does not have proven EconomicGoal-aware sizing semantics"
+                )
+            runtime_strategy_id = self._runtime_strategy_identity(
+                economic_goal,
+                risk_policy,
+            )
+            outcome_lineage = outcome_lineage_binding_from_dataset(
+                canonical_dataset
+            )
+            if outcome_lineage is not None:
+                self.registry.assert_outcome_lineage_compatible(outcome_lineage)
+
+            _require_iid_session_dispatch()
+            result = self._run_dataset_locked(
+                canonical_dataset,
+                market_events=list(member_events),
+                verified_sports=verified_sports,
+                speed=speed,
+                allow_repeat=True,
+                outcome_lineage=outcome_lineage,
+                economic_goal=economic_goal,
+                risk_policy=risk_policy,
+                runtime_strategy_id=runtime_strategy_id,
+                run_id=draw.member_id,
+                sampling_draw_admission_receipt_sha256=admission.receipt_sha256,
+            )
+            _require_iid_session_dispatch()
+            execution = _IID_EXECUTION_RESOLVER(
+                membership,
+                registry_path=registry_path,
+                workspace=self.workspace,
+                sampling_manifest_json=sampling_manifest_json,
+                sampling_frame_json=sampling_frame_json,
+                horizon_json=horizon_json,
+                member_index=member_index,
+                authority_root=authority_root,
+            )
+            if (
+                type(execution) is not _IID_EXECUTION_RECEIPT_TYPE
+                or execution.member_id != draw.member_id
+                or execution.expected_draw_plan_sha256 != plan.plan_sha256
+                or execution.execution_consumption_proven is not True
+                or execution.occurrence_ancestry_proven is not True
+            ):
+                raise ProductIidDrawPlanError(
+                    "IID member run completed without canonical execution proof"
+                )
+            _require_iid_session_dispatch()
+            return IidMemberSessionResult(result, execution)
+
     @_seal_settlement_consumer_entry
     @_bind_canonical_settlement_engine
     def _run_dataset_locked(
@@ -347,6 +626,8 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         economic_goal: EconomicGoalContract | None = None,
         risk_policy: PaperRiskPolicy | None = None,
         runtime_strategy_id: str | None = None,
+        run_id: str | None = None,
+        sampling_draw_admission_receipt_sha256: str | None = None,
         _settlement_engine_type: type[SettlementEngine],
     ) -> SessionResult:
         if SettlementEngine is not _settlement_engine_type:
@@ -361,7 +642,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         base_book_hash = sha256_file(self.book_path)
         base_ledger_hash = base_ledger_snapshot.sha256
 
-        run_id = str(uuid.uuid4())
+        run_id = run_id or str(uuid.uuid4())
         experiment_key = self.registry.begin(
             dataset.market_sha256,
             dataset.results_sha256,
@@ -371,6 +652,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             base_paper_book_sha256=base_book_hash,
             base_decision_ledger_sha256=base_ledger_hash,
             outcome_lineage=outcome_lineage,
+            sampling_draw_admission_receipt_sha256=(
+                sampling_draw_admission_receipt_sha256
+            ),
         )
         try:
             transaction = RunTransaction.start(
@@ -382,6 +666,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 strategy_id=runtime_strategy_id,
                 base_paper_book_sha256=base_book_hash,
                 base_decision_ledger_sha256=base_ledger_hash,
+                sampling_draw_admission_receipt_sha256=(
+                    sampling_draw_admission_receipt_sha256
+                ),
             )
         except Exception:
             # No economic mutation occurs before the transaction object exists.
@@ -478,7 +765,8 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 economic_goal=economic_goal,
                 risk_policy=risk_policy,
                 runtime_strategy_id=runtime_strategy_id,
-            )
+            ),
+            replay_execution_receipt=result.replay.execution_receipt,
         )
         transaction.commit()
 
@@ -671,6 +959,18 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             "run_id": result.replay.run_id,
             "event_count": result.replay.event_count,
             "replay_dataset_hash": result.replay.dataset_hash,
+            "replay_input_event_payload_sequence_sha256": (
+                result.replay.input_event_payload_sequence_sha256
+            ),
+            "replay_consumed_event_payload_sequence_sha256": (
+                result.replay.consumed_event_payload_sequence_sha256
+            ),
+            "replay_applied_event_payload_sequence_sha256": (
+                result.replay.applied_event_payload_sequence_sha256
+            ),
+            "replay_consumed_event_payload_multiset_sha256": (
+                result.replay.consumed_event_payload_multiset_sha256
+            ),
             "campaign_causal_membership": campaign_causal_membership,
             "settled_ticket_ids": list(result.settled_ticket_ids),
             "balance": str(result.balance),

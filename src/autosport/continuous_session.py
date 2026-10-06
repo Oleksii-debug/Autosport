@@ -2096,16 +2096,46 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     def session_id(self) -> str:
         return self._state.session_id
 
-    def status(self) -> ContinuousSessionStatus:
-        snapshot = self._state.snapshot()
-        source_status = self.collector.status()
+    def status(
+        self,
+        *,
+        _snapshot_method: Callable[
+            ["_ContinuousSessionState"], ContinuousSessionStatus
+        ] = _ContinuousSessionState.snapshot,
+        _snapshot_method_code: object = _ContinuousSessionState.snapshot.__code__,
+        _collector_status_method: Callable[[HeadlessCollectorService], dict[str, object]] = (
+            HeadlessCollectorService.status
+        ),
+        _collector_status_method_code: object = HeadlessCollectorService.status.__code__,
+        _replace: Callable[..., ContinuousSessionStatus] = replace,
+        _replace_code: object = replace.__code__,
+    ) -> ContinuousSessionStatus:
+        if (
+            type(self._state).snapshot is not _snapshot_method
+            or getattr(_snapshot_method, "__code__", None)
+            is not _snapshot_method_code
+            or type(self.collector).status is not _collector_status_method
+            or getattr(_collector_status_method, "__code__", None)
+            is not _collector_status_method_code
+            or replace is not _replace
+            or getattr(_replace, "__code__", None) is not _replace_code
+        ):
+            raise ContinuousSessionError(
+                "canonical coordinator status authority changed"
+            )
+        snapshot = _snapshot_method(self._state)
+        source_status = _collector_status_method(self.collector)
+        if type(source_status) is not dict:
+            raise ContinuousSessionError(
+                "collector status authority returned non-canonical mapping"
+            )
         source_last_success = source_status.get("last_success_at")
         source_last_error = source_status.get("last_error_code")
         if source_last_success is not None and not isinstance(source_last_success, str):
             raise ContinuousSessionError("collector last_success_at must be a string or None")
         if source_last_error is not None and not isinstance(source_last_error, str):
             raise ContinuousSessionError("collector last_error_code must be a string or None")
-        return replace(
+        return _replace(
             snapshot,
             source_provider_unavailable=source_last_error == "ProviderUnavailableError",
             source_last_success_at=source_last_success,

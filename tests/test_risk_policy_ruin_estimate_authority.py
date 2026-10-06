@@ -19,6 +19,7 @@ from autosport.risk_policy_ruin_estimate_authority import (
     ProductFixedNRiskPolicyEstimate,
     ProductFixedNRiskPolicyEstimateError,
     _derive_policy_estimate_material,
+    _estimate_fields_differ,
 )
 
 
@@ -252,6 +253,39 @@ def test_policy_estimate_derivation_rejects_internal_helper_rebinding(
         _derive_policy_estimate_material(_precommit(), _observations())
 
 
+def test_estimate_field_comparison_rejects_hostile_member_without_equality() -> None:
+    class HostileMember:
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("hostile member equality must not execute")
+
+    candidate = object.__new__(ProductFixedNRiskPolicyEstimate)
+    canonical = object.__new__(ProductFixedNRiskPolicyEstimate)
+    object.__setattr__(candidate, "planned_member_ids", (HostileMember(),))
+    object.__setattr__(canonical, "planned_member_ids", ("run-001",))
+
+    assert _estimate_fields_differ(
+        candidate,
+        canonical,
+        ("planned_member_ids",),
+    ) is True
+
+
+def test_policy_estimate_dispatch_rejects_field_comparison_helper_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        policy_module,
+        "_estimate_fields_differ",
+        lambda *_args, **_kwargs: False,
+    )
+
+    with pytest.raises(
+        ProductFixedNRiskPolicyEstimateError,
+        match="dispatch changed",
+    ):
+        policy_module._require_dispatch()
+
+
 def test_policy_estimate_dispatch_rejects_derivation_helper_rebinding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -267,6 +301,58 @@ def test_policy_estimate_dispatch_rejects_derivation_helper_rebinding(
     ):
         policy_module._require_dispatch()
 
+
+
+@pytest.mark.parametrize(
+    "property_name",
+    (
+        "product_preoutcome_policy_proven",
+        "frozen_policy_execution_proven",
+        "iid_qualified",
+        "proposal_target_execution_proven",
+        "risk_upper_bound_computed",
+        "grants_ticket_authority",
+        "grants_real_money_authority",
+    ),
+)
+def test_policy_estimate_authority_property_rebinding_is_rejected(
+    property_name: str,
+) -> None:
+    with pytest.raises(
+        TypeError,
+        match="risk policy estimate authority surface is sealed",
+    ):
+        setattr(
+            ProductFixedNRiskPolicyEstimate,
+            property_name,
+            property(lambda _self: True),
+        )
+
+    with pytest.raises(
+        TypeError,
+        match="risk policy estimate authority surface is sealed",
+    ):
+        delattr(ProductFixedNRiskPolicyEstimate, property_name)
+
+
+def test_policy_estimate_dispatch_rejects_authority_property_code_replacement() -> None:
+    descriptor = vars(ProductFixedNRiskPolicyEstimate)["grants_ticket_authority"]
+    getter = descriptor.fget
+    assert getter is not None
+    original_code = getter.__code__
+
+    def forged(_self: object) -> bool:
+        return True
+
+    getter.__code__ = forged.__code__
+    try:
+        with pytest.raises(
+            ProductFixedNRiskPolicyEstimateError,
+            match="dispatch changed",
+        ):
+            policy_module._require_dispatch()
+    finally:
+        getter.__code__ = original_code
 
 
 def test_policy_estimate_dispatch_rejects_field_manifest_rebinding(

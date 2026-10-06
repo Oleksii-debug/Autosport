@@ -415,6 +415,22 @@ def test_contract_successor_ignores_rebound_canonical_transition_alias(monkeypat
     previous.validate_automatic_successor(candidate)
 
 
+def test_contract_constructor_rejects_authority_injection() -> None:
+    with pytest.raises(TypeError):
+        _goal(_validator=lambda value: None)  # type: ignore[arg-type]
+
+
+def test_contract_constructor_ignores_rebound_module_authorities(monkeypatch) -> None:
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound constructor authority executed")
+
+    monkeypatch.setattr(economic_goal_module, "_CANONICAL_CONTRACT_VALIDATOR", forged)
+    monkeypatch.setattr(economic_goal_module, "_CONTRACT_OBJECT_SETATTR", forged)
+
+    with pytest.raises(EconomicGoalContractError, match="between 0 and 1"):
+        _goal(max_stake_fraction=Decimal("2"))
+
+
 def test_contract_constructor_rejects_bound_default_rebinding() -> None:
     operation = economic_goal_module._contract_init_authority
     original_defaults = operation.__defaults__

@@ -1227,6 +1227,58 @@ def test_operational_checkpoint_path_lstat_rebinding_fails_closed(monkeypatch) -
         monkeypatch.setattr(Path, "lstat", original_lstat)
 
 
+def test_snapshot_cannot_hide_operational_checkpoint_via_path_lstat_rebinding(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        original_lstat = Path.lstat
+
+        def attacker_lstat(_self: Path) -> object:
+            raise FileNotFoundError("hide operational checkpoint")
+
+        monkeypatch.setattr(Path, "lstat", attacker_lstat)
+        try:
+            state.snapshot()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "presence authority" in str(exc)
+        else:
+            raise AssertionError(
+                "runtime-rebound Path.lstat hid a durable operational checkpoint"
+            )
+        finally:
+            monkeypatch.setattr(Path, "lstat", original_lstat)
+
+
+def test_operational_checkpoint_presence_probe_code_identity_is_immutable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        original_lstat = Path.lstat
+        original_code = original_lstat.__code__
+
+        def attacker_lstat(_self: Path) -> object:
+            raise FileNotFoundError("hide operational checkpoint")
+
+        try:
+            original_lstat.__code__ = attacker_lstat.__code__
+            try:
+                state.snapshot()
+            except continuous_session.ContinuousSessionError as exc:
+                assert "presence authority" in str(exc)
+            else:
+                raise AssertionError(
+                    "mutated Path.lstat code hid a durable operational checkpoint"
+                )
+        finally:
+            original_lstat.__code__ = original_code
+
+
 def test_operational_checkpoint_helper_rebinding_cannot_redirect_verified_read(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

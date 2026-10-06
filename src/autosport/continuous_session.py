@@ -412,9 +412,21 @@ class _ContinuousSessionState:
     def _file_identity(info: os.stat_result) -> tuple[int, int]:
         return (info.st_dev, info.st_ino)
 
-    def _error_checkpoint_present(self) -> bool:
+    def _error_checkpoint_present(
+        self,
+        *,
+        _path_lstat: Callable[[Path], os.stat_result] = Path.lstat,
+        _path_lstat_code: object = Path.lstat.__code__,
+    ) -> bool:
+        if (
+            Path.lstat is not _path_lstat
+            or getattr(Path.lstat, "__code__", None) is not _path_lstat_code
+        ):
+            raise ContinuousSessionError(
+                "canonical operational-checkpoint presence authority changed"
+            )
         try:
-            self._error_path.lstat()
+            _path_lstat(self._error_path)
         except FileNotFoundError:
             return False
         except OSError as exc:

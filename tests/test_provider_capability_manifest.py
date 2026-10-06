@@ -220,38 +220,43 @@ def test_canonical_capability_cannot_be_caller_overridden() -> None:
         _manifest(profile=profile, extension_facts=(override,))
 
 
-def test_positive_extension_capability_requires_explicit_evidence() -> None:
-    with pytest.raises(ProviderCapabilityManifestError, match="not_proven authority"):
-        ProviderCapabilityManifestFact(
-            capability=ProviderManifestCapability.STREAM,
-            state=ProviderManifestState.PROVEN,
-            authority=ProviderManifestFactAuthority.NOT_PROVEN,
-        )
-    with pytest.raises(ProviderCapabilityManifestError, match="requires an exact evidence"):
-        ProviderCapabilityManifestFact(
-            capability=ProviderManifestCapability.STREAM,
-            state=ProviderManifestState.PROVEN,
-            authority=ProviderManifestFactAuthority.EXPLICIT_EVIDENCE,
-        )
+def test_explicit_extension_evidence_is_structural_only_until_product_issuer_exists() -> None:
+    fact = _fact(ProviderManifestCapability.STREAM)
+    assert fact.authority is ProviderManifestFactAuthority.EXPLICIT_EVIDENCE
+    assert fact.evidence is not None
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="product-owned evidence authority",
+    ):
+        _manifest(extension_facts=(fact,))
+
+    baseline = _manifest()
+    direct_facts = tuple(
+        fact if item.capability is ProviderManifestCapability.STREAM else item
+        for item in baseline.facts
+    )
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="product-owned evidence authority",
+    ):
+        replace(baseline, facts=direct_facts)
 
 
-def test_unsupported_extension_capability_also_requires_evidence() -> None:
+def test_caller_evidence_cannot_mint_unsupported_extension_truth() -> None:
     fact = _fact(
         ProviderManifestCapability.STREAM,
         state=ProviderManifestState.UNSUPPORTED,
     )
-    assert fact.state is ProviderManifestState.UNSUPPORTED
     assert fact.evidence is not None
-
-    with pytest.raises(ProviderCapabilityManifestError, match="not_proven authority"):
-        ProviderCapabilityManifestFact(
-            capability=ProviderManifestCapability.STREAM,
-            state=ProviderManifestState.UNSUPPORTED,
-            authority=ProviderManifestFactAuthority.NOT_PROVEN,
-        )
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="product-owned evidence authority",
+    ):
+        _manifest(extension_facts=(fact,))
 
 
-def test_sports_and_markets_require_sorted_concrete_values_when_proven() -> None:
+def test_sports_and_markets_structural_values_do_not_mint_capability_truth() -> None:
     with pytest.raises(ProviderCapabilityManifestError, match="requires concrete values"):
         _fact(ProviderManifestCapability.SPORTS)
     with pytest.raises(ProviderCapabilityManifestError, match="canonical sorted order"):
@@ -269,13 +274,11 @@ def test_sports_and_markets_require_sorted_concrete_values_when_proven() -> None
         ProviderManifestCapability.SPORTS,
         values=("football", "tennis"),
     )
-    markets = _fact(
-        ProviderManifestCapability.MARKETS,
-        values=("match_odds", "over_under"),
-    )
-    manifest = _manifest(extension_facts=(markets, sports))
-    assert manifest.supports(ProviderManifestCapability.SPORTS)
-    assert manifest.supports(ProviderManifestCapability.MARKETS)
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="product-owned evidence authority",
+    ):
+        _manifest(extension_facts=(sports,))
 
 
 def test_noncoverage_capability_cannot_smuggle_values() -> None:
@@ -286,68 +289,45 @@ def test_noncoverage_capability_cannot_smuggle_values() -> None:
         )
 
 
-def test_poll_and_stream_require_proven_quote_read_capability() -> None:
-    no_quotes = _profile(facts=())
+def test_transport_extensions_cannot_be_promoted_by_caller_evidence() -> None:
     for capability in (
         ProviderManifestCapability.POLL,
         ProviderManifestCapability.STREAM,
     ):
         with pytest.raises(
             ProviderCapabilityManifestError,
-            match="requires proven quote-read",
+            match="product-owned evidence authority",
         ):
-            _manifest(
-                profile=no_quotes,
-                extension_facts=(_fact(capability, profile=no_quotes),),
-            )
+            _manifest(extension_facts=(_fact(capability),))
 
 
-def test_ack_and_idempotency_require_proven_submit_capability() -> None:
-    no_submit = _profile(
-        facts=(
-            BookmakerCapabilityFact(
-                BookmakerCapability.LIVE_QUOTES_READ,
-                BookmakerCapabilityState.SUPPORTED,
-            ),
-        )
-    )
+def test_execution_extensions_cannot_be_promoted_by_caller_evidence() -> None:
     for capability in (
         ProviderManifestCapability.IMMEDIATE_ACK,
         ProviderManifestCapability.IDEMPOTENCY,
     ):
         with pytest.raises(
             ProviderCapabilityManifestError,
-            match="requires proven submit",
+            match="product-owned evidence authority",
         ):
-            _manifest(
-                profile=no_submit,
-                extension_facts=(_fact(capability, profile=no_submit),),
-            )
+            _manifest(extension_facts=(_fact(capability),))
 
 
-def test_settlement_requires_proven_settled_position_read() -> None:
-    no_settlement_read = _profile(
-        facts=(
-            BookmakerCapabilityFact(
-                BookmakerCapability.PLACE_BET,
-                BookmakerCapabilityState.SUPPORTED,
-            ),
-        )
-    )
+def test_settlement_extension_cannot_be_promoted_by_caller_evidence() -> None:
     with pytest.raises(
         ProviderCapabilityManifestError,
-        match="settlement requires proven settled-position",
+        match="product-owned evidence authority",
     ):
         _manifest(
-            profile=no_settlement_read,
-            extension_facts=(
-                _fact(ProviderManifestCapability.SETTLEMENT, profile=no_settlement_read),
-            ),
+            extension_facts=(_fact(ProviderManifestCapability.SETTLEMENT),)
         )
 
 
-def test_capability_evidence_cannot_postdate_manifest() -> None:
-    with pytest.raises(ProviderCapabilityManifestError, match="cannot postdate"):
+def test_future_caller_evidence_cannot_reach_positive_authority() -> None:
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="product-owned evidence authority",
+    ):
         _manifest(
             extension_facts=(
                 _fact(
@@ -394,65 +374,23 @@ def test_manifest_rejects_wrong_integration_profile_and_time_order() -> None:
         )
 
 
-def test_extension_evidence_is_nontransferable_across_profile_or_integration() -> None:
+def test_matching_identity_metadata_does_not_authenticate_extension_evidence() -> None:
     profile = _profile()
-    integration = _integration(profile)
-    other_profile = BookmakerCapabilityProfile(
-        venue_id="betfair",
-        account_id="acct-b",
-        adapter_id="betfair-api",
-        adapter_version="1.0",
-        profile_version=3,
-        facts=profile.facts,
-        observed_at=_T0,
-        source_ref="other-profile",
-        source_payload_sha256=_HASH_A,
-    )
-    foreign = ProviderCapabilityManifestFact(
-        capability=ProviderManifestCapability.STREAM,
-        state=ProviderManifestState.PROVEN,
-        authority=ProviderManifestFactAuthority.EXPLICIT_EVIDENCE,
-        evidence=_evidence("stream", profile=other_profile),
-    )
-    with pytest.raises(ProviderCapabilityManifestError, match="exact profile"):
-        build_provider_capability_manifest(
-            profile,
-            integration,
-            manifest_ref="manifest",
-            manifest_version=1,
-            observed_at=_T2,
-            source_ref="projection",
-            source_payload_sha256=_HASH_C,
-            extension_facts=(foreign,),
-        )
+    fact = _fact(ProviderManifestCapability.STREAM, profile=profile)
+    assert fact.evidence is not None
+    assert fact.evidence.profile_id == profile.profile_id
+    assert fact.evidence.integration_evidence_id == _integration(profile).evidence_id
 
-    wrong_integration = replace(
-        _evidence("stream", profile=profile),
-        integration_evidence_id="d" * 64,
-    )
-    mismatched = replace(foreign, evidence=wrong_integration)
-    with pytest.raises(ProviderCapabilityManifestError, match="exact integration"):
-        build_provider_capability_manifest(
-            profile,
-            integration,
-            manifest_ref="manifest",
-            manifest_version=1,
-            observed_at=_T2,
-            source_ref="projection",
-            source_payload_sha256=_HASH_C,
-            extension_facts=(mismatched,),
-        )
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="product-owned evidence authority",
+    ):
+        _manifest(profile=profile, extension_facts=(fact,))
 
 
-def test_manifest_digest_is_deterministic_across_extension_input_order() -> None:
-    sports = _fact(
-        ProviderManifestCapability.SPORTS,
-        values=("football", "tennis"),
-    )
-    stream = _fact(ProviderManifestCapability.STREAM)
-
-    one = _manifest(extension_facts=(sports, stream))
-    two = _manifest(extension_facts=(stream, sports))
+def test_manifest_digest_is_deterministic_with_fail_closed_extensions() -> None:
+    one = _manifest()
+    two = _manifest()
     assert one.manifest_sha256 == two.manifest_sha256
     assert one.manifest_id == one.manifest_sha256
     assert len(one.manifest_sha256) == 64

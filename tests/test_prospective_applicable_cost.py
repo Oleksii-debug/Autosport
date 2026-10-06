@@ -5,6 +5,7 @@ from datetime import datetime, tzinfo
 
 from decimal import Decimal
 import inspect
+import sys
 
 import pytest
 
@@ -1101,3 +1102,85 @@ def test_aggregate_rejects_in_place_router_payload_code_mutation_before_executio
                 )
     finally:
         target.__code__ = original_code
+
+
+
+def test_product_slippage_is_reverified_after_base_resolution(
+    monkeypatch,
+    tmp_path,
+):
+    bound, approval, issuance_store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(issuance_store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    base_resolver = inspect.getclosurevars(
+        subject.resolve_prospective_applicable_costs_with_betfair_standard_limit
+    ).nonlocals["resolve"]
+    original_flag = object.__getattribute__(
+        evidence,
+        "matchme_applicability_proven",
+    )
+    mutated = False
+
+    def tracer(frame, event, _arg):
+        nonlocal mutated
+        if frame.f_code is base_resolver.__code__ and event == "return":
+            object.__setattr__(
+                evidence,
+                "matchme_applicability_proven",
+                False,
+            )
+            mutated = True
+        return tracer
+
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        with _active_runtime_profile(issuance_store.workspace) as runtime_profile:
+            sys.settrace(tracer)
+            try:
+                with pytest.raises(
+                    subject.ProspectiveApplicableCostError,
+                    match=(
+                        "slippage verification failed|"
+                        "narrow zero-adverse-price contract|"
+                        "changed during applicable-cost resolution"
+                    ),
+                ):
+                    subject.resolve_prospective_applicable_costs_with_betfair_standard_limit(
+                        intent=intent,
+                        plan=plan,
+                        router_store=router_store,
+                        model_request_id=request.request_id,
+                        decision_at=decision_at,
+                        slippage_evidence=evidence,
+                        ledger=ledger,
+                        issuance_store=issuance_store,
+                        runtime_profile=runtime_profile,
+                        execution_plan_id=bound.execution_plan.plan_id,
+                        action_id=action.action_id,
+                    )
+            finally:
+                sys.settrace(None)
+                object.__setattr__(
+                    evidence,
+                    "matchme_applicability_proven",
+                    original_flag,
+                )
+
+    assert mutated is True

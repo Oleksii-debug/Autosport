@@ -968,6 +968,7 @@ class _ContinuousSessionState:
         self,
         mutate: Callable[[dict[str, Any]], None],
         *,
+        advance_generation: bool = False,
         _atomic_write_json: Callable[[str | Path, dict[str, Any]], None] = atomic_write_json,
         _atomic_write_json_code: object = atomic_write_json.__code__,
     ) -> dict[str, Any]:
@@ -977,7 +978,8 @@ class _ContinuousSessionState:
             )
         raw = self._read()
         mutate(raw)
-        raw["generation"] = int(raw["generation"]) + 1
+        if advance_generation:
+            raw["generation"] = int(raw["generation"]) + 1
         _atomic_write_json(self.path, raw)
         updated = self._read()
         self._generation = updated["generation"]
@@ -995,7 +997,7 @@ class _ContinuousSessionState:
             if reason is not None:
                 raw["last_error_code"] = _text(reason, "reason")
 
-        updated = self._update(mutate)
+        updated = self._update(mutate, advance_generation=True)
         self._state = updated["state"]
         # Any committed state transition supersedes an operational failure that
         # was observed in the predecessor state.  Leaving that sidecar intact
@@ -1155,7 +1157,7 @@ class _ContinuousSessionState:
                 sorted(known.values(), key=lambda item: item["evidence_id"])
             )
 
-        updated = self._update(mutate)
+        updated = self._update(mutate, advance_generation=True)
         self._cycles_completed = updated["cycles_completed"]
         self._last_success_at = updated["last_success_at"]
         self._state = updated["state"]

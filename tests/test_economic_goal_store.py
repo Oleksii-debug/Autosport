@@ -244,3 +244,34 @@ def test_json_decoder_rejects_string_subclasses_before_parsing() -> None:
 
     with pytest.raises(EconomicGoalContractError, match="must be text"):
         economic_goal_from_json(TextSubclass("{}"))
+
+
+def test_payload_decoder_rejects_schema_and_objective_subclasses_before_semantic_lookup() -> None:
+    class TextSubclass(str):
+        comparisons = 0
+
+        def __eq__(self, other):
+            type(self).comparisons += 1
+            raise AssertionError("hostile comparison executed")
+
+    payload = economic_goal_to_payload(_goal())
+    payload["schema"] = TextSubclass(ECONOMIC_GOAL_SCHEMA)
+    with pytest.raises(EconomicGoalContractError, match="unsupported economic goal schema"):
+        economic_goal_from_payload(payload)
+    assert TextSubclass.comparisons == 0
+
+    payload = economic_goal_to_payload(_goal())
+    body = payload["contract"]
+    assert type(body) is dict
+    body["objective"] = TextSubclass("long_run_risk_adjusted_bankroll_growth")
+    with pytest.raises(EconomicGoalContractError, match="objective must be a string"):
+        economic_goal_from_payload(payload)
+    assert TextSubclass.comparisons == 0
+
+
+def test_payload_encoder_revalidates_post_construction_contract_mutation() -> None:
+    goal = _goal()
+    object.__setattr__(goal, "max_stake_fraction", "0.01")
+
+    with pytest.raises(EconomicGoalContractError):
+        economic_goal_to_payload(goal)

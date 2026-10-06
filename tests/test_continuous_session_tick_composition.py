@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from autosport import continuous_session
 
 
@@ -333,4 +335,108 @@ def test_tick_keeps_invalidation_routing_composition() -> None:
         assert replacement_buffer.calls == 0
         assert original_index.calls == 1
         assert replacement_index.calls == 0
+
+def test_tick_rejects_provider_time_economic_context_rebinding() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        original_book = coordinator.paper_book_path
+        replacement_book = root / "attacker-paper-book.json"
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        def rebind() -> None:
+            coordinator.workspace = root / "attacker-workspace"
+            coordinator.paper_book_path = replacement_book
+            coordinator.initial_bankroll = "999999"
+
+        coordinator.collector = _Collector(callback=rebind)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="settlement economic configuration changed during tick",
+        ):
+            coordinator.tick()
+
+        assert not original_book.exists()
+        assert not replacement_book.exists()
+
+
+def test_tick_rejects_prepare_time_economic_path_rebinding_before_settlement() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        original_book = coordinator.paper_book_path
+        replacement_book = root / "attacker-paper-book.json"
+        record = continuous_session.EventLifecycleRecord(
+            identity="provider-a:event-1",
+            source_id="provider-a",
+            sport="table_tennis",
+            event_id="event-1",
+            phase=continuous_session.EventPhase.COMPLETED,
+            first_discovered_at=_AT,
+            last_available_at=_AT,
+            scheduled_start_at=None,
+            completion_ref="completion-1",
+            settlement_ref="settlement-1",
+            completion_discovered_at=_AT,
+            settlement_discovered_at=_AT,
+            last_discovered_at=_AT,
+        )
+        resolution = continuous_session.SettlementResolution(
+            event_identity=record.identity,
+            settlement_ref="settlement-1",
+            quote_outcomes={"quote-1": "win"},
+            evidence_id="evidence-prepare-rebind",
+            evidence_sha256="b" * 64,
+            available_at=_AT,
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+            def records(self):
+                return (record,)
+
+        class OutcomeAuthority:
+            def resolve(self, _record, *, as_of: str):
+                assert as_of == _AT
+                return resolution
+
+        class Handoff:
+            def prepare_settlement(self, **_kwargs):
+                coordinator.paper_book_path = replacement_book
+                return ()
+
+            def reconcile_after_settlement(self, **_kwargs):
+                raise AssertionError("reconcile ran after economic context rebinding")
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.outcome_authority = OutcomeAuthority()
+        coordinator.settlement_learning_handoff = Handoff()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="settlement economic configuration changed during tick",
+        ):
+            coordinator.tick()
+
+        assert not original_book.exists()
+        assert not replacement_book.exists()
 

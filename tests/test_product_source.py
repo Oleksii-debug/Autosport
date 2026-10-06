@@ -405,10 +405,12 @@ class ParlayApiProductSourceTests(unittest.TestCase):
     def test_factory_explicit_workspace_bypasses_only_workspace_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "strategy-workspace"
+            environment_workspace = Path(directory) / "different-global-workspace"
             with patch.dict(
                 "os.environ",
                 {
                     "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": str(environment_workspace),
                     "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
                     "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
                     "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(
@@ -420,7 +422,10 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 source = create_parlay_product_source(workspace=workspace)
 
                 self.assertEqual(source.workspace, workspace.resolve(strict=False))
-                self.assertNotIn("AUTOSPORT_PRODUCT_WORKSPACE", os.environ)
+                self.assertEqual(
+                    os.environ["AUTOSPORT_PRODUCT_WORKSPACE"],
+                    str(environment_workspace),
+                )
 
     def test_factory_requires_secret_and_operator_authority_environment(self) -> None:
         with patch.dict(

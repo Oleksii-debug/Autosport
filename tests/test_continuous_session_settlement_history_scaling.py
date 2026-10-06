@@ -3546,3 +3546,19 @@ def test_settlement_consumer_subclass_cannot_override_helper_graph() -> None:
         assert "consumer entry binding is immutable" in str(exc)
     else:
         raise AssertionError("settlement consumer helper override subclass was accepted")
+
+
+def test_learning_resolution_detach_rejects_runtime_replace_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    def attacker_replace(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("runtime-rebound learning callback copy executed")
+
+    monkeypatch.setattr(continuous_session, "replace", attacker_replace)
+
+    try:
+        coordinator._detached_settlement_resolutions((_resolution(),))
+    except continuous_session.ContinuousSessionError as exc:
+        assert "callback copy authority changed" in str(exc)
+    else:
+        raise AssertionError("runtime-rebound learning callback copy was accepted")

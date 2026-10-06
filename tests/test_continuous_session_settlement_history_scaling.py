@@ -1810,3 +1810,72 @@ def test_snapshot_rejects_runtime_session_lock_rebinding(monkeypatch) -> None:
             assert "snapshot authority changed" in str(exc)
         else:
             raise AssertionError("runtime-rebound snapshot lock was accepted")
+
+
+def test_concurrent_bootstrap_has_one_identity_winner_and_conflict_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state_path = root / "continuous_session.json"
+        barrier = threading.Barrier(2)
+        outcomes: list[tuple[str, str]] = []
+        outcomes_lock = threading.Lock()
+
+        def bootstrap(session_id: str) -> None:
+            barrier.wait()
+            try:
+                state = continuous_session._ContinuousSessionState(
+                    state_path,
+                    session_id=session_id,
+                    source_id="provider-a",
+                    clock=lambda: _AT,
+                )
+                outcome = ("success", state.session_id)
+            except continuous_session.ContinuousSessionError as exc:
+                outcome = ("error", str(exc))
+            with outcomes_lock:
+                outcomes.append(outcome)
+
+        threads = [
+            threading.Thread(target=bootstrap, args=("session-a",), daemon=True),
+            threading.Thread(target=bootstrap, args=("session-b",), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2.0)
+            assert not thread.is_alive()
+
+        successes = [value for kind, value in outcomes if kind == "success"]
+        errors = [value for kind, value in outcomes if kind == "error"]
+        assert len(successes) == 1
+        assert len(errors) == 1
+        assert "durable session_id does not match configured session" in errors[0]
+
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        assert payload["session_id"] == successes[0]
+        assert payload["generation"] == 0
+
+
+def test_bootstrap_rejects_runtime_session_lock_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+
+        def attacker_lock(_path: object):
+            raise AssertionError("runtime-rebound bootstrap lock executed")
+
+        monkeypatch.setattr(
+            continuous_session,
+            "durable_path_lock",
+            attacker_lock,
+        )
+        try:
+            continuous_session._ContinuousSessionState(
+                root / "continuous_session.json",
+                session_id="session-a",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "bootstrap authority changed" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound bootstrap lock was accepted")

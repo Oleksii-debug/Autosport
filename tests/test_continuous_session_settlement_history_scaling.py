@@ -637,7 +637,7 @@ def test_checkpoint_authority_ignores_rebound_module_constants(monkeypatch) -> N
         error_path = root / "continuous_session.json.operational_error.json"
         payload = json.loads(error_path.read_text(encoding="utf-8"))
         assert payload["schema"] == "autosport.continuous_session.operational_error"
-        assert payload["schema_version"] == 1
+        assert payload["schema_version"] == 2
 
         payload["schema"] = "attacker.error"
         payload["schema_version"] = 999
@@ -663,3 +663,56 @@ def test_checkpoint_authority_ignores_rebound_module_constants(monkeypatch) -> N
         assert fresh_payload["schema_version"] == 2
         assert fresh.snapshot().session_id == "fresh-session"
 
+
+
+def test_state_reason_commit_supersedes_stale_failure_after_cleanup_crash() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="PROVIDER_FAILURE")
+
+        original_write_error = state._write_error_checkpoint
+
+        def crash_during_cleanup(code: str | None) -> None:
+            if code is None:
+                raise RuntimeError("simulated crash after canonical state commit")
+            original_write_error(code)
+
+        with patch.object(state, "_write_error_checkpoint", crash_during_cleanup):
+            try:
+                state.set_state(
+                    continuous_session.SessionState.PAUSED,
+                    reason="OPERATOR_PAUSE",
+                )
+            except RuntimeError as exc:
+                assert "simulated crash" in str(exc)
+            else:
+                raise AssertionError("cleanup crash was not simulated")
+
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        snapshot = reopened.snapshot()
+        assert snapshot.state is continuous_session.SessionState.PAUSED
+        assert snapshot.last_error_code == "OPERATOR_PAUSE"
+
+
+def test_operational_checkpoint_state_marker_fails_closed_when_invalid() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
+        error_path = root / "continuous_session.json.operational_error.json"
+        payload = json.loads(error_path.read_text(encoding="utf-8"))
+        payload["observed_state"] = "ATTACKER_STATE"
+        error_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "observed_state" in str(exc)
+        else:
+            raise AssertionError("invalid sidecar observed_state was accepted")

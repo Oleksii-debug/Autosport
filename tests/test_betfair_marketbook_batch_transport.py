@@ -2056,3 +2056,244 @@ def test_immediate_dispatch_rejects_future_causal_instant_before_any_gate_mutati
     assert rate_gate.snapshot().markets == ()
     assert concurrency_gate.snapshot().active == ()
     assert transport.calls == []
+
+def test_class_rebound_evidence_id_cannot_bless_mutated_result(monkeypatch):
+    plan = _plan()
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    rebound_called = False
+
+    def forged_evidence_id(self):
+        nonlocal rebound_called
+        rebound_called = True
+        return "0" * 64
+
+    monkeypatch.setattr(
+        MarketBookBatchTransportResult,
+        "evidence_id",
+        property(forged_evidence_id),
+    )
+
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    issued.assert_issued()
+    assert rebound_called is False
+
+    object.__setattr__(issued, "request_payload_sha256", "0" * 64)
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="changed after canonical issuance",
+    ):
+        issued.assert_issued()
+
+    assert rebound_called is False
+
+
+def test_class_rebound_evidence_payload_cannot_bless_mutated_result(monkeypatch):
+    plan = _plan()
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    rebound_called = False
+
+    def forged_evidence_payload(self):
+        nonlocal rebound_called
+        rebound_called = True
+        return {"forged": True}
+
+    monkeypatch.setattr(
+        MarketBookBatchTransportResult,
+        "evidence_payload",
+        property(forged_evidence_payload),
+    )
+
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    issued.assert_issued()
+    assert rebound_called is False
+
+    object.__setattr__(issued, "source_payload_sha256", "0" * 64)
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="changed after canonical issuance",
+    ):
+        issued.assert_issued()
+
+    assert rebound_called is False
+
+
+def test_module_rebound_dispatch_instant_cannot_reopen_full_rate_window(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    for _ in range(5):
+        assert rate_gate.reserve(("1.001",), scheduled_at=NOW).allowed is True
+
+    rebound_called = False
+
+    def forged_dispatch_instant(*args, **kwargs):
+        nonlocal rebound_called
+        rebound_called = True
+        return NOW + timedelta(seconds=2)
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "_dispatch_instant",
+        forged_dispatch_instant,
+    )
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="sealed-dispatch-instant",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert rebound_called is False
+    assert transport.calls == []
+
+
+def test_module_rebound_transport_now_cannot_reopen_full_rate_window(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    for _ in range(5):
+        assert rate_gate.reserve(("1.001",), scheduled_at=NOW).allowed is True
+
+    rebound_called = False
+
+    def forged_transport_now(*args, **kwargs):
+        nonlocal rebound_called
+        rebound_called = True
+        return NOW + timedelta(seconds=2)
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "_transport_now",
+        forged_transport_now,
+    )
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="sealed-transport-now",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert rebound_called is False
+    assert transport.calls == []
+
+
+def test_module_rebound_network_origin_probe_cannot_replace_transport_clock(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    rebound_called = False
+
+    def forged_network_origin(*args, **kwargs):
+        nonlocal rebound_called
+        rebound_called = True
+        raise AssertionError("rebound network-origin probe must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module._transport,
+        "_canonical_network_transport",
+        forged_network_origin,
+    )
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="sealed-network-origin-probe",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    result.assert_issued()
+    assert rebound_called is False
+    assert len(transport.calls) == 1
+
+
+def test_module_rebound_projection_cleanup_cannot_strand_success_lease(monkeypatch):
+    plan = _plan(market_ids=("1.001",), order_projection="EXECUTABLE")
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    rebound_called = False
+
+    def forged_release(*args, **kwargs):
+        nonlocal rebound_called
+        rebound_called = True
+        raise AssertionError("rebound projection cleanup must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "_release_projection_lease",
+        forged_release,
+    )
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="sealed-success-cleanup",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    result.assert_issued()
+    assert rebound_called is False
+    assert concurrency_gate.snapshot().active == ()
+    assert len(transport.calls) == 1
+
+
+def test_module_rebound_failure_cleanup_cannot_mask_rate_denial_or_strand_lease(monkeypatch):
+    plan = _plan(market_ids=("1.001",), order_projection="EXECUTABLE")
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    for _ in range(5):
+        assert rate_gate.reserve(("1.001",), scheduled_at=NOW).allowed is True
+
+    rebound_called = False
+
+    def forged_cleanup(*args, **kwargs):
+        nonlocal rebound_called
+        rebound_called = True
+        raise AssertionError("rebound failure cleanup must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "_release_projection_lease_after_failure",
+        forged_cleanup,
+    )
+
+    with pytest.raises(MarketBookBatchAdmissionError) as exc_info:
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="sealed-failure-cleanup",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert rebound_called is False
+    assert concurrency_gate.snapshot().active == ()
+    assert transport.calls == []
+

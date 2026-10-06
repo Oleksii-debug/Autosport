@@ -487,7 +487,8 @@ def _require_restrictions_not_removed(
 def _validate_automatic_transition_bound(
     previous: EconomicGoalContract,
     candidate: EconomicGoalContract,
-    _snapshotter=_snapshot_transition_contract,
+    _contract_type=_CANONICAL_CONTRACT_TYPE,
+    _contract_validator=_CANONICAL_CONTRACT_VALIDATOR,
     _same_guard=_require_same,
     _cap_guard=_require_cap_not_increased,
     _optional_cap_guard=_require_optional_cap_not_increased,

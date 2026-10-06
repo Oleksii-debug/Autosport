@@ -232,6 +232,45 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         ):
             store.require_current(evidence)
 
+    def test_transition_rejects_rebound_product_session_equality(self) -> None:
+        store = self._store()
+        first = store.current()
+        original_eq = ProductEconomicSession.__eq__
+
+        def hostile_eq(self, other):
+            raise AssertionError("rebound ProductEconomicSession equality executed")
+
+        ProductEconomicSession.__eq__ = hostile_eq
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.transition_to_current_goal(first)
+        finally:
+            ProductEconomicSession.__eq__ = original_eq
+
+
+    def test_transition_rejects_in_place_product_session_equality_code_mutation(self) -> None:
+        store = self._store()
+        first = store.current()
+        original_eq = ProductEconomicSession.__eq__
+        original_code = original_eq.__code__
+
+        def hostile_eq(self, other):
+            raise AssertionError("mutated ProductEconomicSession equality executed")
+
+        try:
+            original_eq.__code__ = hostile_eq.__code__
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.transition_to_current_goal(first)
+        finally:
+            original_eq.__code__ = original_code
+
+
     def test_candidate_subclass_is_rejected_before_equality(self) -> None:
         store = self._store()
         evidence = store.current()

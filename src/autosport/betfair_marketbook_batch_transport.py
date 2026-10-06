@@ -24,6 +24,11 @@ from .betfair_marketbook_batch_plan import (
     MarketBookReadBatch,
     MarketBookReadPlan,
 )
+from .betfair_marketbook_attempt_history import (
+    MarketBookAttemptHistory,
+    MarketBookAttemptOutcome,
+    MarketBookAttemptRecord,
+)
 
 
 class MarketBookBatchTransportError(RuntimeError):
@@ -202,7 +207,7 @@ class MarketBookBatchTransportResult:
             "canonical_network_origin_diagnostic": self.canonical_network_origin,
             "receipt": self.receipt.evidence_payload,
             "structural_exact_response": self.structural_exact_response,
-            "transport_result_origin_bound": True,
+            "origin_authority_requires_assert_issued": True,
             "provider_observation_authenticated": False,
             "provider_freshness_proven": False,
             "provider_dispatch_authorized": False,
@@ -271,6 +276,51 @@ def _read_market_book_batch(
         canonical_network_origin=response.network_origin,
         receipt=receipt,
     )
+
+
+def append_market_book_transport_attempt(
+    history: MarketBookAttemptHistory,
+    result: MarketBookBatchTransportResult,
+    *,
+    attempt_id: str,
+    required: bool,
+) -> MarketBookAttemptHistory:
+    """Append one issued transport result to canonical retry/gap history."""
+
+    if type(history) is not MarketBookAttemptHistory:
+        raise TypeError("history must be an exact MarketBookAttemptHistory")
+    if type(result) is not MarketBookBatchTransportResult:
+        raise TypeError("result must be an exact MarketBookBatchTransportResult")
+    result.assert_issued()
+    if history.plan.plan_id != result.plan_id:
+        raise MarketBookBatchTransportError(
+            "transport result is bound to another or mutated MarketBook plan"
+        )
+
+    _canonical_batch(history.plan, result.batch_id)
+    previous = history.records[-1] if history.records else None
+    if result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE:
+        outcome = MarketBookAttemptOutcome.EXACT_RESPONSE
+        exact_receipt = result.receipt
+    elif result.receipt.status is BatchReceiptStatus.INCOMPLETE_RESPONSE:
+        outcome = MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
+        exact_receipt = None
+    else:
+        raise MarketBookBatchTransportError(
+            "transport result receipt has unsupported dispatch outcome"
+        )
+
+    record = MarketBookAttemptRecord.issue(
+        history.plan,
+        attempt_id=attempt_id,
+        sequence=len(history.records) + 1,
+        batch_id=result.batch_id,
+        required=required,
+        outcome=outcome,
+        exact_receipt=exact_receipt,
+        previous_record=previous,
+    )
+    return MarketBookAttemptHistory(history.plan, history.records + (record,))
 
 
 def _install_transport_result_authority() -> None:

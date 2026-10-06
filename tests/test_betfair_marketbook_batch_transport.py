@@ -11,9 +11,14 @@ from autosport.betfair_account_readonly import (
 )
 from autosport.betfair_marketbook_batch_completeness import BatchReceiptStatus
 from autosport.betfair_marketbook_batch_plan import MarketBookReadPlan
+from autosport.betfair_marketbook_attempt_history import (
+    MarketBookAttemptHistory,
+    MarketBookAttemptOutcome,
+)
 from autosport.betfair_marketbook_batch_transport import (
     MarketBookBatchTransportError,
     MarketBookBatchTransportResult,
+    append_market_book_transport_attempt,
     read_market_book_batch,
 )
 
@@ -246,3 +251,66 @@ def test_direct_transport_result_construction_cannot_mint_issuance():
         match="not issued by canonical transport",
     ):
         forged.assert_issued()
+
+
+def test_exact_transport_result_appends_to_canonical_attempt_history():
+    plan = _plan()
+    history = MarketBookAttemptHistory(plan, ())
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    result = read_market_book_batch(client, plan, batch_id=batch.batch_id)
+
+    updated = append_market_book_transport_attempt(
+        history,
+        result,
+        attempt_id="attempt-1",
+        required=True,
+    )
+
+    assert len(updated.records) == 1
+    assert updated.records[0].outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert updated.records[0].exact_receipt == result.receipt
+    assert updated.current_structural_complete is True
+    assert updated.required_gap_attempt_ids == ()
+    assert updated.historical_required_gap_free is True
+
+
+def test_incomplete_transport_result_preserves_required_gap_in_attempt_history():
+    plan = _plan()
+    history = MarketBookAttemptHistory(plan, ())
+    batch = plan.batches[0]
+    client, _ = _client(_payload(("1.001",)))
+    result = read_market_book_batch(client, plan, batch_id=batch.batch_id)
+
+    updated = append_market_book_transport_attempt(
+        history,
+        result,
+        attempt_id="attempt-gap",
+        required=True,
+    )
+
+    assert updated.records[0].outcome is MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
+    assert updated.records[0].exact_receipt is None
+    assert updated.current_structural_complete is False
+    assert updated.required_gap_attempt_ids == ("attempt-gap",)
+    assert updated.historical_required_gap_free is False
+
+
+def test_forged_transport_result_cannot_be_appended_to_attempt_history():
+    plan = _plan()
+    history = MarketBookAttemptHistory(plan, ())
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = read_market_book_batch(client, plan, batch_id=batch.batch_id)
+    forged = replace(issued)
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="not issued by canonical transport",
+    ):
+        append_market_book_transport_attempt(
+            history,
+            forged,
+            attempt_id="attempt-forged",
+            required=True,
+        )

@@ -816,3 +816,55 @@ def test_durable_session_parser_rejects_runtime_scalar_validator_rebinding(
         ):
             state.snapshot()
 
+def test_tick_ignores_instance_shadowed_running_precheck() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+
+        def attacker_require_running() -> None:
+            raise AssertionError("instance-shadowed tick running precheck executed")
+
+        coordinator._require_running = attacker_require_running  # type: ignore[method-assign]
+
+        class Collector:
+            def run_cycle(self):
+                raise RuntimeError("collector reached")
+
+        coordinator.collector = Collector()
+
+        with pytest.raises(RuntimeError, match="collector reached"):
+            coordinator.tick()
+
+
+def test_tick_rejects_runtime_causal_time_validator_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+
+        class Collector:
+            def run_cycle(self):
+                raise AssertionError("collector ran after causal-time authority changed")
+
+        coordinator.collector = Collector()
+
+        def attacker_instant(_value: object, _field: str) -> object:
+            raise AssertionError("runtime-rebound tick timestamp validator executed")
+
+        monkeypatch.setattr(continuous_session, "_instant", attacker_instant)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical coordinator running-fence authority changed",
+        ):
+            coordinator.tick()
+

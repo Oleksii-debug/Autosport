@@ -2979,10 +2979,6 @@ def test_provider_unavailable_tick_uses_bounded_failure_publication() -> None:
             source_id = "provider-a"
             committed_delta_ids = ()
 
-        class SourceSnapshot:
-            source_gap_state = None
-            source_sync_state = None
-
         coordinator = object.__new__(
             continuous_session.ContinuousSessionCoordinator
         )
@@ -2994,12 +2990,18 @@ def test_provider_unavailable_tick_uses_bounded_failure_publication() -> None:
             {"run_cycle": lambda _self: ProviderUnavailableCycle()},
         )()
         coordinator._require_running = lambda: None
-        coordinator._refresh_source_state_projection = lambda: SourceSnapshot()
 
         def forbidden_reader():
             raise AssertionError(
                 "provider-unavailable tick must not read the full settlement history"
             )
+
+        def forbidden_projection():
+            raise AssertionError(
+                "provider-unavailable tick must not refresh the full session projection"
+            )
+
+        coordinator._refresh_source_state_projection = forbidden_projection
 
         with patch.object(state, "_read", forbidden_reader):
             result = coordinator.tick()
@@ -3008,6 +3010,8 @@ def test_provider_unavailable_tick_uses_bounded_failure_publication() -> None:
         assert result.cycle_index == _LARGE_HISTORY
         assert result.source_id == "provider-a"
         assert result.source_provider_unavailable is True
+        assert result.source_gap_states == ()
+        assert result.source_sync_states == ()
         assert result.last_success_at == _AT
         error_path = root / "continuous_session.json.operational_error.json"
         payload = json.loads(error_path.read_text(encoding="utf-8"))

@@ -2034,12 +2034,18 @@ def cancel_superseded_explicit_pr_runs(
     # authority: every effect still requires the same live qualification, exact-run
     # identity reread, final qualification reread, and cancellation boundary.
     pr_runs: dict[int, list[WorkflowRun]] = {}
+    candidate_pr_numbers: set[int] = set()
     for run in explicit_singleton_runs:
-        if run.run_id == current_run_id:
-            continue
-        pr_runs.setdefault(run.pr_numbers[0], []).append(run)
+        pr_number = run.pr_numbers[0]
+        # Keep the triggering source run in scheduling evidence: current+stale is
+        # already a two-head group and should not look like a clean singleton merely
+        # because the triggering run itself is intentionally excluded from sweep
+        # cancellation. It still never enters the candidate set by run id.
+        pr_runs.setdefault(pr_number, []).append(run)
+        if run.run_id != current_run_id:
+            candidate_pr_numbers.add(pr_number)
     pr_numbers = sorted(
-        pr_runs,
+        candidate_pr_numbers,
         key=lambda pr_number: (
             -len({run.head_sha for run in pr_runs[pr_number]}),
             -len(pr_runs[pr_number]),

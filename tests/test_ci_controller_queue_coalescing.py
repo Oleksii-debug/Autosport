@@ -2105,7 +2105,10 @@ def test_sweep_prioritizes_multi_head_groups_before_budget_exhaustion() -> None:
         cancel_superseded_explicit_pr_runs(
             api,  # type: ignore[arg-type]
             workflow_name="CI",
-            current_run_id=99999,
+            # The target group's current head is the triggering source run. Ranking
+            # must still see current+stale as a multi-head group while never selecting
+            # this triggering run for sweep cancellation.
+            current_run_id=9002,
             _qualification_reader=budgeted_qualification,
             _qualification_reader_code=budgeted_qualification.__code__,
         )

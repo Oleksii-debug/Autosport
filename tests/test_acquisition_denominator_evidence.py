@@ -1324,3 +1324,42 @@ def test_terminal_exactly_at_frozen_cutoff_is_causally_available() -> None:
         assert evidence.acquisition_complete_by_universe_freeze is True
         assert require_complete_acquisition_coverage(evidence) is evidence
 
+def test_late_scheduled_start_cannot_launder_complete_cutoff_coverage() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        slot = store._next_collector_schedule_slot(
+            source_id=SOURCE_ID,
+            run_id=RUN_ID,
+        )
+        cycle = store._begin_scheduled_collector_cycle(
+            source_id=SOURCE_ID,
+            run_id=RUN_ID,
+            stream_epoch=STREAM_EPOCH,
+            max_items=250,
+            slot_ordinal=slot["slot_ordinal"],
+            due_at=slot["due_at"],
+            attempted_at="2026-09-22T00:00:01+00:00",
+        )
+        _finish(
+            store,
+            cycle,
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+
+        evidence = _build(
+            store,
+            path,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+            end_slot=0,
+        )
+
+        assert evidence.success_empty_count == 1
+        assert evidence.scheduled_start_coverage_complete is True
+        assert evidence.acquisition_complete_by_universe_freeze is False
+        assert evidence.coverage_strength is AcquisitionCoverageStrength.INCOMPLETE_OR_UNKNOWN
+        with pytest.raises(AcquisitionDenominatorEvidenceError):
+            require_complete_acquisition_coverage(evidence)
+

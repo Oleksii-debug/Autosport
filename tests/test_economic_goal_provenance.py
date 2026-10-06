@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from decimal import Decimal
 
 import pytest
 
-import autosport.economic_goal_provenance as provenance_module
+import autosport.economic_goal as economic_goal_module
+import autosport.economic_goal_provenance as economic_goal_provenance_module
+import autosport.economic_goal_store as economic_goal_store_module
 
 from autosport.economic_goal import (
     AutomationLevel,
@@ -20,33 +22,6 @@ from autosport.economic_goal_provenance import (
     verify_provenance,
 )
 from autosport.economic_goal_store import EconomicGoalStore
-
-
-class _GoalSubclass(EconomicGoalContract):
-    pass
-
-
-class _StringSubclass(str):
-    pass
-
-
-class _IntSubclass(int):
-    pass
-
-
-class _ProvenanceSubclass(EconomicGoalProvenance):
-    pass
-
-
-class _HostileIdentityField:
-    comparisons = 0
-
-    def __eq__(self, other: object) -> bool:
-        type(self).comparisons += 1
-        return True
-
-    def __str__(self) -> str:
-        raise AssertionError("hostile identity field stringification executed")
 
 
 def _goal(**changes: object) -> EconomicGoalContract:
@@ -80,325 +55,6 @@ def _goal(**changes: object) -> EconomicGoalContract:
     return EconomicGoalContract(**values)  # type: ignore[arg-type]
 
 
-def test_provenance_authority_ignores_rebound_public_exports(
-    monkeypatch,
-) -> None:
-    goal = _goal()
-    expected = provenance_for(goal)
-
-    monkeypatch.setattr(provenance_module, "EconomicGoalContract", _GoalSubclass)
-    monkeypatch.setattr(provenance_module, "EconomicGoalProvenance", _ProvenanceSubclass)
-    monkeypatch.setattr(
-        provenance_module,
-        "economic_goal_to_payload",
-        lambda contract: {"forged": True},
-    )
-    monkeypatch.setattr(
-        provenance_module,
-        "contract_sha256",
-        lambda contract: "0" * 64,
-    )
-    monkeypatch.setattr(
-        provenance_module,
-        "PROVENANCE_SCHEMA",
-        "autosport.forged",
-    )
-    monkeypatch.setattr(
-        provenance_module,
-        "PROVENANCE_SCHEMA_VERSION",
-        999,
-    )
-
-    derived = provenance_for(goal)
-    assert derived == expected
-    verify_provenance(goal, derived)
-
-
-def test_provenance_hash_ignores_json_and_hashlib_rebinding(
-    monkeypatch,
-) -> None:
-    goal = _goal()
-    expected = contract_sha256(goal)
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("rebound provenance primitive executed")
-
-    monkeypatch.setattr(provenance_module.json, "dumps", forbidden)
-    monkeypatch.setattr(provenance_module.hashlib, "sha256", forbidden)
-    monkeypatch.setattr(
-        provenance_module,
-        "_canonical_json",
-        lambda payload: b"forged",
-    )
-
-    assert contract_sha256(goal) == expected
-    assert provenance_for(goal).contract_sha256 == expected
-
-
-def test_provenance_rejects_forged_subclass_after_export_rebinding(
-    monkeypatch,
-) -> None:
-    goal = _goal()
-    canonical = provenance_for(goal)
-    forged = _ProvenanceSubclass(
-        schema=canonical.schema,
-        schema_version=canonical.schema_version,
-        goal_id=canonical.goal_id,
-        revision=canonical.revision,
-        bankroll_id=canonical.bankroll_id,
-        contract_sha256=canonical.contract_sha256,
-    )
-    monkeypatch.setattr(provenance_module, "EconomicGoalProvenance", _ProvenanceSubclass)
-
-    with pytest.raises(
-        EconomicGoalProvenanceError,
-        match="canonical EconomicGoalProvenance",
-    ):
-        verify_provenance(goal, forged)
-
-
-def test_provenance_rejects_contract_subclass() -> None:
-    canonical = _goal()
-    derived = _GoalSubclass(
-        goal_id=canonical.goal_id,
-        revision=canonical.revision,
-        bankroll_id=canonical.bankroll_id,
-        currency=canonical.currency,
-        objective=canonical.objective,
-        max_stake_fraction=canonical.max_stake_fraction,
-        max_stake_amount=canonical.max_stake_amount,
-        max_session_loss_fraction=canonical.max_session_loss_fraction,
-        max_day_loss_fraction=canonical.max_day_loss_fraction,
-        max_drawdown_fraction=canonical.max_drawdown_fraction,
-        max_capital_at_risk_fraction=canonical.max_capital_at_risk_fraction,
-        max_event_concentration_fraction=canonical.max_event_concentration_fraction,
-        max_market_concentration_fraction=canonical.max_market_concentration_fraction,
-        max_provider_concentration_fraction=canonical.max_provider_concentration_fraction,
-        max_sport_concentration_fraction=canonical.max_sport_concentration_fraction,
-        max_turnover_fraction=canonical.max_turnover_fraction,
-        max_risk_of_ruin=canonical.max_risk_of_ruin,
-        max_execution_slippage_fraction=canonical.max_execution_slippage_fraction,
-        max_quote_age_seconds=canonical.max_quote_age_seconds,
-        minimum_data_quality=canonical.minimum_data_quality,
-        max_concurrent_positions=canonical.max_concurrent_positions,
-        max_parlay_legs=canonical.max_parlay_legs,
-        automation_level=canonical.automation_level,
-        emergency_stop=canonical.emergency_stop,
-        blocked_sports=canonical.blocked_sports,
-        blocked_providers=canonical.blocked_providers,
-        blocked_markets=canonical.blocked_markets,
-    )
-
-    with pytest.raises(EconomicGoalContractError, match="canonical EconomicGoalContract"):
-        contract_sha256(derived)
-    with pytest.raises(EconomicGoalContractError, match="canonical EconomicGoalContract"):
-        provenance_for(derived)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("goal_id", " padded "),
-        ("goal_id", "goal\x00suffix"),
-        ("goal_id", "g" * 513),
-        ("bankroll_id", " padded "),
-        ("bankroll_id", "b" * 513),
-    ],
-)
-def test_provenance_rejects_noncanonical_or_unbounded_identity_text(
-    field: str,
-    value: str,
-) -> None:
-    values = {
-        "schema": "autosport.economic_goal_provenance",
-        "schema_version": 1,
-        "goal_id": "goal",
-        "revision": 1,
-        "bankroll_id": "bankroll",
-        "contract_sha256": "a" * 64,
-    }
-    values[field] = value
-
-    with pytest.raises(EconomicGoalProvenanceError):
-        EconomicGoalProvenance(**values)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("schema", _StringSubclass("autosport.economic_goal_provenance")),
-        ("schema_version", _IntSubclass(1)),
-        ("goal_id", _StringSubclass("goal")),
-        ("revision", _IntSubclass(1)),
-        ("bankroll_id", _StringSubclass("bankroll")),
-        ("contract_sha256", _StringSubclass("a" * 64)),
-    ],
-)
-def test_provenance_evidence_rejects_scalar_subclasses(
-    field: str,
-    value: object,
-) -> None:
-    values: dict[str, object] = {
-        "schema": "autosport.economic_goal_provenance",
-        "schema_version": 1,
-        "goal_id": "goal",
-        "revision": 1,
-        "bankroll_id": "bankroll",
-        "contract_sha256": "a" * 64,
-    }
-    values[field] = value
-
-    with pytest.raises(EconomicGoalProvenanceError):
-        EconomicGoalProvenance(**values)  # type: ignore[arg-type]
-
-
-
-def test_provenance_revalidation_ignores_validator_rebinding(
-    monkeypatch,
-) -> None:
-    goal = _goal()
-    evidence = provenance_for(goal)
-    object.__setattr__(goal, "max_stake_fraction", object())
-    object.__setattr__(evidence, "goal_id", object())
-
-    monkeypatch.setattr(
-        provenance_module._CANONICAL_GOAL_TYPE,
-        "__post_init__",
-        lambda self: None,
-    )
-    monkeypatch.setattr(
-        provenance_module._CANONICAL_PROVENANCE_TYPE,
-        "__post_init__",
-        lambda self: None,
-    )
-
-    with pytest.raises(EconomicGoalContractError):
-        contract_sha256(goal)
-
-    with pytest.raises(EconomicGoalProvenanceError):
-        verify_provenance(_goal(), evidence)
-
-
-def test_verify_provenance_rejects_contract_subclass_before_reads() -> None:
-    canonical = _goal()
-    evidence = provenance_for(canonical)
-    derived = _GoalSubclass(
-        goal_id=canonical.goal_id,
-        revision=canonical.revision,
-        bankroll_id=canonical.bankroll_id,
-        currency=canonical.currency,
-        objective=canonical.objective,
-        max_stake_fraction=canonical.max_stake_fraction,
-        max_stake_amount=canonical.max_stake_amount,
-        max_session_loss_fraction=canonical.max_session_loss_fraction,
-        max_day_loss_fraction=canonical.max_day_loss_fraction,
-        max_drawdown_fraction=canonical.max_drawdown_fraction,
-        max_capital_at_risk_fraction=canonical.max_capital_at_risk_fraction,
-        max_event_concentration_fraction=canonical.max_event_concentration_fraction,
-        max_market_concentration_fraction=canonical.max_market_concentration_fraction,
-        max_provider_concentration_fraction=canonical.max_provider_concentration_fraction,
-        max_sport_concentration_fraction=canonical.max_sport_concentration_fraction,
-        max_turnover_fraction=canonical.max_turnover_fraction,
-        max_risk_of_ruin=canonical.max_risk_of_ruin,
-        max_execution_slippage_fraction=canonical.max_execution_slippage_fraction,
-        max_quote_age_seconds=canonical.max_quote_age_seconds,
-        minimum_data_quality=canonical.minimum_data_quality,
-        max_concurrent_positions=canonical.max_concurrent_positions,
-        max_parlay_legs=canonical.max_parlay_legs,
-        automation_level=canonical.automation_level,
-        emergency_stop=canonical.emergency_stop,
-        blocked_sports=canonical.blocked_sports,
-        blocked_providers=canonical.blocked_providers,
-        blocked_markets=canonical.blocked_markets,
-    )
-
-    with pytest.raises(
-        EconomicGoalProvenanceError,
-        match="canonical EconomicGoalContract",
-    ):
-        verify_provenance(derived, evidence)
-
-
-def test_verify_provenance_rejects_provenance_subclass() -> None:
-    goal = _goal()
-    canonical = provenance_for(goal)
-    derived = _ProvenanceSubclass(
-        schema=canonical.schema,
-        schema_version=canonical.schema_version,
-        goal_id=canonical.goal_id,
-        revision=canonical.revision,
-        bankroll_id=canonical.bankroll_id,
-        contract_sha256=canonical.contract_sha256,
-    )
-
-    with pytest.raises(
-        EconomicGoalProvenanceError,
-        match="canonical EconomicGoalProvenance",
-    ):
-        verify_provenance(goal, derived)
-
-
-
-def test_provenance_for_revalidates_mutated_contract_before_identity_reads() -> None:
-    goal = _goal()
-    _HostileIdentityField.comparisons = 0
-    object.__setattr__(
-        goal,
-        "goal_id",
-        _HostileIdentityField(),
-    )
-
-    with pytest.raises(EconomicGoalContractError):
-        provenance_for(goal)
-
-    assert _HostileIdentityField.comparisons == 0
-
-
-def test_verify_provenance_revalidates_mutated_contract_before_comparison() -> None:
-    goal = _goal()
-    evidence = provenance_for(goal)
-    _HostileIdentityField.comparisons = 0
-    object.__setattr__(
-        goal,
-        "goal_id",
-        _HostileIdentityField(),
-    )
-
-    with pytest.raises(EconomicGoalContractError):
-        verify_provenance(goal, evidence)
-
-    assert _HostileIdentityField.comparisons == 0
-
-
-def test_verify_provenance_revalidates_mutated_evidence_before_comparison() -> None:
-    goal = _goal()
-    evidence = provenance_for(goal)
-    _HostileIdentityField.comparisons = 0
-    object.__setattr__(
-        evidence,
-        "goal_id",
-        _HostileIdentityField(),
-    )
-
-    with pytest.raises(EconomicGoalProvenanceError):
-        verify_provenance(goal, evidence)
-
-    assert _HostileIdentityField.comparisons == 0
-
-
-def test_decision_identity_revalidates_mutated_evidence_before_formatting() -> None:
-    goal = _goal()
-    evidence = provenance_for(goal)
-    object.__setattr__(
-        evidence,
-        "goal_id",
-        _HostileIdentityField(),
-    )
-
-    with pytest.raises(EconomicGoalProvenanceError):
-        _ = evidence.decision_identity
-
-
 def test_provenance_is_deterministic_and_revision_specific() -> None:
     goal = _goal()
     first = provenance_for(goal)
@@ -413,6 +69,112 @@ def test_provenance_is_deterministic_and_revision_specific() -> None:
     changed_provenance = provenance_for(changed)
     assert changed_provenance.contract_sha256 != first.contract_sha256
     assert changed_provenance.decision_identity != first.decision_identity
+
+
+def test_decision_identity_rejects_provenance_mutation_between_snapshots() -> None:
+    evidence = provenance_for(_goal())
+    canonical_snapshot = economic_goal_provenance_module._canonical_provenance_snapshot
+    mutated = False
+
+    def snapshot_then_mutate(provenance):
+        nonlocal mutated
+        snapshot = canonical_snapshot(provenance)
+        if not mutated:
+            object.__setattr__(evidence, "goal_id", "mutated-after-snapshot")
+            object.__setattr__(evidence, "revision", 999)
+            mutated = True
+        return snapshot
+
+    with pytest.raises(
+        EconomicGoalProvenanceError,
+        match="changed during identity derivation",
+    ):
+        economic_goal_provenance_module._decision_identity_bound(
+            evidence,
+            _snapshot=snapshot_then_mutate,
+        )
+
+    assert mutated is True
+
+
+def test_provenance_authority_seal_cannot_be_cleared() -> None:
+    assert EconomicGoalProvenance._authority_operations_sealed is True
+
+    with pytest.raises(
+        TypeError,
+        match="provenance public authority binding is immutable",
+    ):
+        EconomicGoalProvenance._authority_operations_sealed = False
+
+    assert EconomicGoalProvenance._authority_operations_sealed is True
+
+
+def test_decision_identity_public_property_cannot_be_rebound() -> None:
+    original = EconomicGoalProvenance.decision_identity
+
+    def forged_property(_instance):
+        raise AssertionError("rebound decision identity executed")
+
+    with pytest.raises(
+        TypeError,
+        match="provenance public authority binding is immutable",
+    ):
+        EconomicGoalProvenance.decision_identity = forged_property
+
+    assert EconomicGoalProvenance.decision_identity is original
+
+    with pytest.raises(
+        TypeError,
+        match="provenance public authority binding is immutable",
+    ):
+        del EconomicGoalProvenance.decision_identity
+
+
+def test_provenance_authority_rejects_direct_type_mutation() -> None:
+    original = EconomicGoalProvenance.decision_identity
+
+    def forged_property(_instance):
+        raise AssertionError("direct type mutation executed")
+
+    for name, replacement in (
+        ("__init__", forged_property),
+        ("__post_init__", forged_property),
+        ("decision_identity", forged_property),
+        ("_authority_operations_sealed", False),
+    ):
+        with pytest.raises(
+            TypeError,
+            match="provenance public authority binding is immutable",
+        ):
+            type.__setattr__(EconomicGoalProvenance, name, replacement)
+        with pytest.raises(
+            TypeError,
+            match="provenance public authority binding is immutable",
+        ):
+            type.__delattr__(EconomicGoalProvenance, name)
+
+    assert EconomicGoalProvenance.decision_identity is original
+    assert EconomicGoalProvenance._authority_operations_sealed is True
+
+
+def test_decision_identity_ignores_rebound_bound_implementation(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    expected = evidence.decision_identity
+    called = False
+
+    def forged(*args: object, **kwargs: object) -> str:
+        nonlocal called
+        called = True
+        raise AssertionError("rebound decision identity implementation executed")
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_decision_identity_bound",
+        forged,
+    )
+
+    assert evidence.decision_identity == expected
+    assert called is False
 
 
 def test_provenance_verifies_after_durable_restart_readback(tmp_path) -> None:
@@ -457,4 +219,846 @@ def test_provenance_schema_validation_is_fail_closed() -> None:
             revision=1,
             bankroll_id="bankroll",
             contract_sha256="not-a-digest",
+        )
+
+
+def test_provenance_rejects_contract_and_provenance_subclasses() -> None:
+    class ContractSubclass(EconomicGoalContract):
+        pass
+
+    class ProvenanceSubclass(EconomicGoalProvenance):
+        pass
+
+    assert isinstance(ProvenanceSubclass.decision_identity, property)
+
+    goal = _goal()
+    contract_subclass = ContractSubclass(
+        **{field.name: getattr(goal, field.name) for field in fields(EconomicGoalContract)}
+    )
+    with pytest.raises((EconomicGoalProvenanceError, TypeError, ValueError)):
+        provenance_for(contract_subclass)
+
+    provenance = provenance_for(goal)
+    provenance_subclass = ProvenanceSubclass(
+        schema=provenance.schema,
+        schema_version=provenance.schema_version,
+        goal_id=provenance.goal_id,
+        revision=provenance.revision,
+        bankroll_id=provenance.bankroll_id,
+        contract_sha256=provenance.contract_sha256,
+    )
+    with pytest.raises(EconomicGoalProvenanceError):
+        verify_provenance(goal, provenance_subclass)
+
+
+def test_provenance_rejects_scalar_subclasses() -> None:
+    class TextSubclass(str):
+        pass
+
+    class IntSubclass(int):
+        pass
+
+    with pytest.raises(EconomicGoalProvenanceError):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id=TextSubclass("goal"),
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
+        )
+    with pytest.raises(EconomicGoalProvenanceError):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="goal",
+            revision=IntSubclass(1),
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
+        )
+
+
+def test_provenance_rejects_schema_subclass_before_comparison() -> None:
+    class TextSubclass(str):
+        comparisons = 0
+
+        def __eq__(self, other):
+            type(self).comparisons += 1
+            raise AssertionError("hostile comparison executed")
+
+    with pytest.raises(EconomicGoalProvenanceError, match="unsupported provenance schema"):
+        EconomicGoalProvenance(
+            schema=TextSubclass("autosport.economic_goal_provenance"),
+            schema_version=1,
+            goal_id="goal",
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
+        )
+    assert TextSubclass.comparisons == 0
+
+
+def test_provenance_rejects_oversize_identity_text() -> None:
+    with pytest.raises(EconomicGoalProvenanceError, match="identity size limit"):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="g" * 513,
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
+        )
+
+
+def test_decision_identity_revalidates_post_construction_mutation() -> None:
+    provenance = provenance_for(_goal())
+    object.__setattr__(provenance, "goal_id", "")
+
+    with pytest.raises(EconomicGoalProvenanceError):
+        _ = provenance.decision_identity
+
+
+def test_decision_identity_ignores_rebound_provenance_validator(monkeypatch) -> None:
+    provenance = provenance_for(_goal())
+    object.__setattr__(provenance, "goal_id", "")
+
+    with pytest.raises(
+        TypeError,
+        match="provenance public authority binding is immutable",
+    ):
+        monkeypatch.setattr(EconomicGoalProvenance, "__post_init__", lambda self: None)
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_CANONICAL_PROVENANCE_VALIDATOR",
+        lambda self: None,
+    )
+
+    with pytest.raises(EconomicGoalProvenanceError):
+        _ = provenance.decision_identity
+
+
+def test_provenance_operations_ignore_rebound_contract_validator(monkeypatch) -> None:
+    goal = _goal()
+    object.__setattr__(goal, "max_stake_fraction", "0.01")
+
+    with pytest.raises(
+        TypeError,
+        match="public authority operation binding is immutable",
+    ):
+        monkeypatch.setattr(EconomicGoalContract, "__post_init__", lambda self: None)
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_CANONICAL_GOAL_VALIDATOR",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "EconomicGoalContract",
+        object,
+    )
+
+    with pytest.raises(EconomicGoalContractError):
+        contract_sha256(goal)
+
+
+def test_provenance_operations_revalidate_post_construction_mutation() -> None:
+    goal = _goal()
+    provenance = provenance_for(goal)
+
+    object.__setattr__(goal, "max_stake_fraction", "0.01")
+    with pytest.raises(EconomicGoalContractError):
+        contract_sha256(goal)
+
+    clean_goal = _goal()
+    clean_provenance = provenance_for(clean_goal)
+    object.__setattr__(clean_provenance, "revision", 0)
+    with pytest.raises(EconomicGoalProvenanceError):
+        verify_provenance(clean_goal, clean_provenance)
+
+
+def test_contract_sha256_rejects_bound_default_rebinding() -> None:
+    contract = _goal()
+    operation = economic_goal_provenance_module._contract_sha256_bound
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+
+    operation.__defaults__ = (
+        object,
+        *original_defaults[1:],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="provenance operation defaults authority changed",
+        ):
+            contract_sha256(contract)
+    finally:
+        operation.__defaults__ = original_defaults
+
+
+def test_decision_identity_rejects_snapshot_default_rebinding() -> None:
+    evidence = provenance_for(_goal())
+    snapshotter = economic_goal_provenance_module._canonical_provenance_snapshot
+    original_defaults = snapshotter.__defaults__
+    assert original_defaults is not None
+
+    snapshotter.__defaults__ = (
+        (),
+        original_defaults[1],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="provenance decision identity nested defaults authority changed",
+        ):
+            _ = evidence.decision_identity
+    finally:
+        snapshotter.__defaults__ = original_defaults
+
+
+def test_provenance_verifier_rejects_nested_hash_default_rebinding() -> None:
+    contract = _goal()
+    evidence = provenance_for(contract)
+    operation = economic_goal_provenance_module._contract_sha256_bound
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+
+    operation.__defaults__ = (
+        original_defaults[0],
+        original_defaults[1],
+        original_defaults[2],
+        original_defaults[3],
+        lambda payload: b"forged",
+        original_defaults[5],
+        original_defaults[6],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="provenance verification nested defaults authority changed",
+        ):
+            verify_provenance(contract, evidence)
+    finally:
+        operation.__defaults__ = original_defaults
+
+
+def test_contract_sha256_ignores_rebound_hashing_dispatch(monkeypatch) -> None:
+    goal = _goal()
+    expected = contract_sha256(goal)
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound provenance hashing dependency executed")
+
+    monkeypatch.setattr(economic_goal_provenance_module, "_canonical_json", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "economic_goal_to_payload", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_CANONICAL_GOAL_VALIDATOR", forged)
+    monkeypatch.setattr(economic_goal_provenance_module.hashlib, "sha256", forged)
+
+    assert contract_sha256(goal) == expected
+
+
+def test_provenance_operations_ignore_rebound_internal_authorities(monkeypatch) -> None:
+    goal = _goal()
+    expected = provenance_for(goal)
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound provenance authority executed")
+
+    monkeypatch.setattr(economic_goal_provenance_module, "contract_sha256", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_CANONICAL_GOAL_VALIDATOR", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_CANONICAL_PROVENANCE_VALIDATOR", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_CANONICAL_PROVENANCE_TYPE", object)
+    monkeypatch.setattr(economic_goal_provenance_module, "PROVENANCE_SCHEMA", "forged")
+    monkeypatch.setattr(economic_goal_provenance_module, "PROVENANCE_SCHEMA_VERSION", 999)
+
+    evidence = provenance_for(goal)
+    assert evidence == expected
+    verify_provenance(goal, evidence)
+
+
+def test_provenance_validation_ignores_rebound_schema_bounds_and_error(monkeypatch) -> None:
+    monkeypatch.setattr(economic_goal_provenance_module, "PROVENANCE_SCHEMA", "forged")
+    monkeypatch.setattr(economic_goal_provenance_module, "PROVENANCE_SCHEMA_VERSION", 999)
+    monkeypatch.setattr(economic_goal_provenance_module, "_MAX_PROVENANCE_IDENTITY_CHARS", 10000)
+    monkeypatch.setattr(economic_goal_provenance_module, "EconomicGoalProvenanceError", RuntimeError)
+
+    with pytest.raises(EconomicGoalProvenanceError, match="identity size limit"):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="g" * 513,
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
+        )
+
+
+def test_public_provenance_authority_operations_reject_helper_injection() -> None:
+    goal = _goal()
+    evidence = provenance_for(goal)
+
+    with pytest.raises(TypeError):
+        contract_sha256(goal, _goal_validator=lambda contract: None)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        provenance_for(goal, _contract_sha256=lambda contract: "0" * 64)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        verify_provenance(
+            goal,
+            evidence,
+            _provenance_validator=lambda provenance: None,
+        )  # type: ignore[call-arg]
+
+
+def test_public_provenance_operations_ignore_rebound_bound_implementation_aliases(
+    monkeypatch,
+) -> None:
+    goal = _goal()
+    expected = provenance_for(goal)
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound bound implementation alias executed")
+
+    monkeypatch.setattr(economic_goal_provenance_module, "_contract_sha256_bound", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_provenance_for_bound", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_verify_provenance_bound", forged)
+
+    assert contract_sha256(goal) == expected.contract_sha256
+    evidence = provenance_for(goal)
+    assert evidence == expected
+    verify_provenance(goal, evidence)
+
+
+def test_provenance_derivation_rejects_contract_mutation_during_hash() -> None:
+    goal = _goal()
+    canonical_hash = economic_goal_provenance_module._contract_sha256_bound
+    mutated = False
+
+    def hash_then_mutate(contract):
+        nonlocal mutated
+        digest = canonical_hash(contract)
+        object.__setattr__(goal, "goal_id", "mutated-after-snapshot")
+        object.__setattr__(goal, "revision", 99)
+        mutated = True
+        return digest
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="changed during provenance derivation",
+    ):
+        economic_goal_provenance_module._provenance_for_bound(
+            goal,
+            _contract_sha256=hash_then_mutate,
+        )
+
+    assert mutated is True
+
+
+def test_provenance_verification_rejects_contract_mutation_during_hash() -> None:
+    goal = _goal()
+    evidence = provenance_for(goal)
+    canonical_hash = economic_goal_provenance_module._contract_sha256_bound
+    mutated = False
+
+    def hash_then_mutate(contract):
+        nonlocal mutated
+        digest = canonical_hash(contract)
+        object.__setattr__(goal, "bankroll_id", "mutated-after-snapshot")
+        mutated = True
+        return digest
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="changed during provenance verification",
+    ):
+        economic_goal_provenance_module._verify_provenance_bound(
+            goal,
+            evidence,
+            _contract_sha256=hash_then_mutate,
+        )
+
+    assert mutated is True
+
+
+def test_provenance_snapshot_isolated_from_later_source_mutation() -> None:
+    evidence = provenance_for(_goal())
+    snapshot = economic_goal_provenance_module._snapshot_provenance(evidence)
+
+    object.__setattr__(evidence, "goal_id", "mutated-after-snapshot")
+    object.__setattr__(evidence, "revision", 999)
+
+    assert snapshot.goal_id == "owner-goal-v1"
+    assert snapshot.revision == 1
+    assert evidence.goal_id == "mutated-after-snapshot"
+    assert evidence.revision == 999
+
+
+def test_decision_identity_ignores_rebound_snapshotter_alias(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    expected = evidence.decision_identity
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound provenance snapshotter executed")
+
+    monkeypatch.setattr(economic_goal_provenance_module, "_snapshot_provenance", forged)
+
+    assert evidence.decision_identity == expected
+
+
+def test_provenance_constructor_rejects_authority_injection() -> None:
+    with pytest.raises(TypeError):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="owner-goal-v1",
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="0" * 64,
+            _validator=lambda value: None,  # type: ignore[call-arg]
+        )
+
+
+def test_provenance_constructor_ignores_rebound_module_authorities(monkeypatch) -> None:
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound provenance constructor authority executed")
+
+    monkeypatch.setattr(economic_goal_provenance_module, "_CANONICAL_PROVENANCE_VALIDATOR", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_PROVENANCE_OBJECT_SETATTR", forged)
+
+    with pytest.raises(EconomicGoalProvenanceError, match="SHA-256 hex"):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="owner-goal-v1",
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="not-a-sha",
+        )
+
+
+def test_provenance_constructor_rejects_code_rebinding(monkeypatch) -> None:
+    operation = economic_goal_provenance_module._provenance_init_authority
+    original_code = operation.__code__
+
+    def forged(self):
+        return None
+
+    operation.__code__ = forged.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="constructor authority changed",
+        ):
+            EconomicGoalProvenance(
+                schema="autosport.economic_goal_provenance",
+                schema_version=1,
+                goal_id="owner-goal-v1",
+                revision=1,
+                bankroll_id="paper-main",
+                contract_sha256="not-a-sha",
+            )
+    finally:
+        operation.__code__ = original_code
+
+
+def test_provenance_construction_uses_captured_slot_setters(monkeypatch) -> None:
+    expected = provenance_for(_goal())
+    expected_snapshot = economic_goal_provenance_module._canonical_provenance_snapshot(
+        expected
+    )
+
+    for name in economic_goal_provenance_module._PROVENANCE_FIELD_NAMES:
+        class HostileDescriptor:
+            def __get__(self, instance, owner=None):
+                raise AssertionError("rebound provenance descriptor getter executed")
+
+            def __set__(self, instance, value):
+                raise AssertionError("rebound provenance descriptor setter executed")
+
+        monkeypatch.setattr(EconomicGoalProvenance, name, HostileDescriptor())
+
+        direct = EconomicGoalProvenance(
+            schema=expected_snapshot[0],
+            schema_version=expected_snapshot[1],
+            goal_id=expected_snapshot[2],
+            revision=expected_snapshot[3],
+            bankroll_id=expected_snapshot[4],
+            contract_sha256=expected_snapshot[5],
+        )
+        assert (
+            economic_goal_provenance_module._canonical_provenance_snapshot(direct)
+            == expected_snapshot
+        )
+
+        derived = provenance_for(_goal())
+        assert (
+            economic_goal_provenance_module._canonical_provenance_snapshot(derived)
+            == expected_snapshot
+        )
+        monkeypatch.undo()
+
+
+def test_provenance_constructor_and_post_init_bindings_are_sealed() -> None:
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound provenance constructor authority executed")
+
+    for name in ("__init__", "__post_init__"):
+        with pytest.raises(
+            TypeError,
+            match="provenance public authority binding is immutable",
+        ):
+            setattr(EconomicGoalProvenance, name, forged)
+        with pytest.raises(
+            TypeError,
+            match="provenance public authority binding is immutable",
+        ):
+            type.__setattr__(EconomicGoalProvenance, name, forged)
+
+    with pytest.raises(EconomicGoalProvenanceError, match="SHA-256 hex"):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="owner-goal-v1",
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="not-a-sha",
+        )
+
+
+def test_provenance_constructor_ignores_rebound_object_writer(monkeypatch) -> None:
+    class ForgedObject:
+        @staticmethod
+        def __setattr__(instance, name, value):
+            raise AssertionError("rebound object writer executed")
+
+    monkeypatch.setattr(economic_goal_provenance_module, "object", ForgedObject)
+
+    with pytest.raises(EconomicGoalProvenanceError, match="SHA-256 hex"):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="owner-goal-v1",
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="not-a-sha",
+        )
+
+
+def test_contract_hash_ignores_descriptor_laundering(monkeypatch) -> None:
+    goal = _goal(max_stake_fraction=Decimal("0.03"))
+    expected = economic_goal_provenance_module.contract_sha256(goal)
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return Decimal("0.02")
+
+    monkeypatch.setattr(
+        EconomicGoalContract,
+        "max_stake_fraction",
+        ForgedDescriptor(),
+    )
+
+    assert economic_goal_provenance_module.contract_sha256(goal) == expected
+
+
+
+
+def test_provenance_snapshot_covers_every_captured_field(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    field_names = economic_goal_provenance_module._PROVENANCE_FIELD_NAMES
+    expected = economic_goal_provenance_module._canonical_provenance_snapshot(
+        evidence
+    )
+
+    for index, name in enumerate(field_names):
+        class ForgedDescriptor:
+            def __get__(self, instance, owner=None):
+                return object()
+
+        monkeypatch.setattr(EconomicGoalProvenance, name, ForgedDescriptor())
+        snapshot = economic_goal_provenance_module._canonical_provenance_snapshot(
+            evidence
+        )
+        assert snapshot[index] == expected[index]
+        monkeypatch.undo()
+
+
+
+
+def test_snapshot_provenance_ignores_rebound_field_descriptors(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    expected_sha = evidence.contract_sha256
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return "0" * 64
+
+    monkeypatch.setattr(
+        EconomicGoalProvenance,
+        "contract_sha256",
+        ForgedDescriptor(),
+    )
+
+    snapshot = economic_goal_provenance_module._snapshot_provenance(evidence)
+    assert (
+        economic_goal_provenance_module._canonical_provenance_snapshot(snapshot)[5]
+        == expected_sha
+    )
+
+
+
+
+def test_decision_identity_ignores_rebound_provenance_field_descriptors(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    expected = evidence.decision_identity
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return "0" * 64
+
+    monkeypatch.setattr(
+        EconomicGoalProvenance,
+        "contract_sha256",
+        ForgedDescriptor(),
+    )
+
+    assert evidence.decision_identity == expected
+
+
+def test_provenance_creation_and_identity_use_sealed_constructor_authority() -> None:
+    goal = _goal()
+    expected = provenance_for(goal)
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound EconomicGoalProvenance constructor executed")
+
+    for name in ("__init__", "__post_init__"):
+        with pytest.raises(
+            TypeError,
+            match="provenance public authority binding is immutable",
+        ):
+            setattr(EconomicGoalProvenance, name, forged)
+
+    evidence = provenance_for(goal)
+    assert evidence == expected
+    assert evidence.decision_identity == expected.decision_identity
+    verify_provenance(goal, evidence)
+
+def test_contract_sha256_rejects_bound_keyword_default_rebinding() -> None:
+    contract = _goal()
+    operation = economic_goal_provenance_module._contract_sha256_bound
+    original_kwdefaults = operation.__kwdefaults__
+
+    operation.__kwdefaults__ = {"forged_authority": object()}
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="provenance operation keyword defaults authority changed",
+        ):
+            contract_sha256(contract)
+    finally:
+        operation.__kwdefaults__ = original_kwdefaults
+
+
+def test_provenance_for_rejects_in_place_builder_keyword_default_mutation() -> None:
+    contract = _goal()
+    builder = economic_goal_provenance_module._build_provenance
+    original_kwdefaults = builder.__kwdefaults__
+    assert original_kwdefaults is not None
+    original_validator = original_kwdefaults["_validator"]
+
+    original_kwdefaults["_validator"] = lambda _evidence: None
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="provenance operation nested keyword defaults authority changed",
+        ):
+            provenance_for(contract)
+    finally:
+        original_kwdefaults["_validator"] = original_validator
+
+
+def test_provenance_contract_field_order_ignores_runtime_rebinding(monkeypatch) -> None:
+    contract = _goal()
+    canonical = provenance_for(contract)
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_PROVENANCE_CONTRACT_FIELD_NAMES",
+        tuple(reversed(economic_goal_provenance_module._PROVENANCE_CONTRACT_FIELD_NAMES)),
+    )
+
+    rebound = provenance_for(contract)
+    assert rebound == canonical
+
+
+def test_provenance_operation_rejects_transitive_json_encoder_code_mutation() -> None:
+    goal = _goal()
+    nested_json_encoder = economic_goal_provenance_module._canonical_json
+    original_code = nested_json_encoder.__code__
+
+    def forged_json_encoder(_payload, *args, **kwargs):
+        return b"forged"
+
+    nested_json_encoder.__code__ = forged_json_encoder.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="economic-goal provenance operation nested authority changed",
+        ):
+            provenance_for(goal)
+    finally:
+        nested_json_encoder.__code__ = original_code
+
+
+def test_provenance_verifier_rejects_transitive_hash_dependency_mutation() -> None:
+    goal = _goal()
+    evidence = provenance_for(goal)
+    nested_json_encoder = economic_goal_provenance_module._canonical_json
+    original_code = nested_json_encoder.__code__
+
+    def forged_json_encoder(_payload, *args, **kwargs):
+        return b"forged"
+
+    nested_json_encoder.__code__ = forged_json_encoder.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="economic-goal provenance verification nested authority changed",
+        ):
+            verify_provenance(goal, evidence)
+    finally:
+        nested_json_encoder.__code__ = original_code
+
+
+def test_provenance_verifier_maps_contract_identity_fields_by_canonical_position() -> None:
+    goal = _goal(
+        goal_id="goal-distinct",
+        revision=7,
+        bankroll_id="bankroll-distinct",
+        currency="EUR",
+    )
+    evidence = provenance_for(goal)
+
+    # A valid canonical provenance must verify before any mismatch falsifier.
+    verify_provenance(goal, evidence)
+
+    for field, value, message in (
+        ("goal_id", "other-goal", "goal_id mismatch"),
+        ("revision", 8, "revision mismatch"),
+        ("bankroll_id", "other-bankroll", "bankroll_id mismatch"),
+    ):
+        with pytest.raises(EconomicGoalProvenanceError, match=message):
+            verify_provenance(replace(goal, **{field: value}), evidence)
+
+
+def test_economic_goal_field_order_is_shared_across_contract_store_and_provenance() -> None:
+    assert economic_goal_provenance_module._PROVENANCE_CONTRACT_FIELD_NAMES == (
+        economic_goal_module._CONTRACT_FIELD_NAMES
+    )
+    assert economic_goal_store_module._CONTRACT_KEYS_ORDERED == (
+        economic_goal_module._CONTRACT_FIELD_NAMES
+    )
+
+def test_provenance_authority_graph_ignores_rebound_introspection_builtins(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    def forged(name: str):
+        def operation(*_args, **_kwargs):
+            calls.append(name)
+            raise AssertionError(f"rebound {name} executed")
+        return operation
+
+    for name in ("getattr", "tuple", "enumerate"):
+        monkeypatch.setattr(
+            economic_goal_provenance_module,
+            name,
+            forged(name),
+            raising=False,
+        )
+
+    goal = _goal()
+    proof = provenance_for(goal)
+
+    assert proof.decision_identity == (
+        f"{goal.goal_id}@{goal.revision}:{proof.contract_sha256}"
+    )
+    verify_provenance(goal, proof)
+    assert callable(EconomicGoalProvenance.__init__)
+    assert calls == []
+
+
+def test_provenance_class_guard_ignores_rebound_getattr(monkeypatch) -> None:
+    executed = False
+
+    def forged_getattr(*_args, **_kwargs):
+        nonlocal executed
+        executed = True
+        raise AssertionError("rebound getattr executed")
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "getattr",
+        forged_getattr,
+        raising=False,
+    )
+
+    assert callable(EconomicGoalProvenance.__init__)
+    with pytest.raises(TypeError, match="immutable"):
+        type.__setattr__(
+            EconomicGoalProvenance,
+            "__init__",
+            lambda *_args, **_kwargs: None,
+        )
+    assert executed is False
+
+def test_provenance_validation_ignores_rebound_primitive_builtins(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    def forged(name: str):
+        def operation(*_args, **_kwargs):
+            calls.append(name)
+            raise AssertionError(f"rebound {name} executed")
+        return operation
+
+    for name in ("type", "len", "any", "dict", "zip"):
+        monkeypatch.setattr(
+            economic_goal_provenance_module,
+            name,
+            forged(name),
+            raising=False,
+        )
+
+    goal = _goal()
+    proof = provenance_for(goal)
+    verify_provenance(goal, proof)
+    assert proof.decision_identity.endswith(proof.contract_sha256)
+    assert calls == []
+
+
+def test_provenance_digest_rejects_rebound_any_laundering(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "any",
+        lambda _values: False,
+        raising=False,
+    )
+
+    with pytest.raises(
+        EconomicGoalProvenanceError,
+        match="contract_sha256 must be lowercase SHA-256 hex",
+    ):
+        EconomicGoalProvenance(
+            schema=economic_goal_provenance_module.PROVENANCE_SCHEMA,
+            schema_version=economic_goal_provenance_module.PROVENANCE_SCHEMA_VERSION,
+            goal_id="owner-goal-v1",
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="g" * 64,
         )

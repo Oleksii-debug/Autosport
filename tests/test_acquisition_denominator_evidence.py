@@ -1189,3 +1189,138 @@ def test_issue_descriptor_rebinding_cannot_forge_builder_result(monkeypatch) -> 
 
     assert hostile_calls == []
 
+def test_all_failed_schedule_remains_failed_unknown_not_observed_zero() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store, end_slot=1)
+        first = _start_slot(store, 0)
+        _finish(
+            store,
+            first,
+            status="PROVIDER_UNAVAILABLE",
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        second = _start_slot(store, 1)
+        _finish(
+            store,
+            second,
+            status="PROVIDER_UNAVAILABLE",
+            completed_at="2026-09-22T00:00:12+00:00",
+        )
+
+        evidence = _build(
+            store,
+            path,
+            start_cycle_seq=first,
+            end_cycle_seq=second,
+            end_slot=1,
+        )
+
+        assert evidence.expected_slot_count == 2
+        assert evidence.provider_unavailable_count == 2
+        assert evidence.success_empty_count == 0
+        assert evidence.success_nonempty_count == 0
+        assert evidence.observed_delta_occurrence_count == 0
+        assert evidence.acquisition_complete_by_universe_freeze is False
+        assert evidence.coverage_strength is AcquisitionCoverageStrength.INCOMPLETE_OR_UNKNOWN
+        with pytest.raises(AcquisitionDenominatorEvidenceError):
+            require_complete_acquisition_coverage(evidence)
+
+
+def test_all_authoritative_empty_schedule_is_complete_observed_zero_scope() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store, end_slot=1)
+        first = _start_slot(store, 0)
+        _finish(
+            store,
+            first,
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        second = _start_slot(store, 1)
+        _finish(
+            store,
+            second,
+            completed_at="2026-09-22T00:00:12+00:00",
+        )
+
+        evidence = _build(
+            store,
+            path,
+            start_cycle_seq=first,
+            end_cycle_seq=second,
+            end_slot=1,
+        )
+
+        assert evidence.expected_slot_count == 2
+        assert evidence.success_empty_count == 2
+        assert evidence.provider_unavailable_count == 0
+        assert evidence.local_failure_count == 0
+        assert evidence.pending_or_late_terminal_count == 0
+        assert evidence.acquisition_complete_by_universe_freeze is True
+        assert (
+            evidence.coverage_strength
+            is AcquisitionCoverageStrength.SCHEDULED_CYCLE_WINDOW_COMPLETE
+        )
+        assert evidence.external_provider_universe_complete is False
+        assert evidence.promotion_ready is False
+        assert require_complete_acquisition_coverage(evidence) is evidence
+
+
+def test_stop_requested_is_explicit_incomplete_denominator_state() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            status="STOP_REQUESTED",
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+
+        evidence = _build(
+            store,
+            path,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+            end_slot=0,
+        )
+
+        assert evidence.stop_requested_count == 1
+        assert evidence.success_empty_count == 0
+        assert evidence.acquisition_complete_by_universe_freeze is False
+        with pytest.raises(AcquisitionDenominatorEvidenceError):
+            require_complete_acquisition_coverage(evidence)
+
+
+def test_terminal_exactly_at_frozen_cutoff_is_causally_available() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            completed_at="2026-09-22T00:00:20+00:00",
+        )
+
+        evidence = _build(
+            store,
+            path,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+            end_slot=0,
+            frozen_at="2026-09-22T00:00:20Z",
+        )
+
+        assert evidence.success_empty_count == 1
+        assert evidence.pending_or_late_terminal_count == 0
+        assert evidence.terminal_after_freeze_count == 0
+        assert evidence.acquisition_complete_by_universe_freeze is True
+        assert require_complete_acquisition_coverage(evidence) is evidence
+

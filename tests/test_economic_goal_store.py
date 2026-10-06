@@ -335,6 +335,79 @@ def test_payload_encoder_revalidates_post_construction_contract_mutation() -> No
         economic_goal_to_payload(goal)
 
 
+def test_payload_encoder_rejects_bound_default_rebinding() -> None:
+    contract = _goal()
+    operation = economic_goal_store_module._BOUND_ECONOMIC_GOAL_TO_PAYLOAD
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+
+    operation.__defaults__ = (
+        lambda value: value,
+        *original_defaults[1:],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="payload encoder defaults authority changed",
+        ):
+            economic_goal_to_payload(contract)
+    finally:
+        operation.__defaults__ = original_defaults
+
+
+def test_payload_decoder_rejects_bound_nested_default_rebinding() -> None:
+    payload = economic_goal_to_payload(_goal())
+    operation = economic_goal_store_module._BOUND_ECONOMIC_GOAL_FROM_PAYLOAD
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+    snapshotter = original_defaults[1]
+    snapshot_defaults = snapshotter.__defaults__
+    assert snapshot_defaults is not None
+
+    snapshotter.__defaults__ = (
+        object,
+        *snapshot_defaults[1:],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="payload decoder nested defaults authority changed",
+        ):
+            economic_goal_from_payload(payload)
+    finally:
+        snapshotter.__defaults__ = snapshot_defaults
+        operation.__defaults__ = original_defaults
+
+
+def test_json_decoder_rejects_bound_payload_decoder_default_rebinding() -> None:
+    payload = economic_goal_to_payload(_goal())
+    import json
+
+    text = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    operation = economic_goal_store_module._BOUND_ECONOMIC_GOAL_FROM_JSON
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+
+    operation.__defaults__ = (
+        original_defaults[0],
+        lambda value: _goal(),
+        *original_defaults[2:],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="JSON decoder defaults authority changed",
+        ):
+            economic_goal_from_json(text)
+    finally:
+        operation.__defaults__ = original_defaults
+
+
 def test_payload_encoder_ignores_rebound_codec_authorities(monkeypatch) -> None:
     goal = _goal()
     expected = economic_goal_to_payload(goal)

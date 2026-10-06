@@ -99,7 +99,12 @@ def _build_contract_class_guard(name: str):
         def __get__(self, instance, owner=None):
             if instance is None:
                 return self
-            binding = instance.__dict__[name]
+            for ancestor in instance.__mro__:
+                if name in ancestor.__dict__:
+                    binding = ancestor.__dict__[name]
+                    break
+            else:
+                raise AttributeError(name)
             descriptor_get = getattr(binding, "__get__", None)
             if descriptor_get is None:
                 return binding

@@ -503,6 +503,27 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         self.assertEqual(first.title, "Provider Authorization: Bearer FIRST_SECRET_VALUE_1234567890")
         self.assertEqual(first_projection.fingerprint_sha256, first.fingerprint_sha256)
 
+    def test_operator_projection_redacts_assignment_and_bare_auth_credentials(self) -> None:
+        entry = self._entry(
+            title="Retry Authorization=Bearer short-secret",
+            summary=(
+                "Proxy-Authorization: Basic aGVsbG8="
+                " and auth token tiny-token should not reach the operator."
+            ),
+            mitigation="authorization=token one-word-secret",
+            residual_risk="bearer x",
+        )
+
+        projection = operator_projection(entry)
+
+        self.assertEqual(projection.title, "Retry [REDACTED]")
+        self.assertEqual(
+            projection.summary,
+            "[REDACTED] and auth [REDACTED] should not reach the operator.",
+        )
+        self.assertEqual(projection.mitigation, "[REDACTED]")
+        self.assertEqual(projection.residual_risk, "[REDACTED]")
+
     def test_operator_projection_preserves_noncredential_text(self) -> None:
         entry = self._entry(
             title="Provider session recovered",

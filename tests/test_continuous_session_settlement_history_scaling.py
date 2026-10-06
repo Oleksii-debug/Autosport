@@ -2952,6 +2952,58 @@ def test_record_failure_does_not_enter_full_history_reader() -> None:
         assert payload["last_error_code"] == "BOUNDED_FAILURE"
 
 
+
+def test_record_failure_with_existing_sidecar_still_avoids_full_history_reader() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _LARGE_HISTORY)
+        state.record_failure(code="FIRST_FAILURE")
+
+        main_before = state.path.read_bytes()
+        error_path = root / "continuous_session.json.operational_error.json"
+
+        def forbidden_reader():
+            raise AssertionError(
+                "bounded operational failure with an existing sidecar must not read full settlement history"
+            )
+
+        with patch.object(state, "_read", forbidden_reader):
+            state.record_failure(code="SECOND_FAILURE")
+
+        assert state.path.read_bytes() == main_before
+        payload = json.loads(error_path.read_text(encoding="utf-8"))
+        assert payload["last_error_code"] == "SECOND_FAILURE"
+
+
+def test_record_failure_rejects_corrupt_existing_sidecar_without_full_history_read() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _LARGE_HISTORY)
+        state.record_failure(code="FIRST_FAILURE")
+
+        main_before = state.path.read_bytes()
+        error_path = root / "continuous_session.json.operational_error.json"
+        error_path.write_bytes(b'{"schema": "autosport.continuous_session.operational_error"')
+
+        sidecar_before = error_path.read_bytes()
+
+        def forbidden_reader():
+            raise AssertionError(
+                "corrupt operational sidecar must not redirect failure handling into full settlement-history read"
+            )
+
+        with patch.object(state, "_read", forbidden_reader):
+            try:
+                state.record_failure(code="SECOND_FAILURE")
+            except continuous_session.ContinuousSessionError as exc:
+                assert "cannot verify continuous session operational error checkpoint" in str(exc)
+            else:
+                raise AssertionError("corrupt operational sidecar was overwritten")
+
+        assert state.path.read_bytes() == main_before
+        assert error_path.read_bytes() == sidecar_before
+
+
 def test_stale_instance_failure_overlay_is_ignored_after_newer_generation() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

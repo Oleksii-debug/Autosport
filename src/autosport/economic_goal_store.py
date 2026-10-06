@@ -372,6 +372,7 @@ class EconomicGoalStore:
         _bindings=_STORE_BINDINGS_BY_ID,
         _weakref_ref=weakref.ref,
         _file_name=_CANONICAL_STORE_FILE_NAME,
+        _error_type=EconomicGoalContractError,
     ) -> None:
         workspace_path = _path_type(workspace)
         path = workspace_path / _file_name
@@ -394,7 +395,7 @@ class EconomicGoalStore:
             except FileNotFoundError:
                 return False
             except OSError as exc:
-                raise EconomicGoalContractError(
+                raise _error_type(
                     f"cannot inspect persisted economic goal path: {exc}"
                 ) from exc
             return True

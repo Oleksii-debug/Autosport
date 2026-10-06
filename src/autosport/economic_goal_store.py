@@ -399,10 +399,25 @@ def economic_goal_to_payload(
     return payload
 
 
+def _build_economic_goal_contract(
+    values: dict[str, object],
+    _goal_type=EconomicGoalContract,
+    _goal_validator=EconomicGoalContract.__post_init__,
+    _object_new=object.__new__,
+    _object_setattr=object.__setattr__,
+    _field_names=_CONTRACT_KEYS,
+) -> EconomicGoalContract:
+    contract = _object_new(_goal_type)
+    for name in _field_names:
+        _object_setattr(contract, name, values[name])
+    _goal_validator(contract)
+    return contract
+
+
 def economic_goal_from_payload(
     payload: object,
     _goal_type=EconomicGoalContract,
-    _goal_validator=EconomicGoalContract.__post_init__,
+    _goal_builder=_build_economic_goal_contract,
     _goal_error=EconomicGoalContractError,
     _objective_type=EconomicObjective,
     _automation_type=AutomationLevel,
@@ -468,12 +483,13 @@ def economic_goal_from_payload(
         decoded[field] = _restriction_decoder(field, body[field])
 
     try:
-        contract = _goal_type(**decoded)  # type: ignore[arg-type]
-        _goal_validator(contract)
+        contract = _goal_builder(decoded)
+        if type(contract) is not _goal_type:
+            raise _goal_error("malformed economic goal contract")
         return contract
     except _goal_error:
         raise
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, KeyError) as exc:
         raise _goal_error("malformed economic goal contract") from exc
 
 

@@ -52,6 +52,7 @@ def _fixture(
     *,
     reflection_plan: PaperReflectionPlan | None = None,
     research_supervisor: ResearchSupervisor | None = None,
+    activation_binding_id: str | None = None,
 ) -> tuple[
     TicketLeg,
     PaperBook,
@@ -136,6 +137,7 @@ def _fixture(
         source_sha256="a" * 64,
         config_sha256="b" * 64,
         at=T0,
+        activation_binding_id=activation_binding_id,
     )
     bridge = PaperSettlementLearningBridge(
         root / "paper-learning-bridge.json",

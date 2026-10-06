@@ -121,8 +121,49 @@ def _canonical_json(value: object) -> bytes:
         ) from exc
 
 
+_ESTIMATE_AUTHORITY_PROPERTY_NAMES = (
+    "product_preoutcome_policy_proven",
+    "frozen_policy_execution_proven",
+    "iid_qualified",
+    "proposal_target_execution_proven",
+    "risk_upper_bound_computed",
+    "grants_ticket_authority",
+    "grants_real_money_authority",
+)
+
+
+def _build_estimate_meta():
+    sealed: set[type] = set()
+    protected = frozenset(_ESTIMATE_AUTHORITY_PROPERTY_NAMES)
+
+    class _EstimateMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "risk policy estimate authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "risk policy estimate authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed.add(cls)
+
+    return _EstimateMeta
+
+
+_EstimateMeta = _build_estimate_meta()
+del _build_estimate_meta
+
+
 @dataclass(frozen=True, slots=True, init=False)
-class ProductFixedNRiskPolicyEstimate:
+class ProductFixedNRiskPolicyEstimate(metaclass=_EstimateMeta):
     """Product-derived ruin bound for the frozen simulator stake policy.
 
     This result is scientific/PAPER evidence for the exact precommitted policy
@@ -194,6 +235,16 @@ class ProductFixedNRiskPolicyEstimate:
 
 
 _ESTIMATE_TYPE = ProductFixedNRiskPolicyEstimate
+_EstimateMeta.seal(_ESTIMATE_TYPE)
+del _EstimateMeta
+_ESTIMATE_AUTHORITY_PROPERTY_SURFACE = tuple(
+    (
+        name,
+        vars(_ESTIMATE_TYPE)[name],
+        getattr(vars(_ESTIMATE_TYPE)[name].fget, "__code__", None),
+    )
+    for name in _ESTIMATE_AUTHORITY_PROPERTY_NAMES
+)
 _SHA_HELPER = _sha
 _SHA_HELPER_CODE = getattr(_SHA_HELPER, "__code__", None)
 _DECIMAL_TEXT_HELPER = _decimal_text
@@ -202,6 +253,48 @@ _INSTANT_HELPER = _instant
 _INSTANT_HELPER_CODE = getattr(_INSTANT_HELPER, "__code__", None)
 _CANONICAL_JSON_HELPER = _canonical_json
 _CANONICAL_JSON_HELPER_CODE = getattr(_CANONICAL_JSON_HELPER, "__code__", None)
+
+
+def _estimate_fields_differ(
+    candidate: ProductFixedNRiskPolicyEstimate,
+    canonical: ProductFixedNRiskPolicyEstimate,
+    field_names: tuple[str, ...],
+) -> bool:
+    """Compare exact estimate fields without invoking caller-owned equality."""
+
+    try:
+        candidate_members = object.__getattribute__(candidate, "planned_member_ids")
+        canonical_members = object.__getattribute__(canonical, "planned_member_ids")
+    except AttributeError:
+        return True
+    if type(candidate_members) is not tuple or type(canonical_members) is not tuple:
+        return True
+    if len(candidate_members) != len(canonical_members):
+        return True
+    if any(type(item) is not str for item in candidate_members):
+        return True
+    if any(type(item) is not str for item in canonical_members):
+        return True
+
+    try:
+        for field_name in field_names:
+            candidate_value = object.__getattribute__(candidate, field_name)
+            canonical_value = object.__getattribute__(canonical, field_name)
+            if type(candidate_value) is not type(canonical_value):
+                return True
+            if candidate_value != canonical_value:
+                return True
+    except AttributeError:
+        return True
+    return False
+
+
+_ESTIMATE_FIELD_COMPARISON = _estimate_fields_differ
+_ESTIMATE_FIELD_COMPARISON_CODE = getattr(
+    _ESTIMATE_FIELD_COMPARISON,
+    "__code__",
+    None,
+)
 
 
 def _require_dispatch() -> None:
@@ -222,6 +315,17 @@ def _require_dispatch() -> None:
         or evaluator_source_sha256 is not _SOURCE_DIGEST
         or getattr(_SOURCE_DIGEST, "__code__", None) is not _SOURCE_DIGEST_CODE
         or ProductFixedNRiskPolicyEstimate is not _ESTIMATE_TYPE
+        or any(
+            vars(_ESTIMATE_TYPE).get(name) is not expected_descriptor
+            or getattr(
+                getattr(vars(_ESTIMATE_TYPE).get(name), "fget", None),
+                "__code__",
+                None,
+            )
+            is not expected_code
+            for name, expected_descriptor, expected_code
+            in _ESTIMATE_AUTHORITY_PROPERTY_SURFACE
+        )
         or _sha is not _SHA_HELPER
         or getattr(_SHA_HELPER, "__code__", None) is not _SHA_HELPER_CODE
         or _decimal_text is not _DECIMAL_TEXT_HELPER
@@ -232,6 +336,9 @@ def _require_dispatch() -> None:
         or _canonical_json is not _CANONICAL_JSON_HELPER
         or getattr(_CANONICAL_JSON_HELPER, "__code__", None)
         is not _CANONICAL_JSON_HELPER_CODE
+        or _estimate_fields_differ is not _ESTIMATE_FIELD_COMPARISON
+        or getattr(_ESTIMATE_FIELD_COMPARISON, "__code__", None)
+        is not _ESTIMATE_FIELD_COMPARISON_CODE
         or _derive_policy_estimate_material
         is not _DERIVE_POLICY_ESTIMATE_MATERIAL
         or getattr(_DERIVE_POLICY_ESTIMATE_MATERIAL, "__code__", None)
@@ -579,18 +686,11 @@ def _build_verifier(resolver, estimate_type):
             raise ProductFixedNRiskPolicyEstimateError(
                 "risk policy estimate resolver returned invalid result type"
             )
-        try:
-            differs = any(
-                type(object.__getattribute__(candidate, field_name))
-                is not type(object.__getattribute__(canonical, field_name))
-                or object.__getattribute__(candidate, field_name)
-                != object.__getattribute__(canonical, field_name)
-                for field_name in field_names
-            )
-        except AttributeError as exc:
-            raise ProductFixedNRiskPolicyEstimateError(
-                "risk policy estimate differs from canonical durable roots"
-            ) from exc
+        differs = _ESTIMATE_FIELD_COMPARISON(
+            candidate,
+            canonical,
+            field_names,
+        )
         if differs:
             raise ProductFixedNRiskPolicyEstimateError(
                 "risk policy estimate differs from canonical durable roots"

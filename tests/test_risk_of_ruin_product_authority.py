@@ -1,3 +1,4 @@
+import pytest
 from dataclasses import replace
 from decimal import Decimal
 import subprocess
@@ -17,6 +18,61 @@ from autosport.risk import (
 from autosport.risk_of_ruin_authority import risk_of_ruin_result_sha256
 from autosport.scientific_registry import DatasetSnapshot, EvaluationBundleRef, ScientificRegistry
 
+
+def test_scalar_ruin_evidence_rejects_signed_zero_upper_bound() -> None:
+    with pytest.raises(
+        ValueError,
+        match="must not use a signed-zero Decimal representation",
+    ):
+        RiskOfRuinEvidence(
+            evidence_id="evidence-signed-zero",
+            research_protocol_sha256="a" * 64,
+            reproducibility_bundle_sha256="b" * 64,
+            producer_identity="research-run",
+            causal_cutoff=CAUSAL_CUTOFF,
+            evaluated_at=EVALUATED_AT,
+            bankroll_id="paper-bankroll",
+            currency="USD",
+            base_portfolio_sha256="c" * 64,
+            candidate_sha256="d" * 64,
+            evaluated_stake=Decimal("10"),
+            upper_bound=Decimal("-0"),
+        )
+
+
+def test_vector_ruin_evidence_rejects_signed_zero_stake_and_upper_bound() -> None:
+    base = dict(
+        evidence_id="vector-signed-zero",
+        research_protocol_sha256="a" * 64,
+        reproducibility_bundle_sha256="b" * 64,
+        producer_identity="research-run",
+        causal_cutoff=CAUSAL_CUTOFF,
+        evaluated_at=EVALUATED_AT,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        base_portfolio_sha256="c" * 64,
+        candidate_vector_sha256="d" * 64,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="must not use a signed-zero Decimal representation",
+    ):
+        RiskOfRuinVectorEvidence(
+            **base,
+            evaluated_stakes=(Decimal("-0"), Decimal("10")),
+            upper_bound=Decimal("0"),
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="must not use a signed-zero Decimal representation",
+    ):
+        RiskOfRuinVectorEvidence(
+            **base,
+            evaluated_stakes=(Decimal("10"),),
+            upper_bound=Decimal("-0"),
+        )
 
 def test_decision_ledger_and_risk_cold_import_without_authority_cycle() -> None:
     completed = subprocess.run(

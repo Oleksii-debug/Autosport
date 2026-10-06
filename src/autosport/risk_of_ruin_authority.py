@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ._scientific_registry_read_authority import (
-    _CANONICAL_REGISTRY_READ_AUTHORITY_ERROR,
+    ScientificRegistryReadAuthorityError,
     require_scientific_registry_read_authority,
 )
 from .risk_of_ruin_evaluator import (

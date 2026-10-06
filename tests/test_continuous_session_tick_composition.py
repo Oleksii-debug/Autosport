@@ -748,6 +748,42 @@ def test_tick_rejects_invalid_affected_input_ids(routed: object) -> None:
             coordinator.tick()
 
 
+def test_tick_rejects_unregistered_affected_input_id() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class Index:
+            input_ids = ("registered",)
+
+            def affected_inputs(self, _batch):
+                return ("phantom",)
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = Index()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency index routed an unregistered input",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
 def test_tick_rejects_phantom_lifecycle_registration() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

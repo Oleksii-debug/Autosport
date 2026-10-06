@@ -704,7 +704,7 @@ class _ContinuousSessionState:
             )
         try:
             raw = _strict_json_loads(_path_read_text(self.path, encoding="utf-8"))
-        except (OSError, TypeError, ValueError) as exc:
+        except (OSError, TypeError, ValueError, RecursionError) as exc:
             raise ContinuousSessionError(
                 "cannot verify continuous session state"
             ) from exc

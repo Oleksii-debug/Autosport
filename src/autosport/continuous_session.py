@@ -511,6 +511,7 @@ class _ContinuousSessionState:
         _version: int = _CONTINUOUS_SESSION_ERROR_VERSION,
         _max_bytes: int = _CONTINUOUS_SESSION_ERROR_MAX_BYTES,
         _max_code_chars: int = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS,
+        _strict_json_loads: Callable[[str], Any] = strict_json_loads,
     ) -> dict[str, Any]:
         try:
             encoded = self._read_error_checkpoint_bytes(_max_bytes=_max_bytes)
@@ -519,7 +520,7 @@ class _ContinuousSessionState:
                     "continuous session operational error checkpoint "
                     "exceeds resource limit"
                 )
-            raw = strict_json_loads(encoded.decode("utf-8"))
+            raw = _strict_json_loads(encoded.decode("utf-8"))
         except ContinuousSessionError:
             raise
         except (
@@ -586,6 +587,8 @@ class _ContinuousSessionState:
         _version: int = _CONTINUOUS_SESSION_ERROR_VERSION,
         _max_bytes: int = _CONTINUOUS_SESSION_ERROR_MAX_BYTES,
         _max_code_chars: int = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS,
+        _json_dumps: Callable[..., str] = json.dumps,
+        _atomic_write_json: Callable[[str | Path, dict[str, Any]], None] = atomic_write_json,
     ) -> None:
         if code is not None:
             code = _text(code, "code")
@@ -602,7 +605,7 @@ class _ContinuousSessionState:
             "last_error_code": code,
         }
         encoded = (
-            json.dumps(
+            _json_dumps(
                 payload,
                 ensure_ascii=False,
                 indent=2,
@@ -615,7 +618,7 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "continuous session operational error checkpoint exceeds resource limit"
             )
-        atomic_write_json(self._error_path, payload)
+        _atomic_write_json(self._error_path, payload)
 
     @staticmethod
     def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:

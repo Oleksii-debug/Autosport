@@ -113,10 +113,18 @@ def _timestamp(value: object, name: str) -> datetime:
     return parsed.astimezone(_CANONICAL_TIMEZONE_UTC)
 
 
-def _timestamp_text(value: datetime) -> str:
+_CANONICAL_TIMESTAMP_PARSER = _timestamp
+_CANONICAL_TIMESTAMP_PARSER_CODE = _timestamp.__code__
+
+
+def _timestamp_CANONICAL_TEXT_VALIDATOR(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
     return value.astimezone(_CANONICAL_TIMEZONE_UTC).isoformat(timespec="microseconds")
+
+
+_CANONICAL_TIMESTAMP_FORMATTER = _timestamp_text
+_CANONICAL_TIMESTAMP_FORMATTER_CODE = _timestamp_text.__code__
 
 
 def _decimal(
@@ -172,7 +180,7 @@ _CANONICAL_DECIMAL_PREFLIGHT = _preflight_decimal_text_fields
 _CANONICAL_DECIMAL_PREFLIGHT_CODE = _preflight_decimal_text_fields.__code__
 
 
-def _decimal_text(value: Decimal) -> str:
+def _decimal_CANONICAL_TEXT_VALIDATOR(value: Decimal) -> str:
     preflight = _CANONICAL_DECIMAL_PREFLIGHT
     if preflight.__code__ is not _CANONICAL_DECIMAL_PREFLIGHT_CODE:
         raise ValueError("decimal preflight authority changed")
@@ -275,10 +283,10 @@ class PaperExecutionModelConfig:
     max_slippage_bps: int = 0
 
     def __post_init__(self) -> None:
-        _text(self.model_id, "model_id")
-        _text(self.model_version, "model_version")
-        _text(self.evidence_source, "evidence_source")
-        _text(self.seed, "seed")
+        _CANONICAL_TEXT_VALIDATOR(self.model_id, "model_id")
+        _CANONICAL_TEXT_VALIDATOR(self.model_version, "model_version")
+        _CANONICAL_TEXT_VALIDATOR(self.evidence_source, "evidence_source")
+        _CANONICAL_TEXT_VALIDATOR(self.seed, "seed")
         if type(self.evidence_grade) is not _CANONICAL_EVIDENCE_GRADE_TYPE:
             raise ValueError("evidence_grade must be EvidenceGrade")
         for name in (
@@ -307,7 +315,7 @@ class PaperExecutionModelConfig:
 
     @property
     def fingerprint(self) -> str:
-        return _digest(
+        return _CANONICAL_DIGEST(
             {
                 "schema": "autosport.paper_execution_model",
                 "schema_version": _SCHEMA_VERSION,
@@ -363,8 +371,8 @@ class PaperExecutionEvidenceRecord:
             "evidence_source",
             "reason",
         ):
-            _text(getattr(self, name), name)
-        _timestamp(self.observed_at, "observed_at")
+            _CANONICAL_TEXT_VALIDATOR(getattr(self, name), name)
+        _CANONICAL_TIMESTAMP_PARSER(self.observed_at, "observed_at")
         if type(self.outcome) is not _CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE:
             raise ValueError("outcome must be PaperAttemptOutcome")
         if self.evidence_grade not in {_EVIDENCE_CONFIGURED, _EVIDENCE_EMPIRICAL}:
@@ -416,7 +424,7 @@ class PaperExecutionEvidenceRecord:
 
     @property
     def evidence_sha256(self) -> str:
-        return _digest(
+        return _CANONICAL_DIGEST(
             {
                 "schema": "autosport.paper_execution_observation_evidence",
                 "schema_version": 1,
@@ -508,18 +516,18 @@ class ObservedPaperExecution:
         decimal_parser = _CANONICAL_DECIMAL_PARSER
         if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
             raise ValueError("decimal parser authority changed")
-        _text(self.action_id, "action_id")
-        _timestamp(self.observed_at, "observed_at")
+        _CANONICAL_TEXT_VALIDATOR(self.action_id, "action_id")
+        _CANONICAL_TIMESTAMP_PARSER(self.observed_at, "observed_at")
         if type(self.outcome) is not _CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE:
             raise ValueError("outcome must be PaperAttemptOutcome")
         if self.evidence_grade not in {_EVIDENCE_CONFIGURED, _EVIDENCE_EMPIRICAL}:
             raise ValueError("observed execution evidence must be CONFIGURED or EMPIRICAL")
-        _text(self.evidence_source, "evidence_source")
-        _text(self.evidence_id, "evidence_id")
-        digest = _text(self.evidence_sha256, "evidence_sha256")
+        _CANONICAL_TEXT_VALIDATOR(self.evidence_source, "evidence_source")
+        _CANONICAL_TEXT_VALIDATOR(self.evidence_id, "evidence_id")
+        digest = _CANONICAL_TEXT_VALIDATOR(self.evidence_sha256, "evidence_sha256")
         if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
             raise ValueError("evidence_sha256 must be lowercase SHA-256 hex")
-        _text(self.reason, "reason")
+        _CANONICAL_TEXT_VALIDATOR(self.reason, "reason")
         if type(self.suspended) is not bool:
             raise ValueError("suspended must be bool")
         if self.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
@@ -586,7 +594,7 @@ class PaperLegAttempt:
             "model_fingerprint",
             "reason",
         ):
-            _text(getattr(self, name), name)
+            _CANONICAL_TEXT_VALIDATOR(getattr(self, name), name)
         if type(self.sequence) is not int or self.sequence < 0:
             raise ValueError("sequence must be a non-negative int")
         decision_odds = decimal_parser(self.decision_odds, "decision_odds")
@@ -598,8 +606,8 @@ class PaperLegAttempt:
             "requested_stake",
             decimal_parser(self.requested_stake, "requested_stake"),
         )
-        decision_time = _timestamp(self.decision_observed_at, "decision_observed_at")
-        execution_time = _timestamp(self.execution_observed_at, "execution_observed_at")
+        decision_time = _CANONICAL_TIMESTAMP_PARSER(self.decision_observed_at, "decision_observed_at")
+        execution_time = _CANONICAL_TIMESTAMP_PARSER(self.execution_observed_at, "execution_observed_at")
         if execution_time < decision_time:
             raise ValueError("execution evidence cannot predate decision quote")
         if type(self.delay_ms) is not int or self.delay_ms < 0:
@@ -616,8 +624,8 @@ class PaperLegAttempt:
             if self.evidence_id is not None or self.evidence_sha256 is not None:
                 raise ValueError("synthetic attempt cannot claim registered evidence identity")
         else:
-            _text(self.evidence_id, "evidence_id")
-            digest = _text(self.evidence_sha256, "evidence_sha256")
+            _CANONICAL_TEXT_VALIDATOR(self.evidence_id, "evidence_id")
+            digest = _CANONICAL_TEXT_VALIDATOR(self.evidence_sha256, "evidence_sha256")
             if len(digest) != 64:
                 raise ValueError("evidence_sha256 must be SHA-256 hex")
         if self.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
@@ -766,8 +774,8 @@ class PaperExecutionRun:
         if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
             raise ValueError("decimal parser authority changed")
         for name in ("run_id", "trigger_id", "plan_id", "plan_fingerprint", "model_fingerprint"):
-            _text(getattr(self, name), name)
-        _timestamp(self.started_at, "started_at")
+            _CANONICAL_TEXT_VALIDATOR(getattr(self, name), name)
+        _CANONICAL_TIMESTAMP_PARSER(self.started_at, "started_at")
         if not all(isinstance(item, PaperLegAttempt) for item in self.attempts):
             raise ValueError("attempts must contain PaperLegAttempt values")
         if len({item.action_id for item in self.attempts}) != len(self.attempts):
@@ -864,20 +872,20 @@ class PaperExecutionLedger:
     ) -> dict[str, Any]:
         body = {
             "schema_version": _SCHEMA_VERSION,
-            "event_type": _text(event_type, "event_type"),
-            "run_id": _text(run_id, "run_id"),
-            "event_key": _text(key, "event_key"),
+            "event_type": _CANONICAL_TEXT_VALIDATOR(event_type, "event_type"),
+            "run_id": _CANONICAL_TEXT_VALIDATOR(run_id, "run_id"),
+            "event_key": _CANONICAL_TEXT_VALIDATOR(key, "event_key"),
             "sequence": sequence,
             "previous_sha256": previous_sha256,
             "payload": payload,
         }
-        return {**body, "event_sha256": _digest(body)}
+        return {**body, "event_sha256": _CANONICAL_DIGEST(body)}
 
     def _read_anchor_unlocked(self) -> dict[str, Any] | None:
         if not self._anchor_path.exists():
             return None
         try:
-            raw = self._anchor_path.read_text(encoding="utf-8")
+            raw = self._anchor_path.read_CANONICAL_TEXT_VALIDATOR(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise PaperExecutionIntegrityError("cannot read PAPER execution anchor") from exc
         anchor = _parse_json_object(raw, what="ledger anchor")
@@ -888,7 +896,7 @@ class PaperExecutionLedger:
         if set(anchor) != expected:
             raise PaperExecutionIntegrityError("ledger anchor schema is invalid")
         body = {key: anchor[key] for key in expected if key != "anchor_sha256"}
-        if anchor["anchor_sha256"] != _digest(body):
+        if anchor["anchor_sha256"] != _CANONICAL_DIGEST(body):
             raise PaperExecutionIntegrityError("ledger anchor digest mismatch")
         return anchor
 
@@ -900,13 +908,13 @@ class PaperExecutionLedger:
             "event_count": len(events),
             "ledger_root_sha256": root,
         }
-        anchor = {**body, "anchor_sha256": _digest(body)}
+        anchor = {**body, "anchor_sha256": _CANONICAL_DIGEST(body)}
         tmp = self._anchor_path.with_name(
             self._anchor_path.name + f".tmp-{os.getpid()}-{threading.get_ident()}"
         )
         try:
             with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-                handle.write(_canonical(anchor) + "\n")
+                handle.write(_CANONICAL_CANONICALIZER(anchor) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, self._anchor_path)
@@ -928,7 +936,7 @@ class PaperExecutionLedger:
                     raise PaperExecutionIntegrityError("ledger is missing but anchor claims history")
             return []
         try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
+            lines = self.path.read_CANONICAL_TEXT_VALIDATOR(encoding="utf-8").splitlines()
         except (OSError, UnicodeError) as exc:
             raise PaperExecutionIntegrityError("cannot read PAPER execution ledger") from exc
 
@@ -950,7 +958,7 @@ class PaperExecutionLedger:
             if event["previous_sha256"] != previous_sha256:
                 raise PaperExecutionIntegrityError("ledger event chain predecessor mismatch")
             body = {key: event[key] for key in expected_keys if key != "event_sha256"}
-            if event["event_sha256"] != _digest(body):
+            if event["event_sha256"] != _CANONICAL_DIGEST(body):
                 raise PaperExecutionIntegrityError("ledger event digest mismatch")
             key = event["event_key"]
             if type(key) is not str or not key:
@@ -981,7 +989,7 @@ class PaperExecutionLedger:
             events = self._load_unlocked()
             if run_id is None:
                 return tuple(events)
-            _text(run_id, "run_id")
+            _CANONICAL_TEXT_VALIDATOR(run_id, "run_id")
             return tuple(event for event in events if event["run_id"] == run_id)
 
     def _append_event(
@@ -1021,7 +1029,7 @@ class PaperExecutionLedger:
                         "event_key already has different payload"
                     )
                 return
-            encoded = _canonical(event) + "\n"
+            encoded = _CANONICAL_CANONICALIZER(event) + "\n"
             path_existed_before = self.path.exists()
             try:
                 with self.path.open("a", encoding="utf-8", newline="\n") as handle:
@@ -1060,7 +1068,7 @@ class PaperExecutionLedger:
     def resolve_observation_evidence(
         self, evidence_id: str
     ) -> PaperExecutionEvidenceRecord:
-        evidence_id = _text(evidence_id, "evidence_id")
+        evidence_id = _CANONICAL_TEXT_VALIDATOR(evidence_id, "evidence_id")
         matches = [
             event
             for event in self.events()
@@ -1258,17 +1266,17 @@ def _run_id(
     trigger_id: str,
     config: PaperExecutionModelConfig,
 ) -> str:
-    return "paper-exec-v2-" + _digest(
+    return "paper-exec-v2-" + _CANONICAL_DIGEST(
         {
             "plan_fingerprint": plan.fingerprint,
-            "trigger_id": _text(trigger_id, "trigger_id"),
+            "trigger_id": _CANONICAL_TEXT_VALIDATOR(trigger_id, "trigger_id"),
             "model_fingerprint": config.fingerprint,
         }
     )
 
 
 def _attempt_id(run_id: str, action: ExecutionAction, sequence: int) -> str:
-    return "paper-attempt-v2-" + _digest(
+    return "paper-attempt-v2-" + _CANONICAL_DIGEST(
         {
             "run_id": run_id,
             "action_id": action.action_id,
@@ -1292,7 +1300,7 @@ def _synthetic_attempt(
             "synthetic PAPER exposure model supports BACK only; non-BACK must use "
             "explicit empirical/configured execution evidence"
         )
-    start = _timestamp(started_at, "started_at")
+    start = _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at")
     delay_span = config.max_delay_ms - config.min_delay_ms
     delay_ms = config.min_delay_ms
     if delay_span:
@@ -1302,9 +1310,9 @@ def _synthetic_attempt(
             delay_span + 1,
         )
     execution_time = start + timedelta(milliseconds=delay_ms)
-    decision_time = _timestamp(action.quote_observed_at, "quote_observed_at")
+    decision_time = _CANONICAL_TIMESTAMP_PARSER(action.quote_observed_at, "quote_observed_at")
     quote_age_ms = _milliseconds(execution_time - decision_time, "quote age")
-    expires = _timestamp(action.expires_at, "expires_at")
+    expires = _CANONICAL_TIMESTAMP_PARSER(action.expires_at, "expires_at")
     reason: str
     outcome: PaperAttemptOutcome
     execution_odds: Decimal | None = None
@@ -1376,7 +1384,7 @@ def _synthetic_attempt(
         decision_odds=action.requested_odds,
         requested_stake=action.requested_stake,
         decision_observed_at=action.quote_observed_at,
-        execution_observed_at=_timestamp_text(execution_time),
+        execution_observed_at=_timestamp_CANONICAL_TEXT_VALIDATOR(execution_time),
         delay_ms=delay_ms,
         quote_age_ms=quote_age_ms,
         outcome=outcome,
@@ -1437,14 +1445,14 @@ def _observed_attempt(
 ) -> PaperLegAttempt:
     if observation.action_id != action.action_id:
         raise PaperExecutionStateError("observation action_id mismatch")
-    execution_time = _timestamp(observation.observed_at, "observed_at")
-    decision_time = _timestamp(action.quote_observed_at, "quote_observed_at")
+    execution_time = _CANONICAL_TIMESTAMP_PARSER(observation.observed_at, "observed_at")
+    decision_time = _CANONICAL_TIMESTAMP_PARSER(action.quote_observed_at, "quote_observed_at")
     delay_ms = _milliseconds(
-        execution_time - _timestamp(started_at, "started_at"),
+        execution_time - _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at"),
         "execution delay",
     )
     quote_age_ms = _milliseconds(execution_time - decision_time, "quote age")
-    if execution_time >= _timestamp(action.expires_at, "expires_at"):
+    if execution_time >= _CANONICAL_TIMESTAMP_PARSER(action.expires_at, "expires_at"):
         raise PaperExecutionStateError("observed execution occurs at/after action expiry")
     if quote_age_ms > config.max_quote_age_ms:
         raise PaperExecutionStateError("observed execution violates configured quote freshness")
@@ -1516,8 +1524,8 @@ def execute_paper_plan(
         raise TypeError("config must be PaperExecutionModelConfig")
     if not isinstance(ledger, PaperExecutionLedger):
         raise TypeError("ledger must be PaperExecutionLedger")
-    trigger_id = _text(trigger_id, "trigger_id")
-    _timestamp(started_at, "started_at")
+    trigger_id = _CANONICAL_TEXT_VALIDATOR(trigger_id, "trigger_id")
+    _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at")
     if observations is None:
         observations = {}
     if not isinstance(observations, Mapping):

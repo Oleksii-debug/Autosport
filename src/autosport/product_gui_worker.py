@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import queue
-import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,6 +27,7 @@ from .operator_source_registry import (
 )
 from .product_entrypoint import ProductEntrypointError, _validated_source
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
+from .secret_redaction import _safe_exception_type_label
 from .trusted_runtime_code_profile import (
     TrustedRuntimeCodeProfile,
     TrustedRuntimeCodeProfileError,
@@ -43,7 +43,7 @@ from .workspace_lock import WorkspaceEconomicLock
 
 RuntimeBuilder = Callable[[Path, str, str], AutonomousProductRuntime]
 ProfiledRuntimeBuilder = Callable[..., AutonomousProductRuntime]
-SourceFactory = Callable[[], object]
+SourceFactory = Callable[..., object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,11 +124,14 @@ def _capture_profiled_runtime_builder(
                 "configured source factory is not product-owned by this build"
             )
         binding = matches[0]
+        expected_workspace = canonical_workspace(workspace)
 
         # Do not route the profiled path through product_entrypoint._validated_source:
         # that compatibility helper intentionally performs a dynamic module:function
-        # load. The authority path calls the exact import-time registry callable.
-        source = binding.factory()
+        # load. The authority path calls the exact import-time registry callable and
+        # passes only the already-canonical runtime workspace through its product-owned
+        # keyword contract. No process-global workspace environment is rewritten.
+        source = binding.factory(workspace=expected_workspace)
         for field in ("source_id", "stream_epoch"):
             value = getattr(source, field, None)
             if type(value) is not str or not value or value.strip() != value:
@@ -141,7 +144,6 @@ def _capture_profiled_runtime_builder(
                     f"product source must provide callable {method}"
                 )
 
-        expected_workspace = canonical_workspace(workspace)
         source_workspace = getattr(source, "workspace", None)
         if (
             source_workspace is not None
@@ -348,18 +350,9 @@ def _require_profiled_tick_identity(
 
 
 def _safe_error_type(exc: BaseException) -> str:
-    """Return a bounded identifier only; exception detail never crosses to the UI."""
+    """Project only canonical built-in exception categories into operator UI."""
 
-    try:
-        name = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        return "BaseException"
-    if (
-        type(name) is not str
-        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) is None
-    ):
-        return "BaseException"
-    return name
+    return _safe_exception_type_label(exc)
 
 
 @dataclass(frozen=True, slots=True)

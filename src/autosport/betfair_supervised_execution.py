@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
+from hmac import compare_digest as _hmac_compare_digest, digest as _hmac_digest
 import json
 from pathlib import Path
+from secrets import token_bytes as _token_bytes
 from typing import Callable, Mapping, Sequence
-import weakref
 
 from .betfair_account_readonly import (
     BETTING_JSON_RPC_ENDPOINT,
@@ -688,7 +689,7 @@ class BetfairSupervisedPlaceOrdersClient:
 
 
 def _build_canonical_place_action_dispatch():
-    """Capture the exact provider-write method before callers can shadow dispatch."""
+    """Capture provider-write dispatch and authenticate each client construction."""
 
     client_type = BetfairSupervisedPlaceOrdersClient
     object_getattribute = object.__getattribute__
@@ -703,6 +704,7 @@ def _build_canonical_place_action_dispatch():
         if original_init_kwdefaults is not None
         else ()
     )
+
     canonical_credentials_type = BetfairSessionCredentials
     canonical_gate_type = BetfairSupervisedExecutionGate
     canonical_default_transport_type = UrllibBetfairHttpTransport
@@ -711,146 +713,222 @@ def _build_canonical_place_action_dispatch():
     canonical_client_getattribute = client_type.__getattribute__
     canonical_credentials_getattribute = canonical_credentials_type.__getattribute__
     canonical_gate_getattribute = canonical_gate_type.__getattribute__
+    canonical_gate_method = canonical_gate_type.__dict__.get("require")
     gate_owner_authority_method = canonical_gate_type.__dict__.get(
         "_require_current_owner_authority"
     )
     if (
-        not callable(gate_owner_authority_method)
+        not callable(canonical_gate_method)
+        or getattr(canonical_gate_method, "__code__", None) is None
+        or not callable(gate_owner_authority_method)
         or getattr(gate_owner_authority_method, "__code__", None) is None
     ):
-        raise RuntimeError("canonical Betfair gate owner authority is unavailable")
+        raise RuntimeError("canonical Betfair gate authority is unavailable")
+    canonical_gate_method_code = canonical_gate_method.__code__
     gate_owner_authority_code = gate_owner_authority_method.__code__
+    gate_field_names = (
+        "enabled",
+        "bookmaker_id",
+        "account_id",
+        "profile_sha256",
+        "authority_ref",
+        "authority_sha256",
+        "economic_goal_store",
+        "economic_goal_workspace",
+    )
     gate_field_descriptors = tuple(
         (name, canonical_gate_type.__dict__.get(name))
-        for name in (
-            "enabled",
-            "bookmaker_id",
-            "account_id",
-            "profile_sha256",
-            "authority_ref",
-            "authority_sha256",
-            "economic_goal_store",
-            "economic_goal_workspace",
-        )
+        for name in gate_field_names
     )
+    credential_field_names = ("application_key", "session_token")
     credential_field_descriptors = tuple(
         (name, canonical_credentials_type.__dict__.get(name))
-        for name in ("application_key", "session_token")
+        for name in credential_field_names
     )
-    bindings: weakref.WeakKeyDictionary[
-        BetfairSupervisedPlaceOrdersClient,
-        tuple[object, ...],
-    ] = weakref.WeakKeyDictionary()
 
-    def sealed_init(self, *args, **kwargs):
+    canonical_bytes = _canonical_bytes
+    canonical_bytes_code = canonical_bytes.__code__
+    binding_digest = _hmac_digest
+    binding_compare_digest = _hmac_compare_digest
+    binding_key = _token_bytes(32)
+    if type(binding_key) is not bytes or len(binding_key) != 32:
+        raise RuntimeError("Betfair client binding key is unavailable")
+    binding_field = "_autosport_provider_write_dependency_proof"
+
+    def init_metadata_current() -> bool:
         current_kwdefaults = original_init.__kwdefaults__
-        if (
-            client_type.__dict__.get("__init__") is not sealed_init
-            or original_init.__code__ is not original_init_code
-            or original_init.__defaults__ is not original_init_defaults
-            or current_kwdefaults is not original_init_kwdefaults
-            or (
-                current_kwdefaults is not None
-                and (
-                    len(current_kwdefaults) != len(original_init_kwdefault_items)
-                    or any(
-                        key not in current_kwdefaults
-                        or current_kwdefaults[key] is not value
+        return (
+            original_init.__code__ is original_init_code
+            and original_init.__defaults__ is original_init_defaults
+            and current_kwdefaults is original_init_kwdefaults
+            and (
+                current_kwdefaults is None
+                or (
+                    len(current_kwdefaults) == len(original_init_kwdefault_items)
+                    and all(
+                        key in current_kwdefaults
+                        and current_kwdefaults[key] is value
                         for key, value in original_init_kwdefault_items
                     )
                 )
             )
-            or BetfairSessionCredentials is not canonical_credentials_type
-            or BetfairSupervisedExecutionGate is not canonical_gate_type
-            or UrllibBetfairHttpTransport is not canonical_default_transport_type
-            or _now is not canonical_default_clock
-            or getattr(canonical_default_clock, "__code__", None)
-            is not canonical_default_clock_code
-            or client_type.__getattribute__ is not canonical_client_getattribute
-            or canonical_credentials_type.__getattribute__
-            is not canonical_credentials_getattribute
-            or canonical_gate_type.__getattribute__ is not canonical_gate_getattribute
-            or canonical_gate_type.__dict__.get("_require_current_owner_authority")
-            is not gate_owner_authority_method
-            or getattr(gate_owner_authority_method, "__code__", None)
-            is not gate_owner_authority_code
-            or any(
-                canonical_gate_type.__dict__.get(name) is not descriptor
+        )
+
+    def static_authority_current() -> bool:
+        return (
+            init_metadata_current()
+            and BetfairSessionCredentials is canonical_credentials_type
+            and BetfairSupervisedExecutionGate is canonical_gate_type
+            and UrllibBetfairHttpTransport is canonical_default_transport_type
+            and _now is canonical_default_clock
+            and getattr(canonical_default_clock, "__code__", None)
+            is canonical_default_clock_code
+            and client_type.__getattribute__ is canonical_client_getattribute
+            and canonical_credentials_type.__getattribute__
+            is canonical_credentials_getattribute
+            and canonical_gate_type.__getattribute__ is canonical_gate_getattribute
+            and canonical_gate_type.__dict__.get("require") is canonical_gate_method
+            and getattr(canonical_gate_method, "__code__", None)
+            is canonical_gate_method_code
+            and canonical_gate_type.__dict__.get("_require_current_owner_authority")
+            is gate_owner_authority_method
+            and getattr(gate_owner_authority_method, "__code__", None)
+            is gate_owner_authority_code
+            and all(
+                canonical_gate_type.__dict__.get(name) is descriptor
                 for name, descriptor in gate_field_descriptors
             )
-            or any(
-                canonical_credentials_type.__dict__.get(name) is not descriptor
+            and all(
+                canonical_credentials_type.__dict__.get(name) is descriptor
                 for name, descriptor in credential_field_descriptors
             )
-        ):
-            raise BetfairSupervisedExecutionError(
-                "canonical Betfair client constructor authority changed"
-            )
-        original_init(self, *args, **kwargs)
-        namespace = object_getattribute(self, "__dict__")
-        if type(namespace.get("_credentials")) is not canonical_credentials_type:
-            raise BetfairSupervisedExecutionError(
-                "Betfair client credentials must be exact canonical credentials"
-            )
-        if type(namespace.get("_gate")) is not canonical_gate_type:
-            raise BetfairSupervisedExecutionError(
-                "Betfair client gate must be exact canonical gate"
-            )
+            and _canonical_bytes is canonical_bytes
+            and canonical_bytes.__code__ is canonical_bytes_code
+        )
+
+    def instance_dict(value: object) -> dict[str, object] | None:
+        try:
+            namespace = object_getattribute(value, "__dict__")
+        except AttributeError:
+            return None
+        return namespace if type(namespace) is dict else None
+
+    def dependency_payload(
+        client: BetfairSupervisedPlaceOrdersClient,
+        namespace: dict[str, object],
+    ) -> bytes:
         gate = namespace.get("_gate")
         transport = namespace.get("_transport")
-        if gate is None or transport is None:
+        credentials = namespace.get("_credentials")
+        clock = namespace.get("_clock")
+        timeout_seconds = namespace.get("_timeout_seconds")
+        if (
+            type(gate) is not canonical_gate_type
+            or type(credentials) is not canonical_credentials_type
+            or transport is None
+            or not callable(clock)
+            or type(timeout_seconds) is not float
+            or timeout_seconds <= 0
+        ):
             raise BetfairSupervisedExecutionError(
                 "Betfair client dependencies were not initialized canonically"
             )
-        gate_method = type(gate).__dict__.get("require")
-        transport_method = type(transport).__dict__.get("post")
-        transport_getattribute = type(transport).__getattribute__
+        transport_type = type(transport)
+        transport_method = transport_type.__dict__.get("post")
+        transport_getattribute = transport_type.__getattribute__
         if (
-            not callable(gate_method)
-            or getattr(gate_method, "__code__", None) is None
-            or not callable(transport_method)
+            not callable(transport_method)
             or getattr(transport_method, "__code__", None) is None
         ):
             raise BetfairSupervisedExecutionError(
                 "Betfair client dependency dispatch is unavailable"
             )
-        credentials = namespace.get("_credentials")
-        clock = namespace.get("_clock")
-        timeout_seconds = namespace.get("_timeout_seconds")
-        if credentials is None or clock is None or timeout_seconds is None:
+        gate_namespace = instance_dict(gate)
+        transport_namespace = instance_dict(transport)
+        if (
+            gate_namespace is not None
+            and "require" in gate_namespace
+        ) or (
+            transport_namespace is not None
+            and "post" in transport_namespace
+        ):
             raise BetfairSupervisedExecutionError(
-                "Betfair client runtime dependencies were not initialized canonically"
+                "Betfair client dependency dispatch is shadowed"
             )
-        gate_state = tuple(
+        gate_state = [
             object_getattribute(gate, name)
-            for name in (
-                "enabled",
-                "bookmaker_id",
-                "account_id",
-                "profile_sha256",
-                "authority_ref",
-                "authority_sha256",
-                "economic_goal_store",
-                "economic_goal_workspace",
+            for name in gate_field_names
+        ]
+        store = gate_state[6]
+        workspace = gate_state[7]
+        canonical_gate_state = [
+            gate_state[0],
+            gate_state[1],
+            gate_state[2],
+            gate_state[3],
+            gate_state[4],
+            gate_state[5],
+            0 if store is None else id(store),
+            None if workspace is None else str(workspace),
+        ]
+        credential_state = [
+            object_getattribute(credentials, name)
+            for name in credential_field_names
+        ]
+        clock_code = getattr(clock, "__code__", None)
+        payload = {
+            "schema": "autosport.betfair_provider_write_client_binding",
+            "schema_version": 1,
+            "client_identity": id(client),
+            "gate_identity": id(gate),
+            "gate_state": canonical_gate_state,
+            "gate_method_identity": id(canonical_gate_method),
+            "gate_method_code_identity": id(canonical_gate_method_code),
+            "gate_owner_method_identity": id(gate_owner_authority_method),
+            "gate_owner_method_code_identity": id(gate_owner_authority_code),
+            "credentials_identity": id(credentials),
+            "credential_state": credential_state,
+            "transport_identity": id(transport),
+            "transport_type_identity": id(transport_type),
+            "transport_method_identity": id(transport_method),
+            "transport_method_code_identity": id(transport_method.__code__),
+            "transport_getattribute_identity": id(transport_getattribute),
+            "clock_identity": id(clock),
+            "clock_code_identity": 0 if clock_code is None else id(clock_code),
+            "timeout_seconds": timeout_seconds,
+        }
+        return canonical_bytes(payload)
+
+    def dependency_proof(
+        client: BetfairSupervisedPlaceOrdersClient,
+        namespace: dict[str, object],
+    ) -> bytes:
+        return binding_digest(
+            binding_key,
+            dependency_payload(client, namespace),
+            "sha256",
+        )
+
+    def sealed_init(self, *args, **kwargs):
+        if (
+            client_type.__dict__.get("__init__") is not sealed_init
+            or not static_authority_current()
+        ):
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair client constructor authority changed"
             )
-        )
-        credential_state = (
-            credentials,
-            object_getattribute(credentials, "application_key"),
-            object_getattribute(credentials, "session_token"),
-        )
-        bindings[self] = (
-            gate,
-            gate_method,
-            gate_state,
-            transport,
-            transport_method,
-            transport_getattribute,
-            credential_state,
-            clock,
-            getattr(clock, "__code__", None),
-            timeout_seconds,
-        )
+        original_init(self, *args, **kwargs)
+        if not static_authority_current():
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair client constructor authority changed"
+            )
+        namespace = object_getattribute(self, "__dict__")
+        if type(namespace) is not dict:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client instance state is unavailable"
+            )
+        proof = dependency_proof(self, namespace)
+        namespace[binding_field] = proof
 
     client_type.__init__ = sealed_init
 
@@ -868,113 +946,29 @@ def _build_canonical_place_action_dispatch():
             or sealed_init.__code__ is not sealed_init_code
             or client_type.__dict__.get("place_action") is not place_action
             or place_action.__code__ is not place_action_code
+            or not static_authority_current()
         ):
             raise BetfairSupervisedExecutionError(
                 "canonical Betfair client dispatch changed"
             )
         namespace = object_getattribute(client, "__dict__")
-        if type(namespace) is not dict or "place_action" in namespace:
-            raise BetfairSupervisedExecutionError(
-                "Betfair client shadows canonical place_action dispatch"
-            )
-        binding = bindings.get(client)
-        if binding is None:
-            raise BetfairSupervisedExecutionError(
-                "Betfair client has no canonical dependency binding"
-            )
-        (
-            bound_gate,
-            gate_method,
-            gate_state,
-            bound_transport,
-            transport_method,
-            transport_getattribute,
-            credential_state,
-            bound_clock,
-            bound_clock_code,
-            bound_timeout_seconds,
-        ) = binding
-        current_gate = namespace.get("_gate")
-        current_transport = namespace.get("_transport")
-        current_credentials = namespace.get("_credentials")
-        current_clock = namespace.get("_clock")
-        current_timeout_seconds = namespace.get("_timeout_seconds")
         if (
-            current_gate is not bound_gate
-            or current_transport is not bound_transport
-            or current_credentials is not credential_state[0]
-            or current_clock is not bound_clock
-            or current_timeout_seconds != bound_timeout_seconds
+            type(namespace) is not dict
+            or "place_action" in namespace
+            or binding_field not in namespace
         ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client lacks canonical dependency binding"
+            )
+        proof = namespace.get(binding_field)
+        if type(proof) is not bytes or len(proof) != 32:
             raise BetfairSupervisedExecutionError(
                 "Betfair client dependency binding changed"
             )
-        current_gate_method = type(bound_gate).__dict__.get("require")
-        current_transport_method = type(bound_transport).__dict__.get("post")
-        current_gate_owner_authority = type(bound_gate).__dict__.get(
-            "_require_current_owner_authority"
-        )
-        if (
-            type(bound_gate) is not canonical_gate_type
-            or canonical_gate_type.__getattribute__ is not canonical_gate_getattribute
-            or type(current_credentials) is not canonical_credentials_type
-            or canonical_credentials_type.__getattribute__
-            is not canonical_credentials_getattribute
-            or type(bound_transport).__getattribute__ is not transport_getattribute
-            or current_gate_owner_authority is not gate_owner_authority_method
-            or getattr(current_gate_owner_authority, "__code__", None)
-            is not gate_owner_authority_code
-            or any(
-                canonical_gate_type.__dict__.get(name) is not descriptor
-                for name, descriptor in gate_field_descriptors
-            )
-            or any(
-                canonical_credentials_type.__dict__.get(name) is not descriptor
-                for name, descriptor in credential_field_descriptors
-            )
-        ):
+        expected = dependency_proof(client, namespace)
+        if not binding_compare_digest(proof, expected):
             raise BetfairSupervisedExecutionError(
-                "Betfair client dependency dispatch changed"
-            )
-        current_gate_state = tuple(
-            object_getattribute(bound_gate, name)
-            for name in (
-                "enabled",
-                "bookmaker_id",
-                "account_id",
-                "profile_sha256",
-                "authority_ref",
-                "authority_sha256",
-                "economic_goal_store",
-                "economic_goal_workspace",
-            )
-        )
-        if current_gate_state != gate_state:
-            raise BetfairSupervisedExecutionError(
-                "Betfair client gate authority state changed"
-            )
-        if (
-            object_getattribute(current_credentials, "application_key")
-            != credential_state[1]
-            or object_getattribute(current_credentials, "session_token")
-            != credential_state[2]
-        ):
-            raise BetfairSupervisedExecutionError(
-                "Betfair client credential authority changed"
-            )
-        if (
-            current_gate_method is not gate_method
-            or getattr(gate_method, "__code__", None)
-            is not getattr(current_gate_method, "__code__", None)
-            or current_transport_method is not transport_method
-            or getattr(transport_method, "__code__", None)
-            is not getattr(current_transport_method, "__code__", None)
-            or getattr(bound_clock, "__code__", None) is not bound_clock_code
-            or "require" in getattr(bound_gate, "__dict__", {})
-            or "post" in getattr(bound_transport, "__dict__", {})
-        ):
-            raise BetfairSupervisedExecutionError(
-                "Betfair client dependency dispatch changed"
+                "Betfair client dependency binding changed"
             )
 
     def dispatch(

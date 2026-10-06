@@ -12,12 +12,6 @@ import pytest
 
 from supervised_clock_test_support import install_trusted_clock
 
-# Install one stable deterministic supervised-execution clock before test collection
-# imports Betfair provider-write composition. Individual tests vary only the helper's
-# private state; the function identity/code captured by production authority seals
-# remains unchanged.
-install_trusted_clock()
-
 # Root-selection production now correctly treats post-composition replacement of the
 # OS account-location resolver as an authority violation. Tests that need a sandbox
 # must therefore install one stable process-local resolver *before* importing the
@@ -64,6 +58,11 @@ else:
         return SimpleNamespace(pw_dir=str(_ROOT_SELECTION_TEST_HOME))
 
     _root_selection_pwd.getpwuid = _pytest_root_selection_getpwuid
+
+# Install the stable supervised-execution test clock only after the OS account
+# resolver shim is composed, but still before test collection can import the Betfair
+# provider-write module that seals the trusted-clock function identity.
+install_trusted_clock()
 
 from autosport import monotonic_authority_root_binding as _root_selection
 from autosport._provider_evaluation_semantic_gate import (

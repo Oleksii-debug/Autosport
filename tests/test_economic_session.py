@@ -403,6 +403,32 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                     MonotonicWorkspaceAuthority.__init__ = original_authority_init
 
 
+    def test_paperbook_path_exists_rebinding_fails_before_session_io(self) -> None:
+        import autosport.economic_session as economic_session
+
+        store = self._store()
+        path_type = economic_session._PATH_TYPE
+        original = path_type.exists
+        calls = 0
+
+        def hostile(_self):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("rebound PaperBook Path.exists executed")
+
+        path_type.exists = hostile
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+        finally:
+            path_type.exists = original
+
+        self.assertEqual(calls, 0)
+
+
     def test_instance_configuration_rebinding_fails_closed(self) -> None:
         store = self._store()
         store.current()

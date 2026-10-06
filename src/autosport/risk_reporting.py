@@ -1413,138 +1413,159 @@ def build_paper_risk_report(
     book: PaperBook,
     goal: EconomicGoalContract,
 ) -> PaperRiskReport:
-    """Build a fail-closed report from the same replay authority as risk policy.
-
-    This function is read-only. It neither mutates the book nor authorizes a
-    stake/action. Invalid or internally inconsistent PAPER state raises
-    ``ValueError`` rather than publishing partial or caller-shaped risk metrics.
-    """
+    """Acquire the canonical PaperBook operation lock for the full risk report replay."""
 
     if type(book) is not PaperBook:
         raise TypeError("book must be canonical PaperBook")
     if type(goal) is not EconomicGoalContract:
         raise TypeError("goal must be canonical EconomicGoalContract")
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    lock = _CANONICAL_PAPERBOOK_OPERATION_LOCK(book)
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    with lock:
+        result = _build_paper_risk_report_locked(book, goal)
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    return result
 
-    _require_canonical_equity_replay_code_authority()
-
-    # Frozen dataclasses remain technically mutable through low-level same-process
-    # operations such as object.__setattr__. Capture one canonical persisted-value
-    # snapshot and fence the source contract before, immediately after capture, and
-    # again before return so report fields/headroom cannot mix two goal revisions.
-    goal_provenance_before = _CANONICAL_GOAL_PROVENANCE(goal)
-    goal_snapshot = _CANONICAL_GOAL_FROM_PAYLOAD(_CANONICAL_GOAL_TO_PAYLOAD(goal))
-    goal_snapshot_provenance = _CANONICAL_GOAL_PROVENANCE(goal_snapshot)
-    goal_provenance_after_capture = _CANONICAL_GOAL_PROVENANCE(goal)
-    if (
-        goal_provenance_before != goal_snapshot_provenance
-        or goal_provenance_after_capture != goal_snapshot_provenance
-    ):
-        raise ValueError("canonical economic goal changed during reporting")
-
-    before_source_sha256 = _paper_equity_source_state_sha256(book)
-    before_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
-    if before_sha256 is None:
-        raise ValueError("canonical PAPER risk state cannot be reported")
-
-    metrics = _CANONICAL_RISK_HISTORICAL_METRICS(book)
-    rooms = _CANONICAL_RISK_GOAL_HISTORY_ROOMS(book, goal_snapshot)
-    equity_path = build_product_issued_paper_equity_path(book, goal_snapshot)
-    drawdown_evidence = build_product_issued_paper_drawdown_evidence(
-        book,
-        goal_snapshot,
-    )
-    if drawdown_evidence.equity_path_sha256 != equity_path.path_sha256:
-        raise ValueError("canonical PAPER drawdown evidence path identity is inconsistent")
-    # Preserve the established independent replay callback boundary as a
-    # consistency/race falsifier. It is not the published evidence authority:
-    # the product-issued path/drawdown digests above are. This cross-check also
-    # catches state mutation between the two independent canonical replays.
-    replay_crosscheck = _historical_max_drawdown(book)
-    if replay_crosscheck is None:
-        raise ValueError("canonical PAPER drawdown replay is unavailable")
-    maximum_drawdown = _HistoricalMaxDrawdown(
-        amount=drawdown_evidence.max_drawdown_amount,
-        fraction=drawdown_evidence.max_drawdown_fraction,
-        peak_id=drawdown_evidence.max_drawdown_peak_id,
-        trough_id=drawdown_evidence.max_drawdown_trough_id,
-        current_equity=drawdown_evidence.current_equity,
-        peak_equity=drawdown_evidence.peak_equity,
-    )
-    after_source_sha256 = _paper_equity_source_state_sha256(book)
-    after_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
-    if (
-        metrics is None
-        or rooms is None
-        or maximum_drawdown is None
-        or after_sha256 is None
-    ):
-        raise ValueError("canonical PAPER risk state cannot be reported")
-    if after_sha256 != before_sha256:
-        raise ValueError("canonical PAPER risk state changed during reporting")
-    if after_source_sha256 != before_source_sha256:
-        raise ValueError("canonical PAPER source state changed during reporting")
-    if (
-        maximum_drawdown.current_equity != metrics.current_equity
-        or maximum_drawdown.peak_equity != metrics.peak_equity
-        or replay_crosscheck != maximum_drawdown
-    ):
-        raise ValueError("canonical PAPER drawdown replay is inconsistent")
-
-    _, _, drawdown_loss_room, _ = rooms
-    try:
-        with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
-            current_drawdown_amount = metrics.peak_equity - metrics.current_equity
-    except DecimalException as exc:
-        raise ValueError("canonical PAPER drawdown is not exactly representable") from exc
-    if current_drawdown_amount < 0:
-        raise ValueError("canonical PAPER drawdown state is inconsistent")
-
-    report = PaperRiskReport(
-        schema=RISK_REPORT_SCHEMA,
-        scope=RISK_REPORT_SCOPE_PAPER_ONLY,
-        drawdown_metric_class=DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
-        includes_live_execution_exposure=False,
-        live_execution_headroom_authoritative=False,
-        portfolio_risk_state_sha256=after_sha256,
-        paperbook_source_state_sha256=equity_path.paperbook_source_state_sha256,
-        equity_path_sha256=equity_path.path_sha256,
-        drawdown_evidence_sha256=drawdown_evidence.evidence_sha256,
-        equity_path_point_count=equity_path.point_count,
-        equity_path_availability_complete=equity_path.availability_complete,
-        settled_history_complete=equity_path.settled_history_complete,
-        money_scope_complete=equity_path.money_scope_complete,
-        opening_capital_authority_complete=equity_path.opening_capital_authority_complete,
-        applicable_costs_complete=equity_path.applicable_costs_complete,
-        net_equity_authoritative=equity_path.net_equity_authoritative,
-        correction_lineage_complete=equity_path.correction_lineage_complete,
-        restated_history_authoritative=equity_path.restated_history_authoritative,
-        frozen_scope_complete=equity_path.frozen_scope_complete,
-        historical_reresolution_complete=equity_path.historical_reresolution_complete,
-        history_view=equity_path.history_view,
-        historical_as_known_supported=equity_path.historical_as_known_supported,
-        goal_id=goal_snapshot.goal_id,
-        goal_revision=goal_snapshot.revision,
-        bankroll_id=goal_snapshot.bankroll_id,
-        currency=goal_snapshot.currency,
-        goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
-        initial_bankroll=metrics.initial_bankroll,
-        current_equity=metrics.current_equity,
-        peak_equity=metrics.peak_equity,
-        committed_stake=metrics.committed_stake,
-        realized_gross_loss=metrics.realized_gross_loss,
-        turnover=metrics.turnover,
-        current_drawdown_amount=current_drawdown_amount,
-        historical_max_drawdown_amount=maximum_drawdown.amount,
-        historical_max_drawdown_fraction=maximum_drawdown.fraction,
-        historical_max_drawdown_peak_id=maximum_drawdown.peak_id,
-        historical_max_drawdown_trough_id=maximum_drawdown.trough_id,
-        drawdown_loss_room=drawdown_loss_room,
-        max_drawdown_fraction=goal_snapshot.max_drawdown_fraction,
-        risk_of_ruin_limit=goal_snapshot.max_risk_of_ruin,
-        risk_of_ruin_upper_bound=None,
-        risk_of_ruin_status=RISK_OF_RUIN_STATUS_UNKNOWN,
-    )
-
-    if _CANONICAL_GOAL_PROVENANCE(goal) != goal_snapshot_provenance:
-        raise ValueError("canonical economic goal changed during reporting")
-    return report
+    def _build_paper_risk_report_locked(
+        book: PaperBook,
+        goal: EconomicGoalContract,
+    ) -> PaperRiskReport:
+        """Build a fail-closed report from the same replay authority as risk policy.
+    
+        This function is read-only. It neither mutates the book nor authorizes a
+        stake/action. Invalid or internally inconsistent PAPER state raises
+        ``ValueError`` rather than publishing partial or caller-shaped risk metrics.
+        """
+    
+        if type(book) is not PaperBook:
+            raise TypeError("book must be canonical PaperBook")
+        if type(goal) is not EconomicGoalContract:
+            raise TypeError("goal must be canonical EconomicGoalContract")
+    
+        _require_canonical_equity_replay_code_authority()
+    
+        # Frozen dataclasses remain technically mutable through low-level same-process
+        # operations such as object.__setattr__. Capture one canonical persisted-value
+        # snapshot and fence the source contract before, immediately after capture, and
+        # again before return so report fields/headroom cannot mix two goal revisions.
+        goal_provenance_before = _CANONICAL_GOAL_PROVENANCE(goal)
+        goal_snapshot = _CANONICAL_GOAL_FROM_PAYLOAD(_CANONICAL_GOAL_TO_PAYLOAD(goal))
+        goal_snapshot_provenance = _CANONICAL_GOAL_PROVENANCE(goal_snapshot)
+        goal_provenance_after_capture = _CANONICAL_GOAL_PROVENANCE(goal)
+        if (
+            goal_provenance_before != goal_snapshot_provenance
+            or goal_provenance_after_capture != goal_snapshot_provenance
+        ):
+            raise ValueError("canonical economic goal changed during reporting")
+    
+        before_source_sha256 = _paper_equity_source_state_sha256(book)
+        before_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
+        if before_sha256 is None:
+            raise ValueError("canonical PAPER risk state cannot be reported")
+    
+        metrics = _CANONICAL_RISK_HISTORICAL_METRICS(book)
+        rooms = _CANONICAL_RISK_GOAL_HISTORY_ROOMS(book, goal_snapshot)
+        equity_path = build_product_issued_paper_equity_path(book, goal_snapshot)
+        drawdown_evidence = build_product_issued_paper_drawdown_evidence(
+            book,
+            goal_snapshot,
+        )
+        if drawdown_evidence.equity_path_sha256 != equity_path.path_sha256:
+            raise ValueError("canonical PAPER drawdown evidence path identity is inconsistent")
+        # Preserve the established independent replay callback boundary as a
+        # consistency/race falsifier. It is not the published evidence authority:
+        # the product-issued path/drawdown digests above are. This cross-check also
+        # catches state mutation between the two independent canonical replays.
+        replay_crosscheck = _historical_max_drawdown(book)
+        if replay_crosscheck is None:
+            raise ValueError("canonical PAPER drawdown replay is unavailable")
+        maximum_drawdown = _HistoricalMaxDrawdown(
+            amount=drawdown_evidence.max_drawdown_amount,
+            fraction=drawdown_evidence.max_drawdown_fraction,
+            peak_id=drawdown_evidence.max_drawdown_peak_id,
+            trough_id=drawdown_evidence.max_drawdown_trough_id,
+            current_equity=drawdown_evidence.current_equity,
+            peak_equity=drawdown_evidence.peak_equity,
+        )
+        after_source_sha256 = _paper_equity_source_state_sha256(book)
+        after_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
+        if (
+            metrics is None
+            or rooms is None
+            or maximum_drawdown is None
+            or after_sha256 is None
+        ):
+            raise ValueError("canonical PAPER risk state cannot be reported")
+        if after_sha256 != before_sha256:
+            raise ValueError("canonical PAPER risk state changed during reporting")
+        if after_source_sha256 != before_source_sha256:
+            raise ValueError("canonical PAPER source state changed during reporting")
+        if (
+            maximum_drawdown.current_equity != metrics.current_equity
+            or maximum_drawdown.peak_equity != metrics.peak_equity
+            or replay_crosscheck != maximum_drawdown
+        ):
+            raise ValueError("canonical PAPER drawdown replay is inconsistent")
+    
+        _, _, drawdown_loss_room, _ = rooms
+        try:
+            with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
+                current_drawdown_amount = metrics.peak_equity - metrics.current_equity
+        except DecimalException as exc:
+            raise ValueError("canonical PAPER drawdown is not exactly representable") from exc
+        if current_drawdown_amount < 0:
+            raise ValueError("canonical PAPER drawdown state is inconsistent")
+    
+        report = PaperRiskReport(
+            schema=RISK_REPORT_SCHEMA,
+            scope=RISK_REPORT_SCOPE_PAPER_ONLY,
+            drawdown_metric_class=DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
+            includes_live_execution_exposure=False,
+            live_execution_headroom_authoritative=False,
+            portfolio_risk_state_sha256=after_sha256,
+            paperbook_source_state_sha256=equity_path.paperbook_source_state_sha256,
+            equity_path_sha256=equity_path.path_sha256,
+            drawdown_evidence_sha256=drawdown_evidence.evidence_sha256,
+            equity_path_point_count=equity_path.point_count,
+            equity_path_availability_complete=equity_path.availability_complete,
+            settled_history_complete=equity_path.settled_history_complete,
+            money_scope_complete=equity_path.money_scope_complete,
+            opening_capital_authority_complete=equity_path.opening_capital_authority_complete,
+            applicable_costs_complete=equity_path.applicable_costs_complete,
+            net_equity_authoritative=equity_path.net_equity_authoritative,
+            correction_lineage_complete=equity_path.correction_lineage_complete,
+            restated_history_authoritative=equity_path.restated_history_authoritative,
+            frozen_scope_complete=equity_path.frozen_scope_complete,
+            historical_reresolution_complete=equity_path.historical_reresolution_complete,
+            history_view=equity_path.history_view,
+            historical_as_known_supported=equity_path.historical_as_known_supported,
+            goal_id=goal_snapshot.goal_id,
+            goal_revision=goal_snapshot.revision,
+            bankroll_id=goal_snapshot.bankroll_id,
+            currency=goal_snapshot.currency,
+            goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
+            initial_bankroll=metrics.initial_bankroll,
+            current_equity=metrics.current_equity,
+            peak_equity=metrics.peak_equity,
+            committed_stake=metrics.committed_stake,
+            realized_gross_loss=metrics.realized_gross_loss,
+            turnover=metrics.turnover,
+            current_drawdown_amount=current_drawdown_amount,
+            historical_max_drawdown_amount=maximum_drawdown.amount,
+            historical_max_drawdown_fraction=maximum_drawdown.fraction,
+            historical_max_drawdown_peak_id=maximum_drawdown.peak_id,
+            historical_max_drawdown_trough_id=maximum_drawdown.trough_id,
+            drawdown_loss_room=drawdown_loss_room,
+            max_drawdown_fraction=goal_snapshot.max_drawdown_fraction,
+            risk_of_ruin_limit=goal_snapshot.max_risk_of_ruin,
+            risk_of_ruin_upper_bound=None,
+            risk_of_ruin_status=RISK_OF_RUIN_STATUS_UNKNOWN,
+        )
+    
+        if _CANONICAL_GOAL_PROVENANCE(goal) != goal_snapshot_provenance:
+            raise ValueError("canonical economic goal changed during reporting")
+        return report

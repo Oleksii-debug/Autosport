@@ -3900,8 +3900,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         tick_dependency_fingerprints: tuple[
             tuple[str, tuple[object, ...]], ...
         ] | None = None
+        tick_dependency_entries: tuple[
+            tuple[str, FocusedMirrorDependency, tuple[object, ...]], ...
+        ] | None = None
         tick_matching_keys: tuple[
             tuple[str, tuple[object, ...]], ...
+        ] | None = None
+        tick_matching_key_sets: tuple[
+            tuple[str, set[object], tuple[object, ...]], ...
         ] | None = None
 
         if type(dependency_index) is _dependency_index_type:
@@ -3913,12 +3919,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         def refresh_tick_dependency_routing_authority() -> None:
             nonlocal tick_dependency_input_ids
             nonlocal tick_dependency_fingerprints
+            nonlocal tick_dependency_entries
             nonlocal tick_matching_keys
+            nonlocal tick_matching_key_sets
             require_lifecycle_dispatch_authority()
             if type(dependency_index) is not _dependency_index_type:
                 tick_dependency_input_ids = None
                 tick_dependency_fingerprints = None
+                tick_dependency_entries = None
                 tick_matching_keys = None
+                tick_matching_key_sets = None
                 return
             input_ids = dependency_index.input_ids
             if (
@@ -3935,22 +3945,92 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "dependency index input identity state is invalid"
                 )
             tick_dependency_input_ids = input_ids
-            tick_dependency_fingerprints = tuple(
+            tick_dependency_entries = tuple(
                 (
                     input_id,
+                    _dependency_reader(dependency_index, input_id),
                     dependency_fingerprint(
                         _dependency_reader(dependency_index, input_id)
                     ),
                 )
                 for input_id in input_ids
             )
-            tick_matching_keys = tuple(
+            tick_dependency_fingerprints = tuple(
+                (input_id, fingerprint)
+                for input_id, _dependency, fingerprint in tick_dependency_entries
+            )
+            tick_matching_key_sets = tuple(
                 (
                     input_id,
+                    dependency_index._matched_keys[input_id],
                     _matching_keys_reader(dependency_index, input_id),
                 )
                 for input_id in input_ids
             )
+            tick_matching_keys = tuple(
+                (input_id, keys)
+                for input_id, _matched_set, keys in tick_matching_key_sets
+            )
+
+        def restore_tick_dependency_routing_authority() -> bool:
+            if (
+                type(dependency_index) is not _dependency_index_type
+                or tick_dependency_entries is None
+                or tick_matching_key_sets is None
+                or tick_dependency_storage is None
+                or tick_matched_keys_storage is None
+                or tick_dependency_lock is None
+            ):
+                return False
+            changed = (
+                dependency_index._mirror is not tick_dependency_mirror
+                or dependency_index._dependencies is not tick_dependency_storage
+                or dependency_index._matched_keys is not tick_matched_keys_storage
+                or dependency_index._lock is not tick_dependency_lock
+                or tuple(dependency_index._dependencies) != tick_dependency_input_ids
+            )
+            object.__setattr__(dependency_index, "_mirror", tick_dependency_mirror)
+            object.__setattr__(
+                dependency_index,
+                "_dependencies",
+                tick_dependency_storage,
+            )
+            object.__setattr__(
+                dependency_index,
+                "_matched_keys",
+                tick_matched_keys_storage,
+            )
+            object.__setattr__(dependency_index, "_lock", tick_dependency_lock)
+            with tick_dependency_lock:
+                tick_dependency_storage.clear()
+                for input_id, dependency, fingerprint in tick_dependency_entries:
+                    for field_name, value in zip(
+                        (
+                            "input_id",
+                            "source_ids",
+                            "sports",
+                            "event_ids",
+                            "market_ids",
+                            "selection_ids",
+                        ),
+                        fingerprint,
+                    ):
+                        if getattr(dependency, field_name) != value:
+                            changed = True
+                            object.__setattr__(dependency, field_name, value)
+                    tick_dependency_storage[input_id] = dependency
+
+                tick_matched_keys_storage.clear()
+                for input_id, matched_set, keys in tick_matching_key_sets:
+                    if (
+                        tuple(sorted(matched_set)) != keys
+                        or dependency_index._matched_keys.get(input_id) is not matched_set
+                    ):
+                        changed = True
+                    matched_set.clear()
+                    matched_set.update(keys)
+                    tick_matched_keys_storage[input_id] = matched_set
+            return changed
 
         def require_tick_dependency_routing_authority(message: str) -> None:
             require_lifecycle_dispatch_authority()
@@ -3962,9 +4042,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 or dependency_index._matched_keys is not tick_matched_keys_storage
                 or dependency_index._lock is not tick_dependency_lock
             ):
+                restore_tick_dependency_routing_authority()
                 raise ContinuousSessionError(message)
             input_ids = dependency_index.input_ids
             if input_ids != tick_dependency_input_ids:
+                restore_tick_dependency_routing_authority()
                 raise ContinuousSessionError(message)
             current_dependencies = tuple(
                 (
@@ -3986,6 +4068,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 current_dependencies != tick_dependency_fingerprints
                 or current_matching_keys != tick_matching_keys
             ):
+                restore_tick_dependency_routing_authority()
                 raise ContinuousSessionError(message)
 
         refresh_tick_dependency_routing_authority()

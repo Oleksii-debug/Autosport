@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from autosport.causal_collector import CollectorDelta, CollectorDeltaStore
+from autosport.causal_collector_legacy import SyncState
 
 
 _TRIGGER_NAME = "collector_deltas_projection_immutable_v1"
@@ -181,6 +182,7 @@ def _delta(
     revision_of: str | None = None,
     revision_number: int = 0,
     event_identity: str | None = None,
+    sync_state: SyncState = SyncState.READY,
 ) -> CollectorDelta:
     identity = delta_id if event_identity is None else event_identity
     digest_seed = f"{delta_id}:{cursor_position}:{revision_number}".encode("utf-8")
@@ -205,6 +207,7 @@ def _delta(
         desktop_available_at="2026-09-23T00:00:03+00:00",
         revision_of=revision_of,
         revision_number=revision_number,
+        sync_state=sync_state,
     )
 
 
@@ -338,7 +341,14 @@ def test_unverified_predecessor_cannot_export_or_reuse_epoch_activation(
     path = tmp_path / "collector.db"
     store = CollectorDeltaStore(path)
     assert store.append(_delta("d1", 1, stream_epoch="epoch-1")) is True
-    assert store.append(_delta("d2", 1, stream_epoch="epoch-2")) is True
+    assert store.append(
+        _delta(
+            "d2",
+            1,
+            stream_epoch="epoch-2",
+            sync_state=SyncState.EPOCH_CHANGED,
+        )
+    ) is True
     _install_predecessor_projection_trigger(path)
 
     # Model an activation issued by predecessor code while commit_seq was not

@@ -25,6 +25,11 @@ from secrets import token_hex
 import stat
 from threading import RLock
 
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .workspace_lock import (
     WorkspaceEconomicLock,
     WorkspaceEconomicLockBusyError,
@@ -41,6 +46,10 @@ _BASE_RETRY_SECONDS = 5
 _MAX_RETRY_SECONDS = 300
 _MAX_TEXT_CHARS = 4096
 _MAX_STATE_FILE_BYTES = 64 * 1024
+_MONOTONIC_DOMAIN = "provider-session-lifecycle"
+_MONOTONIC_KEY_PREFIX = "prophetx-session-pool:"
+_MONOTONIC_BINDING_SCHEMA = "autosport.prophetx_session_pool.monotonic_binding"
+_MONOTONIC_BINDING_VERSION = 1
 
 
 class ProphetXSessionLifecycleError(RuntimeError):
@@ -1917,7 +1926,125 @@ class ProphetXSessionLifecycle:
             seconds=min(base + jitter, _MAX_RETRY_SECONDS)
         )
 
-    def _load_state(self) -> ProphetXSessionSnapshot | None:
+    def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
+        return MonotonicWorkspaceAuthority(
+            workspace=self.workspace,
+            domain=_MONOTONIC_DOMAIN,
+            key=_MONOTONIC_KEY_PREFIX + self.scope.pool_id,
+        )
+
+    def _monotonic_binding(self) -> str:
+        payload = {
+            "schema": _MONOTONIC_BINDING_SCHEMA,
+            "schema_version": _MONOTONIC_BINDING_VERSION,
+            "provider": PROVIDER_ID,
+            "environment": self.scope.environment,
+            "access_key_identity_sha256": self.scope.access_key_identity_sha256,
+            "pool_id": self.scope.pool_id,
+            "state_name": self._STATE_NAME,
+        }
+        return sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("ascii")
+        ).hexdigest()
+
+    @staticmethod
+    def _monotonic_tx_id(
+        *,
+        operation: str,
+        observed_state_sha256: str | None,
+        intended_state_sha256: str,
+        semantic_binding_sha256: str,
+        authority_tip_sha256: str | None,
+    ) -> str:
+        payload = {
+            "operation": operation,
+            "observed_state_sha256": observed_state_sha256,
+            "intended_state_sha256": intended_state_sha256,
+            "semantic_binding_sha256": semantic_binding_sha256,
+            "authority_tip_sha256": authority_tip_sha256,
+        }
+        return sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("ascii")
+        ).hexdigest()
+
+    @staticmethod
+    def _raise_monotonic_error(exc: MonotonicWorkspaceAuthorityError) -> None:
+        raise ProphetXSessionLifecycleError(
+            "ProphetX monotonic session-state authority rejected local state: "
+            + str(exc)
+        ) from exc
+
+    def _recover_or_adopt_monotonic_state(
+        self,
+        local: tuple[ProphetXSessionSnapshot, str] | None,
+    ) -> None:
+        """Bind validated local state to the independent monotonic authority.
+
+        A pre-authority, schema-valid state is adopted exactly once as the migration
+        baseline.  After that first witness, deletion or rollback cannot silently
+        remint a fresh provider-session history while machine authority survives.
+        """
+
+        try:
+            authority = self._monotonic_authority()
+            history = authority.read_history()
+            if not history:
+                if local is None:
+                    return
+                _, state_sha256 = local
+                binding_sha256 = self._monotonic_binding()
+                tx_id = self._monotonic_tx_id(
+                    operation="ADOPT_VALIDATED_BASELINE",
+                    observed_state_sha256=None,
+                    intended_state_sha256=state_sha256,
+                    semantic_binding_sha256=binding_sha256,
+                    authority_tip_sha256=None,
+                )
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=state_sha256,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=state_sha256,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                return
+
+            latest = history[-1]
+            if local is None:
+                authority.recover(observed_state_sha256=None)
+                return
+
+            _, state_sha256 = local
+            if latest.phase is AuthorityPhase.PREPARE:
+                authority.recover(
+                    observed_state_sha256=state_sha256,
+                    tx_id=latest.tx_id,
+                    semantic_binding_sha256=self._monotonic_binding(),
+                )
+            else:
+                authority.recover(observed_state_sha256=state_sha256)
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+
+    def _load_state_local(
+        self,
+    ) -> tuple[ProphetXSessionSnapshot, str] | None:
         try:
             descriptor = _open_read_only_descriptor(self._state_path)
         except FileNotFoundError:
@@ -1940,7 +2067,8 @@ class ProphetXSessionLifecycle:
             with os.fdopen(descriptor, "r", encoding="utf-8", closefd=True) as handle:
                 descriptor = -1
                 raw = handle.read(_MAX_STATE_FILE_BYTES + 1)
-            if len(raw.encode("utf-8")) > _MAX_STATE_FILE_BYTES:
+            encoded_raw = raw.encode("utf-8")
+            if len(encoded_raw) > _MAX_STATE_FILE_BYTES:
                 raise ProphetXSessionLifecycleError(
                     "ProphetX session state exceeds the bounded file-size contract"
                 )
@@ -2043,7 +2171,7 @@ class ProphetXSessionLifecycle:
             raise ProphetXSessionLifecycleError(
                 "unknown ProphetX renewal failure class"
             ) from exc
-        return ProphetXSessionSnapshot(
+        snapshot = ProphetXSessionSnapshot(
             state=state,
             generation=_nonnegative_int(payload["generation"], "generation"),
             credential_revision=_required_text(
@@ -2103,6 +2231,12 @@ class ProphetXSessionLifecycle:
             last_failure_class=failure,
             last_renewal_failure_class=renewal_failure,
         )
+        return snapshot, sha256(encoded_raw).hexdigest()
+
+    def _load_state(self) -> ProphetXSessionSnapshot | None:
+        local = self._load_state_local()
+        self._recover_or_adopt_monotonic_state(local)
+        return None if local is None else local[0]
 
     def _write_state(self, snapshot: ProphetXSessionSnapshot) -> None:
         if type(snapshot) is not ProphetXSessionSnapshot:
@@ -2123,10 +2257,44 @@ class ProphetXSessionLifecycle:
             )
             + chr(10)
         )
-        if len(encoded.encode("utf-8")) > _MAX_STATE_FILE_BYTES:
+        encoded_bytes = encoded.encode("utf-8")
+        if len(encoded_bytes) > _MAX_STATE_FILE_BYTES:
             raise ProphetXSessionLifecycleError(
                 "ProphetX session state exceeds the bounded file-size contract"
             )
+
+        local = self._load_state_local()
+        self._recover_or_adopt_monotonic_state(local)
+        observed_state_sha256 = None if local is None else local[1]
+        intended_state_sha256 = sha256(encoded_bytes).hexdigest()
+        semantic_binding_sha256 = self._monotonic_binding()
+
+        try:
+            authority = self._monotonic_authority()
+            history = authority.read_history()
+            if history and history[-1].phase is AuthorityPhase.PREPARE:
+                raise ProphetXSessionLifecycleError(
+                    "ProphetX monotonic authority has unresolved prepared state"
+                )
+            authority_tip_sha256 = (
+                None if not history else history[-1].record_sha256
+            )
+            tx_id = self._monotonic_tx_id(
+                operation="PUBLISH",
+                observed_state_sha256=observed_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                semantic_binding_sha256=semantic_binding_sha256,
+                authority_tip_sha256=authority_tip_sha256,
+            )
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                semantic_binding_sha256=semantic_binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+
         temporary = self._scope_dir / (
             f".{self._STATE_NAME}.{os.getpid()}.{token_hex(8)}.tmp"
         )
@@ -2150,3 +2318,22 @@ class ProphetXSessionLifecycle:
             raise ProphetXSessionLifecycleError(
                 "cannot durably write ProphetX session state"
             ) from exc
+
+        published = self._load_state_local()
+        if (
+            published is None
+            or published[1] != intended_state_sha256
+            or published[0] != snapshot
+        ):
+            raise ProphetXSessionLifecycleError(
+                "published ProphetX session state differs from prepared authority"
+            )
+        try:
+            authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=intended_state_sha256,
+                semantic_binding_sha256=semantic_binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+

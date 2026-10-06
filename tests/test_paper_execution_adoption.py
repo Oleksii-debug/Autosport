@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+
+import autosport.paper_execution_adoption as adoption_module
 
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
@@ -206,6 +209,579 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                     binding=binding,
                     decision_id="decision-lay",
                 )
+
+    def test_runtime_rejects_prepared_execution_subclass_before_field_access(self):
+        class HostilePrepared(PreparedPaperExecution):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    raise AssertionError("hostile prepared fields must not be read")
+                return super().__getattribute__(name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            hostile = object.__new__(HostilePrepared)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "prepared must be exact PreparedPaperExecution",
+            ):
+                runtime._mint_prepared(hostile)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "prepared must be exact PreparedPaperExecution",
+            ):
+                runtime._require_minted(hostile)
+
+    def test_constructor_rejects_model_config_subclass_before_access(self):
+        class HostileConfig(PaperExecutionModelConfig):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    raise AssertionError("hostile config attributes must not be read")
+                return super().__getattribute__(name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hostile = object.__new__(HostileConfig)
+            with self.assertRaisesRegex(
+                TypeError,
+                "config must be exact PaperExecutionModelConfig",
+            ):
+                PaperExecutionAdoptionRuntime(
+                    book=PaperBook("100.00"),
+                    ledger=PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl"),
+                    config=hostile,
+                    max_quote_age=__import__("datetime").timedelta(seconds=5),
+                    paper_book_path=Path(tmp) / "paper-book.json",
+                )
+
+    def test_constructor_rejects_paper_execution_ledger_subclass_before_access(self):
+        class HostileLedger(PaperExecutionLedger):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    raise AssertionError("hostile ledger attributes must not be read")
+                return super().__getattribute__(name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hostile = object.__new__(HostileLedger)
+            with self.assertRaisesRegex(
+                TypeError,
+                "ledger must be exact PaperExecutionLedger",
+            ):
+                PaperExecutionAdoptionRuntime(
+                    book=PaperBook("100.00"),
+                    ledger=hostile,
+                    config=config(),
+                    max_quote_age=__import__("datetime").timedelta(seconds=5),
+                    paper_book_path=Path(tmp) / "paper-book.json",
+                )
+
+    def test_constructor_rejects_timedelta_subclass_before_comparison(self):
+        class HostileTimedelta(timedelta):
+            def __le__(self, _other):
+                raise AssertionError("hostile timedelta comparison must not execute")
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with self.assertRaisesRegex(
+                TypeError,
+                "max_quote_age must be an exact timedelta",
+            ):
+                PaperExecutionAdoptionRuntime(
+                    book=PaperBook("1000"),
+                    ledger=PaperExecutionLedger(workspace / "paper-execution.jsonl"),
+                    config=config(),
+                    max_quote_age=HostileTimedelta(seconds=5),
+                    paper_book_path=workspace / "paper_book.json",
+                )
+
+    def test_execute_with_clock_rejects_datetime_subclass_before_hooks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            _book, _ledger, runtime = self.runtime(directory)
+            prepared_value = prepared(runtime, action("a1"))
+
+            class HostileDateTime(datetime):
+                def utcoffset(self):
+                    raise AssertionError("hostile utcoffset must not execute")
+
+                def astimezone(self, *args, **kwargs):
+                    raise AssertionError("hostile astimezone must not execute")
+
+            hostile = HostileDateTime(
+                2026,
+                9,
+                21,
+                12,
+                0,
+                tzinfo=timezone.utc,
+            )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "PAPER execution clock must return exact datetime",
+            ):
+                runtime.execute_with_clock(
+                    prepared=prepared_value,
+                    trigger_id="trigger-1",
+                    clock=lambda: hostile,
+                    materialize_exposure=False,
+                )
+
+    def test_execute_with_clock_rejects_product_clock_before_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            backwards = datetime.fromisoformat(
+                "2026-09-20T05:59:59.999999+00:00"
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "start clock precedes the authorized plan",
+            ):
+                runtime.execute_with_clock(
+                    prepared=current_prepared,
+                    trigger_id="trigger-backward-clock",
+                    clock=lambda: backwards,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(ledger.events(), ())
+            self.assertEqual(book.tickets, {})
+
+    def test_exposure_scope_only_recovery_uses_new_execution_clock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-scope-only-recovery"
+            run_id = runtime.expected_run_id(current_prepared, trigger_id)
+
+            # Simulate a crash after scope publication but before #623 reserves
+            # the run. Scope evidence is authority for exposure identity, not proof
+            # that execution already started.
+            runtime._publish_exposure_scope(
+                prepared=current_prepared,
+                run_id=run_id,
+            )
+            pre_recovery_events = ledger.events(run_id)
+            self.assertEqual(
+                [event["event_type"] for event in pre_recovery_events],
+                [runtime._EXPOSURE_SCOPE_EVENT_TYPE],
+            )
+
+            recovery_time = datetime.fromisoformat(
+                "2026-09-20T06:01:00+00:00"
+            )
+            result = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id=trigger_id,
+                clock=lambda: recovery_time,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(result.run.started_at, recovery_time.isoformat())
+            self.assertEqual(
+                result.run.attempts[0].outcome,
+                PaperAttemptOutcome.REJECTED,
+            )
+            self.assertIn("expired", result.run.attempts[0].reason)
+            self.assertEqual(book.tickets, {})
+            reservations = [
+                event
+                for event in ledger.events(run_id)
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(
+                reservations[0]["payload"]["started_at"],
+                recovery_time.isoformat(),
+            )
+
+    def test_expected_run_id_rejects_run_identity_resolver_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            hostile_calls = []
+
+            def forged_run_id(*_args):
+                hostile_calls.append(True)
+                return "forged-run"
+
+            original = adoption_module._paper_impl._run_id
+            adoption_module._paper_impl._run_id = forged_run_id
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "canonical PAPER execution run identity resolver changed",
+                ):
+                    runtime.expected_run_id(
+                        current_prepared,
+                        "trigger-run-id-rebind",
+                    )
+            finally:
+                adoption_module._paper_impl._run_id = original
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_execute_with_clock_rejects_timestamp_parser_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            hostile_calls = []
+
+            def forged_timestamp(*_args):
+                hostile_calls.append(True)
+                return datetime.fromisoformat(STARTED_AT)
+
+            original = adoption_module._utc_timestamp
+            adoption_module._utc_timestamp = forged_timestamp
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "canonical PAPER execution timestamp parser changed",
+                ):
+                    runtime.execute_with_clock(
+                        prepared=current_prepared,
+                        trigger_id="trigger-timestamp-parser-rebind",
+                        clock=lambda: datetime.fromisoformat(
+                            "2026-09-20T06:01:00+00:00"
+                        ),
+                        materialize_exposure=True,
+                    )
+            finally:
+                adoption_module._utc_timestamp = original
+
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(book.tickets, {})
+
+    def test_execute_with_clock_rejects_durable_loader_code_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            loader = PaperExecutionLedger._load_unlocked
+            original_code = loader.__code__
+            hostile_calls = []
+
+            def forged_loader(_self):
+                hostile_calls.append(True)
+                return ()
+
+            loader.__code__ = forged_loader.__code__
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "canonical PAPER execution ledger reader changed",
+                ):
+                    runtime.execute_with_clock(
+                        prepared=current_prepared,
+                        trigger_id="trigger-loader-code-mutation",
+                        clock=lambda: datetime.fromisoformat(
+                            "2026-09-20T06:01:00+00:00"
+                        ),
+                        materialize_exposure=True,
+                    )
+            finally:
+                loader.__code__ = original_code
+
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(book.tickets, {})
+
+    def test_execute_with_clock_rejects_module_durable_loader_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            hostile_calls = []
+
+            def forged_loader(_ledger):
+                hostile_calls.append(True)
+                return ()
+
+            original = adoption_module._PAPER_EXECUTION_LEDGER_LOAD_UNL
+            adoption_module._PAPER_EXECUTION_LEDGER_LOAD_UNL = forged_loader
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "canonical PAPER execution ledger reader changed",
+                ):
+                    runtime.execute_with_clock(
+                        prepared=current_prepared,
+                        trigger_id="trigger-module-loader-rebind",
+                        clock=lambda: datetime.fromisoformat(
+                            "2026-09-20T06:01:00+00:00"
+                        ),
+                        materialize_exposure=True,
+                    )
+            finally:
+                adoption_module._PAPER_EXECUTION_LEDGER_LOAD_UNL = original
+
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(book.tickets, {})
+
+    def test_execute_with_clock_ignores_rebound_durable_loader_for_start_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-rebound-durable-loader"
+            run_id = runtime.expected_run_id(current_prepared, trigger_id)
+            real_load = ledger._load_unlocked
+            forged_calls = [0]
+
+            fake_reservation = {
+                "event_type": "RUN_RESERVED",
+                "run_id": run_id,
+                "payload": {
+                    "trigger_id": trigger_id,
+                    "plan_id": current_prepared.execution_plan.plan_id,
+                    "plan_fingerprint": current_prepared.execution_plan.fingerprint,
+                    "model_fingerprint": runtime.config.fingerprint,
+                    "started_at": STARTED_AT,
+                    "action_ids": [
+                        item.action_id
+                        for item in current_prepared.execution_plan.actions
+                    ],
+                    "observation_evidence_ids": {},
+                },
+            }
+
+            def forged_load():
+                forged_calls[0] += 1
+                if forged_calls[0] == 1:
+                    return [fake_reservation]
+                return real_load()
+
+            ledger._load_unlocked = forged_load
+            actual_execution_time = datetime.fromisoformat(
+                "2026-09-20T06:01:00+00:00"
+            )
+
+            result = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id=trigger_id,
+                clock=lambda: actual_execution_time,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(forged_calls[0], 0)
+            self.assertEqual(
+                result.run.started_at,
+                actual_execution_time.isoformat(),
+            )
+            self.assertEqual(
+                result.run.attempts[0].outcome,
+                PaperAttemptOutcome.REJECTED,
+            )
+            self.assertIn("expired", result.run.attempts[0].reason)
+            self.assertEqual(book.tickets, {})
+
+    def test_execute_with_clock_ignores_rebound_ledger_reader_for_start_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-rebound-start-reader"
+            run_id = runtime.expected_run_id(current_prepared, trigger_id)
+            real_events = ledger.events
+
+            fake_reservation = {
+                "event_type": "RUN_RESERVED",
+                "payload": {
+                    "trigger_id": trigger_id,
+                    "plan_id": current_prepared.execution_plan.plan_id,
+                    "plan_fingerprint": current_prepared.execution_plan.fingerprint,
+                    "model_fingerprint": runtime.config.fingerprint,
+                    "started_at": STARTED_AT,
+                    "action_ids": [
+                        item.action_id
+                        for item in current_prepared.execution_plan.actions
+                    ],
+                    "observation_evidence_ids": {},
+                },
+            }
+
+            def forged_events(requested_run_id=None):
+                durable = real_events(requested_run_id)
+                # The adversarial reader lies only while no canonical event exists.
+                # Once execution publishes its real scope/reservation, downstream
+                # ledger validation sees the genuine durable history.
+                if durable:
+                    return durable
+                return (fake_reservation,)
+
+            ledger.events = forged_events
+            actual_execution_time = datetime.fromisoformat(
+                "2026-09-20T06:01:00+00:00"
+            )
+
+            result = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id=trigger_id,
+                clock=lambda: actual_execution_time,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(
+                result.run.started_at,
+                actual_execution_time.isoformat(),
+            )
+            self.assertEqual(
+                result.run.attempts[0].outcome,
+                PaperAttemptOutcome.REJECTED,
+            )
+            self.assertIn("expired", result.run.attempts[0].reason)
+            self.assertEqual(book.tickets, {})
+            reservations = [
+                event
+                for event in real_events(run_id)
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(
+                reservations[0]["payload"]["started_at"],
+                actual_execution_time.isoformat(),
+            )
+
+    def test_execute_with_clock_ignores_instance_shadowed_start_resolver(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            runtime.resolve_execution_started_at = (
+                lambda **_kwargs: STARTED_AT
+            )
+            actual_execution_time = datetime.fromisoformat(
+                "2026-09-20T06:01:00+00:00"
+            )
+
+            result = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id="trigger-shadowed-start-resolver",
+                clock=lambda: actual_execution_time,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(
+                result.run.started_at,
+                actual_execution_time.isoformat(),
+            )
+            self.assertEqual(
+                result.run.attempts[0].outcome,
+                PaperAttemptOutcome.REJECTED,
+            )
+            self.assertIn("expired", result.run.attempts[0].reason)
+            self.assertEqual(book.tickets, {})
+            reservations = [
+                event
+                for event in ledger.events()
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(
+                reservations[0]["payload"]["started_at"],
+                actual_execution_time.isoformat(),
+            )
+
+    def test_execute_with_clock_ignores_instance_shadowed_execute(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            forged_result = object()
+            runtime.execute = lambda **_kwargs: forged_result
+            actual_execution_time = datetime.fromisoformat(STARTED_AT)
+
+            result = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id="trigger-shadowed-execute",
+                clock=lambda: actual_execution_time,
+                materialize_exposure=False,
+            )
+
+            self.assertIsNot(result, forged_result)
+            self.assertEqual(result.run.started_at, STARTED_AT)
+            self.assertTrue(result.run.completed)
+
+    def test_execute_with_clock_samples_after_execution_lock_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            clock_value = [
+                datetime.fromisoformat("2026-09-20T06:00:00.100000+00:00")
+            ]
+
+            class _AdvanceClockOnEnter:
+                def __enter__(self):
+                    clock_value[0] = datetime.fromisoformat(
+                        "2026-09-20T06:01:00+00:00"
+                    )
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            runtime._execution_lock = _AdvanceClockOnEnter()
+            result = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id="trigger-lock-clock",
+                clock=lambda: clock_value[0],
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(
+                result.run.started_at,
+                "2026-09-20T06:01:00+00:00",
+            )
+            self.assertEqual(
+                result.run.attempts[0].outcome,
+                PaperAttemptOutcome.REJECTED,
+            )
+            self.assertIn("expired", result.run.attempts[0].reason)
+            self.assertEqual(book.tickets, {})
+            reservations = [
+                event
+                for event in ledger.events()
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(
+                reservations[0]["payload"]["started_at"],
+                "2026-09-20T06:01:00+00:00",
+            )
+
+    def test_execute_with_clock_reuses_reserved_start_with_configured_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("a1", odds="2.50", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.25",
+                stake="10.00",
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            clock_value = [datetime.fromisoformat(STARTED_AT)]
+
+            first = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id="trigger-clock-observed-restart",
+                clock=lambda: clock_value[0],
+                materialize_exposure=True,
+                observations={"a1": registered.as_observation()},
+                evidence_registry=registry,
+            )
+            clock_value[0] = datetime.fromisoformat(
+                "2026-09-20T06:00:00.200000+00:00"
+            )
+            second = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id="trigger-clock-observed-restart",
+                clock=lambda: clock_value[0],
+                materialize_exposure=True,
+                observations={"a1": registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(first.run, second.run)
+            self.assertEqual(second.run.started_at, STARTED_AT)
+            self.assertEqual(first.ticket_ids, second.ticket_ids)
+            self.assertEqual(len(book.tickets), 1)
 
     def test_moved_accepted_quote_materializes_execution_truth_once(self):
         with tempfile.TemporaryDirectory() as tmp:

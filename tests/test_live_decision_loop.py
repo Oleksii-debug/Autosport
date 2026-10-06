@@ -322,6 +322,99 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             catalog_required_history=catalog_required_history,
         )
 
+    def test_constructor_rejects_paper_execution_runtime_subclass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            book = PaperBook("1000")
+            ledger = PaperExecutionLedger(workspace / "paper-execution.jsonl")
+
+            class HostileRuntime(PaperExecutionAdoptionRuntime):
+                pass
+
+            runtime = HostileRuntime(
+                book=book,
+                ledger=ledger,
+                config=PaperExecutionModelConfig(
+                    model_id="hostile-runtime",
+                    model_version="1",
+                    evidence_grade=EvidenceGrade.SYNTHETIC,
+                    evidence_source="hostile-runtime",
+                    seed="hostile-runtime",
+                    max_quote_age_ms=5_000,
+                    min_delay_ms=0,
+                    max_delay_ms=0,
+                    rejected_bps=0,
+                    partial_bps=0,
+                    unknown_bps=0,
+                    partial_fill_bps=5_000,
+                    max_slippage_bps=0,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "paper_execution must be exact PaperExecutionAdoptionRuntime or None",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START),
+                    book=book,
+                    paper_execution=runtime,
+                )
+
+    def test_runtime_revalidation_rejects_post_init_subclass_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            book = PaperBook("1000")
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+                book=book,
+            )
+
+            class HostileRuntime(PaperExecutionAdoptionRuntime):
+                def __getattribute__(self, name):
+                    if name in {"book", "paper_book_path", "ledger", "config"}:
+                        raise AssertionError(
+                            "hostile runtime attributes must not be read"
+                        )
+                    return super().__getattribute__(name)
+
+            hostile = HostileRuntime(
+                book=book,
+                ledger=PaperExecutionLedger(workspace / "paper-execution.jsonl"),
+                config=PaperExecutionModelConfig(
+                    model_id="hostile-runtime-swap",
+                    model_version="1",
+                    evidence_grade=EvidenceGrade.SYNTHETIC,
+                    evidence_source="hostile-runtime-swap",
+                    seed="hostile-runtime-swap",
+                    max_quote_age_ms=5_000,
+                    min_delay_ms=0,
+                    max_delay_ms=0,
+                    rejected_bps=0,
+                    partial_bps=0,
+                    unknown_bps=0,
+                    partial_fill_bps=5_000,
+                    max_slippage_bps=0,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            loop.paper_execution = hostile
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "paper_execution runtime authority changed exact type",
+            ):
+                loop._paper_execution_model_fingerprint()
+
     def test_constructor_requires_durable_registered_intent_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -2674,6 +2767,228 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     paper_execution=execution,
                 )
 
+    def test_paper_execution_uses_current_clock_for_plan_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            model = PaperExecutionModelConfig(
+                model_id="live-plan-expiry-test",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="live-plan-expiry-test",
+                seed="live-plan-expiry-test",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            execution_ledger = PaperExecutionLedger(
+                workspace / "paper-execution.jsonl"
+            )
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=execution_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-live-plan-expiry",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=clock,
+                book=book,
+                authority=authority,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            real_refresh = loop._refresh_intents_from_snapshots
+
+            def refresh_then_expire(snapshots):
+                real_refresh(snapshots)
+                clock.value = self.START + timedelta(seconds=6)
+
+            with patch.object(
+                loop,
+                "_refresh_intents_from_snapshots",
+                side_effect=refresh_then_expire,
+            ):
+                result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(len(result.paper_execution_attempt_ids), 1)
+            self.assertEqual(book.tickets, {})
+            reservations = [
+                event
+                for event in execution_ledger.events()
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(len(reservations), 1)
+            origin = execution_ledger.reservation_decision_origin(
+                reservations[0]["run_id"]
+            )
+            self.assertIsNotNone(origin)
+            assert origin is not None
+            self.assertEqual(
+                origin.decision_id,
+                reservations[0]["payload"]["trigger_id"],
+            )
+            self.assertEqual(
+                reservations[0]["payload"]["decision_origin"],
+                origin.to_dict(),
+            )
+            self.assertEqual(
+                reservations[0]["payload"]["started_at"],
+                (self.START + timedelta(seconds=6)).isoformat(),
+            )
+            attempts = [
+                event
+                for event in execution_ledger.events()
+                if event["event_type"] == "ATTEMPT_RECORDED"
+            ]
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0]["payload"]["outcome"], "rejected")
+            self.assertIn("expired", attempts[0]["payload"]["reason"])
+
+    def test_post_append_recovery_does_not_backdate_unstarted_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            model = PaperExecutionModelConfig(
+                model_id="live-unstarted-recovery-expiry-test",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="live-unstarted-recovery-expiry-test",
+                seed="live-unstarted-recovery-expiry-test",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            execution_ledger = PaperExecutionLedger(
+                workspace / "paper-execution.jsonl"
+            )
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=execution_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-live-unstarted-recovery-expiry",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+
+            def crash_after_decision_append() -> None:
+                raise RuntimeError("simulated process loss before PAPER execution")
+
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                authority=authority,
+                paper_execution=execution,
+                post_append_hook=crash_after_decision_append,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated process loss before PAPER execution",
+            ):
+                first.run_cycle()
+
+            self.assertEqual(first._load_progress().phase, "append_pending")
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+            self.assertEqual(execution_ledger.events(), ())
+
+            resumed_book = PaperBook.load(workspace / "paper_book.json")
+            resumed_execution = PaperExecutionAdoptionRuntime(
+                book=resumed_book,
+                ledger=execution_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=6)),
+                book=resumed_book,
+                authority=authority,
+                paper_execution=resumed_execution,
+            )
+
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DUPLICATE_DECISION)
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(resumed_book.tickets, {})
+            reservations = [
+                event
+                for event in execution_ledger.events()
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(
+                reservations[0]["payload"]["started_at"],
+                (self.START + timedelta(seconds=6)).isoformat(),
+            )
+            attempts = [
+                event
+                for event in execution_ledger.events()
+                if event["event_type"] == "ATTEMPT_RECORDED"
+            ]
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0]["payload"]["outcome"], "rejected")
+            self.assertIn("expired", attempts[0]["payload"]["reason"])
+
     def test_post_execution_book_publish_restart_reuses_durable_plan_and_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -2760,7 +3075,18 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(len(durable_after_crash.tickets), 1)
             balance_after_crash = durable_after_crash.balance
             ticket_ids_after_crash = tuple(durable_after_crash.tickets)
-            execution_event_count = len(execution_ledger.events())
+            execution_events_after_crash = execution_ledger.events()
+            execution_event_count = len(execution_events_after_crash)
+            reservations_after_crash = [
+                event
+                for event in execution_events_after_crash
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(len(reservations_after_crash), 1)
+            self.assertEqual(
+                reservations_after_crash[0]["payload"]["started_at"],
+                (self.START + timedelta(seconds=1)).isoformat(),
+            )
             decision = JsonlDecisionLedger(
                 workspace / "decisions.jsonl"
             ).verified_records()[0]

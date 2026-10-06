@@ -660,6 +660,7 @@ class ProductProposalRiskCounterfactualCashFloor:
     path_protocol: str
     candidate_sha256s: tuple[str, ...]
     evaluated_stakes: tuple[Decimal, ...]
+    evaluated_capital_at_risk: tuple[Decimal, ...]
     base_cash_balance: Decimal
     candidate_open_cash_balances: tuple[Decimal, ...]
     post_open_cash_balance: Decimal
@@ -700,6 +701,12 @@ class ProductProposalRiskCounterfactualCashFloor:
         return _proven(self)
 
     @property
+    @property
+    def counterfactual_target_capital_reservation_proven(
+        self, _proven=_IDENTITY_PROVEN
+    ) -> bool:
+        return _proven(self)
+
     def terminal_payout_reconstruction_proven(
         self, _proven=_IDENTITY_PROVEN
     ) -> bool:
@@ -795,6 +802,7 @@ _RESULT_FIELDS = (
     "path_protocol",
     "candidate_sha256s",
     "evaluated_stakes",
+    "evaluated_capital_at_risk",
     "base_cash_balance",
     "candidate_open_cash_balances",
     "post_open_cash_balance",
@@ -817,6 +825,7 @@ _RESULT_AUTHORITY_PROPERTY_NAMES = (
     "evaluation_identity_proven",
     "base_portfolio_identity_proven",
     "counterfactual_target_stake_reservation_proven",
+    "counterfactual_target_capital_reservation_proven",
     "terminal_payout_reconstruction_proven",
     "counterfactual_minimum_cash_floor_proven",
     "product_scenario_source_provenance_proven",

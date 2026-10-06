@@ -1953,3 +1953,251 @@ def test_provider_unavailable_tick_rejects_noncanonical_invalidation_backlog_sta
         ):
             coordinator.tick()
 
+        assert coordinator._state.snapshot().last_error_code is None
+
+def test_tick_restores_state_after_provider_rebinding() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical_state = coordinator._state
+        replacement_state = continuous_session._ContinuousSessionState(
+            root / "replacement_session.json",
+            session_id="replacement-session",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.collector = _Collector(
+            callback=lambda: setattr(coordinator, "_state", replacement_state)
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous session state authority changed during tick",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state is canonical_state
+        assert canonical_state.snapshot().last_error_code == "ContinuousSessionError"
+        assert replacement_state.snapshot().cycles_completed == 0
+        assert replacement_state.snapshot().last_error_code is None
+
+
+def test_tick_restores_state_when_provider_rebinds_then_raises() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical_state = coordinator._state
+        replacement_state = continuous_session._ContinuousSessionState(
+            root / "replacement_session.json",
+            session_id="replacement-session",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        class Collector(_Collector):
+            def run_cycle(self):
+                coordinator._state = replacement_state
+                raise RuntimeError("provider boom")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(RuntimeError, match="provider boom"):
+            coordinator.tick()
+
+        assert coordinator._state is canonical_state
+        assert canonical_state.snapshot().last_error_code == "RuntimeError"
+        assert replacement_state.snapshot().last_error_code is None
+
+
+def test_tick_restores_state_after_desktop_rebinding() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical_state = coordinator._state
+        replacement_state = continuous_session._ContinuousSessionState(
+            root / "replacement_session.json",
+            session_id="replacement-session",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                coordinator._state = replacement_state
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous session state authority changed during tick",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state is canonical_state
+        assert canonical_state.snapshot().last_error_code == "ContinuousSessionError"
+        assert replacement_state.snapshot().last_error_code is None
+
+
+def test_tick_restores_state_after_outcome_callback_rebinding() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical_state = coordinator._state
+        replacement_state = continuous_session._ContinuousSessionState(
+            root / "replacement_session.json",
+            session_id="replacement-session",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        record = continuous_session.EventLifecycleRecord(
+            identity="provider-a:event-1",
+            source_id="provider-a",
+            sport="table_tennis",
+            event_id="event-1",
+            phase=continuous_session.EventPhase.COMPLETED,
+            first_discovered_at=_AT,
+            last_available_at=_AT,
+            scheduled_start_at=None,
+            completion_ref="completion-1",
+            settlement_ref="settlement-1",
+            completion_discovered_at=_AT,
+            settlement_discovered_at=_AT,
+            last_discovered_at=_AT,
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+            def records(self):
+                return (record,)
+
+        class Authority:
+            def resolve(self, _record, *, as_of: str):
+                assert as_of == _AT
+                coordinator._state = replacement_state
+                return None
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.outcome_authority = Authority()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous session state authority changed during tick",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state is canonical_state
+        assert canonical_state.snapshot().last_error_code == "ContinuousSessionError"
+        assert replacement_state.snapshot().last_error_code is None
+
+
+def test_tick_restores_state_after_learning_prepare_rebinding() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical_state = coordinator._state
+        replacement_state = continuous_session._ContinuousSessionState(
+            root / "replacement_session.json",
+            session_id="replacement-session",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        record = continuous_session.EventLifecycleRecord(
+            identity="provider-a:event-1",
+            source_id="provider-a",
+            sport="table_tennis",
+            event_id="event-1",
+            phase=continuous_session.EventPhase.COMPLETED,
+            first_discovered_at=_AT,
+            last_available_at=_AT,
+            scheduled_start_at=None,
+            completion_ref="completion-1",
+            settlement_ref="settlement-1",
+            completion_discovered_at=_AT,
+            settlement_discovered_at=_AT,
+            last_discovered_at=_AT,
+        )
+        resolution = continuous_session.SettlementResolution(
+            event_identity=record.identity,
+            settlement_ref="settlement-1",
+            quote_outcomes={"quote-1": "win"},
+            evidence_id="evidence-state-rebind",
+            evidence_sha256="e" * 64,
+            available_at=_AT,
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+            def records(self):
+                return (record,)
+
+        class Authority:
+            def resolve(self, _record, *, as_of: str):
+                assert as_of == _AT
+                return resolution
+
+        class Handoff:
+            def prepare_settlement(self, **_kwargs):
+                coordinator._state = replacement_state
+                return ()
+
+            def reconcile_after_settlement(self, **_kwargs):
+                raise AssertionError("reconcile ran after state authority rebinding")
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.outcome_authority = Authority()
+        coordinator.settlement_learning_handoff = Handoff()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="continuous session state authority changed during tick",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state is canonical_state
+        assert canonical_state.snapshot().last_error_code == "ContinuousSessionError"
+        assert replacement_state.snapshot().last_error_code is None
+

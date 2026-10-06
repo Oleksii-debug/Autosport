@@ -10,6 +10,7 @@ from autosport.incident_risk_register import (
     RiskStatus,
     derive_occurrence_entry_id,
     operator_projection,
+    operator_sort,
 )
 
 
@@ -104,6 +105,34 @@ class IncidentRiskProjectionIdentifierRedactionTests(unittest.TestCase):
         self.assertIn("db.example/risk", repr(projection))
         self.assertIn("mirror.example/evidence/7", repr(projection))
         self.assertIn("provider.example/incident/42", repr(projection))
+
+
+    def test_operator_projection_rejects_hostile_entry_subclass_before_attribute_access(self) -> None:
+        class HostileEntry(IncidentRiskEntry):
+            def __getattribute__(self, name: str):
+                raise AssertionError("hostile IncidentRiskEntry subclass executed")
+
+        attack = object.__new__(HostileEntry)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "operator projection requires an exact IncidentRiskEntry",
+        ):
+            operator_projection(attack)
+
+    def test_operator_sort_rejects_hostile_entry_subclass_before_sort_key_access(self) -> None:
+        class HostileEntry(IncidentRiskEntry):
+            def __getattribute__(self, name: str):
+                raise AssertionError("hostile IncidentRiskEntry subclass executed")
+
+        attack = object.__new__(HostileEntry)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "operator_sort accepts only exact IncidentRiskEntry values",
+        ):
+            operator_sort((attack,))
+
 
 
 if __name__ == "__main__":

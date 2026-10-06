@@ -1818,3 +1818,53 @@ def test_goal_store_field_order_authority_does_not_accept_forged_shape(monkeypat
     assert snapshot == contract
     assert payload["contract"]["goal_id"] == contract.goal_id
     assert payload["contract"]["currency"] == contract.currency
+
+
+def test_store_callable_authority_rejects_transitive_nested_code_mutation() -> None:
+    def leaf_validator(_value):
+        return True
+
+    def nested_validator(_value, _leaf=leaf_validator):
+        return _leaf(_value)
+
+    def operation(_value, _validator=nested_validator):
+        return _validator(_value)
+
+    bound = economic_goal_store_module._make_store_callable_authority(
+        operation,
+        "synthetic transitive authority",
+    )
+    original_code = leaf_validator.__code__
+
+    def forged_leaf(_value):
+        raise AssertionError("forged transitive validator executed")
+
+    leaf_validator.__code__ = forged_leaf.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="synthetic transitive authority transitive nested authority changed",
+        ):
+            bound(object())
+    finally:
+        leaf_validator.__code__ = original_code
+
+
+def test_public_payload_encoder_rejects_transitive_contract_validator_mutation() -> None:
+    goal = _goal()
+    validator = economic_goal_store_module._CANONICAL_GOAL_VALIDATOR
+    nested_validator = validator.__defaults__[2]
+    original_code = nested_validator.__code__
+
+    def forged_decimal_validator(_name, value, *args, **kwargs):
+        return value
+
+    nested_validator.__code__ = forged_decimal_validator.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="economic-goal payload encoder transitive nested authority changed",
+        ):
+            economic_goal_to_payload(goal)
+    finally:
+        nested_validator.__code__ = original_code

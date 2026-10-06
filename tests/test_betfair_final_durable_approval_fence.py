@@ -516,51 +516,41 @@ def test_final_send_cannot_precede_attempt_reservation(monkeypatch) -> None:
         )
 
 
-def test_second_local_gate_denial_is_not_mislabeled_provider_unknown(
+def test_gate_method_rebinding_fails_closed_before_first_gate_execution(
     monkeypatch,
 ) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
-        original_require = type(client._gate).require
         calls = 0
 
-        def deny_second_require(self, **kwargs):
+        def rebound_require(self, **kwargs):
             nonlocal calls
+            del self, kwargs
             calls += 1
-            if calls == 2:
-                raise BetfairSupervisedExecutionError(
-                    "synthetic final local authority denial"
-                )
-            return original_require(self, **kwargs)
+            raise AssertionError("rebound gate require must never execute")
 
-        monkeypatch.setattr(type(client._gate), "require", deny_second_require)
+        monkeypatch.setattr(type(client._gate), "require", rebound_require)
 
         with pytest.raises(
             BetfairSupervisedExecutionError,
-            match="synthetic final local authority denial",
+            match="canonical Betfair client dispatch changed",
         ):
             execute_betfair_supervised_action(
                 ledger,
                 bound,
                 approval,
                 action_id=action.action_id,
-                attempt_id="attempt-local-final-denial",
+                attempt_id="attempt-gate-method-rebinding",
                 profile=profile,
                 client=client,
                 clock=lambda: SUBMITTED_AT,
             )
 
-        assert calls == 2
+        assert calls == 0
         assert transport.calls == []
-        _assert_reserved_without_submission(
-            ledger,
-            bound.execution_plan.plan_id,
-            "attempt-local-final-denial",
-        )
-
-
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 def test_instance_shadowed_place_action_cannot_mint_submission_or_evidence(
     monkeypatch,
@@ -716,3 +706,133 @@ def test_final_writer_lock_conflict_fails_closed_before_submission(
             bound.execution_plan.plan_id,
             "attempt-final-writer-busy",
         )
+
+
+def test_instance_rebound_gate_cannot_reach_authority_or_transport() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        forged_calls: list[str] = []
+
+        class ForgedGate:
+            def require(self, **kwargs):
+                del kwargs
+                forged_calls.append("require")
+                raise AssertionError("forged gate must never execute")
+
+        client._gate = ForgedGate()  # type: ignore[assignment]
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="dependency binding changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-shadowed-gate",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert forged_calls == []
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_instance_rebound_transport_cannot_execute_after_reservation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        forged_calls: list[str] = []
+
+        class ForgedTransport:
+            def post(self, **kwargs):
+                del kwargs
+                forged_calls.append("post")
+                raise AssertionError("forged transport must never execute")
+
+        client._transport = ForgedTransport()  # type: ignore[assignment]
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="dependency binding changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-shadowed-transport",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert forged_calls == []
+        assert transport.calls == []
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        attempt = next(
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id == "attempt-shadowed-transport"
+        )
+        assert attempt.state is AttemptState.RESERVED
+        assert attempt.submitted_at is None
+        assert attempt.provider_evidence is None
+
+
+def test_in_place_gate_state_mutation_fails_closed_before_attempt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        object.__setattr__(client._gate, "authority_ref", "forged-authority")
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="gate authority state changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-mutated-gate",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_in_place_credential_mutation_fails_closed_before_attempt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        object.__setattr__(client._credentials, "session_token", "forged-token")
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="credential authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-mutated-credentials",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}

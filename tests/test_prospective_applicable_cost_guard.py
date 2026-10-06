@@ -141,6 +141,25 @@ def test_exact_class_positive_object_new_forge_fails_before_rebound_resolver_exe
     assert attacker_called is False
 
 
+def test_guard_ignores_rebound_object_getattribute(monkeypatch):
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+
+        class HostileObject:
+            @staticmethod
+            def __getattribute__(*args, **kwargs):
+                raise AssertionError("rebound object.__getattribute__ executed")
+
+        monkeypatch.setattr(guard, "object", HostileObject)
+        accepted = _require(asserted, case)
+
+    assert accepted is not asserted
+
+
 def test_guard_resolver_type_and_field_globals_are_non_authoritative(monkeypatch):
     attacker_called = False
 

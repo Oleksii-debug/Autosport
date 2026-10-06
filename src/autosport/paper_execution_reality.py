@@ -38,6 +38,7 @@ _RECOVERY_NONE = RecoveryDecision.NONE
 _RECOVERY_NO_EXPOSURE = RecoveryDecision.NO_EXPOSURE
 _RECOVERY_HEDGE_REVIEW_REQUIRED = RecoveryDecision.HEDGE_REVIEW_REQUIRED
 _CANONICAL_DECIMAL_TYPE = Decimal
+_CANONICAL_DECIMAL_TYPE_IDENTITY = _CANONICAL_DECIMAL_TYPE
 _CANONICAL_TEXT_VALIDATOR = _impl._CANONICAL_TEXT_VALIDATOR
 _CANONICAL_DECIMAL_PARSER = _impl._CANONICAL_DECIMAL_PARSER
 _CANONICAL_DECIMAL_PARSER_IDENTITY = _CANONICAL_DECIMAL_PARSER
@@ -60,6 +61,8 @@ _MAX_DURABLE_EVENT_LINE_CHARS = _impl._MAX_DURABLE_EVENT_LINE_CHARS
 
 
 def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
+    if type(value) is not _CANONICAL_DECIMAL_TYPE_IDENTITY:
+        raise ValueError("exact Decimal required")
     if not value.is_finite():
         raise ValueError("Decimal must be finite")
     parts = value.as_tuple()
@@ -72,10 +75,13 @@ def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
 
 
 def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
+    decimal_type = _CANONICAL_DECIMAL_TYPE
+    if decimal_type is not _CANONICAL_DECIMAL_TYPE_IDENTITY:
+        raise ValueError("PAPER Decimal type authority changed")
     sign = 1 if coefficient < 0 else 0
-    magnitude = _CANONICAL_DECIMAL_TYPE(abs(coefficient))
+    magnitude = decimal_type(abs(coefficient))
     digits = magnitude.as_tuple().digits
-    return _CANONICAL_DECIMAL_TYPE((sign, digits, exponent))
+    return decimal_type((sign, digits, exponent))
 
 
 def _decimal_add_exact(left: Decimal, right: Decimal) -> Decimal:
@@ -117,8 +123,8 @@ def _derive_run_economics(
     if len(attempts) > len(action_ids):
         raise PaperExecutionIntegrityError("durable attempts exceed reserved action list")
 
-    known_exposure = _CANONICAL_DECIMAL_TYPE("0")
-    worst_case = _CANONICAL_DECIMAL_TYPE("0")
+    known_exposure = _decimal_from_coefficient(0, 0)
+    worst_case = _decimal_from_coefficient(0, 0)
     terminal_seen = False
     for index, attempt in enumerate(attempts):
         if attempt.sequence != index or attempt.action_id != action_ids[index]:
@@ -537,10 +543,10 @@ def _synthetic_attempt(
             )
             odds_margin = _decimal_subtract_exact(
                 action.requested_odds,
-                _CANONICAL_DECIMAL_TYPE("1"),
+                _decimal_from_coefficient(1, 0),
             )
             execution_odds = _decimal_add_exact(
-                _CANONICAL_DECIMAL_TYPE("1"),
+                _decimal_from_coefficient(1, 0),
                 _decimal_scale_bps_exact(
                     odds_margin,
                     10_000 - slippage_bps,
@@ -678,8 +684,8 @@ def execute_paper_plan(
         assert result is not None
         return result
 
-    known_exposure = _CANONICAL_DECIMAL_TYPE("0")
-    worst_case_exposure = _CANONICAL_DECIMAL_TYPE("0")
+    known_exposure = _decimal_from_coefficient(0, 0)
+    worst_case_exposure = _decimal_from_coefficient(0, 0)
     for prior in attempts:
         assert prior.outcome is _OUTCOME_ACCEPTED
         assert prior.execution_stake is not None

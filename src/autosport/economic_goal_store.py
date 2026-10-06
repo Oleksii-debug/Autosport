@@ -359,6 +359,7 @@ def economic_goal_to_payload(
 def economic_goal_from_payload(
     payload: object,
     _goal_type=EconomicGoalContract,
+    _goal_validator=EconomicGoalContract.__post_init__,
     _goal_error=EconomicGoalContractError,
     _objective_type=EconomicObjective,
     _automation_type=AutomationLevel,
@@ -424,7 +425,9 @@ def economic_goal_from_payload(
         decoded[field] = _restriction_decoder(field, body[field])
 
     try:
-        return _goal_type(**decoded)  # type: ignore[arg-type]
+        contract = _goal_type(**decoded)  # type: ignore[arg-type]
+        _goal_validator(contract)
+        return contract
     except _goal_error:
         raise
     except (TypeError, ValueError) as exc:

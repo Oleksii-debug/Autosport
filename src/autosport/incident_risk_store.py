@@ -115,6 +115,14 @@ def _validate_histories(
                 "durable history accepts exact IncidentRiskEntry values only"
             )
 
+        try:
+            for entry in history:
+                entry.__post_init__()
+        except (IncidentRiskRegisterError, TypeError, ValueError) as exc:
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk history contains an invalid entry snapshot"
+            ) from exc
+
         first = history[0]
         if first.revision != 1:
             raise IncidentRiskStoreError(

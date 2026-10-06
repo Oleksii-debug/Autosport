@@ -57,6 +57,65 @@ def _goal(**changes: object) -> EconomicGoalContract:
     return EconomicGoalContract(**values)  # type: ignore[arg-type]
 
 
+def test_store_operation_descriptors_do_not_expose_mutable_operation_slot() -> None:
+    for name in ("load", "initialize_owner", "persist_automatic_successor"):
+        descriptor = EconomicGoalStore.__dict__[name]
+        assert not hasattr(descriptor, "_operation")
+        try:
+            object.__setattr__(descriptor, "_operation", lambda _self: None)
+        except AttributeError:
+            continue
+        raise AssertionError(f"{name} descriptor exposed mutable operation storage")
+
+
+def test_store_public_authority_operations_ignore_direct_dict_shadowing(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+
+    store.__dict__["load"] = lambda: None
+    store.__dict__["initialize_owner"] = lambda _contract: None
+    store.__dict__["persist_automatic_successor"] = lambda _contract: None
+
+    assert callable(store.load)
+    assert callable(store.initialize_owner)
+    assert callable(store.persist_automatic_successor)
+
+
+def test_store_authority_seal_ignores_rebound_authority_name_set(monkeypatch) -> None:
+    monkeypatch.setattr(
+        EconomicGoalStore,
+        "_AUTHORITY_NAMES",
+        frozenset(),
+        raising=False,
+    )
+
+    for name, replacement in (
+        ("load", lambda self: None),
+        ("initialize_owner", lambda self, _contract: None),
+        ("persist_automatic_successor", lambda self, _contract: None),
+    ):
+        try:
+            setattr(EconomicGoalStore, name, replacement)
+        except TypeError as exc:
+            assert "authority operation binding is immutable" in str(exc)
+        else:
+            raise AssertionError(f"{name} class binding escaped the sealed name set")
+
+
+def test_store_public_authority_operations_reject_class_rebinding() -> None:
+    for name, replacement in (
+        ("__init__", lambda self, _workspace: None),
+        ("load", lambda self: None),
+        ("initialize_owner", lambda self, _contract: None),
+        ("persist_automatic_successor", lambda self, _contract: None),
+    ):
+        try:
+            setattr(EconomicGoalStore, name, replacement)
+        except TypeError as exc:
+            assert "authority operation binding is immutable" in str(exc)
+        else:
+            raise AssertionError(f"{name} class binding was mutable")
+
+
 def test_payload_roundtrip_is_versioned_exact_and_canonical() -> None:
     goal = _goal()
 

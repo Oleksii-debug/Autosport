@@ -49,6 +49,47 @@ _MAX_CANONICAL_TEXT_CHARS: Final = 512
 _MAX_RESTRICTION_MEMBERS: Final = 1024
 
 
+class _EconomicGoalContractMeta(type):
+    """Seal the public automatic-successor method after canonical binding."""
+
+    _AUTHORITY_NAMES: Final = frozenset(
+        {
+            "validate_automatic_successor",
+            "_authority_operations_sealed",
+        }
+    )
+
+    def __setattr__(
+        cls,
+        name: str,
+        value: object,
+        _authority_names=_AUTHORITY_NAMES,
+    ) -> None:
+        if (
+            cls.__dict__.get("_authority_operations_sealed", False)
+            and name in _authority_names
+        ):
+            raise TypeError(
+                "economic-goal public authority operation binding is immutable"
+            )
+        super().__setattr__(name, value)
+
+    def __delattr__(
+        cls,
+        name: str,
+        _authority_names=_AUTHORITY_NAMES,
+    ) -> None:
+        if (
+            cls.__dict__.get("_authority_operations_sealed", False)
+            and name in _authority_names
+        ):
+            raise TypeError(
+                "economic-goal public authority operation binding is immutable"
+            )
+        super().__delattr__(name)
+
+
+
 def _canonical_text(
     name: str,
     value: object,
@@ -174,7 +215,7 @@ def _canonical_restrictions(
 
 
 @dataclass(frozen=True, slots=True)
-class EconomicGoalContract:
+class EconomicGoalContract(metaclass=_EconomicGoalContractMeta):
     """Immutable owner-level economic objective and authority ceiling.
 
     Fractions are exact :class:`~decimal.Decimal` values in ``[0, 1]``.
@@ -220,6 +261,8 @@ class EconomicGoalContract:
     blocked_sports: frozenset[str] = frozenset()
     blocked_providers: frozenset[str] = frozenset()
     blocked_markets: frozenset[str] = frozenset()
+
+    _authority_operations_sealed = False
 
     def __post_init__(
         self,
@@ -950,6 +993,9 @@ def _bind_contract_successor_operation(operation):
 EconomicGoalContract.validate_automatic_successor = _bind_contract_successor_operation(
     _CANONICAL_TRANSITION_VALIDATOR
 )
+
+# Freeze the public method once its closure has captured the canonical validator.
+EconomicGoalContract._authority_operations_sealed = True
 
 
 # Keep the public transition proof noninjectable while capturing the canonical

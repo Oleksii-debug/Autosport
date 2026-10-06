@@ -736,7 +736,32 @@ def _install_transport_result_authority() -> None:
                 "MarketBook batch transport result lacks canonical network origin"
             )
 
+    append_attempt_unbound = append_market_book_transport_attempt
+
+    def append_market_book_transport_attempt_bound(
+        history: MarketBookAttemptHistory,
+        result: MarketBookBatchTransportResult,
+        *,
+        attempt_id: str,
+        required: bool,
+    ) -> MarketBookAttemptHistory:
+        # Consumer authority must not depend on mutable class dispatch.  Prove
+        # canonical issuance through the closure-local registry before entering
+        # the ordinary structural append path.
+        if type(result) is not MarketBookBatchTransportResult:
+            raise TypeError("result must be an exact MarketBookBatchTransportResult")
+        _record(result)
+        return append_attempt_unbound(
+            history,
+            result,
+            attempt_id=attempt_id,
+            required=required,
+        )
+
     globals()["read_market_book_batch"] = read_market_book_batch
+    globals()["append_market_book_transport_attempt"] = (
+        append_market_book_transport_attempt_bound
+    )
     MarketBookBatchTransportResult.assert_issued = assert_issued
     MarketBookBatchTransportResult.assert_canonical_network_origin = (
         assert_canonical_network_origin

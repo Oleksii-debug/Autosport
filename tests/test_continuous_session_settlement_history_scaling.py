@@ -1007,3 +1007,21 @@ def test_operational_checkpoint_writer_code_identity_is_immutable() -> None:
         finally:
             original_dumps.__code__ = original_dumps_code
             original_writer.__code__ = original_writer_code
+
+
+def test_pathological_main_checkpoint_nesting_is_normalized() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state_path = root / "continuous_session.json"
+        state_path.write_text(
+            ("[" * 1500) + "0" + ("]" * 1500),
+            encoding="utf-8",
+        )
+
+        try:
+            state._read()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "cannot verify continuous session state" in str(exc)
+        else:
+            raise AssertionError("pathological main checkpoint escaped domain validation")

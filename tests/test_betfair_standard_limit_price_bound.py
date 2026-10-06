@@ -130,6 +130,56 @@ def test_public_provider_client_rebinding_cannot_redirect_canonical_capture(
     assert actual.to_dict() == expected.to_dict()
 
 
+def test_execution_action_serializer_rebinding_fails_before_capture(
+    monkeypatch,
+) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    bound, action, _expected = _evidence()
+    original = ExecutionAction.to_dict
+
+    def hostile_to_dict(_self):
+        raise AssertionError("hostile action serializer executed")
+
+    monkeypatch.setattr(ExecutionAction, "to_dict", hostile_to_dict)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="ExecutionAction serializer authority changed",
+    ):
+        module.resolve_betfair_standard_limit_price_bound(
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_execution_action_serializer_in_place_code_mutation_fails_closed(
+    monkeypatch,
+) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    bound, action, _expected = _evidence()
+    original = ExecutionAction.to_dict
+    original_code = original.__code__
+
+    def hostile_to_dict(self):
+        raise AssertionError("mutated action serializer executed")
+
+    monkeypatch.setattr(original, "__code__", hostile_to_dict.__code__)
+
+    try:
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="ExecutionAction serializer authority changed",
+        ):
+            module.resolve_betfair_standard_limit_price_bound(
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        original.__code__ = original_code
+
+
 def test_capture_and_digest_helpers_ignore_module_rebinding(monkeypatch) -> None:
     import autosport.betfair_standard_limit_price_bound as module
 

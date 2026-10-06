@@ -772,3 +772,20 @@ def test_session_rmw_uses_canonical_predecessor_reader() -> None:
         assert updated["generation"] == 0
         assert json.loads(path.read_text(encoding="utf-8"))["generation"] == 0
 
+def test_existing_session_bootstrap_reopens_after_reader_hardening() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path, state = _state(root)
+        state.record_failure(code="ProviderUnavailableError")
+
+        reopened = continuous_session._ContinuousSessionState(
+            path,
+            session_id="session-progress-state-guard",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        snapshot = reopened.snapshot()
+        assert snapshot.session_id == "session-progress-state-guard"
+        assert snapshot.last_error_code == "ProviderUnavailableError"
+

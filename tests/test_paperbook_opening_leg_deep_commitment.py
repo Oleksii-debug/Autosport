@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import autosport.paper as paper_module
+import autosport.domain as domain_module
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
 
@@ -2859,6 +2860,32 @@ def test_lay_capital_root_rejects_underlying_calculator_closure_mutation() -> No
             book.open_ticket([_lay_leg()], "10", placed_at=_TS)
     finally:
         target_cell.cell_contents = original_value
+
+    assert attacker_calls == 0
+
+
+def test_market_semantics_root_rejects_rebound_underlying_validator_dependency_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound market semantics dependency executed")
+
+    monkeypatch.setattr(domain_module, "_canonical_string_value", hostile)
+    book = PaperBook("100")
+
+    with pytest.raises(
+        ValueError,
+        match=r"market-semantics dependency changed: _canonical_string_value",
+    ):
+        book.open_ticket(
+            [_lay_leg(semantics="exchange.match.odds.v2")],
+            "10",
+            placed_at=_TS,
+        )
 
     assert attacker_calls == 0
 

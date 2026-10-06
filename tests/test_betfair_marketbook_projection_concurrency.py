@@ -5,6 +5,7 @@ from threading import Barrier, Thread
 
 import pytest
 
+import autosport.betfair_marketbook_projection_concurrency as _projection_gate_module
 from autosport.betfair_marketbook_projection_concurrency import (
     BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION,
     BetfairMarketBookProjectionConcurrencyGate,
@@ -684,3 +685,146 @@ def test_process_control_during_complete_delete_preserves_causal_time() -> None:
     assert state.last_observed_at_utc_us == int(completed_at.timestamp() * 1_000_000)
     assert state.next_lease_generation == 2
 
+
+
+def test_projection_gate_runtime_authority_is_closure_bound(monkeypatch) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    state_type = MarketBookProjectionConcurrencyState
+    lease_type = MarketBookProjectionLease
+    decision_type = _projection_gate_module.MarketBookProjectionConcurrencyDecision
+    original_policy = BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION
+
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "_validate_request_id",
+        lambda value: "forged-request",
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "_utc_microseconds",
+        lambda *args, **kwargs: 0,
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "_MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED",
+        999,
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION",
+        "forged",
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "MarketBookProjectionConcurrencyDecision",
+        object,
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "MarketBookProjectionLease",
+        object,
+    )
+    monkeypatch.setattr(
+        _projection_gate_module,
+        "MarketBookProjectionConcurrencyState",
+        object,
+    )
+    monkeypatch.setattr(
+        decision_type,
+        "__init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable decision constructor must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        decision_type,
+        "__post_init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable decision validator must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        lease_type,
+        "__init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable lease constructor must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        lease_type,
+        "__post_init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable lease validator must not run")
+        ),
+    )
+
+    value = gate_type()
+    first = value.begin(
+        "r0",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    second = value.begin(
+        "r1",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    third = value.begin(
+        "r2",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    denied = value.begin(
+        "r3",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    state = value.snapshot()
+
+    assert all(
+        type(decision) is decision_type and decision.allowed
+        for decision in (first, second, third)
+    )
+    assert type(denied) is decision_type
+    assert denied.allowed is False
+    assert denied.active_projection_requests == 3
+    assert type(state) is state_type
+    assert all(type(lease) is lease_type for lease in state.active)
+    assert [lease.request_id for lease in state.active] == ["r0", "r1", "r2"]
+    assert state.policy_version == original_policy
+    assert value.policy_version == original_policy
+
+    assert first.lease_generation is not None
+    value.complete(
+        "r0",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(seconds=1),
+    )
+    assert [lease.request_id for lease in value.snapshot().active] == ["r1", "r2"]
+
+
+def test_projection_restart_validation_ignores_rebound_dto_validators(monkeypatch) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    original = gate_type()
+    assert begin_projected(original, "r0").allowed
+    state = original.snapshot()
+    lease = state.active[0]
+
+    monkeypatch.setattr(
+        MarketBookProjectionConcurrencyState,
+        "__post_init__",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        MarketBookProjectionLease,
+        "__post_init__",
+        lambda self: None,
+    )
+    object.__setattr__(lease, "generation", 0)
+
+    with pytest.raises(ValueError, match="generation must be a positive"):
+        gate_type(state=state)

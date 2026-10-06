@@ -701,12 +701,12 @@ class ProductProposalRiskCounterfactualCashFloor:
         return _proven(self)
 
     @property
-    @property
     def counterfactual_target_capital_reservation_proven(
         self, _proven=_IDENTITY_PROVEN
     ) -> bool:
         return _proven(self)
 
+    @property
     def terminal_payout_reconstruction_proven(
         self, _proven=_IDENTITY_PROVEN
     ) -> bool:

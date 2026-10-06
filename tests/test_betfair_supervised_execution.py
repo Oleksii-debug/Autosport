@@ -278,8 +278,16 @@ def _bound(
 
 
 class _Transport:
-    def __init__(self, responder):
+    def __init__(
+        self,
+        responder,
+        *,
+        http_status: int = 200,
+        final_url: str | None = None,
+    ):
         self.responder = responder
+        self.http_status = http_status
+        self.final_url = final_url
         self.calls: list[dict[str, object]] = []
 
     def post(
@@ -304,10 +312,17 @@ class _Transport:
 
 
 class _UrlopenResponse:
-    def __init__(self, payload: bytes) -> None:
+    def __init__(
+        self,
+        payload: bytes,
+        *,
+        status: int = 200,
+        url: str | None = None,
+    ) -> None:
         self._payload = payload
-        self.code = 200
-        self.status = 200
+        self._url = url
+        self.code = status
+        self.status = status
         self.reason = "OK"
         self.msg = "OK"
         self.headers: dict[str, str] = {}
@@ -329,6 +344,9 @@ class _UrlopenResponse:
 
     def getcode(self) -> int:
         return self.code
+
+    def geturl(self) -> str | None:
+        return self._url
 
 
 _REAL_HTTPS_CONNECTION = http.client.HTTPSConnection
@@ -384,7 +402,14 @@ class _TestHTTPSConnection:
             body=self._request_body,
             timeout_seconds=self.timeout,
         )
-        return _UrlopenResponse(payload)
+        return _UrlopenResponse(
+            payload,
+            status=getattr(_ACTIVE_WRITE_TRANSPORT, "http_status", 200),
+            url=(
+                getattr(_ACTIVE_WRITE_TRANSPORT, "final_url", None)
+                or full_url
+            ),
+        )
 
     def close(self) -> None:
         return None
@@ -998,6 +1023,68 @@ def test_subclassed_write_client_cannot_mint_terminal_provider_truth() -> None:
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
+def test_supervised_transport_seal_tracks_isolated_opener_contract() -> None:
+    post = betfair_account_readonly.UrllibBetfairHttpTransport.post
+    post_globals = post.__globals__
+
+    assert "urlopen" not in post_globals
+    assert (
+        betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_HTTP_POST
+        is post
+    )
+    assert (
+        betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_HTTP_POST_GLOBALS
+        is post_globals
+    )
+    assert (
+        betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_BUILD_OPENER
+        is post_globals["build_opener"]
+    )
+    assert (
+        betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_GLOBALS
+        is post_globals["build_opener"].__globals__
+    )
+
+
+def test_replaced_isolated_opener_factory_cannot_mint_terminal_provider_truth(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_build_opener = betfair_account_readonly.build_opener
+        monkeypatch.setattr(
+            betfair_account_readonly,
+            "build_opener",
+            lambda *args, **kwargs: original_build_opener(*args, **kwargs),
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical client, transport, and parser authority",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-rebound-opener-factory",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
 def test_injected_write_transport_cannot_mint_terminal_provider_truth() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
@@ -1191,6 +1278,57 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
         )
         assert provider_ref != action.action_id
         assert ledger.verify_integrity() > 0
+
+
+@pytest.mark.parametrize(
+    ("http_status", "final_url"),
+    (
+        (201, None),
+        (200, "https://example.invalid/redirected-placeOrders"),
+    ),
+)
+def test_noncanonical_http_envelope_stays_unknown_after_durable_submit(
+    http_status: int,
+    final_url: str | None,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            ),
+            http_status=http_status,
+            final_url=final_url,
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-invalid-http-envelope",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.external_receipt_id is None
+        assert result.evidence_id is None
+        assert len(transport.calls) == 1
+        attempt = next(
+            item
+            for item in ledger.verified_execution_view(
+                bound.execution_plan.plan_id
+            ).attempts
+            if item.attempt_id == "attempt-invalid-http-envelope"
+        )
+        assert attempt.submitted_request_sha256 is not None
+        assert attempt.provider_evidence is None
 
 
 def test_terminal_provider_observation_time_ignores_caller_client_clock() -> None:

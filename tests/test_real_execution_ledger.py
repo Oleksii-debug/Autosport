@@ -1,5 +1,6 @@
 import hashlib
 import json
+import multiprocessing
 import os
 import tempfile
 import unittest
@@ -63,6 +64,29 @@ def plan(*actions: ExecutionAction, plan_id: str = "p1") -> ExecutionPlan:
         created_at=TS,
         actions=tuple(actions or (action(),)),
     )
+
+
+def _crash_with_submitted_writer_fence(workspace: str) -> None:
+    path = Path(workspace) / "real.jsonl"
+    ledger = RealExecutionLedger(path)
+    ledger.reserve_plan(plan(action()))
+    ledger.begin_attempt(
+        plan_id="p1",
+        action_id="a1",
+        attempt_id="try-crash-submit",
+        reserved_at=RESERVED_AT,
+    )
+
+    def submit_then_die() -> None:
+        ledger.mark_submitted(
+            "try-crash-submit",
+            submitted_at=SUBMITTED_AT,
+            request_sha256="a" * 64,
+        )
+        os._exit(91)
+
+    ledger._mutate(submit_then_die)
+    os._exit(92)
 
 
 def _bind_submitted_provider_evidence(
@@ -2119,6 +2143,50 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     competing.reserve_plan(plan(action()))
 
             ledger._mutate(while_writer_is_live)
+
+    def test_process_kill_after_submitted_releases_writer_for_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            context = multiprocessing.get_context("spawn")
+            process = context.Process(
+                target=_crash_with_submitted_writer_fence,
+                args=(tmp,),
+            )
+            process.start()
+            process.join(timeout=30)
+            if process.is_alive():
+                process.kill()
+                process.join()
+                self.fail("submitted-writer crash worker did not terminate")
+
+            self.assertEqual(process.exitcode, 91)
+
+            path = Path(tmp) / "real.jsonl"
+            restarted = RealExecutionLedger(path)
+            self.assertTrue(restarted._lock_path.exists())
+            self.assertEqual(
+                restarted.attempt_state("try-crash-submit"),
+                AttemptState.SUBMITTED,
+            )
+
+            with patch(
+                "autosport.real_execution_ledger._now",
+                return_value=UNKNOWN_AT,
+            ):
+                self.assertEqual(
+                    restarted.recover_uncertain(),
+                    ("try-crash-submit",),
+                )
+
+            self.assertEqual(
+                restarted.attempt_state("try-crash-submit"),
+                AttemptState.UNKNOWN,
+            )
+            self.assertFalse(
+                restarted.can_retry_action(
+                    plan_id="p1",
+                    action_id="a1",
+                )
+            )
 
     def test_rejected_ack_cannot_claim_accepted_money(self):
         with self.assertRaises(ValueError):

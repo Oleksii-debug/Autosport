@@ -4998,14 +4998,47 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 or tick_dependency_storage is None
                 or tick_matched_keys_storage is None
                 or tick_dependency_lock is None
+                or tick_dependency_input_ids is None
             ):
                 return False
+
+            current_dependency_mirror = getattr(
+                dependency_index,
+                "_mirror",
+                missing_coordinator_authority,
+            )
+            current_dependency_storage = getattr(
+                dependency_index,
+                "_dependencies",
+                missing_coordinator_authority,
+            )
+            current_matched_keys_storage = getattr(
+                dependency_index,
+                "_matched_keys",
+                missing_coordinator_authority,
+            )
+            current_dependency_lock = getattr(
+                dependency_index,
+                "_lock",
+                missing_coordinator_authority,
+            )
+            storage_keys = tuple(tick_dependency_storage)
+            storage_key_drift = (
+                len(storage_keys) != len(tick_dependency_input_ids)
+                or any(
+                    type(current) is not str or current != expected
+                    for current, expected in zip(
+                        storage_keys,
+                        tick_dependency_input_ids,
+                    )
+                )
+            )
             changed = (
-                dependency_index._mirror is not tick_dependency_mirror
-                or dependency_index._dependencies is not tick_dependency_storage
-                or dependency_index._matched_keys is not tick_matched_keys_storage
-                or dependency_index._lock is not tick_dependency_lock
-                or tuple(dependency_index._dependencies) != tick_dependency_input_ids
+                current_dependency_mirror is not tick_dependency_mirror
+                or current_dependency_storage is not tick_dependency_storage
+                or current_matched_keys_storage is not tick_matched_keys_storage
+                or current_dependency_lock is not tick_dependency_lock
+                or storage_key_drift
             )
             object.__setattr__(dependency_index, "_mirror", tick_dependency_mirror)
             object.__setattr__(
@@ -5033,14 +5066,38 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         ),
                         fingerprint,
                     ):
-                        if getattr(dependency, field_name) != value:
+                        current_value = getattr(
+                            dependency,
+                            field_name,
+                            missing_coordinator_authority,
+                        )
+                        if (
+                            current_value is missing_coordinator_authority
+                            or type(current_value) is not type(value)
+                            or current_value != value
+                        ):
                             changed = True
                             object.__setattr__(dependency, field_name, value)
                     tick_dependency_storage[input_id] = dependency
 
                 tick_matched_keys_storage.clear()
                 for input_id, matched_set, keys in tick_matching_key_sets:
-                    if matched_set != set(keys):
+                    current_keys = tuple(matched_set)
+                    current_keys_are_canonical = all(
+                        type(key) is tuple
+                        and len(key) == 2
+                        and type(key[0]) is str
+                        and type(key[1]) is str
+                        for key in current_keys
+                    )
+                    if (
+                        not current_keys_are_canonical
+                        or len(current_keys) != len(keys)
+                        or (
+                            current_keys_are_canonical
+                            and set(current_keys) != set(keys)
+                        )
+                    ):
                         changed = True
                     matched_set.clear()
                     matched_set.update(keys)
@@ -5054,10 +5111,30 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if type(dependency_index) is not _dependency_index_type:
                 return
             if (
-                dependency_index._mirror is not tick_dependency_mirror
-                or dependency_index._dependencies is not tick_dependency_storage
-                or dependency_index._matched_keys is not tick_matched_keys_storage
-                or dependency_index._lock is not tick_dependency_lock
+                getattr(
+                    dependency_index,
+                    "_mirror",
+                    missing_coordinator_authority,
+                )
+                is not tick_dependency_mirror
+                or getattr(
+                    dependency_index,
+                    "_dependencies",
+                    missing_coordinator_authority,
+                )
+                is not tick_dependency_storage
+                or getattr(
+                    dependency_index,
+                    "_matched_keys",
+                    missing_coordinator_authority,
+                )
+                is not tick_matched_keys_storage
+                or getattr(
+                    dependency_index,
+                    "_lock",
+                    missing_coordinator_authority,
+                )
+                is not tick_dependency_lock
             ):
                 restore_tick_dependency_routing_authority()
                 raise ContinuousSessionError(message)
@@ -5172,6 +5249,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         except Exception as exc:
             state_was_rebound = restore_state_identity()
             dependency_index_was_rebound = restore_dependency_index_identity()
+            restore_tick_dependency_routing_authority()
             lifecycle_type_was_changed = restore_lifecycle_type_authority()
             invalidation_buffer_was_rebound = restore_invalidation_buffer_identity()
             invalidation_structure_was_rebound = (
@@ -5359,6 +5437,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     # state while the provider-unavailable result is being handled.
                     state_was_rebound = restore_state_identity()
                     dependency_index_was_rebound = restore_dependency_index_identity()
+                    restore_tick_dependency_routing_authority()
                     lifecycle_type_was_changed = restore_lifecycle_type_authority()
                     invalidation_buffer_was_rebound = (
                         restore_invalidation_buffer_identity()
@@ -5889,6 +5968,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # authority before failing.
                 state_was_rebound = restore_state_identity()
                 dependency_index_was_rebound = restore_dependency_index_identity()
+                restore_tick_dependency_routing_authority()
                 lifecycle_type_was_changed = restore_lifecycle_type_authority()
                 invalidation_buffer_was_rebound = restore_invalidation_buffer_identity()
                 invalidation_structure_was_rebound = (

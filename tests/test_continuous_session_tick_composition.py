@@ -7301,3 +7301,93 @@ def test_tick_recovers_malformed_canonical_invalidation_truth_as_full_refresh(
             == "ContinuousSessionError"
         )
 
+@pytest.mark.parametrize(
+    "field_name",
+    ("_mirror", "_dependencies", "_matched_keys", "_lock"),
+)
+def test_tick_failure_restores_deleted_canonical_dependency_structure(
+    field_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+        canonical_value = getattr(index, field_name)
+
+        def delete_and_raise() -> None:
+            delattr(index, field_name)
+            raise RuntimeError("deleted dependency routing structure")
+
+        coordinator.collector = _Collector(callback=delete_and_raise)
+
+        with pytest.raises(
+            RuntimeError,
+            match="deleted dependency routing structure",
+        ):
+            coordinator.tick()
+
+        assert getattr(index, field_name) is canonical_value
+        assert index.input_ids == ("input-a",)
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+
+def test_tick_failure_restores_in_place_dependency_selector_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+        dependency = index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        def mutate_and_raise() -> None:
+            object.__setattr__(
+                dependency,
+                "source_ids",
+                frozenset({"provider-b"}),
+            )
+            raise RuntimeError("mutated dependency selector")
+
+        coordinator.collector = _Collector(callback=mutate_and_raise)
+
+        with pytest.raises(RuntimeError, match="mutated dependency selector"):
+            coordinator.tick()
+
+        assert dependency.source_ids == frozenset({"provider-a"})
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+
+def test_tick_failure_restores_malformed_matched_key_without_foreign_equality() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+        equality_calls = 0
+
+        class HostileKey:
+            def __hash__(self) -> int:
+                return 987654321
+
+            def __eq__(self, _other) -> bool:
+                nonlocal equality_calls
+                equality_calls += 1
+                raise AssertionError("foreign matched-key equality executed")
+
+        def mutate_and_raise() -> None:
+            index._matched_keys["input-a"].add(HostileKey())
+            raise RuntimeError("malformed matched key")
+
+        coordinator.collector = _Collector(callback=mutate_and_raise)
+
+        with pytest.raises(RuntimeError, match="malformed matched key"):
+            coordinator.tick()
+
+        assert equality_calls == 0
+        assert index.matching_keys("input-a") == ()
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"

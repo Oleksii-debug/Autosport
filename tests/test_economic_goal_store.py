@@ -201,6 +201,42 @@ def test_owner_initialization_is_creation_only_and_preserves_existing_bytes(tmp_
     assert EconomicGoalStore(tmp_path).load() == goal
 
 
+def test_owner_initialization_race_does_not_replace_late_incumbent(tmp_path) -> None:
+    goal = _goal()
+    store = EconomicGoalStore(tmp_path)
+    incumbent_bytes = b'{"authority":"late-incumbent"}\n'
+    canonical_create = economic_goal_store_module._CANONICAL_ATOMIC_CREATE_OWNER_JSON
+
+    def racing_writer(path, payload):
+        # Simulate a non-cooperating actor winning the pathname after
+        # initialize_owner() has already observed it as absent.
+        path.write_bytes(incumbent_bytes)
+        canonical_create(path, payload)
+
+    with pytest.raises(EconomicGoalContractError, match="already exists"):
+        economic_goal_store_module._BOUND_STORE_INITIALIZE_OWNER(
+            store,
+            goal,
+            _writer=racing_writer,
+        )
+
+    assert store.path.read_bytes() == incumbent_bytes
+    assert list(tmp_path.glob(f".{store.path.name}.*.owner-init.tmp")) == []
+
+
+def test_owner_initialization_atomic_create_leaves_single_link_and_no_staging(
+    tmp_path,
+) -> None:
+    goal = _goal()
+    store = EconomicGoalStore(tmp_path)
+
+    store.initialize_owner(goal)
+
+    assert os.stat(store.path, follow_symlinks=False).st_nlink == 1
+    assert list(tmp_path.glob(f".{store.path.name}.*.owner-init.tmp")) == []
+    assert EconomicGoalStore(tmp_path).load() == goal
+
+
 def test_automatic_tightening_persists_and_survives_restart(tmp_path) -> None:
     previous = _goal()
     candidate = replace(

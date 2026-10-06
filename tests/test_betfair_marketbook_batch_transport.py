@@ -2916,3 +2916,125 @@ def test_execution_validator_rejects_forged_copy_after_class_rebind(monkeypatch)
             forged,
         )
 
+def test_attempt_executor_seals_plan_lifecycle_hooks(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    init_called = False
+    post_called = False
+
+    def forged_init(self, *args, **kwargs):
+        nonlocal init_called
+        init_called = True
+        raise AssertionError("rebound plan init must not run")
+
+    def forged_post_init(self):
+        nonlocal post_called
+        post_called = True
+        raise AssertionError("rebound plan post-init must not run")
+
+    monkeypatch.setattr(MarketBookReadPlan, "__init__", forged_init)
+    monkeypatch.setattr(MarketBookReadPlan, "__post_init__", forged_post_init)
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="sealed-plan-lifecycle",
+        required=True,
+        request_id="sealed-plan-lifecycle",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert init_called is False
+    assert post_called is False
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert len(transport.calls) == 1
+
+
+def test_attempt_executor_seals_history_lifecycle_hooks(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    init_called = False
+    post_called = False
+
+    def forged_init(self, *args, **kwargs):
+        nonlocal init_called
+        init_called = True
+        raise AssertionError("rebound history init must not run")
+
+    def forged_post_init(self):
+        nonlocal post_called
+        post_called = True
+        raise AssertionError("rebound history post-init must not run")
+
+    monkeypatch.setattr(MarketBookAttemptHistory, "__init__", forged_init)
+    monkeypatch.setattr(MarketBookAttemptHistory, "__post_init__", forged_post_init)
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="sealed-history-lifecycle",
+        required=True,
+        request_id="sealed-history-lifecycle",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert init_called is False
+    assert post_called is False
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert len(transport.calls) == 1
+
+
+def test_attempt_executor_seals_lifecycle_hooks_on_nonresponse(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    for _ in range(5):
+        assert rate_gate.reserve(("1.001",), scheduled_at=NOW).allowed is True
+
+    monkeypatch.setattr(
+        MarketBookReadPlan,
+        "__post_init__",
+        lambda self: (_ for _ in ()).throw(
+            AssertionError("rebound plan post-init must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        MarketBookAttemptHistory,
+        "__post_init__",
+        lambda self: (_ for _ in ()).throw(
+            AssertionError("rebound history post-init must not run")
+        ),
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="sealed-lifecycle-nonresponse",
+        required=True,
+        request_id="sealed-lifecycle-nonresponse",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert execution.history.required_gap_attempt_ids == (
+        "sealed-lifecycle-nonresponse",
+    )
+    assert transport.calls == []
+

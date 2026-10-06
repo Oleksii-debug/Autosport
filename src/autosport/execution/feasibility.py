@@ -486,6 +486,8 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     _profile_binding_type,
     _constraint_type,
     _execution_plan_fingerprint,
+    _assert_market_book_authority,
+    _market_book_acquisition_started_at,
     _verify_bound_binding,
     _bound_action_for,
     _bound_profile_for,
@@ -522,11 +524,11 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
         raise TypeError("bound.constraints must contain exact ExecutionLegConstraint values")
     if not isinstance(receipt, BetfairMarketBookDepthObservation):
         raise TypeError("receipt must be BetfairMarketBookDepthObservation")
-    acquisition_started_at = market_book_depth_acquisition_started_at(receipt)
+    acquisition_started_at = _market_book_acquisition_started_at(receipt)
     # Provider provenance is necessary but must not choose the decision epoch.
     # The independently durable PLAN_RESERVED event is the causal publication
     # boundary for DECISION_EVIDENCE semantics.
-    assert_market_book_depth_authoritative(receipt)
+    _assert_market_book_authority(receipt)
     _require_aware(acquisition_started_at, "acquisition_started_at")
     _verify_bound_binding(bound)
     try:
@@ -728,6 +730,10 @@ def _install_execution_feasibility_result_authority():
     execution_plan_fingerprint_code = execution_plan_fingerprint.__code__
     profile_binding_type = ProfileBinding
     constraint_type = ExecutionLegConstraint
+    assert_market_book_authority = assert_market_book_depth_authoritative
+    assert_market_book_authority_code = assert_market_book_authority.__code__
+    market_book_acquisition_started = market_book_depth_acquisition_started_at
+    market_book_acquisition_started_code = market_book_acquisition_started.__code__
     verify_bound_binding = bound_type.verify_binding
     verify_bound_binding_code = verify_bound_binding.__code__
     bound_action_for = bound_type.action_for
@@ -753,6 +759,17 @@ def _install_execution_feasibility_result_authority():
         ):
             raise RuntimeError(
                 "canonical execution feasibility assessor changed"
+            )
+        if (
+            assert_market_book_depth_authoritative is not assert_market_book_authority
+            or assert_market_book_authority.__code__ is not assert_market_book_authority_code
+            or market_book_depth_acquisition_started_at
+            is not market_book_acquisition_started
+            or market_book_acquisition_started.__code__
+            is not market_book_acquisition_started_code
+        ):
+            raise RuntimeError(
+                "canonical MarketBook authority resolver changed"
             )
         if (
             ExecutionPlan is not execution_plan_type
@@ -799,6 +816,8 @@ def _install_execution_feasibility_result_authority():
             _profile_binding_type=profile_binding_type,
             _constraint_type=constraint_type,
             _execution_plan_fingerprint=execution_plan_fingerprint,
+            _assert_market_book_authority=assert_market_book_authority,
+            _market_book_acquisition_started_at=market_book_acquisition_started,
             _verify_bound_binding=verify_bound_binding,
             _bound_action_for=bound_action_for,
             _bound_profile_for=bound_profile_for,

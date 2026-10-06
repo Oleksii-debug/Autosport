@@ -1462,3 +1462,42 @@ def test_execution_plan_fingerprint_rebind_revokes_authoritative_feasibility(
                 max_snapshot_age=timedelta(seconds=2),
             )
 
+@pytest.mark.parametrize(
+    "alias_name",
+    (
+        "assert_market_book_depth_authoritative",
+        "market_book_depth_acquisition_started_at",
+    ),
+)
+def test_feasibility_market_book_authority_alias_rebind_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    alias_name: str,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    called = False
+
+    def substituted(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("substituted MarketBook authority alias must not execute")
+
+    monkeypatch.setattr(feasibility_module, alias_name, substituted)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical MarketBook authority resolver changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+    assert called is False
+

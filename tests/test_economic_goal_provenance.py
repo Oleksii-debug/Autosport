@@ -474,6 +474,24 @@ def test_decision_identity_ignores_rebound_snapshotter_alias(monkeypatch) -> Non
     assert evidence.decision_identity == expected
 
 
+def test_provenance_constructor_ignores_rebound_post_init(monkeypatch) -> None:
+    monkeypatch.setattr(
+        EconomicGoalProvenance,
+        "__post_init__",
+        lambda self: None,
+    )
+
+    with pytest.raises(EconomicGoalProvenanceError, match="SHA-256 hex"):
+        EconomicGoalProvenance(
+            schema="autosport.economic_goal_provenance",
+            schema_version=1,
+            goal_id="owner-goal-v1",
+            revision=1,
+            bankroll_id="paper-main",
+            contract_sha256="not-a-sha",
+        )
+
+
 def test_provenance_creation_and_identity_ignore_rebound_constructor(monkeypatch) -> None:
     goal = _goal()
     expected = provenance_for(goal)

@@ -330,14 +330,24 @@ def _candidate_leg_identity_key(
 
 
 def _canonical_candidate(candidate: ParlayCandidate) -> ParlayCandidate:
-    if not candidate.legs:
-        raise ValueError("candidate requires at least one leg")
+    # Candidate economics are an authority boundary.  Do not dispatch through
+    # caller subclasses/proxies before accepting the canonical DTO shape.
+    if type(candidate) is not ParlayCandidate:
+        raise ValueError("candidate must be the exact canonical ParlayCandidate type")
+    if type(candidate.legs) is not tuple or not candidate.legs:
+        raise ValueError("candidate requires a canonical non-empty leg tuple")
 
     for leg in candidate.legs:
+        if type(leg) is not CandidateLeg:
+            raise ValueError("candidate leg must be the exact canonical CandidateLeg type")
+        if type(leg.decimal_odds) is not Decimal:
+            raise ValueError("candidate decimal odds must be an exact Decimal")
         if not leg.decimal_odds.is_finite():
             raise ValueError("candidate decimal odds must be finite")
         if leg.decimal_odds <= 1:
             raise ValueError("candidate decimal odds must be greater than 1")
+        if type(leg.probability) is not Decimal:
+            raise ValueError("candidate leg probability must be an exact Decimal")
         if not leg.probability.is_finite():
             raise ValueError("candidate leg probability must be finite")
         if leg.probability < 0 or leg.probability > 1:

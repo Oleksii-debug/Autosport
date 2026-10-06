@@ -522,3 +522,53 @@ def test_state_rejects_generation_rewind_or_duplicate_active_generation() -> Non
             (a, b),
             2,
         )
+
+def test_projection_gate_rejects_subclassed_authority_inputs_before_mutation() -> None:
+    class RequestId(str):
+        pass
+
+    class ObservedInstant(datetime):
+        def astimezone(self, tz=None):
+            raise AssertionError("subclass clock override must not execute")
+
+    value = gate()
+
+    with pytest.raises(TypeError, match="request_id must be exact str"):
+        value.begin(
+            RequestId("r-subclass"),
+            observed_at=T0,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+
+    state = value.snapshot()
+    assert state.active == ()
+    assert state.last_observed_at_utc_us is None
+
+    hostile_time = ObservedInstant(2026, 9, 22, tzinfo=timezone.utc)
+    with pytest.raises(TypeError, match="observed_at must be exact datetime"):
+        value.begin(
+            "r-time-subclass",
+            observed_at=hostile_time,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+
+    state = value.snapshot()
+    assert state.active == ()
+    assert state.last_observed_at_utc_us is None
+
+    class PolicyVersion(str):
+        pass
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported Betfair MarketBook projection concurrency policy",
+    ):
+        MarketBookProjectionConcurrencyState(
+            PolicyVersion(BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION),
+            None,
+            (),
+            1,
+        )
+

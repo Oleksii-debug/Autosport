@@ -13,16 +13,16 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _validate_market_id(value: object) -> str:
-    if not isinstance(value, str):
-        raise TypeError("market_id must be str")
+    if type(value) is not str:
+        raise TypeError("market_id must be exact str")
     if not value or value != value.strip():
         raise ValueError("market_id must be non-empty and trimmed")
     return value
 
 
 def _utc_microseconds(value: object) -> int:
-    if not isinstance(value, datetime):
-        raise TypeError("scheduled_at must be datetime")
+    if type(value) is not datetime:
+        raise TypeError("scheduled_at must be exact datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("scheduled_at must be timezone-aware")
     utc_value = value.astimezone(timezone.utc)
@@ -78,7 +78,10 @@ class MarketBookRateGateState:
     markets: tuple[MarketBookRateWindowState, ...]
 
     def __post_init__(self) -> None:
-        if self.policy_version != BETFAIR_MARKETBOOK_RATE_POLICY_VERSION:
+        if (
+            type(self.policy_version) is not str
+            or self.policy_version != BETFAIR_MARKETBOOK_RATE_POLICY_VERSION
+        ):
             raise ValueError("unsupported Betfair MarketBook rate policy version")
         if self.last_scheduled_at_utc_us is not None and type(
             self.last_scheduled_at_utc_us

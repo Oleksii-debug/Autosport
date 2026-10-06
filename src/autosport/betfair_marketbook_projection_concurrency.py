@@ -13,16 +13,16 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _validate_request_id(value: object) -> str:
-    if not isinstance(value, str):
-        raise TypeError("request_id must be str")
+    if type(value) is not str:
+        raise TypeError("request_id must be exact str")
     if not value or value != value.strip():
         raise ValueError("request_id must be non-empty and trimmed")
     return value
 
 
 def _utc_microseconds(value: object, *, name: str) -> int:
-    if not isinstance(value, datetime):
-        raise TypeError(f"{name} must be datetime")
+    if type(value) is not datetime:
+        raise TypeError(f"{name} must be exact datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
     utc_value = value.astimezone(timezone.utc)
@@ -56,7 +56,11 @@ class MarketBookProjectionConcurrencyState:
     next_lease_generation: int
 
     def __post_init__(self) -> None:
-        if self.policy_version != BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION:
+        if (
+            type(self.policy_version) is not str
+            or self.policy_version
+            != BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION
+        ):
             raise ValueError("unsupported Betfair MarketBook projection concurrency policy")
         if self.last_observed_at_utc_us is not None and type(
             self.last_observed_at_utc_us

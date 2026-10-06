@@ -459,3 +459,39 @@ def test_rate_decision_rejects_inconsistent_or_widened_authority() -> None:
             allowed=True,
             provider_dispatch_authorized=True,
         )
+
+def test_rate_gate_rejects_subclassed_authority_inputs_before_mutation() -> None:
+    class MarketId(str):
+        pass
+
+    class ScheduledInstant(datetime):
+        def astimezone(self, tz=None):
+            raise AssertionError("subclass clock override must not execute")
+
+    value = BetfairMarketBookPerMarketRateGate()
+
+    with pytest.raises(TypeError, match="market_id must be exact str"):
+        value.reserve((MarketId("1.1"),), scheduled_at=T0)
+
+    state = value.snapshot()
+    assert state.markets == ()
+    assert state.last_scheduled_at_utc_us is None
+
+    hostile_time = ScheduledInstant(2026, 9, 22, tzinfo=timezone.utc)
+    with pytest.raises(TypeError, match="scheduled_at must be exact datetime"):
+        value.reserve(("1.1",), scheduled_at=hostile_time)
+
+    state = value.snapshot()
+    assert state.markets == ()
+    assert state.last_scheduled_at_utc_us is None
+
+    class PolicyVersion(str):
+        pass
+
+    with pytest.raises(ValueError, match="unsupported Betfair MarketBook rate policy"):
+        MarketBookRateGateState(
+            PolicyVersion(BETFAIR_MARKETBOOK_RATE_POLICY_VERSION),
+            None,
+            (),
+        )
+

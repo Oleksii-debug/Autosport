@@ -104,6 +104,39 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         self.assertFalse(evidence.automatic_rollover_supported)
         self.assertFalse(evidence.real_money_execution_authorized)
 
+    def test_opening_paperbook_validation_parses_exact_hashed_bytes(self) -> None:
+        import autosport.economic_session as economic_session
+
+        path = self.workspace / "paper_book.json"
+        expected = path.read_bytes()
+        seen: list[bytes] = []
+
+        def load_exact(payload: bytes) -> PaperBook:
+            seen.append(payload)
+            return PaperBook.load_bytes(payload)
+
+        observed = economic_session._opening_paperbook_sha256(
+            path,
+            _load_bytes=load_exact,
+        )
+
+        self.assertEqual(seen, [expected])
+        self.assertEqual(observed, hashlib.sha256(expected).hexdigest())
+
+    def test_invalid_stable_paperbook_bytes_cannot_be_rescued_by_path_redecode(self) -> None:
+        import autosport.economic_session as economic_session
+
+        path = self.workspace / "paper_book.json"
+        path.write_bytes(b"{}")
+
+        with self.assertRaisesRegex(
+            EconomicSessionIntegrityError,
+            "canonical PaperBook cannot establish economic session",
+        ):
+            economic_session._opening_paperbook_sha256(path)
+
+        self.assertFalse((self.workspace / ".autosport" / "economic_session.json").exists())
+
     def test_restart_reuses_exact_session_identity(self) -> None:
         first = self._store().current()
         second = self._store().current()

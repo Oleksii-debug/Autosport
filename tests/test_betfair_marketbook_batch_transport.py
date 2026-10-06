@@ -19,6 +19,11 @@ from autosport.betfair_marketbook_rate_gate import BetfairMarketBookPerMarketRat
 from autosport.betfair_marketbook_projection_concurrency import (
     BetfairMarketBookProjectionConcurrencyGate,
 )
+from autosport.betfair_marketbook_retry_backoff import (
+    MARKETBOOK_RETRY_BASE_DELAY_US,
+    MarketBookRetryBackoffGate,
+    MarketBookRetryDisposition,
+)
 from autosport.betfair_marketbook_batch_plan import MarketBookReadPlan
 from autosport.betfair_marketbook_attempt_history import (
     MarketBookAttemptHistory,
@@ -31,6 +36,7 @@ from autosport.betfair_marketbook_batch_transport import (
     MarketBookBatchTransportResult,
     append_market_book_transport_attempt,
     execute_market_book_batch_attempt,
+    execute_market_book_batch_attempt_with_backoff,
     read_market_book_batch,
 )
 
@@ -3662,4 +3668,271 @@ def test_nonresponse_append_uses_canonical_error_after_module_rebind(monkeypatch
             attempt_id="sealed-nonresponse-error-type",
             required=True,
             outcome=MarketBookAttemptOutcome.EXACT_RESPONSE,
+        )
+
+
+def _provider_error_payload(provider_code: str, *, request_id: int = 1) -> bytes:
+    return json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32099,
+                "message": "ANGX-0007",
+                "data": {
+                    "exceptionname": "APINGException",
+                    "APINGException": {
+                        "errorCode": provider_code,
+                        "errorDetails": "synthetic-detail",
+                    },
+                },
+            },
+            "id": request_id,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def test_attempt_execution_preserves_secret_free_provider_error_code():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    client, transport = _client(_provider_error_payload("TOO_MANY_REQUESTS"))
+    rate_gate, concurrency_gate = _gates()
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="provider-code",
+        required=True,
+        request_id="provider-code",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.PROVIDER_FAILURE
+    assert execution.provider_error_code == "TOO_MANY_REQUESTS"
+    assert execution.result is None
+    assert len(transport.calls) == 1
+
+
+def test_retry_aware_executor_enforces_cooldown_and_preserves_historical_gaps():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    transport = FakeTransport(_provider_error_payload("SERVICE_BUSY"))
+    now = [NOW]
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: now[0],
+        venue_id="betfair-global",
+        account_id="configured-account",
+    )
+    rate_gate, concurrency_gate = _gates()
+    retry_gate = MarketBookRetryBackoffGate(plan)
+
+    first = execute_market_book_batch_attempt_with_backoff(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="retry-first",
+        required=True,
+        request_id="retry-first",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+        retry_gate=retry_gate,
+    )
+    assert first.outcome is MarketBookAttemptOutcome.PROVIDER_FAILURE
+    assert first.provider_error_code == "SERVICE_BUSY"
+    assert len(transport.calls) == 1
+
+    blocked = execute_market_book_batch_attempt_with_backoff(
+        client,
+        first.history,
+        batch_id=batch.batch_id,
+        attempt_id="retry-blocked",
+        required=True,
+        request_id="retry-blocked",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+        retry_gate=retry_gate,
+    )
+    assert blocked.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_BACKOFF
+    assert blocked.provider_error_code is None
+    assert len(transport.calls) == 1
+    decision = retry_gate.admit(batch.batch_id, observed_at=NOW)
+    assert decision.disposition is MarketBookRetryDisposition.BACKOFF
+
+    now[0] = NOW + timedelta(microseconds=MARKETBOOK_RETRY_BASE_DELAY_US)
+    transport.payload = _payload(batch.market_ids, request_id=2)
+    recovered = execute_market_book_batch_attempt_with_backoff(
+        client,
+        blocked.history,
+        batch_id=batch.batch_id,
+        attempt_id="retry-recovered",
+        required=True,
+        request_id="retry-recovered",
+        scheduled_at=now[0],
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+        retry_gate=retry_gate,
+    )
+
+    assert recovered.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert len(transport.calls) == 2
+    assert recovered.history.required_gap_attempt_ids == (
+        "retry-first",
+        "retry-blocked",
+    )
+    assert retry_gate.snapshot().batches == ()
+
+
+def test_retry_aware_executor_terminal_contract_failure_never_auto_retries():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    client, transport = _client(_provider_error_payload("TOO_MUCH_DATA"))
+    rate_gate, concurrency_gate = _gates()
+    retry_gate = MarketBookRetryBackoffGate(plan)
+
+    failed = execute_market_book_batch_attempt_with_backoff(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="too-much-data",
+        required=True,
+        request_id="too-much-data",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+        retry_gate=retry_gate,
+    )
+    assert failed.outcome is MarketBookAttemptOutcome.PROVIDER_FAILURE
+    assert failed.provider_error_code == "TOO_MUCH_DATA"
+    assert len(transport.calls) == 1
+
+    decision = retry_gate.admit(batch.batch_id, observed_at=NOW)
+    assert decision.disposition is MarketBookRetryDisposition.TERMINAL
+
+    blocked = execute_market_book_batch_attempt_with_backoff(
+        client,
+        failed.history,
+        batch_id=batch.batch_id,
+        attempt_id="too-much-data-blocked",
+        required=True,
+        request_id="too-much-data-blocked",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+        retry_gate=retry_gate,
+    )
+    assert blocked.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_BACKOFF
+    assert len(transport.calls) == 1
+
+
+def test_retry_aware_executor_does_not_starve_unrelated_batch():
+    plan = _plan(
+        market_ids=tuple(f"1.{index:03d}" for index in range(1, 13)),
+        price_data=("EX_ALL_OFFERS",),
+    )
+    first_batch, second_batch = plan.batches
+    transport = FakeTransport(_provider_error_payload("TOO_MANY_REQUESTS"))
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: NOW,
+        venue_id="betfair-global",
+        account_id="configured-account",
+    )
+    rate_gate, concurrency_gate = _gates()
+    retry_gate = MarketBookRetryBackoffGate(plan)
+
+    first = execute_market_book_batch_attempt_with_backoff(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=first_batch.batch_id,
+        attempt_id="first-batch-failed",
+        required=True,
+        request_id="first-batch-failed",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+        retry_gate=retry_gate,
+    )
+    assert first.outcome is MarketBookAttemptOutcome.PROVIDER_FAILURE
+    assert len(transport.calls) == 1
+
+    transport.payload = _payload(second_batch.market_ids, request_id=2)
+    second = execute_market_book_batch_attempt_with_backoff(
+        client,
+        first.history,
+        batch_id=second_batch.batch_id,
+        attempt_id="second-batch-success",
+        required=True,
+        request_id="second-batch-success",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+        retry_gate=retry_gate,
+    )
+    assert second.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert len(transport.calls) == 2
+    first_decision = retry_gate.admit(first_batch.batch_id, observed_at=NOW)
+    assert first_decision.disposition is MarketBookRetryDisposition.BACKOFF
+
+
+def test_retry_aware_executor_rejects_gate_bound_to_another_plan_before_dispatch():
+    plan = _plan(market_ids=("1.001",))
+    other_plan = _plan(market_ids=("9.999",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    retry_gate = MarketBookRetryBackoffGate(other_plan)
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="retry gate is bound to another MarketBook plan",
+    ):
+        execute_market_book_batch_attempt_with_backoff(
+            client,
+            history,
+            batch_id=batch.batch_id,
+            attempt_id="wrong-retry-plan",
+            required=True,
+            request_id="wrong-retry-plan",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+            retry_gate=retry_gate,
+        )
+
+    assert transport.calls == []
+
+
+def test_attempt_execution_rejects_provider_code_on_nonprovider_outcome():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    history = append_market_book_transport_attempt(
+        MarketBookAttemptHistory(plan, ()),
+        issued,
+        attempt_id="invalid-provider-code",
+        required=True,
+    )
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="only valid for PROVIDER_FAILURE",
+    ):
+        MarketBookBatchAttemptExecution(
+            history,
+            MarketBookAttemptOutcome.EXACT_RESPONSE,
+            issued,
+            "SERVICE_BUSY",
         )

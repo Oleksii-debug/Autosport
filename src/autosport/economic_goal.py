@@ -311,13 +311,132 @@ class EconomicGoalContract:
         _CANONICAL_TRANSITION_VALIDATOR(self, candidate)
 
 _CANONICAL_CONTRACT_TYPE: Final = EconomicGoalContract
-_RAW_CONTRACT_POST_INIT: Final = EconomicGoalContract.__post_init__
-_CONTRACT_OBJECT_SETATTR: Final = object.__setattr__
+
+_CONTRACT_FIELD_NAMES: Final = (
+    "goal_id",
+    "revision",
+    "bankroll_id",
+    "currency",
+    "objective",
+    "max_stake_fraction",
+    "max_stake_amount",
+    "max_session_loss_fraction",
+    "max_day_loss_fraction",
+    "max_drawdown_fraction",
+    "max_capital_at_risk_fraction",
+    "max_event_concentration_fraction",
+    "max_market_concentration_fraction",
+    "max_provider_concentration_fraction",
+    "max_sport_concentration_fraction",
+    "max_turnover_fraction",
+    "max_risk_of_ruin",
+    "max_execution_slippage_fraction",
+    "max_quote_age_seconds",
+    "minimum_data_quality",
+    "max_concurrent_positions",
+    "max_parlay_legs",
+    "automation_level",
+    "emergency_stop",
+    "blocked_sports",
+    "blocked_providers",
+    "blocked_markets",
+)
+
+# Capture the original slot descriptors once so class-level rebinding cannot
+# redirect economic-goal validation or identity reads to a forged descriptor.
+_CANONICAL_CONTRACT_FIELD_GETTERS: Final = tuple(
+    (name, EconomicGoalContract.__dict__[name].__get__)
+    for name in _CONTRACT_FIELD_NAMES
+)
+
+
+def _canonical_contract_snapshot(
+    contract: EconomicGoalContract,
+    _field_getters=_CANONICAL_CONTRACT_FIELD_GETTERS,
+    _contract_type=_CANONICAL_CONTRACT_TYPE,
+) -> tuple[object, ...]:
+    return tuple(
+        getter(contract, _contract_type)
+        for _, getter in _field_getters
+    )
+
+
+def _validate_contract_bound(
+    self: EconomicGoalContract,
+    _field_getters=_CANONICAL_CONTRACT_FIELD_GETTERS,
+    _contract_type=_CANONICAL_CONTRACT_TYPE,
+    _text_validator=_canonical_text,
+    _positive_int_validator=_positive_int,
+    _fraction_validator=_fraction,
+    _optional_nonnegative_decimal_validator=_optional_nonnegative_decimal,
+    _nonnegative_decimal_validator=_nonnegative_decimal,
+    _nonnegative_int_validator=_nonnegative_int,
+    _restrictions_validator=_canonical_restrictions,
+    _snapshot=_canonical_contract_snapshot,
+    _objective_type=EconomicObjective,
+    _automation_type=AutomationLevel,
+    _error_type=EconomicGoalContractError,
+) -> None:
+    """Validate contract fields through captured slot descriptors."""
+
+    if type(self) is not _contract_type:
+        raise _error_type("economic goal must use the exact contract type")
+    values = _snapshot(self, _field_getters)
+    (
+        goal_id, revision, bankroll_id, currency, objective,
+        max_stake_fraction, max_stake_amount, max_session_loss_fraction,
+        max_day_loss_fraction, max_drawdown_fraction, max_capital_at_risk_fraction,
+        max_event_concentration_fraction, max_market_concentration_fraction,
+        max_provider_concentration_fraction, max_sport_concentration_fraction,
+        max_turnover_fraction, max_risk_of_ruin, max_execution_slippage_fraction,
+        max_quote_age_seconds, minimum_data_quality, max_concurrent_positions,
+        max_parlay_legs, automation_level, emergency_stop,
+        blocked_sports, blocked_providers, blocked_markets,
+    ) = values
+
+    _text_validator("goal_id", goal_id)
+    _positive_int_validator("revision", revision)
+    _text_validator("bankroll_id", bankroll_id)
+    currency = _text_validator("currency", currency)
+    if len(currency) != 3 or not currency.isascii() or not currency.isalpha():
+        raise _error_type("currency must be a three-letter uppercase ASCII code")
+    if currency != currency.upper():
+        raise _error_type("currency must be a three-letter uppercase ASCII code")
+    if type(objective) is not _objective_type:
+        raise _error_type("objective must be an EconomicObjective")
+
+    _fraction_validator("max_stake_fraction", max_stake_fraction)
+    _optional_nonnegative_decimal_validator("max_stake_amount", max_stake_amount)
+    _fraction_validator("max_session_loss_fraction", max_session_loss_fraction)
+    _fraction_validator("max_day_loss_fraction", max_day_loss_fraction)
+    _fraction_validator("max_drawdown_fraction", max_drawdown_fraction)
+    _fraction_validator("max_capital_at_risk_fraction", max_capital_at_risk_fraction)
+    _fraction_validator("max_event_concentration_fraction", max_event_concentration_fraction)
+    _fraction_validator("max_market_concentration_fraction", max_market_concentration_fraction)
+    _fraction_validator("max_provider_concentration_fraction", max_provider_concentration_fraction)
+    _fraction_validator("max_sport_concentration_fraction", max_sport_concentration_fraction)
+    _nonnegative_decimal_validator("max_turnover_fraction", max_turnover_fraction)
+    _fraction_validator("max_risk_of_ruin", max_risk_of_ruin)
+    _fraction_validator("max_execution_slippage_fraction", max_execution_slippage_fraction)
+    _nonnegative_decimal_validator("max_quote_age_seconds", max_quote_age_seconds)
+    _fraction_validator("minimum_data_quality", minimum_data_quality)
+
+    _nonnegative_int_validator("max_concurrent_positions", max_concurrent_positions)
+    _positive_int_validator("max_parlay_legs", max_parlay_legs)
+    if type(automation_level) is not _automation_type:
+        raise _error_type("automation_level must be an AutomationLevel")
+    if type(emergency_stop) is not bool:
+        raise _error_type("emergency_stop must be a bool")
+
+    _restrictions_validator("blocked_sports", blocked_sports)
+    _restrictions_validator("blocked_providers", blocked_providers)
+    _restrictions_validator("blocked_markets", blocked_markets)
 
 
 def _make_contract_post_init_authority(operation):
     operation_code = operation.__code__
     operation_defaults = operation.__defaults__
+    operation_kwdefaults = operation.__kwdefaults__
     nested_callables = tuple(
         value
         for value in (operation_defaults or ())
@@ -339,6 +458,10 @@ def _make_contract_post_init_authority(operation):
             raise error_type("economic-goal contract validator authority changed")
         if operation.__defaults__ is not operation_defaults:
             raise error_type("economic-goal contract validator defaults authority changed")
+        if operation.__kwdefaults__ is not operation_kwdefaults:
+            raise error_type(
+                "economic-goal contract validator keyword defaults authority changed"
+            )
         for callable_object, expected_code, expected_defaults, expected_kwdefaults in nested_authority:
             if getattr(callable_object, "__code__", None) is not expected_code:
                 raise error_type("economic-goal contract nested validator authority changed")
@@ -358,14 +481,14 @@ def _make_contract_post_init_authority(operation):
 
 
 _CANONICAL_CONTRACT_VALIDATOR: Final = _make_contract_post_init_authority(
-    _RAW_CONTRACT_POST_INIT
+    _validate_contract_bound
 )
 EconomicGoalContract.__post_init__ = _CANONICAL_CONTRACT_VALIDATOR
 
 
-# The dataclass-generated initializer dispatches through self.__post_init__.
-# Replace that generated initializer with an authority-fixed constructor so a later
-# class-level __post_init__ rebinding cannot create an unvalidated contract.
+# The custom initializer writes all slots directly and then invokes the captured
+# canonical validator, so constructor-time validation never dispatches through a
+# mutable class-level __post_init__ alias.
 def _contract_init_authority(
     self: EconomicGoalContract,
     goal_id: str,

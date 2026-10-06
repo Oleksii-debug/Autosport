@@ -8,7 +8,7 @@ authority.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -365,6 +365,10 @@ def _read_market_book_batch(
     request_budget: Callable[[object], object],
     post_readonly: Callable[..., _transport._MarketBookRpcResponse],
     receipt_from_response: Callable[..., MarketBookBatchReceipt],
+    validate_receipt_from_response: Callable[
+        [MarketBookBatchReceipt, MarketBookReadBatch, list[object]],
+        None,
+    ],
     result_factory: Callable[..., MarketBookBatchTransportResult],
     post_dispatch_failure_type: type[MarketBookPostDispatchFailure],
     protocol_error_type: type[BaseException],
@@ -417,8 +421,10 @@ def _read_market_book_batch(
                 "MarketBook plan changed during provider dispatch"
             )
 
+        response_rows = list(response.rows)
         try:
-            receipt = receipt_from_response(batch, list(response.rows))
+            receipt = receipt_from_response(batch, response_rows)
+            validate_receipt_from_response(receipt, batch, response_rows)
         except completeness_error_type as exc:
             raise protocol_error_type(
                 "MarketBook response cannot produce canonical structural receipt"
@@ -641,9 +647,70 @@ class MarketBookBatchAttemptExecution:
 
 def _install_transport_result_authority() -> None:
     issued: dict[int, tuple[object, str, bool]] = {}
-    validate = MarketBookBatchTransportResult.__post_init__
     json_dumps = json.dumps
     hash_factory = sha256
+    batch_transport_error_type = MarketBookBatchTransportError
+    base_readonly_error_type = _base.BetfairReadOnlyError
+    result_type = MarketBookBatchTransportResult
+    receipt_type = MarketBookBatchReceipt
+    datetime_type = datetime
+    utc_timezone = timezone.utc
+
+    def validate_result(self: MarketBookBatchTransportResult) -> None:
+        if type(self) is not result_type:
+            raise TypeError("result must be an exact MarketBookBatchTransportResult")
+        for value, field in (
+            (self.plan_id, "plan_id"),
+            (self.request_contract_id, "request_contract_id"),
+            (self.batch_id, "batch_id"),
+            (self.request_budget_evidence_id, "request_budget_evidence_id"),
+            (self.request_payload_sha256, "request_payload_sha256"),
+            (self.source_payload_sha256, "source_payload_sha256"),
+        ):
+            if type(value) is not str or not value or value != value.strip():
+                raise batch_transport_error_type(
+                    f"{field} must be a non-empty canonical string"
+                )
+            if len(value) != 64 or any(
+                char not in "0123456789abcdef" for char in value
+            ):
+                raise batch_transport_error_type(f"{field} must be lowercase sha256")
+        observed_at = self.observed_at
+        if (
+            not isinstance(observed_at, str)
+            or not observed_at
+            or observed_at != observed_at.strip()
+        ):
+            raise base_readonly_error_type(
+                "observed_at must be a non-empty trimmed string"
+            )
+        try:
+            parsed_observed_at = datetime_type.fromisoformat(observed_at)
+        except ValueError:
+            raise base_readonly_error_type(
+                "observed_at must be ISO-8601"
+            ) from None
+        if (
+            parsed_observed_at.tzinfo is None
+            or parsed_observed_at.utcoffset() is None
+        ):
+            raise base_readonly_error_type(
+                "observed_at must include timezone offset"
+            )
+        if type(self.canonical_network_origin) is not bool:
+            raise batch_transport_error_type(
+                "canonical_network_origin must be exact bool"
+            )
+        if type(self.receipt) is not receipt_type:
+            raise batch_transport_error_type(
+                "receipt must be a canonical MarketBookBatchReceipt"
+            )
+        if self.receipt.batch_id != self.batch_id:
+            raise batch_transport_error_type(
+                "receipt is bound to another MarketBook batch"
+            )
+
+    validate = validate_result
 
     def authority_fingerprint(self: MarketBookBatchTransportResult) -> str:
         receipt = self.receipt
@@ -688,7 +755,7 @@ def _install_transport_result_authority() -> None:
                 allow_nan=False,
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
-            raise MarketBookBatchTransportError(
+            raise batch_transport_error_type(
                 "MarketBook transport authority fingerprint is noncanonical"
             ) from exc
         return hash_factory(encoded).hexdigest()
@@ -929,6 +996,125 @@ def _install_transport_result_authority() -> None:
                 )
         return decision.allowed
 
+    mapping_type = Mapping
+
+    def validate_response_receipt(
+        receipt: MarketBookBatchReceipt,
+        batch: MarketBookReadBatch,
+        response_rows: list[object],
+    ) -> None:
+        if type(receipt) is not receipt_type:
+            raise completeness_error_type(
+                "response receipt must be an exact MarketBookBatchReceipt"
+            )
+        if type(response_rows) is not list:
+            raise completeness_error_type(
+                "MarketBook response rows must be an exact list"
+            )
+        observed_ids: list[str] = []
+        for entry in response_rows:
+            if not isinstance(entry, mapping_type):
+                raise completeness_error_type(
+                    "each MarketBook response entry must be an object"
+                )
+            market_id = entry.get("marketId")
+            if (
+                not isinstance(market_id, str)
+                or not market_id
+                or market_id != market_id.strip()
+            ):
+                raise completeness_error_type(
+                    "marketId must be a non-empty canonical string"
+                )
+            observed_ids.append(market_id)
+        if len(observed_ids) != len(set(observed_ids)):
+            raise completeness_error_type(
+                "MarketBook response contains duplicate marketId values"
+            )
+
+        expected = tuple(sorted(batch.market_ids))
+        observed = tuple(sorted(observed_ids))
+        expected_set = set(expected)
+        observed_set = set(observed)
+        missing = tuple(sorted(expected_set - observed_set))
+        unexpected = tuple(sorted(observed_set - expected_set))
+        expected_status = (
+            exact_receipt_status
+            if not missing and not unexpected
+            else incomplete_receipt_status
+        )
+
+        for value, name in (
+            (receipt.expected_market_ids, "expected_market_ids"),
+            (receipt.observed_market_ids, "observed_market_ids"),
+            (receipt.missing_market_ids, "missing_market_ids"),
+            (receipt.unexpected_market_ids, "unexpected_market_ids"),
+        ):
+            if type(value) is not tuple:
+                raise completeness_error_type(
+                    f"response receipt {name} must be an exact tuple"
+                )
+        if (
+            receipt.batch_id != batch.batch_id
+            or receipt.expected_market_ids != expected
+            or receipt.observed_market_ids != observed
+            or receipt.missing_market_ids != missing
+            or receipt.unexpected_market_ids != unexpected
+            or receipt.status is not expected_status
+            or receipt.failure_kind is not None
+            or receipt.failure_code is not None
+        ):
+            raise completeness_error_type(
+                "response receipt contradicts canonical provider rows or batch"
+            )
+
+        try:
+            response_encoded = json_dumps(
+                response_rows,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise completeness_error_type(
+                "MarketBook response rows are not canonical JSON data"
+            ) from exc
+        payload_sha256 = hash_factory(response_encoded).hexdigest()
+        if receipt.payload_sha256 != payload_sha256:
+            raise completeness_error_type(
+                "response receipt payload hash does not match provider rows"
+            )
+
+        core_payload = {
+            "batch_id": batch.batch_id,
+            "expected_market_ids": list(expected),
+            "observed_market_ids": list(observed),
+            "missing_market_ids": list(missing),
+            "unexpected_market_ids": list(unexpected),
+            "status": expected_status.value,
+            "failure_kind": None,
+            "failure_code": None,
+            "payload_sha256": payload_sha256,
+        }
+        try:
+            receipt_encoded = json_dumps(
+                core_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise completeness_error_type(
+                "MarketBook receipt identity payload is not canonical JSON data"
+            ) from exc
+        expected_receipt_id = hash_factory(receipt_encoded).hexdigest()
+        if receipt.receipt_id != expected_receipt_id:
+            raise completeness_error_type(
+                "response receipt identity does not match canonical recomputation"
+            )
+
     def read_market_book_batch(
         client: _base.BetfairReadOnlyClient,
         plan: MarketBookReadPlan,
@@ -954,7 +1140,7 @@ def _install_transport_result_authority() -> None:
         params = params_for_batch(plan, batch)
         wire_budget = market_book_request_budget(params)
         if wire_budget.evidence_id != batch.budget_evidence_id:
-            raise MarketBookBatchTransportError(
+            raise batch_transport_error_type(
                 "wire-derived request budget does not match the canonical planned batch"
             )
 
@@ -1070,6 +1256,7 @@ def _install_transport_result_authority() -> None:
                 request_budget=market_book_request_budget,
                 post_readonly=post_market_book_readonly,
                 receipt_from_response=receipt_from_response,
+                validate_receipt_from_response=validate_response_receipt,
                 result_factory=result_factory,
                 post_dispatch_failure_type=post_dispatch_failure_type,
                 protocol_error_type=protocol_error_type,
@@ -1114,22 +1301,35 @@ def _install_transport_result_authority() -> None:
                     complete=concurrency_complete,
                 )
                 raise
-        # Re-run the original structural validator before minting closure-local
-        # authority. Dataclass __post_init__ and fingerprint methods are mutable
-        # class attributes after import and therefore cannot be trusted here.
+        # Re-run closure-local structural validation before minting authority.
+        # Any ordinary failure here happened after provider I/O and must become a
+        # durable post-dispatch failure so the attempt coordinator can record it.
         if type(result) is not result_factory:
             raise post_dispatch_failure_type(
                 "canonical MarketBook transport returned a noncanonical result type"
             )
-        validate(result)
         key = id(result)
 
         def forget(_weakref: object, *, result_id: int = key) -> None:
             issued.pop(result_id, None)
 
+        try:
+            validate(result)
+            fingerprint = authority_fingerprint(result)
+            weak_result = ref(result, forget)
+        except post_dispatch_failure_type:
+            raise
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                raise
+            raise post_dispatch_failure_type(
+                "provider read completed but canonical MarketBook authority "
+                "finalization failed"
+            ) from exc
+
         issued[key] = (
-            ref(result, forget),
-            authority_fingerprint(result),
+            weak_result,
+            fingerprint,
             result.canonical_network_origin,
         )
         return result
@@ -1140,11 +1340,11 @@ def _install_transport_result_authority() -> None:
         validate(self)
         record = issued.get(id(self))
         if record is None or record[0]() is not self:
-            raise MarketBookBatchTransportError(
+            raise batch_transport_error_type(
                 "MarketBook batch transport result was not issued by canonical transport"
             )
         if record[1] != authority_fingerprint(self):
-            raise MarketBookBatchTransportError(
+            raise batch_transport_error_type(
                 "MarketBook batch transport result changed after canonical issuance"
             )
         return record
@@ -1157,7 +1357,7 @@ def _install_transport_result_authority() -> None:
     ) -> None:
         record = _record(self)
         if not record[2]:
-            raise MarketBookBatchTransportError(
+            raise batch_transport_error_type(
                 "MarketBook batch transport result lacks canonical network origin"
             )
 
@@ -1291,6 +1491,8 @@ def _execute_market_book_batch_attempt(
     exact_response_outcome: MarketBookAttemptOutcome,
     incomplete_response_outcome: MarketBookAttemptOutcome,
     exact_response_status: BatchReceiptStatus,
+    history_type: type[MarketBookAttemptHistory],
+    batch_transport_error_type: type[MarketBookBatchTransportError],
     make_execution: Callable[
         [MarketBookAttemptHistory, MarketBookAttemptOutcome, MarketBookBatchTransportResult | None],
         MarketBookBatchAttemptExecution,
@@ -1298,7 +1500,7 @@ def _execute_market_book_batch_attempt(
 ) -> MarketBookBatchAttemptExecution:
     """Execute one admitted read and durably classify its structural attempt truth."""
 
-    if type(history) is not MarketBookAttemptHistory:
+    if type(history) is not history_type:
         raise TypeError("history must be an exact MarketBookAttemptHistory")
     # Freeze a canonical plan+history snapshot before any provider I/O. Frozen
     # dataclasses can still be adversarially mutated through object.__setattr__;
@@ -1310,7 +1512,7 @@ def _execute_market_book_batch_attempt(
     if type(required) is not bool:
         raise TypeError("required must be exact bool")
     if any(record.attempt_id == attempt for record in frozen_history.records):
-        raise MarketBookBatchTransportError(
+        raise batch_transport_error_type(
             "attempt_id is already present in canonical MarketBook history"
         )
     canonical_batch(frozen_history.plan, batch_id)
@@ -1387,6 +1589,8 @@ def _install_attempt_executor() -> None:
     canonical_append_nonresponse = _append_nonresponse_attempt
     canonical_execution_type = MarketBookBatchAttemptExecution
     canonical_execution_validate = MarketBookBatchAttemptExecution.__post_init__
+    canonical_history_type = MarketBookAttemptHistory
+    canonical_batch_transport_error_type = MarketBookBatchTransportError
     canonical_plan_type = MarketBookReadPlan
     canonical_plan_validate = MarketBookReadPlan.__post_init__
     canonical_history_validate = MarketBookAttemptHistory.__post_init__
@@ -1479,6 +1683,8 @@ def _install_attempt_executor() -> None:
             exact_response_outcome=canonical_exact_response_outcome,
             incomplete_response_outcome=canonical_incomplete_response_outcome,
             exact_response_status=canonical_exact_response_status,
+            history_type=canonical_history_type,
+            batch_transport_error_type=canonical_batch_transport_error_type,
             make_execution=make_execution,
         )
 

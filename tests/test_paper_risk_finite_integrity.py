@@ -1,6 +1,7 @@
 import unittest
 from decimal import Decimal, localcontext
 
+import autosport.risk as risk_module
 from autosport.domain import TicketLeg, TicketStatus
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
@@ -262,6 +263,77 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         self.assertEqual(policy.minimum_cash_reserve_fraction, Decimal("0.10"))
         self.assertTrue(policy.evaluate(PaperBook("100"), "10").allowed)
 
+
+    def test_locked_capital_ticket_rejects_nonfinite_or_negative_stake(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            [self._leg()],
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+        for invalid in (
+            Decimal("NaN"),
+            Decimal("Infinity"),
+            Decimal("-Infinity"),
+            Decimal("-1"),
+        ):
+            with self.subTest(invalid=str(invalid)):
+                original = ticket.stake
+                ticket.stake = invalid
+                try:
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "risk ticket must be canonical",
+                    ):
+                        risk_module._CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
+                finally:
+                    ticket.stake = original
+
+    def test_locked_capital_ticket_rejects_mutated_leg_before_side_dispatch(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            [self._leg()],
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+        leg = ticket.legs[0]
+        original = leg.exchange_side
+        try:
+            object.__setattr__(leg, "exchange_side", "forged")
+            with self.assertRaisesRegex(
+                ValueError,
+                "risk ticket leg must be canonical",
+            ):
+                risk_module._CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
+        finally:
+            object.__setattr__(leg, "exchange_side", original)
+
+    def test_locked_capital_proposal_rejects_nonfinite_or_negative_stake(self) -> None:
+        leg = self._leg()
+        for invalid in (
+            Decimal("NaN"),
+            Decimal("Infinity"),
+            Decimal("-Infinity"),
+            Decimal("-1"),
+        ):
+            with self.subTest(invalid=str(invalid)):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "risk proposal exposure must use canonical stake and legs",
+                ):
+                    risk_module._CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                        invalid,
+                        (leg,),
+                    )
+
+    def test_locked_capital_zero_stake_back_remains_exact_zero(self) -> None:
+        self.assertEqual(
+            risk_module._CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                Decimal("0"),
+                (self._leg(),),
+            ),
+            Decimal("0"),
+        )
 
     def test_risk_captured_raw_paperbook_settlement_supports_lay_before_guard_rebinding(self) -> None:
         book = PaperBook("100")

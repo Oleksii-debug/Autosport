@@ -2488,12 +2488,34 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "continuous-session invalidation bounds are invalid"
             )
+        indexed_input_ids = dependency_index.input_ids
+        if (
+            type(indexed_input_ids) is not tuple
+            or any(
+                type(input_id) is not str
+                or not input_id
+                or input_id.strip() != input_id
+                for input_id in indexed_input_ids
+            )
+            or len(set(indexed_input_ids)) != len(indexed_input_ids)
+        ):
+            raise ContinuousSessionError(
+                "dependency index input identity state is invalid"
+            )
         affected: list[str] = []
         full_refresh_required = False
         last_has_more = False
 
         for _ in range(max_batches):
+            if dependency_index.input_ids != indexed_input_ids:
+                raise ContinuousSessionError(
+                    "dependency index input identity state changed between invalidation batches"
+                )
             batch = drain_invalidation(max_items=max_items)
+            if dependency_index.input_ids != indexed_input_ids:
+                raise ContinuousSessionError(
+                    "invalidation drain mutated dependency index input identity state"
+                )
             if (
                 type(batch) is not MirrorInvalidationBatch
                 or type(batch.changed_keys) is not tuple
@@ -2518,20 +2540,6 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             ):
                 raise ContinuousSessionError(
                     "invalidation buffer returned an invalid batch"
-                )
-            indexed_input_ids = dependency_index.input_ids
-            if (
-                type(indexed_input_ids) is not tuple
-                or any(
-                    type(input_id) is not str
-                    or not input_id
-                    or input_id.strip() != input_id
-                    for input_id in indexed_input_ids
-                )
-                or len(set(indexed_input_ids)) != len(indexed_input_ids)
-            ):
-                raise ContinuousSessionError(
-                    "dependency index input identity state is invalid"
                 )
             routed = affected_inputs(batch)
             if dependency_index.input_ids != indexed_input_ids:
@@ -2590,7 +2598,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "invalidation buffer backlog state is invalid"
             )
         backlog = last_has_more or pending_count > 0 or pending_full_refresh
-        return tuple(dict.fromkeys(affected)), full_refresh_required, backlog
+        affected_ids = set(affected)
+        ordered_affected = tuple(
+            input_id
+            for input_id in indexed_input_ids
+            if input_id in affected_ids
+        )
+        return ordered_affected, full_refresh_required, backlog
 
     def _refresh_source_state_projection(
         self,

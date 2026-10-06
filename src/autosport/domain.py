@@ -191,6 +191,35 @@ def _quote_identity(
     )
 
 
+def _market_settlement_key(
+    quote_key: object,
+    market_semantics_id: object,
+    _utf8=_require_utf8_encodable,
+    _semantic_identity=_canonical_semantic_identity,
+    _json_dumps=json.dumps,
+    _sha256=__import__("hashlib").sha256,
+) -> str:
+    if type(quote_key) is not str or not quote_key:
+        raise ValueError("settlement quote_key must be non-empty canonical text")
+    _utf8(quote_key, "settlement quote_key")
+    if market_semantics_id is None:
+        return quote_key
+    semantics = _semantic_identity(
+        market_semantics_id,
+        "market_semantics_id",
+    )
+    payload = _json_dumps(
+        ["market-settlement-v1", quote_key, semantics],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "market-semantics-v1-" + _sha256(payload).hexdigest()
+
+
+_CANONICAL_MARKET_SETTLEMENT_KEY = _market_settlement_key
+
+
 def _optional_canonical_timestamp(raw: dict[str, Any], field_name: str) -> str | None:
     value = raw.get(field_name)
     if value is None:
@@ -457,12 +486,18 @@ class TicketLeg:
     locked_odds: Decimal
     sport: str | None = None
     exchange_side: str | None = None
+    market_semantics_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.sport is not None:
             _canonical_sport_value(self.sport)
         if self.exchange_side is not None:
             _canonical_exchange_side(self.exchange_side)
+        if self.market_semantics_id is not None:
+            _canonical_semantic_identity(
+                self.market_semantics_id,
+                "market_semantics_id",
+            )
 
     @property
     def quote_key(self) -> str:
@@ -473,6 +508,20 @@ class TicketLeg:
             self.sport,
             self.exchange_side,
         )
+
+    @property
+    def settlement_key(
+        self,
+        _key=_CANONICAL_MARKET_SETTLEMENT_KEY,
+    ) -> str:
+        return _key(
+            self.quote_key,
+            self.market_semantics_id,
+        )
+
+    @property
+    def settlement_identity(self) -> tuple[str, str | None]:
+        return self.quote_key, self.market_semantics_id
 
 
 @dataclass(slots=True)

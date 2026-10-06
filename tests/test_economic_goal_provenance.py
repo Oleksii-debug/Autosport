@@ -812,3 +812,42 @@ def test_provenance_contract_field_order_ignores_runtime_rebinding(monkeypatch) 
 
     rebound = provenance_for(contract)
     assert rebound == canonical
+
+
+def test_provenance_operation_rejects_transitive_json_encoder_code_mutation() -> None:
+    goal = _goal()
+    nested_json_encoder = economic_goal_provenance_module._canonical_json
+    original_code = nested_json_encoder.__code__
+
+    def forged_json_encoder(_payload, *args, **kwargs):
+        return b"forged"
+
+    nested_json_encoder.__code__ = forged_json_encoder.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="economic-goal provenance operation nested authority changed",
+        ):
+            provenance_for(goal)
+    finally:
+        nested_json_encoder.__code__ = original_code
+
+
+def test_provenance_verifier_rejects_transitive_hash_dependency_mutation() -> None:
+    goal = _goal()
+    evidence = provenance_for(goal)
+    nested_json_encoder = economic_goal_provenance_module._canonical_json
+    original_code = nested_json_encoder.__code__
+
+    def forged_json_encoder(_payload, *args, **kwargs):
+        return b"forged"
+
+    nested_json_encoder.__code__ = forged_json_encoder.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="economic-goal provenance verification nested authority changed",
+        ):
+            verify_provenance(goal, evidence)
+    finally:
+        nested_json_encoder.__code__ = original_code

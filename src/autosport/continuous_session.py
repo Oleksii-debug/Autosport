@@ -51,9 +51,10 @@ def _validate_canonical_invalidation_buffer_state(
     buffer: BoundedMirrorInvalidationBuffer,
 ) -> None:
     """Fail closed when the canonical invalidation buffer's internal truth is malformed."""
-    dirty = buffer._dirty
-    max_dirty_keys = buffer._max_dirty_keys
-    full_refresh_required = buffer._full_refresh_required
+    missing = object()
+    dirty = getattr(buffer, "_dirty", missing)
+    max_dirty_keys = getattr(buffer, "_max_dirty_keys", missing)
+    full_refresh_required = getattr(buffer, "_full_refresh_required", missing)
     if (
         type(dirty) is not dict
         or type(max_dirty_keys) is not int

@@ -74,11 +74,16 @@ def _canonical_text(
     return value
 
 
-def _decimal(name: str, value: object) -> Decimal:
-    if type(value) is not Decimal:
-        raise EconomicGoalContractError(f"{name} must be an exact Decimal")
+def _decimal(
+    name: str,
+    value: object,
+    _decimal_type=Decimal,
+    _error_type=EconomicGoalContractError,
+) -> Decimal:
+    if type(value) is not _decimal_type:
+        raise _error_type(f"{name} must be an exact Decimal")
     if not value.is_finite():
-        raise EconomicGoalContractError(f"{name} must be finite")
+        raise _error_type(f"{name} must be finite")
     return value
 
 
@@ -119,18 +124,27 @@ def _optional_nonnegative_decimal(
     return _validator(name, value)
 
 
-def _nonnegative_int(name: str, value: object) -> int:
+def _nonnegative_int(
+    name: str,
+    value: object,
+    _error_type=EconomicGoalContractError,
+) -> int:
     if type(value) is not int:
-        raise EconomicGoalContractError(f"{name} must be a non-boolean integer")
+        raise _error_type(f"{name} must be a non-boolean integer")
     if value < 0:
-        raise EconomicGoalContractError(f"{name} must be non-negative")
+        raise _error_type(f"{name} must be non-negative")
     return value
 
 
-def _positive_int(name: str, value: object) -> int:
-    result = _nonnegative_int(name, value)
+def _positive_int(
+    name: str,
+    value: object,
+    _validator=_nonnegative_int,
+    _error_type=EconomicGoalContractError,
+) -> int:
+    result = _validator(name, value)
     if result == 0:
-        raise EconomicGoalContractError(f"{name} must be positive")
+        raise _error_type(f"{name} must be positive")
     return result
 
 

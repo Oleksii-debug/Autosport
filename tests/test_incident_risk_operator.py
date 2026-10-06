@@ -97,6 +97,41 @@ class IncidentRiskOperatorViewTests(unittest.TestCase):
         self.assertNotIn("operator-secret-value", repr(view))
         self.assertIn("[REDACTED]", row.projection.title)
 
+    def test_current_view_binds_known_at_to_exact_latest_revision(self) -> None:
+        first = self._entry("revision")
+        second = IncidentRiskEntry(
+            entry_id=first.entry_id,
+            revision=2,
+            kind=first.kind,
+            severity=first.severity,
+            status=RiskStatus.ACKNOWLEDGED,
+            evidence_state=first.evidence_state,
+            opened_at=first.opened_at,
+            updated_at="2026-10-06T05:03:00+00:00",
+            title=first.title,
+            summary=first.summary,
+            affected_components=first.affected_components,
+            occurrence_evidence_refs=first.occurrence_evidence_refs,
+            evidence_refs=first.evidence_refs,
+            requires_operator_action=first.requires_operator_action,
+        )
+        with mock.patch(
+            "autosport.incident_risk_store._availability_now",
+            side_effect=(
+                "2026-10-06T05:02:00+00:00",
+                "2026-10-06T05:04:00+00:00",
+            ),
+        ):
+            self.store.append(first)
+            self.store.append(second)
+
+        view = load_incident_risk_operator_view(self.store)
+
+        self.assertEqual(len(view.rows), 1)
+        self.assertEqual(view.rows[0].projection.revision, 2)
+        self.assertEqual(view.rows[0].projection.updated_at, second.updated_at)
+        self.assertEqual(view.rows[0].known_at, "2026-10-06T05:04:00+00:00")
+
     def test_view_uses_canonical_operator_sort_order(self) -> None:
         low_action = self._entry(
             "low",

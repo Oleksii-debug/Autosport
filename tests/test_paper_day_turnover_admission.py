@@ -22,7 +22,7 @@ from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskOfRuinEvidence
 from autosport.risk_day_window import ProductDayRiskWindowStore
-from autosport.risk_turnover_evidence import PaperDayTurnoverResolver
+from autosport.risk_turnover_evidence import PaperDayTurnoverResolver, PaperSessionTurnoverResolver
 from autosport.workspace_lock import WorkspaceEconomicLock
 
 
@@ -276,6 +276,90 @@ def test_turnover_resolver_wrapper_code_mutation_cannot_mint_headroom(tmp_path):
     descriptor = PaperDayTurnoverResolver.__dict__["resolve"]
     assert type(descriptor) is classmethod
     _assert_day_authority_code_mutation_rejected(tmp_path, descriptor.__func__)
+
+
+def test_session_turnover_resolver_wrapper_code_mutation_cannot_mint_headroom(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(
+        workspace=tmp_path,
+        placed_at=_timestamp(old),
+        stake="50",
+    )
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("session-resolver-code")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    descriptor = PaperSessionTurnoverResolver.__dict__["resolve"]
+    assert type(descriptor) is classmethod
+    target = descriptor.__func__
+    original_code = target.__code__
+    try:
+        target.__code__ = _replacement_code_preserving_freevars(target)
+        with pytest.raises(
+            RuntimeError,
+            match="product session turnover resolver executable authority changed",
+        ):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("0.01"),
+                legs=(candidate,),
+                reason="session resolver mutation must fail closed",
+                placed_at=_timestamp(now),
+                context=context,
+                provider_source_ids=("provider-1",),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+    finally:
+        target.__code__ = original_code
+
+    assert len(PaperBook.load(tmp_path / "paper_book.json").tickets) == 1
+
+
+def test_economic_session_current_code_mutation_cannot_mint_headroom(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(
+        workspace=tmp_path,
+        placed_at=_timestamp(old),
+        stake="50",
+    )
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("session-store-code")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    target = ProductEconomicSessionStore.current
+    original_code = target.__code__
+    try:
+        target.__code__ = _replacement_code_preserving_freevars(target)
+        with pytest.raises(
+            RuntimeError,
+            match="economic session executable authority changed",
+        ):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("0.01"),
+                legs=(candidate,),
+                reason="session store mutation must fail closed",
+                placed_at=_timestamp(now),
+                context=context,
+                provider_source_ids=("provider-1",),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+    finally:
+        target.__code__ = original_code
+
+    assert len(PaperBook.load(tmp_path / "paper_book.json").tickets) == 1
 
 
 @pytest.mark.parametrize(

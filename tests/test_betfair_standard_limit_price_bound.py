@@ -105,10 +105,12 @@ def test_exact_bound_type_is_required() -> None:
         )
 
 
-def test_public_provider_client_rebinding_cannot_mint_a_different_contract(monkeypatch) -> None:
+def test_public_provider_client_rebinding_cannot_redirect_canonical_capture(
+    monkeypatch,
+) -> None:
     import autosport.betfair_standard_limit_price_bound as module
 
-    bound, action, _resolved_evidence = _evidence()
+    bound, action, expected = _evidence()
 
     class ShadowClient:
         pass
@@ -120,14 +122,12 @@ def test_public_provider_client_rebinding_cannot_mint_a_different_contract(monke
         raising=False,
     )
 
-    with pytest.raises(
-        BetfairStandardLimitPriceBoundError,
-        match="canonical Betfair placeOrders request could not be captured",
-    ):
-        resolve_betfair_standard_limit_price_bound(
-            bound=bound,
-            action_id=action.action_id,
-        )
+    actual = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    assert actual.to_dict() == expected.to_dict()
 
 
 def test_instruction_projection_is_captured_from_real_place_action_request() -> None:

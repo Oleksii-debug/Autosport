@@ -2841,6 +2841,25 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         try:
             cycle = collector.run_cycle()
+            cycle_source_id = cycle_source_id
+            cycle_provider_unavailable = cycle_provider_unavailable
+            cycle_committed_delta_ids = cycle_committed_delta_ids
+            if (
+                type(cycle_source_id) is not str
+                or not cycle_source_id
+                or cycle_source_id.strip() != cycle_source_id
+                or type(cycle_provider_unavailable) is not bool
+                or type(cycle_committed_delta_ids) is not tuple
+                or any(
+                    type(delta_id) is not str
+                    or not delta_id
+                    or delta_id.strip() != delta_id
+                    for delta_id in cycle_committed_delta_ids
+                )
+            ):
+                raise ContinuousSessionError(
+                    "collector returned invalid continuous-session cycle metadata"
+                )
         except Exception as exc:
             try:
                 with _running_fence(self._state):
@@ -2884,7 +2903,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             return ContinuousTickResult(
                 session_id=failure.session_id,
                 cycle_index=failure.cycles_completed,
-                source_id=cycle.source_id,
+                source_id=cycle_source_id,
                 source_provider_unavailable=True,
                 source_gap_states=(
                     ()
@@ -2896,7 +2915,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     if failure.source_sync_state is None
                     else (failure.source_sync_state,)
                 ),
-                committed_delta_ids=cycle.committed_delta_ids,
+                committed_delta_ids=cycle_committed_delta_ids,
                 delivered_delta_ids=(),
                 affected_input_ids=(),
                 registered_input_ids=(),
@@ -3059,6 +3078,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         settled_ticket_ids=settled,
                         at=now,
                     )
+                    if (
+                        self.workspace != workspace
+                        or self.paper_book_path != paper_book_path
+                        or self.initial_bankroll != initial_bankroll
+                    ):
+                        raise ContinuousSessionError(
+                            "settlement economic configuration changed during tick"
+                        )
 
                 cycle_index = _record_success_method(
                     self._state,
@@ -3090,11 +3117,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         return ContinuousTickResult(
             session_id=self.session_id,
             cycle_index=cycle_index,
-            source_id=cycle.source_id,
+            source_id=cycle_source_id,
             source_provider_unavailable=False,
             source_gap_states=source_gap_states,
             source_sync_states=source_sync_states,
-            committed_delta_ids=cycle.committed_delta_ids,
+            committed_delta_ids=cycle_committed_delta_ids,
             delivered_delta_ids=delivered,
             affected_input_ids=affected,
             registered_input_ids=tuple(newly_registered),

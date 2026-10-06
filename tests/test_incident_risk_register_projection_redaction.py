@@ -67,6 +67,7 @@ class IncidentRiskProjectionIdentifierRedactionTests(unittest.TestCase):
         evidence = tuple(sorted((
             occurrence,
             "https://api-user:another-secret@provider.example/incident/42",
+            "https://opaque-credential-material@mirror.example/evidence/7",
         )))
         components = ("risk_store",)
         entry = IncidentRiskEntry(
@@ -99,7 +100,9 @@ class IncidentRiskProjectionIdentifierRedactionTests(unittest.TestCase):
         self.assertNotIn("super-secret-password", repr(projection))
         self.assertNotIn("api-user", repr(projection))
         self.assertNotIn("another-secret", repr(projection))
+        self.assertNotIn("opaque-credential-material", repr(projection))
         self.assertIn("db.example/risk", repr(projection))
+        self.assertIn("mirror.example/evidence/7", repr(projection))
         self.assertIn("provider.example/incident/42", repr(projection))
 
 

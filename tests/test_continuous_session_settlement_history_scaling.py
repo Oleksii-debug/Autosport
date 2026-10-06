@@ -1047,3 +1047,109 @@ def test_sidecar_descriptor_close_failure_is_normalized(monkeypatch) -> None:
             assert "cannot close" in str(exc)
         else:
             raise AssertionError("descriptor close failure escaped domain normalization")
+
+
+def test_settlement_evidence_validator_ignores_runtime_class_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        def attacker_validator(_raw: object) -> tuple[dict[str, str], ...]:
+            raise AssertionError("runtime-rebound settlement validator executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_validate_settlement_evidence",
+            staticmethod(attacker_validator),
+        )
+
+        assert state.snapshot().cycles_completed == 0
+
+
+def test_settlement_evidence_validator_code_identity_is_immutable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        descriptor = continuous_session._ContinuousSessionState.__dict__[
+            "_validate_settlement_evidence"
+        ]
+        original_validator = descriptor.__func__
+        original_code = original_validator.__code__
+
+        def attacker_validator(_raw: object) -> tuple[dict[str, str], ...]:
+            raise AssertionError("mutated settlement validator executed")
+
+        try:
+            original_validator.__code__ = attacker_validator.__code__
+            try:
+                state.snapshot()
+            except continuous_session.ContinuousSessionError as exc:
+                assert "code identity" in str(exc)
+            else:
+                raise AssertionError("mutated settlement validator was accepted")
+        finally:
+            original_validator.__code__ = original_code
+
+
+def test_settlement_evidence_normalizer_ignores_runtime_class_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        evidence = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-normalizer",
+            settlement_ref="provider-result:normalizer",
+            quote_outcomes={"quote-normalizer": "win"},
+            evidence_id="receipt-normalizer",
+            evidence_sha256="a" * 64,
+            available_at=_AT,
+        )
+
+        def attacker_normalizer(
+            _evidence: continuous_session.SettlementResolution,
+        ) -> dict[str, str]:
+            raise AssertionError("runtime-rebound settlement normalizer executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_normalized_settlement_evidence",
+            staticmethod(attacker_normalizer),
+        )
+
+        state.validate_settlement_evidence(settlement_evidence=(evidence,))
+
+
+def test_settlement_evidence_normalizer_code_identity_is_immutable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        evidence = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-normalizer-code",
+            settlement_ref="provider-result:normalizer-code",
+            quote_outcomes={"quote-normalizer-code": "win"},
+            evidence_id="receipt-normalizer-code",
+            evidence_sha256="b" * 64,
+            available_at=_AT,
+        )
+
+        descriptor = continuous_session._ContinuousSessionState.__dict__[
+            "_normalized_settlement_evidence"
+        ]
+        original_normalizer = descriptor.__func__
+        original_code = original_normalizer.__code__
+
+        def attacker_normalizer(
+            _evidence: continuous_session.SettlementResolution,
+        ) -> dict[str, str]:
+            raise AssertionError("mutated settlement normalizer executed")
+
+        try:
+            original_normalizer.__code__ = attacker_normalizer.__code__
+            try:
+                state.validate_settlement_evidence(settlement_evidence=(evidence,))
+            except continuous_session.ContinuousSessionError as exc:
+                assert "normalizer code identity" in str(exc)
+            else:
+                raise AssertionError("mutated settlement normalizer was accepted")
+        finally:
+            original_normalizer.__code__ = original_code

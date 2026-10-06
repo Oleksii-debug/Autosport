@@ -5836,3 +5836,191 @@ def test_desktop_failure_restores_invalidation_lock_rebind() -> None:
         assert buffer._lock is canonical_lock
         assert coordinator._state.snapshot().last_error_code == "RuntimeError"
 
+
+def test_register_rejects_callback_dependency_index_class_mutation() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+
+    class MutatedIndex(continuous_session.FocusedMirrorDependencyIndex):
+        pass
+
+    def register(input_id: str, **selectors: object) -> None:
+        index.__class__ = MutatedIndex
+        continuous_session.FocusedMirrorDependencyIndex.register(
+            index,
+            input_id,
+            **selectors,
+        )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency index type changed during lifecycle registration",
+    ):
+        coordinator._register_input(
+            "input-a",
+            dependency_index=index,
+            register_input=register,
+            source_ids="provider-a",
+        )
+
+    assert type(index) is continuous_session.FocusedMirrorDependencyIndex
+
+
+def test_retire_rejects_callback_dependency_index_class_mutation() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+    index.register("input-a", source_ids="provider-a")
+
+    class MutatedIndex(continuous_session.FocusedMirrorDependencyIndex):
+        pass
+
+    def unregister(input_id: str) -> bool:
+        index.__class__ = MutatedIndex
+        return continuous_session.FocusedMirrorDependencyIndex.unregister(
+            index,
+            input_id,
+        )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency index type changed during lifecycle retirement",
+    ):
+        coordinator._retire_input(
+            "input-a",
+            dependency_index=index,
+            unregister_input=unregister,
+        )
+
+    assert type(index) is continuous_session.FocusedMirrorDependencyIndex
+
+
+def test_provider_unavailable_rejects_dependency_index_class_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        coordinator.invalidation_buffer = (
+            continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        )
+        index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+        coordinator.dependency_index = index
+
+        class MutatedIndex(continuous_session.FocusedMirrorDependencyIndex):
+            pass
+
+        class ProviderUnavailableCollector(_Collector):
+            def run_cycle(self):
+                index.__class__ = MutatedIndex
+                return type(
+                    "ProviderUnavailableCycle",
+                    (),
+                    {
+                        "provider_unavailable": True,
+                        "source_id": "provider-a",
+                        "committed_delta_ids": (),
+                    },
+                )()
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop ran after dependency type mutation")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after dependency type mutation")
+
+        coordinator.collector = ProviderUnavailableCollector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency index authority changed during tick",
+        ):
+            coordinator.tick()
+
+        assert type(index) is continuous_session.FocusedMirrorDependencyIndex
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_provider_unavailable_rejects_invalidation_buffer_class_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class MutatedBuffer(continuous_session.BoundedMirrorInvalidationBuffer):
+            pass
+
+        class ProviderUnavailableCollector(_Collector):
+            def run_cycle(self):
+                buffer.__class__ = MutatedBuffer
+                return type(
+                    "ProviderUnavailableCycle",
+                    (),
+                    {
+                        "provider_unavailable": True,
+                        "source_id": "provider-a",
+                        "committed_delta_ids": (),
+                    },
+                )()
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop ran after invalidation type mutation")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after invalidation type mutation")
+
+        coordinator.collector = ProviderUnavailableCollector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="invalidation buffer structure changed during tick",
+        ):
+            coordinator.tick()
+
+        assert type(buffer) is continuous_session.BoundedMirrorInvalidationBuffer
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_canonical_lifecycle_class_mutation_after_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        lifecycle = continuous_session.ContinuousEventLifecycle(
+            root / "event_lifecycle.json"
+        )
+
+        class MutatedLifecycle(continuous_session.ContinuousEventLifecycle):
+            pass
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop ran after lifecycle type mutation")
+
+        def mutate() -> None:
+            lifecycle.__class__ = MutatedLifecycle
+
+        coordinator.lifecycle = lifecycle
+        coordinator.desktop_consumer = Desktop()
+        coordinator.collector = _Collector(callback=mutate)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical event lifecycle type changed during tick",
+        ):
+            coordinator.tick()
+
+        assert type(lifecycle) is continuous_session.ContinuousEventLifecycle
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"

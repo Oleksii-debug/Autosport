@@ -453,7 +453,16 @@ class _ContinuousSessionState:
             f"{self.path.name}.operational_error.json"
         )
         if self._error_checkpoint_present():
-            self._read_error_checkpoint()
+            error_checkpoint = self._read_error_checkpoint()
+            if error_checkpoint["observed_generation"] == self._generation and (
+                error_checkpoint["observed_cycles_completed"] != self._cycles_completed
+                or error_checkpoint["observed_last_success_at"] != self._last_success_at
+                or error_checkpoint["observed_state"] != self._state
+            ):
+                raise ContinuousSessionError(
+                    "same-generation operational error checkpoint markers "
+                    "conflict with canonical session bootstrap state"
+                )
 
     @staticmethod
     def _file_identity(info: os.stat_result) -> tuple[int, int]:

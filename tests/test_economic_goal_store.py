@@ -68,6 +68,29 @@ def test_store_operation_descriptors_do_not_expose_mutable_operation_slot() -> N
         raise AssertionError(f"{name} descriptor exposed mutable operation storage")
 
 
+def test_store_constructor_rejects_direct_base_metaclass_rebinding(tmp_path) -> None:
+    original = EconomicGoalStore.__dict__["__init__"]
+
+    def attacker(_self, _workspace) -> None:
+        raise AssertionError("forged constructor authority executed")
+
+    with pytest.raises(
+        TypeError,
+        match="economic goal store authority operation binding is immutable",
+    ):
+        type.__setattr__(EconomicGoalStore, "__init__", attacker)
+
+    with pytest.raises(
+        TypeError,
+        match="economic goal store authority operation binding is immutable",
+    ):
+        type.__delattr__(EconomicGoalStore, "__init__")
+
+    assert EconomicGoalStore.__dict__["__init__"] is original
+    store = EconomicGoalStore(tmp_path)
+    assert store.workspace == tmp_path.resolve()
+
+
 def test_store_public_authority_operations_ignore_direct_dict_shadowing(tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
 

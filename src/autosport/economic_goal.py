@@ -310,6 +310,7 @@ class EconomicGoalContract:
 
         _CANONICAL_TRANSITION_VALIDATOR(self, candidate)
 
+_CANONICAL_CONTRACT_TYPE: Final = EconomicGoalContract
 _RAW_CONTRACT_POST_INIT: Final = EconomicGoalContract.__post_init__
 _CONTRACT_OBJECT_SETATTR: Final = object.__setattr__
 

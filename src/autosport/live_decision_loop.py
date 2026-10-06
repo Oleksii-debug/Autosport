@@ -1868,6 +1868,7 @@ class PersistentLiveDecisionLoop:
         actionability_wait_evidence = self._derive_actionability_wait_evidence(
             refresh_input_ids,
             decision_time,
+            captured_snapshots=snapshots,
         )
         if actionability_wait_evidence:
             decision_ts = decision_time.isoformat()
@@ -2147,7 +2148,7 @@ class PersistentLiveDecisionLoop:
                 "PaperBook changed before durable decision"
             )
 
-        self._refresh_intents_from_replay(
+        replayed_snapshots = self._refresh_intents_from_replay(
             progress.registered_input_ids,
             decision_time,
             expected_market_state_sha256=progress.market_state_sha256,
@@ -2164,7 +2165,7 @@ class PersistentLiveDecisionLoop:
             self._derive_actionability_wait_evidence(
                 progress.registered_input_ids,
                 decision_time,
-                health_boundaries=progress.health_boundaries,
+                captured_snapshots=replayed_snapshots,
             )
             if progress.gate == _GATE_ACTIONABILITY_WAIT
             else None
@@ -2345,7 +2346,7 @@ class PersistentLiveDecisionLoop:
         max_append_generation: int | None,
         health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None = None,
         refresh_intents: bool = True,
-    ) -> None:
+    ) -> dict[str, MirrorSnapshot]:
         _canonical_sha256(
             "expected replay market_state_sha256",
             expected_market_state_sha256,
@@ -2396,9 +2397,7 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "unfinished live decision replayed market state changed across restart"
             )
-        if not refresh_intents:
-            return
-
+        focused_snapshots: dict[str, MirrorSnapshot] = {}
         for input_id in input_ids:
             try:
                 spec = self._input_specs[input_id]
@@ -2443,10 +2442,18 @@ class PersistentLiveDecisionLoop:
                         for source_id in source_ids
                     },
                 )
-            produced = self.intent_factory(input_id, focused)
-            intents = self._validated_intents(produced)
-            self._require_intents_bound_to_snapshot(intents, focused)
-            self._intent_cache[input_id] = intents
+                self._input_health_boundaries[input_id] = (
+                    focused.health_boundaries
+                )
+            else:
+                self._input_health_boundaries[input_id] = ()
+            focused_snapshots[input_id] = focused
+            if refresh_intents:
+                produced = self.intent_factory(input_id, focused)
+                intents = self._validated_intents(produced)
+                self._require_intents_bound_to_snapshot(intents, focused)
+                self._intent_cache[input_id] = intents
+        return focused_snapshots
 
     def _validated_intents(self, produced: object) -> tuple[object, ...]:
         from .portfolio_plan import OpportunityIntent
@@ -2784,7 +2791,7 @@ class PersistentLiveDecisionLoop:
         input_ids: tuple[str, ...],
         as_of: datetime,
         *,
-        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None = None,
+        captured_snapshots: dict[str, MirrorSnapshot],
     ) -> tuple[dict[str, object], ...]:
         if type(input_ids) is not tuple:
             raise TypeError("actionability input_ids must be an exact tuple")
@@ -2792,14 +2799,19 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "actionability input_ids must be unique"
             )
-        boundary_map = (
-            None
-            if health_boundaries is None
-            else {
-                boundary.source_id: boundary
-                for boundary in health_boundaries
-            }
-        )
+        if type(captured_snapshots) is not dict:
+            raise TypeError("captured_snapshots must be an exact dict")
+        if set(captured_snapshots) != set(input_ids):
+            raise LiveDecisionProgressError(
+                "actionability snapshots must match evaluated input_ids"
+            )
+        if any(
+            type(snapshot) not in {MirrorSnapshot, HealthGatedMirrorSnapshot}
+            for snapshot in captured_snapshots.values()
+        ):
+            raise LiveDecisionProgressError(
+                "actionability snapshots must be canonical mirror snapshots"
+            )
         trigger_by_reason = {
             LiveInputWaitReason.NON_OPEN_STATUS: (
                 LiveInputRecheckTrigger.MARKET_STATUS_CHANGE.value
@@ -2823,10 +2835,15 @@ class PersistentLiveDecisionLoop:
                 as_of=as_of,
                 max_age=self.max_quote_age,
             )
-            structural_reasons = tuple(
-                reason
-                for reason in diagnostic.wait_reasons
-                if reason in trigger_by_reason
+            captured = captured_snapshots[input_id]
+            structural_reasons = (
+                ()
+                if captured.events
+                else tuple(
+                    reason
+                    for reason in diagnostic.wait_reasons
+                    if reason in trigger_by_reason
+                )
             )
             wait_reasons = {reason.value for reason in structural_reasons}
             recheck_triggers = {
@@ -2838,17 +2855,15 @@ class PersistentLiveDecisionLoop:
                 and diagnostic.components
                 and self._health_gate is not None
             ):
-                source_ids = tuple(
-                    sorted({component.source_id for component in diagnostic.components})
-                )
-                local_boundaries = (
-                    {
-                        boundary.source_id: boundary
-                        for boundary in self._input_health_boundaries.get(input_id, ())
-                    }
-                    if boundary_map is None
-                    else boundary_map
-                )
+                local_boundaries = {
+                    boundary.source_id: boundary
+                    for boundary in self._input_health_boundaries.get(input_id, ())
+                }
+                source_ids = tuple(sorted(local_boundaries))
+                if not source_ids:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health evidence lacks input horizons"
+                    )
                 if not set(source_ids).issubset(local_boundaries):
                     raise LiveDecisionProgressError(
                         "actionability provider-health evidence lacks replay horizons"

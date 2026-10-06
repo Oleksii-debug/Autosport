@@ -12,7 +12,11 @@ import json
 from dataclasses import dataclass
 from typing import Final
 
-from .economic_goal import (\n    EconomicGoalContract,\n    EconomicGoalContractError,\n    _canonical_contract_snapshot,\n)
+from .economic_goal import (
+    EconomicGoalContract,
+    EconomicGoalContractError,
+    _canonical_contract_snapshot,
+)
 from .economic_goal_store import economic_goal_to_payload
 
 
@@ -197,7 +201,11 @@ import json
 from dataclasses import dataclass
 from typing import Final
 
-from .economic_goal import (\n    EconomicGoalContract,\n    EconomicGoalContractError,\n    _canonical_contract_snapshot,\n)
+from .economic_goal import (
+    EconomicGoalContract,
+    EconomicGoalContractError,
+    _canonical_contract_snapshot,
+)
 from .economic_goal_store import economic_goal_to_payload
 
 

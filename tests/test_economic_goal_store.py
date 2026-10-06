@@ -1130,3 +1130,27 @@ def test_store_constructor_ignores_rebound_path_resolve_and_join(monkeypatch, tm
 
     assert store.workspace == expected_workspace
     assert store.path == expected_path
+
+
+def test_payload_encoder_ignores_rebound_enum_serialization_protocols(monkeypatch) -> None:
+    goal = _goal()
+    expected = economic_goal_to_payload(goal)
+
+    def forged_value(self):
+        raise AssertionError("rebound enum value descriptor executed")
+
+    def forged_int(self):
+        raise AssertionError("rebound IntEnum __int__ executed")
+
+    monkeypatch.setattr(
+        economic_goal_store_module.Enum,
+        "value",
+        property(forged_value),
+    )
+    monkeypatch.setattr(
+        AutomationLevel,
+        "__int__",
+        forged_int,
+    )
+
+    assert economic_goal_to_payload(goal) == expected

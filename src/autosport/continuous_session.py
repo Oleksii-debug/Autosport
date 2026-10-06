@@ -2258,6 +2258,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _resolution_validate_code: object = SettlementResolution.validate.__code__,
         _replace: Callable[..., SettlementResolution] = replace,
         _replace_code: object = replace.__code__,
+        _instant_validator: Callable[[object, str], datetime] = _instant,
+        _instant_validator_code: object = _instant.__code__,
     ) -> tuple[SettlementResolution, ...]:
         if (
             SettlementResolution.validate is not _resolution_validate
@@ -2265,17 +2267,55 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             is not _resolution_validate_code
             or replace is not _replace
             or getattr(_replace, "__code__", None) is not _replace_code
+            or _instant is not _instant_validator
+            or getattr(_instant_validator, "__code__", None)
+            is not _instant_validator_code
         ):
             raise ContinuousSessionError(
                 "canonical settlement resolution validator authority changed"
             )
         if self.outcome_authority is None:
             return ()
+        cutoff = _instant_validator(as_of, "as_of")
         resolutions: list[SettlementResolution] = []
         evidence_by_id: dict[str, SettlementResolution] = {}
         outcome_by_settlement: dict[tuple[str, str], dict[str, str]] = {}
         for record in self.lifecycle.records():
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
+                continue
+            # Settlement truth is causal only after product state discovered both
+            # completion and the settlement reference. tick() intentionally fixes
+            # as_of before provider I/O, so a record advanced during that I/O must
+            # not become settleable against the older cutoff.
+            completion_discovered_at = getattr(
+                record,
+                "completion_discovered_at",
+                None,
+            )
+            settlement_discovered_at = getattr(
+                record,
+                "settlement_discovered_at",
+                None,
+            )
+            if (
+                completion_discovered_at is None
+                or settlement_discovered_at is None
+            ):
+                continue
+            try:
+                completion_discovered = _instant_validator(
+                    completion_discovered_at,
+                    "completion_discovered_at",
+                )
+                settlement_discovered = _instant_validator(
+                    settlement_discovered_at,
+                    "settlement_discovered_at",
+                )
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "lifecycle settlement discovery timestamp is invalid"
+                ) from exc
+            if completion_discovered > cutoff or settlement_discovered > cutoff:
                 continue
             # Snapshot lifecycle causality before entering the external outcome
             # authority.  The authority receives the live record for protocol

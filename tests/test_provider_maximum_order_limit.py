@@ -13,6 +13,7 @@ from autosport.provider_maximum_order_limit import (
     ProviderMaximumOrderLimitError,
     ProviderMaximumOrderLimitEvidence,
     ProviderMaximumOrderLimitKind,
+    ProviderMaximumOrderLimitScope,
     ProviderMaximumOrderLimitSourceKind,
     ProviderMaximumOrderLimitState,
     assess_provider_maximum_order_limit,
@@ -347,3 +348,24 @@ def test_caller_evidence_exposes_hard_false_authority_flags():
     assert item.provider_origin_proven is False
     assert item.supports_requested_amount is False
     assert item.execution_authority is False
+
+
+def test_per_order_scope_cannot_be_relabelled_as_cumulative_capacity():
+    item = evidence()
+    assert item.limit_scope is ProviderMaximumOrderLimitScope.PER_ORDER
+    assert item.cumulative_capacity_proven is False
+
+    with pytest.raises(
+        ProviderMaximumOrderLimitError,
+        match="limit_scope must be exact ProviderMaximumOrderLimitScope",
+    ):
+        replace(item, limit_scope="ACCOUNT_CUMULATIVE")
+
+    sealed = seal(item)
+    result = assess_provider_maximum_order_limit(
+        as_of=NOW,
+        evidence=sealed,
+        requested_amount=Decimal("10"),
+    )
+    assert result.limit_scope is ProviderMaximumOrderLimitScope.PER_ORDER
+    assert result.cumulative_capacity_proven is False

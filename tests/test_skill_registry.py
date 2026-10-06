@@ -932,6 +932,69 @@ def test_handler_spawn_failure_attempts_all_cleanup_even_when_pipe_close_fails(m
     assert process.closed is True
 
 
+def test_handler_spawn_failure_stops_partially_started_child(monkeypatch):
+    class FakeEndpoint:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FakeEndpoint()
+    sender = FakeEndpoint()
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            raise RuntimeError("simulated partial spawn failure")
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            return receiver, sender
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_START_RUNTIMEERROR"
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True
+    assert sender.closed is True
+
+
 @pytest.mark.parametrize(
     ("close_fails", "expected_error"),
     (

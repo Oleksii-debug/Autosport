@@ -513,10 +513,15 @@ class SkillRegistry:
         try:
             process.start()
         except Exception as exc:
+            # start() may fail after partially creating a child. Reuse the same
+            # bounded stop authority instead of assuming a failed start means
+            # there is no live process to reap.
+            stop_error = _stop_process_bounded(process)
             pipe_close_ok = _close_pipe_endpoints(receiver,sender)
-            handle_close_ok = _close_process_handle(process)
-            if not handle_close_ok:
+            if stop_error == "HANDLE_CLOSE_FAILED":
                 return None,"HANDLER_START_HANDLE_CLOSE_FAILED"
+            if stop_error == "STOP_FAILED":
+                return None,"HANDLER_START_STOP_FAILED"
             if not pipe_close_ok:
                 return None,"HANDLER_START_PIPE_CLOSE_FAILED"
             return None,"HANDLER_START_"+exc.__class__.__name__.upper()

@@ -1214,11 +1214,12 @@ class _ContinuousSessionState:
             return True
 
         def finalize(_updated: dict[str, Any]) -> None:
-            # Any committed state transition supersedes an operational failure
-            # observed in the predecessor state. Keep cleanup under the same
-            # session lock so a newer failure cannot be erased after commit.
-            if self._error_checkpoint_present():
-                self._write_error_checkpoint(None)
+            # Publish a bounded same-generation tombstone even when no prior
+            # sidecar exists. Without it, a stale process that still caches the
+            # predecessor generation can publish and return a stale failure
+            # receipt because bounded record_failure() deliberately avoids the
+            # O(history) canonical-session read.
+            self._write_error_checkpoint(None)
 
         self._update(
             mutate,
@@ -1435,7 +1436,18 @@ class _ContinuousSessionState:
             )
             return after != before
 
-        self._update(mutate, advance_generation=True)
+        def finalize(_updated: dict[str, Any]) -> None:
+            # Projection writes advance the canonical generation, so publish
+            # the same bounded generation fence used by state/success commits.
+            # This prevents an older process from returning a stale failure
+            # publication after projection truth has superseded its cache.
+            self._write_error_checkpoint(None)
+
+        self._update(
+            mutate,
+            advance_generation=True,
+            finalize_under_lock=finalize,
+        )
 
     def record_success(
         self,
@@ -1522,8 +1534,10 @@ class _ContinuousSessionState:
             )
 
         def finalize(_updated: dict[str, Any]) -> None:
-            if self._error_checkpoint_present():
-                self._write_error_checkpoint(None)
+            # Every successful generation advance leaves a bounded tombstone
+            # carrying the new generation, fencing stale record_failure()
+            # publishers without rereading settlement history.
+            self._write_error_checkpoint(None)
 
         updated = self._update(
             mutate,

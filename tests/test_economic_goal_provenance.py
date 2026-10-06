@@ -322,7 +322,17 @@ def test_decision_identity_ignores_rebound_provenance_validator(monkeypatch) -> 
     provenance = provenance_for(_goal())
     object.__setattr__(provenance, "goal_id", "")
 
-    monkeypatch.setattr(EconomicGoalProvenance, "__post_init__", lambda self: None)
+    with pytest.raises(
+        TypeError,
+        match="provenance public authority binding is immutable",
+    ):
+        monkeypatch.setattr(EconomicGoalProvenance, "__post_init__", lambda self: None)
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_CANONICAL_PROVENANCE_VALIDATOR",
+        lambda self: None,
+    )
 
     with pytest.raises(EconomicGoalProvenanceError):
         _ = provenance.decision_identity
@@ -332,7 +342,16 @@ def test_provenance_operations_ignore_rebound_contract_validator(monkeypatch) ->
     goal = _goal()
     object.__setattr__(goal, "max_stake_fraction", "0.01")
 
-    monkeypatch.setattr(EconomicGoalContract, "__post_init__", lambda self: None)
+    with pytest.raises(
+        TypeError,
+        match="public authority operation binding is immutable",
+    ):
+        monkeypatch.setattr(EconomicGoalContract, "__post_init__", lambda self: None)
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_CANONICAL_GOAL_VALIDATOR",
+        lambda self: None,
+    )
     monkeypatch.setattr(
         economic_goal_provenance_module,
         "EconomicGoalContract",

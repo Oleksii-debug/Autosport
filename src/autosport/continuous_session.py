@@ -707,6 +707,8 @@ class _ContinuousSessionState:
         _text_validator_code: object = _text.__code__,
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
+        _text_validator: Callable[[object, str], str] = _text,
+        _text_validator_code: object = _text.__code__,
     ) -> dict[str, Any]:
         if (
             getattr(_strict_json_loads, "__code__", None) is not _strict_json_loads_code
@@ -864,7 +866,32 @@ class _ContinuousSessionState:
         _atomic_write_json(self._error_path, payload)
 
     @staticmethod
-    def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:
+    def _validate_settlement_evidence(
+        raw: object,
+        *,
+        _text_validator: Callable[[object, str], str] = _text,
+        _text_validator_code: object = _text.__code__,
+        _sha256_validator: Callable[[object, str], str] = _sha256,
+        _sha256_validator_code: object = _sha256.__code__,
+        _instant_validator: Callable[[object, str], datetime] = _instant,
+        _instant_validator_code: object = _instant.__code__,
+    ) -> tuple[dict[str, str], ...]:
+        if (
+            _text is not _text_validator
+            or getattr(_text_validator, "__code__", None) is not _text_validator_code
+            or _sha256 is not _sha256_validator
+            or getattr(_sha256_validator, "__code__", None)
+            is not _sha256_validator_code
+            or _instant is not _instant_validator
+            or getattr(_instant_validator, "__code__", None)
+            is not _instant_validator_code
+            or _text is not _text_validator
+            or getattr(_text_validator, "__code__", None)
+            is not _text_validator_code
+        ):
+            raise ContinuousSessionError(
+                "canonical settlement evidence parser authority changed"
+            )
         if type(raw) is not list:
             raise ContinuousSessionError("settlement_evidence must be a list")
         values: list[dict[str, str]] = []
@@ -884,9 +911,9 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "settlement_evidence entry fields mismatch"
                 )
-            _text(item["event_identity"], "settlement_evidence event_identity")
-            _text(item["settlement_ref"], "settlement_evidence settlement_ref")
-            evidence_id = _text(
+            _text_validator(item["event_identity"], "settlement_evidence event_identity")
+            _text_validator(item["settlement_ref"], "settlement_evidence settlement_ref")
+            evidence_id = _text_validator(
                 item["evidence_id"],
                 "settlement_evidence evidence_id",
             )
@@ -895,8 +922,14 @@ class _ContinuousSessionState:
                     "settlement_evidence evidence_id values must be unique"
                 )
             evidence_ids.add(evidence_id)
-            _sha256(item["evidence_sha256"], "settlement_evidence evidence_sha256")
-            _instant(item["available_at"], "settlement_evidence available_at")
+            _sha256_validator(
+                item["evidence_sha256"],
+                "settlement_evidence evidence_sha256",
+            )
+            _instant_validator(
+                item["available_at"],
+                "settlement_evidence available_at",
+            )
             values.append(
                 {
                     "event_identity": item["event_identity"],
@@ -971,7 +1004,7 @@ class _ContinuousSessionState:
             raw["schema_version"] = _version
             raw["generation"] = 0
         try:
-            _text(raw["session_id"], "session_id")
+            _text_validator(raw["session_id"], "session_id")
             started_at = _instant_validator(raw["started_at"], "started_at")
         except (TypeError, ValueError) as exc:
             raise ContinuousSessionError(
@@ -1015,7 +1048,7 @@ class _ContinuousSessionState:
                     "continuous session full-refresh timestamp is not causally valid"
                 )
             if raw["last_error_code"] is not None:
-                _text(raw["last_error_code"], "last_error_code")
+                _text_validator(raw["last_error_code"], "last_error_code")
             evidence = _validate_settlement_evidence(raw["settlement_evidence"])
         except ContinuousSessionError:
             raise
@@ -1039,9 +1072,9 @@ class _ContinuousSessionState:
                 ) from exc
         try:
             if raw["source_state_delta_id"] is not None:
-                _text(raw["source_state_delta_id"], "source_state_delta_id")
+                _text_validator(raw["source_state_delta_id"], "source_state_delta_id")
             if raw["source_projection_stream_epoch"] is not None:
-                _text(
+                _text_validator(
                     raw["source_projection_stream_epoch"],
                     "source_projection_stream_epoch",
                 )

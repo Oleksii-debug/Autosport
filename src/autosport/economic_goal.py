@@ -518,6 +518,8 @@ def _contract_init_authority(
     blocked_sports: frozenset[str] = frozenset(),
     blocked_providers: frozenset[str] = frozenset(),
     blocked_markets: frozenset[str] = frozenset(),
+    _validator=_CANONICAL_CONTRACT_VALIDATOR,
+    _setattr=_CONTRACT_OBJECT_SETATTR,
 ) -> None:
     for name, value in (
         ("goal_id", goal_id),
@@ -548,8 +550,8 @@ def _contract_init_authority(
         ("blocked_providers", blocked_providers),
         ("blocked_markets", blocked_markets),
     ):
-        _CONTRACT_OBJECT_SETATTR(self, name, value)
-    _CANONICAL_CONTRACT_VALIDATOR(self)
+        _setattr(self, name, value)
+    _validator(self)
 
 
 def _make_contract_constructor_authority(operation):

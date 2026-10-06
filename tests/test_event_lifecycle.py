@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
+
+import autosport.event_lifecycle as event_lifecycle_module
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -101,6 +105,63 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             events=(event,),
             epoch_changed=epoch_changed,
         )
+
+    def test_lifecycle_read_modify_write_uses_existing_durable_path_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog.json"
+            ContinuousEventLifecycle(path)
+
+            depth = 0
+            real_read = ContinuousEventLifecycle._read
+            real_migrate = ContinuousEventLifecycle._migrate_legacy_state
+            real_atomic_write = event_lifecycle_module.atomic_write_json
+
+            @contextmanager
+            def observed_lock(candidate: str | Path):
+                nonlocal depth
+                self.assertEqual(Path(candidate), path)
+                depth += 1
+                try:
+                    yield
+                finally:
+                    depth -= 1
+
+            def guarded_read(instance: ContinuousEventLifecycle):
+                self.assertGreater(depth, 0)
+                return real_read(instance)
+
+            def guarded_migrate(instance: ContinuousEventLifecycle):
+                self.assertGreater(depth, 0)
+                return real_migrate(instance)
+
+            def guarded_atomic_write(candidate: str | Path, payload: dict):
+                self.assertGreater(depth, 0)
+                return real_atomic_write(candidate, payload)
+
+            with (
+                patch.object(event_lifecycle_module, "durable_path_lock", observed_lock),
+                patch.object(ContinuousEventLifecycle, "_read", guarded_read),
+                patch.object(
+                    ContinuousEventLifecycle,
+                    "_migrate_legacy_state",
+                    guarded_migrate,
+                ),
+                patch.object(
+                    event_lifecycle_module,
+                    "atomic_write_json",
+                    guarded_atomic_write,
+                ),
+            ):
+                lifecycle = ContinuousEventLifecycle(path)
+                event = self._catalog_event(available_offset=1)
+                changed = lifecycle.apply_page(
+                    self._page(1, event),
+                    discovered_at=(self.START + timedelta(seconds=1)).isoformat(),
+                )
+                self.assertEqual(changed, (event.identity,))
+
+            reopened = ContinuousEventLifecycle(path)
+            self.assertIsNotNone(reopened.get(event.identity))
 
     def test_same_provider_event_id_across_sports_remains_distinct(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

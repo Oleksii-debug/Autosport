@@ -46,6 +46,9 @@ class SessionStoppedError(ContinuousSessionError):
     """Raised when work is attempted while the session is durably STOPPED."""
 
 
+_OUTCOME_AUTHORITY_UNSET: Final = object()
+
+
 def _bind_canonical_settlement_engine(method):
     """Inject canonical settlement authorities through a closure-owned seam."""
 
@@ -2312,6 +2315,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self,
         *,
         as_of: str,
+        lifecycle: ContinuousEventLifecycle | None = None,
+        outcome_authority: SettlementOutcomeAuthority | None | object = (
+            _OUTCOME_AUTHORITY_UNSET
+        ),
+        _outcome_authority_unset: object = _OUTCOME_AUTHORITY_UNSET,
         _resolution_validate: Callable[..., None] = SettlementResolution.validate,
         _resolution_validate_code: object = SettlementResolution.validate.__code__,
         _replace: Callable[..., SettlementResolution] = replace,
@@ -2332,7 +2340,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "canonical settlement resolution validator authority changed"
             )
-        outcome_authority = self.outcome_authority
+        lifecycle = self.lifecycle if lifecycle is None else lifecycle
+        if outcome_authority is _outcome_authority_unset:
+            outcome_authority = self.outcome_authority
         if outcome_authority is None:
             return ()
         resolve_outcome = getattr(outcome_authority, "resolve", None)
@@ -2344,7 +2354,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         resolutions: list[SettlementResolution] = []
         evidence_by_id: dict[str, SettlementResolution] = {}
         outcome_by_settlement: dict[tuple[str, str], dict[str, str]] = {}
-        for record in self.lifecycle.records():
+        for record in lifecycle.records():
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
                 continue
             # Settlement truth is causal only after product state discovered both
@@ -2757,6 +2767,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _require_running_method(self)
         observation_token = self._state._checkpoint_token
         collector = self.collector
+        lifecycle = self.lifecycle
+        market_store = self.market_store
+        desktop_consumer = self.desktop_consumer
+        causal_view = self.causal_view
+        required_history = self.required_history
+        outcome_authority = self.outcome_authority
+        learning_handoff = self.settlement_learning_handoff
+        paper_book_path = self.paper_book_path
         now = self.clock()
         _instant_validator(now, "now")
 
@@ -2855,9 +2873,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     if source_snapshot.source_sync_state is None
                     else (source_snapshot.source_sync_state,)
                 )
-                delivered = self.desktop_consumer.drain(
+                delivered = desktop_consumer.drain(
                     as_of=now,
-                    view=self.causal_view,
+                    view=causal_view,
                 )
                 affected, full_refresh, backlog = _drain_invalidations_method(self)
 
@@ -2876,10 +2894,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     if before:
                         retired.append(input_id)
 
-                registered = self.lifecycle.register_eligible(
-                    self.market_store,
+                registered = lifecycle.register_eligible(
+                    market_store,
                     as_of=now,
-                    required_history=self.required_history,
+                    required_history=required_history,
                     register_input=register,
                     retire_input=retire,
                 )
@@ -2889,12 +2907,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     if input_id not in newly_registered:
                         newly_registered.append(input_id)
 
-                resolutions = _settlement_resolutions_method(self, as_of=now)
+                resolutions = _settlement_resolutions_method(
+                    self,
+                    as_of=now,
+                    lifecycle=lifecycle,
+                    outcome_authority=outcome_authority,
+                )
                 _validate_settlement_evidence_method(
                     self._state,
                     settlement_evidence=resolutions,
                 )
-                learning_handoff = self.settlement_learning_handoff
                 prepare_settlement = None
                 reconcile_after_settlement = None
                 if learning_handoff is not None:
@@ -2921,7 +2943,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         )
                 if prepare_settlement is not None:
                     prepare_settlement(
-                        paper_book_path=self.paper_book_path,
+                        paper_book_path=paper_book_path,
                         resolutions=_detached_settlement_resolutions_method(
                             resolutions
                         ),
@@ -2930,7 +2952,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 settled, evidence_ids = self._settle(resolutions=resolutions)
                 if reconcile_after_settlement is not None:
                     reconcile_after_settlement(
-                        paper_book_path=self.paper_book_path,
+                        paper_book_path=paper_book_path,
                         resolutions=_detached_settlement_resolutions_method(
                             resolutions
                         ),

@@ -86,6 +86,39 @@ class RiskOfRuinEvidenceCanonicalityTests(unittest.TestCase):
                 )
             )
 
+    def test_ruin_evidence_rejects_decimal_subclass_protocol_forgery(self) -> None:
+        class ForgedDecimal(Decimal):
+            def is_finite(self):
+                return True
+
+            def __le__(self, other):
+                return False
+
+            def __lt__(self, other):
+                return False
+
+            def __gt__(self, other):
+                return False
+
+        forged_nan = ForgedDecimal("NaN")
+
+        for field in ("evaluated_stake", "upper_bound"):
+            with self.subTest(kind="scalar", field=field):
+                with self.assertRaisesRegex(ValueError, "exact Decimal"):
+                    RiskOfRuinEvidence(**self._kwargs(**{field: forged_nan}))
+
+        with self.assertRaisesRegex(ValueError, "exact Decimals"):
+            RiskOfRuinVectorEvidence(
+                **self._vector_kwargs(
+                    evaluated_stakes=(forged_nan, Decimal("10")),
+                )
+            )
+
+        with self.assertRaisesRegex(ValueError, "exact Decimal"):
+            RiskOfRuinVectorEvidence(
+                **self._vector_kwargs(upper_bound=forged_nan)
+            )
+
 
 class PaperRiskReportingTests(unittest.TestCase):
     @staticmethod

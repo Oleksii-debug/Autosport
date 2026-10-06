@@ -1478,6 +1478,14 @@ class _ContinuousSessionState:
             previous_position = delta.cursor_position
 
         def mutate(raw: dict[str, Any]) -> bool:
+            if raw["state"] == SessionState.PAUSED.value:
+                raise SessionPausedError(
+                    "source projection cannot advance while session is PAUSED"
+                )
+            if raw["state"] == SessionState.STOPPED.value:
+                raise SessionStoppedError(
+                    "source projection cannot advance while session is STOPPED"
+                )
             if (
                 expected_after_delta_id is not _EXPECTED_PROJECTION_UNSET
                 and raw["source_state_delta_id"] != expected_after_delta_id
@@ -1590,6 +1598,14 @@ class _ContinuousSessionState:
                 ) from exc
 
         def mutate(raw: dict[str, Any]) -> None:
+            if raw["state"] == SessionState.PAUSED.value:
+                raise SessionPausedError(
+                    "success cannot advance while session is PAUSED"
+                )
+            if raw["state"] == SessionState.STOPPED.value:
+                raise SessionStoppedError(
+                    "success cannot advance while session is STOPPED"
+                )
             started_at = _instant(raw["started_at"], "started_at")
             if timestamp < started_at:
                 raise ContinuousSessionError(

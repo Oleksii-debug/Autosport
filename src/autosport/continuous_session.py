@@ -2451,6 +2451,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # authoritative while provider observation or error handling was
                 # in flight. The operator reason remains canonical.
                 pass
+            except Exception as checkpoint_exc:
+                exc.add_note(
+                    "operational failure checkpoint could not be persisted: "
+                    f"{type(checkpoint_exc).__name__}"
+                )
             raise
 
 # Seal the consumer entry after class creation. The metaclass data descriptor also

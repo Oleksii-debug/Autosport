@@ -12,10 +12,13 @@ from autosport.paper_execution_reality import (
     PaperExecutionEvidenceRecord,
     PaperExecutionIntegrityError,
     PaperExecutionLedger,
+    PaperExecutionModelConfig,
     PaperExecutionRun,
     PaperLegAttempt,
     RecoveryDecision,
+    execute_paper_plan,
 )
+from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 
 _MAX_FIXED_POINT_CHARS = 8192
 
@@ -272,6 +275,92 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(attempt.requested_stake, Decimal("10.00"))
         self.assertEqual(attempt.execution_odds, Decimal("2.40"))
         self.assertEqual(attempt.execution_stake, Decimal("10.00"))
+
+    def test_ledger_reload_ignores_rebound_json_object_parser(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger.register_observation_evidence(evidence())
+
+            previous = legacy._parse_json_object
+
+            def forged_parser(*args, **kwargs):
+                raise AssertionError("rebound JSON object parser executed")
+
+            legacy._parse_json_object = forged_parser
+            try:
+                events = ledger.events()
+            finally:
+                legacy._parse_json_object = previous
+
+            self.assertEqual(len(events), 1)
+
+    def test_synthetic_execution_ignores_rebound_deterministic_helper(self) -> None:
+        current_action = ExecutionAction(
+            action_id="resource-action",
+            bookmaker_id="paper-venue",
+            account_id="paper-account",
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            side="BACK",
+            requested_odds="2.50",
+            requested_stake="10.00",
+            quote_id="quote-1",
+            quote_observed_at="2026-10-05T00:00:00+00:00",
+            expires_at="2026-10-05T00:01:00+00:00",
+        )
+        current_plan = ExecutionPlan(
+            plan_id="plan-deterministic-authority",
+            bookmaker_profile_version="paper-profile-v1",
+            decision_id="decision-1",
+            approval_id="paper-only",
+            created_at="2026-10-05T00:00:00+00:00",
+            actions=(current_action,),
+        )
+        model = PaperExecutionModelConfig(
+            model_id="paper-reality",
+            model_version="2",
+            evidence_grade=EvidenceGrade.SYNTHETIC,
+            evidence_source="test-seeded-model",
+            seed="fixed-seed",
+            max_quote_age_ms=5_000,
+            min_delay_ms=100,
+            max_delay_ms=250,
+            rejected_bps=100,
+            partial_bps=100,
+            unknown_bps=100,
+            partial_fill_bps=5_000,
+            max_slippage_bps=100,
+        )
+
+        with tempfile.TemporaryDirectory() as first_tmp:
+            first = execute_paper_plan(
+                plan=current_plan,
+                trigger_id="trigger-deterministic-authority",
+                config=model,
+                ledger=PaperExecutionLedger(Path(first_tmp) / "paper.jsonl"),
+                started_at="2026-10-05T00:00:00.100000+00:00",
+            )
+
+        previous = legacy._deterministic_int
+
+        def forged_deterministic(*args, **kwargs):
+            raise AssertionError("rebound deterministic helper executed")
+
+        legacy._deterministic_int = forged_deterministic
+        try:
+            with tempfile.TemporaryDirectory() as second_tmp:
+                second = execute_paper_plan(
+                    plan=current_plan,
+                    trigger_id="trigger-deterministic-authority",
+                    config=model,
+                    ledger=PaperExecutionLedger(Path(second_tmp) / "paper.jsonl"),
+                    started_at="2026-10-05T00:00:00.100000+00:00",
+                )
+        finally:
+            legacy._deterministic_int = previous
+
+        self.assertEqual(second, first)
 
     def test_ledger_durability_ignores_rebound_filesystem_module_globals(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

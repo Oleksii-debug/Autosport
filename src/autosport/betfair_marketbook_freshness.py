@@ -330,10 +330,9 @@ class BetfairMarketBookDelayObservation:
         )
 
 
-def _canonical_network_transport(client: _base.BetfairReadOnlyClient) -> bool:
-    """Return true only for the unmodified built-in production HTTP transport."""
+def _canonical_network_transport_instance(transport: object) -> bool:
+    """Return true only for one unmodified built-in production HTTP transport."""
 
-    transport = client._transport
     if type(transport) is not _base.UrllibBetfairHttpTransport:
         return False
     if type(transport).post is not _CANONICAL_NETWORK_POST:
@@ -344,6 +343,12 @@ def _canonical_network_transport(client: _base.BetfairReadOnlyClient) -> bool:
     if set(transport_dict) != {"_max_response_bytes"}:
         return False
     return True
+
+
+def _canonical_network_transport(client: _base.BetfairReadOnlyClient) -> bool:
+    """Return true only for the exact transport object currently installed."""
+
+    return _canonical_network_transport_instance(client._transport)
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,7 +453,13 @@ def _post_market_book_readonly(
 
     request_budget = _market_book_request_budget(params)
     canonical_params = _canonical_market_book_params(params, request_budget)
-    network_origin = _canonical_network_transport(client)
+    transport = client._transport
+    network_origin = _canonical_network_transport_instance(transport)
+    transport_post = (
+        _CANONICAL_NETWORK_POST.__get__(transport, type(transport))
+        if network_origin
+        else transport.post
+    )
     credentials = client._credentials
     request_id = client._next_request_id()
     try:
@@ -473,6 +484,10 @@ def _post_market_book_readonly(
         raise BetfairMarketBookPreDispatchError(
             "Betfair authenticated context changed before MarketBook transport"
         )
+    if client._transport is not transport:
+        raise BetfairMarketBookPreDispatchError(
+            "Betfair transport changed before MarketBook dispatch"
+        )
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -480,7 +495,7 @@ def _post_market_book_readonly(
         "X-Authentication": credentials.session_token,
     }
     try:
-        payload = client._transport.post(
+        payload = transport_post(
             _base.BETTING_JSON_RPC_ENDPOINT,
             headers=headers,
             body=body,
@@ -499,6 +514,10 @@ def _post_market_book_readonly(
     if client._credentials is not credentials:
         raise BetfairMarketBookTransportError(
             "Betfair authenticated context changed during MarketBook transport"
+        )
+    if client._transport is not transport:
+        raise BetfairMarketBookTransportError(
+            "Betfair transport changed during MarketBook transport"
         )
 
     observed_at = (
@@ -551,7 +570,11 @@ def _post_market_book_readonly(
         raise BetfairMarketBookTransportError(
             "Betfair authenticated context changed during MarketBook capture"
         )
-    if network_origin and not _canonical_network_transport(client):
+    if client._transport is not transport:
+        raise BetfairMarketBookTransportError(
+            "Betfair transport changed during MarketBook capture"
+        )
+    if network_origin and not _canonical_network_transport_instance(transport):
         raise BetfairMarketBookTransportError(
             "canonical Betfair transport changed during MarketBook capture"
         )

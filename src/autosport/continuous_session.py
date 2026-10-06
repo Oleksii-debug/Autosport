@@ -1476,7 +1476,16 @@ class _ContinuousSessionState:
         deltas: tuple[CollectorDelta, ...],
         backlog: bool,
         expected_after_delta_id: str | None | object = _EXPECTED_PROJECTION_UNSET,
+        _update_method: Callable[..., dict[str, Any]] = _update,
+        _update_method_code: object = _update.__code__,
     ) -> None:
+        if (
+            type(self)._update is not _update_method
+            or getattr(_update_method, "__code__", None) is not _update_method_code
+        ):
+            raise ContinuousSessionError(
+                "canonical source-projection read-modify-write authority changed"
+            )
         if type(deltas) is not tuple:
             raise TypeError("deltas must be an exact tuple")
         if type(backlog) is not bool:
@@ -1641,7 +1650,7 @@ class _ContinuousSessionState:
         # operational failure.  The checkpoint identity token still changes on
         # publication, so stale processes are fenced without erasing the
         # same-generation failure overlay.
-        self._update(mutate)
+        _update_method(self, mutate)
 
     def record_success(
         self,
@@ -1657,7 +1666,16 @@ class _ContinuousSessionState:
         ),
         _validate_resolution: Callable[..., None] = SettlementResolution.validate,
         _validate_resolution_code: object = SettlementResolution.validate.__code__,
+        _update_method: Callable[..., dict[str, Any]] = _update,
+        _update_method_code: object = _update.__code__,
     ) -> int:
+        if (
+            type(self)._update is not _update_method
+            or getattr(_update_method, "__code__", None) is not _update_method_code
+        ):
+            raise ContinuousSessionError(
+                "canonical success read-modify-write authority changed"
+            )
         if (
             getattr(
                 _normalized_settlement_evidence,
@@ -1741,7 +1759,8 @@ class _ContinuousSessionState:
             # publishers without rereading settlement history.
             self._write_error_checkpoint(None)
 
-        updated = self._update(
+        updated = _update_method(
+            self,
             mutate,
             advance_generation=True,
             finalize_under_lock=finalize,

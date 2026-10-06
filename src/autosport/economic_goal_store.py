@@ -184,13 +184,13 @@ def _resolve_store_binding(
     entry = _bindings.get(id(store))
     if entry is None or entry[0]() is not store:
         raise _error_type("economic goal store binding is unavailable")
-    workspace, path, path_exists, path_read_text = entry[1:]
+    workspace, path, path_exists, path_open = entry[1:]
     instance_state = _CANONICAL_OBJECT_GETATTRIBUTE(store, "__dict__")
     if instance_state.get("workspace") is not workspace:
         raise _error_type("economic goal store workspace binding was rebound")
     if instance_state.get("path") is not path:
         raise _error_type("economic goal store path binding was rebound")
-    return workspace, path, path_exists, path_read_text
+    return workspace, path, path_exists, path_open
 
 
 def economic_goal_to_payload(
@@ -385,12 +385,26 @@ class EconomicGoalStore:
                 _bindings.pop(store_id, None)
 
         store_ref = _weakref_ref(self, release_binding)
+        path_stat = path.stat
+        path_open = path.open
+
+        def path_exists() -> bool:
+            try:
+                path_stat()
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise EconomicGoalContractError(
+                    f"cannot inspect persisted economic goal path: {exc}"
+                ) from exc
+            return True
+
         _bindings[store_id] = (
             store_ref,
             workspace_path,
             path,
-            path.exists,
-            path.read_text,
+            path_exists,
+            path_open,
         )
 
     def load(
@@ -399,9 +413,10 @@ class EconomicGoalStore:
         _binding_resolver=_resolve_store_binding,
         _error_type=EconomicGoalContractError,
     ) -> EconomicGoalContract:
-        _, _, _, path_read_text = _binding_resolver(self)
+        _, _, _, path_open = _binding_resolver(self)
         try:
-            text = path_read_text(encoding="utf-8")
+            with path_open("r", encoding="utf-8") as handle:
+                text = handle.read()
         except OSError as exc:
             raise _error_type(
                 f"cannot read persisted economic goal: {exc}"
@@ -441,10 +456,11 @@ class EconomicGoalStore:
     ) -> None:
         """Publish one machine revision only when durable authority cannot expand."""
 
-        workspace, path, _, path_read_text = _binding_resolver(self)
+        workspace, path, _, path_open = _binding_resolver(self)
         with _lock_type(workspace):
             try:
-                previous_text = path_read_text(encoding="utf-8")
+                with path_open("r", encoding="utf-8") as handle:
+                    previous_text = handle.read()
             except OSError as exc:
                 raise _error_type(
                     f"cannot read persisted economic goal: {exc}"

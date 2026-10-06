@@ -343,7 +343,12 @@ class _ContinuousSessionState:
         _schema: str = _CONTINUOUS_SESSION_SCHEMA,
         _version: int = _CONTINUOUS_SESSION_VERSION,
         _atomic_write_json: Callable[..., Any] = atomic_write_json,
+        _atomic_write_json_code: object = atomic_write_json.__code__,
     ) -> None:
+        if getattr(_atomic_write_json, "__code__", None) is not _atomic_write_json_code:
+            raise ContinuousSessionError(
+                "canonical session writer code identity changed"
+            )
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.source_id = _text(source_id, "source_id")
@@ -509,11 +514,16 @@ class _ContinuousSessionState:
         *,
         _fields: frozenset[str] = _CONTINUOUS_SESSION_ERROR_FIELDS,
         _strict_json_loads: Callable[..., Any] = strict_json_loads,
+        _strict_json_loads_code: object = strict_json_loads.__code__,
         _schema: str = _CONTINUOUS_SESSION_ERROR_SCHEMA,
         _version: int = _CONTINUOUS_SESSION_ERROR_VERSION,
         _max_bytes: int = _CONTINUOUS_SESSION_ERROR_MAX_BYTES,
         _max_code_chars: int = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS,
     ) -> dict[str, Any]:
+        if getattr(_strict_json_loads, "__code__", None) is not _strict_json_loads_code:
+            raise ContinuousSessionError(
+                "canonical operational-checkpoint parser code identity changed"
+            )
         try:
             encoded = self._read_error_checkpoint_bytes(_max_bytes=_max_bytes)
             if len(encoded) > _max_bytes:
@@ -597,7 +607,17 @@ class _ContinuousSessionState:
         _max_code_chars: int = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS,
         _json_dumps: Callable[..., str] = json.dumps,
         _atomic_write_json: Callable[[str | Path, dict[str, Any]], None] = atomic_write_json,
+        _json_dumps_code: object = json.dumps.__code__,
+        _atomic_write_json_code: object = atomic_write_json.__code__,
     ) -> None:
+        if (
+            getattr(_json_dumps, "__code__", None) is not _json_dumps_code
+            or getattr(_atomic_write_json, "__code__", None)
+            is not _atomic_write_json_code
+        ):
+            raise ContinuousSessionError(
+                "canonical operational-checkpoint writer code identity changed"
+            )
         if code is not None:
             code = _text(code, "code")
             if len(code) > _max_code_chars:
@@ -669,10 +689,19 @@ class _ContinuousSessionState:
         *,
         _fields: frozenset[str] = _CONTINUOUS_SESSION_FIELDS,
         _strict_json_loads: Callable[..., Any] = strict_json_loads,
+        _strict_json_loads_code: object = strict_json_loads.__code__,
         _path_read_text: Callable[..., str] = Path.read_text,
+        _path_read_text_code: object = Path.read_text.__code__,
         _schema: str = _CONTINUOUS_SESSION_SCHEMA,
         _version: int = _CONTINUOUS_SESSION_VERSION,
     ) -> dict[str, Any]:
+        if (
+            getattr(_strict_json_loads, "__code__", None) is not _strict_json_loads_code
+            or getattr(_path_read_text, "__code__", None) is not _path_read_text_code
+        ):
+            raise ContinuousSessionError(
+                "canonical session-reader code identity changed"
+            )
         try:
             raw = _strict_json_loads(_path_read_text(self.path, encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
@@ -801,7 +830,12 @@ class _ContinuousSessionState:
         mutate: Callable[[dict[str, Any]], None],
         *,
         _atomic_write_json: Callable[[str | Path, dict[str, Any]], None] = atomic_write_json,
+        _atomic_write_json_code: object = atomic_write_json.__code__,
     ) -> dict[str, Any]:
+        if getattr(_atomic_write_json, "__code__", None) is not _atomic_write_json_code:
+            raise ContinuousSessionError(
+                "canonical session writer code identity changed"
+            )
         raw = self._read()
         mutate(raw)
         _atomic_write_json(self.path, raw)

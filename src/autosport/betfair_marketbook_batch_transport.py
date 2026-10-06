@@ -344,14 +344,16 @@ def _read_market_book_batch(
     plan: MarketBookReadPlan,
     *,
     batch_id: str,
+    canonical_batch: Callable[[MarketBookReadPlan, str], MarketBookReadBatch],
+    params_for_batch: Callable[[MarketBookReadPlan, MarketBookReadBatch], dict[str, object]],
     request_budget: Callable[[object], object],
     post_readonly: Callable[..., _transport._MarketBookRpcResponse],
 ) -> MarketBookBatchTransportResult:
-    batch = _canonical_batch(plan, batch_id)
-    params = _params_for_batch(plan, batch)
+    batch = canonical_batch(plan, batch_id)
+    params = params_for_batch(plan, batch)
     plan_id = plan.plan_id
     request_contract_id = plan.request_contract_id
-    if _canonical_batch(plan, batch_id) != batch:
+    if canonical_batch(plan, batch_id) != batch:
         raise MarketBookBatchTransportError(
             "MarketBook plan changed before provider dispatch"
         )
@@ -378,7 +380,7 @@ def _read_market_book_batch(
             )
 
         try:
-            current_batch = _canonical_batch(plan, batch_id)
+            current_batch = canonical_batch(plan, batch_id)
             current_plan_id = plan.plan_id
             current_request_contract_id = plan.request_contract_id
         except Exception as exc:
@@ -588,6 +590,8 @@ def _install_transport_result_authority() -> None:
     concurrency_begin = BetfairMarketBookProjectionConcurrencyGate.begin
     concurrency_complete = BetfairMarketBookProjectionConcurrencyGate.complete
     core_read_market_book_batch = _read_market_book_batch
+    canonical_batch = _canonical_batch
+    params_for_batch = _params_for_batch
     market_book_request_budget = _transport._market_book_request_budget
     post_market_book_readonly = _transport._post_market_book_readonly
 
@@ -612,8 +616,8 @@ def _install_transport_result_authority() -> None:
         request = _token(request_id, "request_id")
         instant = _dispatch_instant(client, scheduled_at)
 
-        batch = _canonical_batch(plan, batch_id)
-        params = _params_for_batch(plan, batch)
+        batch = canonical_batch(plan, batch_id)
+        params = params_for_batch(plan, batch)
         wire_budget = market_book_request_budget(params)
         if wire_budget.evidence_id != batch.budget_evidence_id:
             raise MarketBookBatchTransportError(
@@ -691,6 +695,8 @@ def _install_transport_result_authority() -> None:
                 client,
                 plan,
                 batch_id=batch_id,
+                canonical_batch=canonical_batch,
+                params_for_batch=params_for_batch,
                 request_budget=market_book_request_budget,
                 post_readonly=post_market_book_readonly,
             )

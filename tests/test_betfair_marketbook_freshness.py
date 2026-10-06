@@ -655,3 +655,151 @@ def test_physical_boundary_budget_denial_is_pre_dispatch():
         )
 
     assert transport.calls == []
+
+
+@pytest.mark.parametrize(
+    ("provider_code", "retryable", "contract_failure"),
+    (
+        ("TOO_MANY_REQUESTS", True, False),
+        ("SERVICE_BUSY", True, False),
+        ("TIMEOUT_ERROR", True, False),
+        ("TOO_MUCH_DATA", False, True),
+        ("REQUEST_SIZE_EXCEEDS_LIMIT", False, True),
+        ("INVALID_INPUT_DATA", False, True),
+        ("INVALID_SESSION_INFORMATION", False, False),
+    ),
+)
+def test_physical_boundary_preserves_provider_error_identity(
+    provider_code,
+    retryable,
+    contract_failure,
+):
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32099,
+                "message": "ANGX-0007",
+                "data": {
+                    "exceptionname": "APINGException",
+                    "APINGException": {
+                        "errorCode": provider_code,
+                        "errorDetails": "redacted-test-detail",
+                        "requestUUID": "test-request-uuid",
+                    },
+                },
+            },
+            "id": 1,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    client, _ = _client(payload)
+
+    with pytest.raises(
+        betfair_marketbook_freshness.BetfairMarketBookProviderError
+    ) as exc_info:
+        betfair_marketbook_freshness._post_market_book_readonly(
+            client,
+            params={"marketIds": ["1.234"]},
+            resolve_application_context=False,
+        )
+
+    error = exc_info.value
+    assert error.json_rpc_code == -32099
+    assert error.provider_error_code == provider_code
+    assert error.retryable_backpressure is retryable
+    assert error.request_contract_failure is contract_failure
+    assert "redacted-test-detail" not in str(error)
+    assert "test-request-uuid" not in str(error)
+
+
+def test_physical_boundary_keeps_generic_json_rpc_error_unclassified():
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "error": {"code": -32603, "message": "internal json-rpc error"},
+            "id": 1,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    client, _ = _client(payload)
+
+    with pytest.raises(
+        betfair_marketbook_freshness.BetfairMarketBookProviderError
+    ) as exc_info:
+        betfair_marketbook_freshness._post_market_book_readonly(
+            client,
+            params={"marketIds": ["1.234"]},
+            resolve_application_context=False,
+        )
+
+    error = exc_info.value
+    assert error.json_rpc_code == -32603
+    assert error.provider_error_code is None
+    assert error.retryable_backpressure is False
+    assert error.request_contract_failure is False
+
+
+def test_physical_boundary_rejects_contradictory_provider_error_codes():
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32099,
+                "message": "ANGX-0007",
+                "errorCode": "SERVICE_BUSY",
+                "data": {
+                    "exceptionname": "APINGException",
+                    "APINGException": {
+                        "errorCode": "TOO_MUCH_DATA",
+                    },
+                },
+            },
+            "id": 1,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    client, _ = _client(payload)
+
+    with pytest.raises(
+        betfair_marketbook_freshness.BetfairMarketBookProtocolError,
+        match="contradictory errorCode",
+    ):
+        betfair_marketbook_freshness._post_market_book_readonly(
+            client,
+            params={"marketIds": ["1.234"]},
+            resolve_application_context=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_code",
+    ("too_many_requests", " TOO_MANY_REQUESTS", "", 7),
+)
+def test_physical_boundary_rejects_noncanonical_provider_error_code(bad_code):
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32099,
+                "message": "ANGX-0007",
+                "data": {
+                    "exceptionname": "APINGException",
+                    "APINGException": {"errorCode": bad_code},
+                },
+            },
+            "id": 1,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    client, _ = _client(payload)
+
+    with pytest.raises(
+        betfair_marketbook_freshness.BetfairMarketBookProtocolError,
+        match="errorCode must be a canonical uppercase token",
+    ):
+        betfair_marketbook_freshness._post_market_book_readonly(
+            client,
+            params={"marketIds": ["1.234"]},
+            resolve_application_context=False,
+        )

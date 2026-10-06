@@ -768,32 +768,51 @@ class RealExecutionLedger:
 
     def _read_serialized(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
-            try:
-                fd = os.open(
-                    self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-                )
-            except FileExistsError as exc:
-                raise ExecutionLedgerBusyError(
-                    "writer lock exists; fail closed while authoritative read is serialized"
-                ) from exc
-
+            if self._serialization_owner_thread_id == threading.get_ident():
+                return operation()
+            lock = WorkspaceEconomicLock(
+                self.path.parent,
+                file_name=self._lock_path.name,
+            )
             data_fd: int | None = None
+            lock_acquired = False
+            primary_error: BaseException | None = None
             try:
+                lock.acquire()
+                lock_acquired = True
                 data_fd = self._acquire_posix_ledger_read_lock()
                 self._serialization_owner_thread_id = threading.get_ident()
                 return operation()
+            except WorkspaceEconomicLockBusyError as exc:
+                primary_error = exc
+                raise ExecutionLedgerBusyError(
+                    "writer lock is owned by another process; fail closed while authoritative read is serialized"
+                ) from exc
+            except WorkspaceEconomicLockError as exc:
+                primary_error = exc
+                raise ExecutionLedgerIntegrityError(
+                    "execution ledger crash-releasing read serialization lock failed"
+                ) from exc
+            except BaseException as exc:
+                primary_error = exc
+                raise
             finally:
                 self._serialization_owner_thread_id = None
                 if data_fd is not None:
                     os.close(data_fd)
-                os.close(fd)
-                try:
-                    self._lock_path.unlink()
-                except FileNotFoundError:
-                    pass
+                if lock_acquired:
+                    try:
+                        lock.release()
+                    except WorkspaceEconomicLockError as exc:
+                        if primary_error is None:
+                            raise ExecutionLedgerIntegrityError(
+                                "execution ledger read serialization lock release failed"
+                            ) from exc
 
     def _mutate(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
+            if self._serialization_owner_thread_id == threading.get_ident():
+                return operation()
             lock = WorkspaceEconomicLock(
                 self.path.parent,
                 file_name=self._lock_path.name,

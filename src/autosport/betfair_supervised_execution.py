@@ -66,6 +66,22 @@ _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE = ExecutionStopAuthority.admission_lea
 _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE_CODE = (
     _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE.__code__
 )
+_CANONICAL_REQUIRE_SUPERVISED_APPROVAL = (
+    _supervised_execution_runtime._require_approval
+)
+_CANONICAL_REQUIRE_SUPERVISED_APPROVAL_CODE = (
+    _CANONICAL_REQUIRE_SUPERVISED_APPROVAL.__code__
+)
+_CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL = (
+    _supervised_execution_runtime._require_durable_approval
+)
+_CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL_CODE = (
+    _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL.__code__
+)
+_CANONICAL_LEDGER_MARK_SUBMITTED = RealExecutionLedger.mark_submitted
+_CANONICAL_LEDGER_MARK_SUBMITTED_CODE = (
+    _CANONICAL_LEDGER_MARK_SUBMITTED.__code__
+)
 
 # Terminal provider-effect authority must not depend on caller-rebindable method
 # dispatch.  These product-owned implementations are captured once and are used
@@ -1809,6 +1825,22 @@ def _place_action_with_final_durable_authority(
             raise BetfairSupervisedExecutionError(
                 "Betfair client shadows canonical place_action dispatch"
             )
+        if (
+            _supervised_execution_runtime._require_approval
+            is not _CANONICAL_REQUIRE_SUPERVISED_APPROVAL
+            or getattr(_CANONICAL_REQUIRE_SUPERVISED_APPROVAL, "__code__", None)
+            is not _CANONICAL_REQUIRE_SUPERVISED_APPROVAL_CODE
+            or _supervised_execution_runtime._require_durable_approval
+            is not _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL
+            or getattr(_CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL, "__code__", None)
+            is not _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL_CODE
+            or RealExecutionLedger.mark_submitted is not _CANONICAL_LEDGER_MARK_SUBMITTED
+            or getattr(_CANONICAL_LEDGER_MARK_SUBMITTED, "__code__", None)
+            is not _CANONICAL_LEDGER_MARK_SUBMITTED_CODE
+        ):
+            raise BetfairSupervisedExecutionError(
+                "final supervised approval authority changed"
+            )
         view = ledger.verified_execution_view(bound.execution_plan.plan_id)
         if view.plan_fingerprint != bound.execution_plan.fingerprint:
             raise ExecutionStateError(
@@ -1837,7 +1869,7 @@ def _place_action_with_final_durable_authority(
                 "final supervised send provider order reference drifted"
             )
 
-        _require_durable_approval(ledger, bound, approval)
+        _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL(ledger, bound, approval)
         _validate_betfair_place_action(action)
         client._gate.require(
             action=action,
@@ -1864,8 +1896,8 @@ def _place_action_with_final_durable_authority(
                 "submitted request_sha256",
             )
             send_at = _supervised_execution_runtime._trusted_now()
-            _require_approval(bound, approval, send_at)
-            _require_durable_approval(ledger, bound, approval)
+            _CANONICAL_REQUIRE_SUPERVISED_APPROVAL(bound, approval, send_at)
+            _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL(ledger, bound, approval)
             if _time(send_at, "final send time") < _time(
                 attempt.attempt.reserved_at,
                 "attempt reserved_at",
@@ -1880,15 +1912,11 @@ def _place_action_with_final_durable_authority(
                 raise BetfairSupervisedExecutionError(
                     "placeOrders final send is at/after quote expiry"
                 )
-            ledger._append(
-                EventType.ATTEMPT_SUBMITTED,
-                bound.execution_plan.plan_id,
-                action.action_id,
+            _CANONICAL_LEDGER_MARK_SUBMITTED(
+                ledger,
                 attempt_id,
-                {
-                    "submitted_at": send_at,
-                    "request_sha256": request_digest,
-                },
+                submitted_at=send_at,
+                request_sha256=request_digest,
             )
             submitted_request_sha256 = request_digest
             submitted = True

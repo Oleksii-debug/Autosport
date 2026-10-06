@@ -363,3 +363,81 @@ def test_state_transition_rejects_runtime_reason_validator_rebinding(
 
         assert path.read_bytes() == before
 
+def test_success_ignores_instance_shadowed_rmw_dispatch() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+
+        def attacker_update(*_args: object, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("instance-shadowed success RMW executed")
+
+        state._update = attacker_update  # type: ignore[method-assign]
+        assert (
+            state.record_success(
+                at=_AT,
+                full_refresh=False,
+                settlement_evidence=(),
+            )
+            == 1
+        )
+
+        durable = json.loads(path.read_text(encoding="utf-8"))
+        assert durable["generation"] == 1
+        assert durable["cycles_completed"] == 1
+
+
+def test_source_projection_ignores_instance_shadowed_rmw_dispatch() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+
+        def attacker_update(*_args: object, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("instance-shadowed projection RMW executed")
+
+        state._update = attacker_update  # type: ignore[method-assign]
+        state.record_source_projection(deltas=(), backlog=False)
+
+        durable = json.loads(path.read_text(encoding="utf-8"))
+        assert durable["generation"] == 0
+        assert durable["source_state_delta_id"] is None
+
+
+@pytest.mark.parametrize("operation", ("success", "projection"))
+def test_progress_publication_rejects_class_rebound_rmw_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        before = path.read_bytes()
+
+        def attacker_update(
+            _self: object,
+            *_args: object,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            raise AssertionError("class-rebound progress RMW executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_update",
+            attacker_update,
+        )
+
+        if operation == "success":
+            call = lambda: state.record_success(
+                at=_AT,
+                full_refresh=False,
+                settlement_evidence=(),
+            )
+            expected = "canonical success read-modify-write authority changed"
+        else:
+            call = lambda: state.record_source_projection(
+                deltas=(),
+                backlog=False,
+            )
+            expected = "canonical source-projection read-modify-write authority changed"
+
+        with pytest.raises(continuous_session.ContinuousSessionError, match=expected):
+            call()
+
+        assert path.read_bytes() == before
+

@@ -355,6 +355,38 @@ def test_json_decoder_ignores_rebound_parser_and_payload_decoder(monkeypatch) ->
 
 
 
+def test_store_captures_bound_path_method_witnesses(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+
+    def forged_exists(*args, **kwargs):
+        raise AssertionError("rebound Path.exists executed")
+
+    def forged_read_text(*args, **kwargs):
+        raise AssertionError("rebound Path.read_text executed")
+
+    monkeypatch.setattr(type(store.path), "exists", forged_exists)
+    store.initialize_owner(_goal())
+
+    monkeypatch.setattr(type(store.path), "read_text", forged_read_text)
+    assert store.load() == _goal()
+
+
+def test_store_rejects_instance_binding_rebind(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    object.__setattr__(store, "path", tmp_path / "attacker.json")
+    with pytest.raises(EconomicGoalContractError, match="binding was rebound"):
+        store.load()
+
+    object.__setattr__(store, "path", tmp_path / "economic_goal_contract.json")
+    object.__setattr__(store, "workspace", tmp_path / "other-workspace")
+    with pytest.raises(EconomicGoalContractError, match="binding was rebound"):
+        store.persist_automatic_successor(
+            replace(_goal(), revision=2, max_stake_fraction=Decimal("0.01"))
+        )
+
+
 def test_store_ignores_rebound_module_authorities(monkeypatch, tmp_path) -> None:
     previous = _goal()
     candidate = replace(

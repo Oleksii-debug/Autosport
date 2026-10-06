@@ -381,10 +381,30 @@ def _read_stable_store_text(path: Path) -> str:
             raise IncidentRiskStoreError(
                 "durable incident/model-risk store path disappeared during read"
             ) from exc
+
+        final_verification_descriptor: int | None = None
+        try:
+            final_verification_descriptor = _open_read_only_descriptor(path)
+            final_same_file = os.path.sameopenfile(
+                descriptor,
+                final_verification_descriptor,
+            )
+        except OSError as exc:
+            raise IncidentRiskStoreError(
+                "cannot verify durable incident/model-risk store identity after read"
+            ) from exc
+        finally:
+            if final_verification_descriptor is not None:
+                try:
+                    os.close(final_verification_descriptor)
+                except OSError:
+                    pass
+
         if (
             not stat.S_ISREG(path_after_read.st_mode)
             or path_after_read.st_nlink != 1
             or not _stable_stat_metadata(path_before, path_after_read)
+            or not final_same_file
         ):
             raise IncidentRiskStoreError(
                 "durable incident/model-risk store path changed during read"

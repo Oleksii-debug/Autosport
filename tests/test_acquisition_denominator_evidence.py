@@ -933,3 +933,112 @@ def test_fake_issued_registry_closure_cannot_authorize_forged_complete_evidence(
                 public_require(forged)
         finally:
             issued_cell.cell_contents = prior_issued
+
+def test_classification_helper_rebinding_cannot_mint_complete_coverage(monkeypatch) -> None:
+    hostile_calls: list[object] = []
+
+    def hostile_classifier(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return {
+            "success_nonempty_count": 0,
+            "success_empty_count": 1,
+            "provider_unavailable_count": 0,
+            "local_failure_count": 0,
+            "stop_requested_count": 0,
+            "pending_or_late_terminal_count": 0,
+            "terminal_after_freeze_count": 0,
+            "observed_delta_occurrence_count": 0,
+            "observed_unique_delta_count": 0,
+        }
+
+    monkeypatch.setattr(
+        acquisition_denominator_evidence,
+        "_classify_as_of_freeze",
+        hostile_classifier,
+    )
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            status="PROVIDER_UNAVAILABLE",
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        source = build_source_universe_commitment(
+            store,
+            expected_store_path=path,
+            source_id=SOURCE_ID,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+        )
+
+        with pytest.raises(
+            AcquisitionDenominatorEvidenceError,
+            match="canonical acquisition semantic dispatch changed",
+        ):
+            build_acquisition_denominator_evidence(
+                store,
+                source,
+                _universe(),
+                expected_store_path=path,
+                expected_source_id=SOURCE_ID,
+                expected_run_id=RUN_ID,
+                expected_start_slot_ordinal=0,
+                expected_end_slot_ordinal=0,
+            )
+
+    assert hostile_calls == []
+
+
+def test_timestamp_helper_rebinding_cannot_backdate_late_terminal(monkeypatch) -> None:
+    hostile_calls: list[object] = []
+
+    def hostile_instant(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("rebound timestamp helper must not execute")
+
+    monkeypatch.setattr(
+        acquisition_denominator_evidence,
+        "_instant",
+        hostile_instant,
+    )
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            completed_at="2026-09-22T00:00:30+00:00",
+        )
+        source = build_source_universe_commitment(
+            store,
+            expected_store_path=path,
+            source_id=SOURCE_ID,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+        )
+
+        with pytest.raises(
+            AcquisitionDenominatorEvidenceError,
+            match="canonical acquisition semantic dispatch changed",
+        ):
+            build_acquisition_denominator_evidence(
+                store,
+                source,
+                _universe(frozen_at="2026-09-22T00:00:20Z"),
+                expected_store_path=path,
+                expected_source_id=SOURCE_ID,
+                expected_run_id=RUN_ID,
+                expected_start_slot_ordinal=0,
+                expected_end_slot_ordinal=0,
+            )
+
+    assert hostile_calls == []
+

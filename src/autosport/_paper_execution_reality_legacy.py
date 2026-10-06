@@ -131,7 +131,7 @@ _CANONICAL_TIMESTAMP_PARSER = _timestamp
 _CANONICAL_TIMESTAMP_PARSER_CODE = _timestamp.__code__
 
 
-def _timestamp_CANONICAL_TEXT_VALIDATOR(value: datetime) -> str:
+def _timestamp_text(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
     return value.astimezone(_CANONICAL_TIMEZONE_UTC).isoformat(timespec="microseconds")
@@ -194,7 +194,7 @@ _CANONICAL_DECIMAL_PREFLIGHT = _preflight_decimal_text_fields
 _CANONICAL_DECIMAL_PREFLIGHT_CODE = _preflight_decimal_text_fields.__code__
 
 
-def _decimal_CANONICAL_TEXT_VALIDATOR(value: Decimal) -> str:
+def _decimal_text(value: Decimal) -> str:
     preflight = _CANONICAL_DECIMAL_PREFLIGHT
     if preflight.__code__ is not _CANONICAL_DECIMAL_PREFLIGHT_CODE:
         raise ValueError("decimal preflight authority changed")
@@ -1398,7 +1398,7 @@ def _synthetic_attempt(
         decision_odds=action.requested_odds,
         requested_stake=action.requested_stake,
         decision_observed_at=action.quote_observed_at,
-        execution_observed_at=_timestamp_CANONICAL_TEXT_VALIDATOR(execution_time),
+        execution_observed_at=_CANONICAL_TIMESTAMP_FORMATTER(execution_time),
         delay_ms=delay_ms,
         quote_age_ms=quote_age_ms,
         outcome=outcome,

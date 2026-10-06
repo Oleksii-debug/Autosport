@@ -59,20 +59,42 @@ class _StopRequested(RuntimeError):
 
 
 class _SignalStopRequest:
-    """Signal handler target that performs no I/O and defers STOP to safe code."""
+    """One cooperative STOP source shared by signal and product lifecycle paths."""
 
     def __init__(self) -> None:
         self._event = threading.Event()
         self._signal_number: int | None = None
+        self._requested_reason: str | None = None
 
     def __call__(self) -> bool:
         return self._event.is_set()
 
     def handle(self, signum: int, _frame: object) -> None:
         self._signal_number = signum
+        self._requested_reason = None
         self._event.set()
 
+    def request(self, reason: str = "stop_requested") -> None:
+        if type(reason) is not str or not reason or reason != reason.strip():
+            raise ValueError("stop reason must be non-empty trimmed text")
+        self._signal_number = None
+        self._requested_reason = reason
+        self._event.set()
+
+    def clear(self) -> None:
+        self._signal_number = None
+        self._requested_reason = None
+        self._event.clear()
+
+    def wait(self, seconds: float) -> bool:
+        duration = float(seconds)
+        if not math.isfinite(duration) or duration < 0:
+            raise ValueError("STOP wait duration must be finite and non-negative")
+        return self._event.wait(duration)
+
     def reason(self) -> str:
+        if self._requested_reason is not None:
+            return self._requested_reason
         if self._signal_number is None:
             return "stop_requested"
         try:
@@ -899,7 +921,12 @@ class HeadlessCollectorService:
         )
         now = _CollectorServiceState._instant(self.clock(), "clock")
         while now < due_at:
-            self.sleep((due_at - now).total_seconds())
+            delay = (due_at - now).total_seconds()
+            stop_source = self.stop_requested
+            if type(stop_source) is _SignalStopRequest:
+                _SignalStopRequest.wait(stop_source, delay)
+            else:
+                self.sleep(delay)
             reason = self._requested_stop_reason()
             if reason is not None:
                 self.stop(reason)

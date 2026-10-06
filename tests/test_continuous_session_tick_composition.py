@@ -1663,6 +1663,107 @@ def test_register_rejects_preentry_selector_verifier_rebinding(monkeypatch) -> N
     assert not callback_called
 
 
+def test_register_rejects_preentry_input_ids_descriptor_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    callback_called = False
+
+    def register_input(*_args, **_kwargs):
+        nonlocal callback_called
+        callback_called = True
+
+    monkeypatch.setattr(
+        continuous_session.FocusedMirrorDependencyIndex,
+        "input_ids",
+        property(lambda self: ("forged",)),
+    )
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=register_input,
+            source_ids="provider-a",
+        )
+    assert not callback_called
+
+
+def test_register_rejects_callback_input_ids_descriptor_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        index.register(input_id, **selectors)
+        monkeypatch.setattr(
+            continuous_session.FocusedMirrorDependencyIndex,
+            "input_ids",
+            property(lambda self: ("new", "forged")),
+        )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
+def test_retire_rejects_callback_input_ids_descriptor_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("old", source_ids="provider-a")
+
+    def malicious_unregister(input_id: str) -> bool:
+        removed = index.unregister(input_id)
+        monkeypatch.setattr(
+            continuous_session.FocusedMirrorDependencyIndex,
+            "input_ids",
+            property(lambda self: ()),
+        )
+        return removed
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._retire_input(
+            "old",
+            dependency_index=index,
+            unregister_input=malicious_unregister,
+        )
+
+
+def test_invalidation_drain_rejects_input_ids_descriptor_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+    index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+
+    monkeypatch.setattr(
+        continuous_session.FocusedMirrorDependencyIndex,
+        "input_ids",
+        property(lambda self: ("forged",)),
+    )
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency routing identity authority changed",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=index.affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+
+
 def test_register_rejects_callback_dependency_verifier_rebinding(monkeypatch) -> None:
     coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
     index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())

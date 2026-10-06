@@ -284,6 +284,60 @@ class SettlementBatchAtomicityTests(unittest.TestCase):
 
         self._assert_unchanged_open_ticket(book, ticket, before_balance, before_lifecycle)
 
+    def test_later_ticket_settlement_time_failure_is_batch_atomic(self) -> None:
+        book = PaperBook("100")
+        first_leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        second_leg = TicketLeg("event-2", "winner", "bob", Decimal("2"))
+        first = book.open_ticket(
+            [first_leg],
+            "10",
+            placed_at="2026-09-14T19:30:00+00:00",
+        )
+        second = book.open_ticket(
+            [second_leg],
+            "10",
+            placed_at="2026-09-14T19:31:00+00:00",
+        )
+        settlement = SettlementEngine(
+            {
+                first_leg.quote_key: "win",
+                second_leg.quote_key: "win",
+            }
+        )
+        before_balance = book.balance
+        before_lifecycle = list(book._lifecycle)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settled_at must not precede placed_at",
+        ):
+            settlement.settle_ready(
+                book,
+                settled_at="2026-09-14T19:30:30+00:00",
+            )
+
+        self.assertEqual(book.balance, before_balance)
+        self.assertIs(first.status, TicketStatus.OPEN)
+        self.assertEqual(first.payout, Decimal("0"))
+        self.assertIsNone(first.settled_at)
+        self.assertIs(second.status, TicketStatus.OPEN)
+        self.assertEqual(second.payout, Decimal("0"))
+        self.assertIsNone(second.settled_at)
+        self.assertEqual(book._lifecycle, before_lifecycle)
+
+    def test_explicit_settlement_time_is_applied_to_canonical_ticket(self) -> None:
+        book, leg, ticket = self._single_ticket_book()
+        settlement = SettlementEngine({leg.quote_key: "win"})
+        settled_at = "2026-09-14T19:31:00+00:00"
+
+        self.assertEqual(
+            settlement.settle_ready(book, settled_at=settled_at),
+            [ticket.ticket_id],
+        )
+        self.assertEqual(ticket.settled_at, settled_at)
+        self.assertIs(ticket.status, TicketStatus.WON)
+        self.assertEqual(book.balance, Decimal("110"))
+
     def test_canonical_dict_still_settles_normally(self) -> None:
         book, leg, ticket = self._single_ticket_book()
         settlement = SettlementEngine({leg.quote_key: "win"})

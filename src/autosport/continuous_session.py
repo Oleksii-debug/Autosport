@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, replace
@@ -43,14 +44,138 @@ class SessionStoppedError(ContinuousSessionError):
 
 
 def _bind_canonical_settlement_engine(method):
-    """Inject the import-time exact SettlementEngine through a closure-owned seam."""
+    """Inject settlement constructor/scope authority through closure-owned seams."""
 
     canonical_engine_type = SettlementEngine
+    canonical_scope_impl = _canonical_open_quote_keys_for_book
+    canonical_lifecycle_type = ContinuousEventLifecycle
+    canonical_lifecycle_get = ContinuousEventLifecycle.get
+    canonical_lifecycle_read = ContinuousEventLifecycle._read
+    canonical_lifecycle_record_type = EventLifecycleRecord
+    canonical_resolution_type = SettlementResolution
+    canonical_datetime_type = datetime
+    canonical_timezone_utc = timezone.utc
+    canonical_book_type = PaperBook
+    canonical_book_load = PaperBook.load
+    canonical_book_save = PaperBook.save
+    canonical_workspace_lock_type = WorkspaceEconomicLock
+    canonical_collector_source_id_get = HeadlessCollectorService.source_id.fget
+    canonical_completed_phase = EventPhase.COMPLETED
+    canonical_hex = frozenset("0123456789abcdef")
+    canonical_outcomes = frozenset({"win", "loss", "void"})
+
+    def canonical_text(value: object, field: str) -> str:
+        if type(value) is not str or not value or value.strip() != value:
+            raise ValueError(f"{field} must be a non-empty trimmed string")
+        return value
+
+    def canonical_instant(value: object, field: str) -> datetime:
+        raw = canonical_text(value, field)
+        try:
+            parsed = canonical_datetime_type.fromisoformat(
+                raw.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError(f"{field} must be valid ISO-8601") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{field} must be timezone-aware ISO-8601")
+        return parsed.astimezone(canonical_timezone_utc)
+
+    def canonical_resolution_validate(
+        resolution: SettlementResolution,
+        *,
+        as_of: str,
+    ) -> None:
+        if type(resolution) is not canonical_resolution_type:
+            raise TypeError("settlement resolution must be canonical")
+        canonical_text(resolution.event_identity, "event_identity")
+        canonical_text(resolution.settlement_ref, "settlement_ref")
+        canonical_text(resolution.evidence_id, "evidence_id")
+        digest = resolution.evidence_sha256
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in canonical_hex for character in digest)
+        ):
+            raise ValueError(
+                "evidence_sha256 must be a lowercase SHA-256 hex digest"
+            )
+        cutoff = canonical_instant(as_of, "as_of")
+        available = canonical_instant(resolution.available_at, "available_at")
+        if available > cutoff:
+            raise ValueError(
+                "settlement evidence is not causally available at session cutoff"
+            )
+        quote_outcomes = resolution.quote_outcomes
+        if type(quote_outcomes) is not dict or not quote_outcomes:
+            raise ValueError("quote_outcomes must be a non-empty exact dict")
+        for quote_key, outcome in quote_outcomes.items():
+            canonical_text(quote_key, "quote_outcomes quote_key")
+            if type(outcome) is not str or outcome not in canonical_outcomes:
+                raise ValueError("quote_outcomes contains unsupported outcome")
+
+    def canonical_scope_resolver(
+        coordinator,
+        book: PaperBook,
+        event_identity: str,
+        settlement_ref: str,
+        settled_at: str,
+    ) -> set[str]:
+        live_source_id = canonical_collector_source_id_get(coordinator.collector)
+        if live_source_id != coordinator._settlement_source_id:
+            raise ContinuousSessionError(
+                "collector source identity changed after settlement authority binding"
+            )
+        lifecycle = coordinator.lifecycle
+        if type(lifecycle) is not canonical_lifecycle_type:
+            raise ContinuousSessionError(
+                "settlement lifecycle authority must be canonical"
+            )
+        if (
+            canonical_lifecycle_type.get is not canonical_lifecycle_get
+            or canonical_lifecycle_type._read is not canonical_lifecycle_read
+            or "get" in lifecycle.__dict__
+            or "_read" in lifecycle.__dict__
+        ):
+            raise ContinuousSessionError(
+                "settlement lifecycle lookup dispatch changed"
+            )
+        return canonical_scope_impl(
+            coordinator,
+            book,
+            event_identity,
+            settlement_ref,
+            settled_at,
+            _lifecycle_get=canonical_lifecycle_get,
+            _lifecycle_record_type=canonical_lifecycle_record_type,
+            _settlement_instant=canonical_instant,
+            _completed_phase=canonical_completed_phase,
+        )
 
     def guarded(self, *args, **kwargs):
-        if "_settlement_engine_type" in kwargs:
-            raise TypeError("settlement engine origin is internal product authority")
+        protected = {
+            "_settlement_engine_type": "settlement engine origin is internal product authority",
+            "_settlement_scope_resolver": "settlement scope origin is internal product authority",
+            "_settlement_resolution_type": "settlement evidence type is internal product authority",
+            "_settlement_resolution_validate": "settlement evidence validator is internal product authority",
+            "_settlement_instant": "settlement clock parser is internal product authority",
+            "_paper_book_type": "settlement book type is internal product authority",
+            "_paper_book_load": "settlement book loader is internal product authority",
+            "_paper_book_save": "settlement book saver is internal product authority",
+            "_workspace_lock_type": "settlement lock origin is internal product authority",
+        }
+        for name, message in protected.items():
+            if name in kwargs:
+                raise TypeError(message)
         kwargs["_settlement_engine_type"] = canonical_engine_type
+        kwargs["_settlement_scope_resolver"] = canonical_scope_resolver
+        kwargs["_settlement_resolution_type"] = canonical_resolution_type
+        kwargs["_settlement_resolution_validate"] = canonical_resolution_validate
+        kwargs["_settlement_instant"] = canonical_instant
+        kwargs["_paper_book_type"] = canonical_book_type
+        kwargs["_paper_book_load"] = canonical_book_load
+        kwargs["_paper_book_save"] = canonical_book_save
+        kwargs["_workspace_lock_type"] = canonical_workspace_lock_type
         return method(self, *args, **kwargs)
 
     guarded.__name__ = method.__name__
@@ -103,7 +228,16 @@ class _ContinuousSessionCoordinatorMeta(type):
         raise TypeError("canonical settlement consumer metaclass is not extensible")
 
     def __new__(mcls, name, bases, namespace, **kwargs):
-        protected = {"_settle", "_settlement_consumer_bindings_sealed"}
+        protected = {
+            "_settle",
+            "_settlement_resolutions",
+            "_pending_settlement_resolutions",
+            "_retained_pending_settlement_ids",
+            "_recovered_settlement_resolutions",
+            "__setattr__",
+            "__delattr__",
+            "_settlement_consumer_bindings_sealed",
+        }
         inherits_sealed_consumer = any(
             any(
                 ancestor.__dict__.get(
@@ -118,13 +252,24 @@ class _ContinuousSessionCoordinatorMeta(type):
             raise TypeError("canonical settlement consumer entry binding is immutable")
         return super().__new__(mcls, name, bases, namespace, **kwargs)
 
-    def __setattr__(cls, name: str, value: object) -> None:
+    def __setattr__(
+        cls,
+        name: str,
+        value: object,
+        _protected_entries=_CONTINUOUS_STATE_PROTECTED_ENTRIES,
+    ) -> None:
         sealed = any(
             ancestor.__dict__.get("_settlement_consumer_bindings_sealed", False)
             for ancestor in cls.__mro__
         )
         if sealed and name in {
             "_settle",
+            "_settlement_resolutions",
+            "_pending_settlement_resolutions",
+            "_retained_pending_settlement_ids",
+            "_recovered_settlement_resolutions",
+            "__setattr__",
+            "__delattr__",
             "_settlement_consumer_bindings_sealed",
         }:
             raise TypeError("canonical settlement consumer entry binding is immutable")
@@ -137,6 +282,12 @@ class _ContinuousSessionCoordinatorMeta(type):
         )
         if sealed and name in {
             "_settle",
+            "_settlement_resolutions",
+            "_pending_settlement_resolutions",
+            "_retained_pending_settlement_ids",
+            "_recovered_settlement_resolutions",
+            "__setattr__",
+            "__delattr__",
             "_settlement_consumer_bindings_sealed",
         }:
             raise TypeError("canonical settlement consumer entry binding is immutable")
@@ -211,6 +362,13 @@ class SettlementLearningHandoff(Protocol):
     ) -> tuple[str, ...]:
         ...
 
+    def prepared_settlement_resolutions(
+        self,
+        *,
+        paper_book_path: Path,
+    ) -> tuple[SettlementResolution, ...]:
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class ContinuousTickResult:
@@ -242,6 +400,7 @@ class ContinuousSessionStatus:
     last_error_code: str | None
     last_full_refresh_at: str | None
     settlement_evidence: tuple[dict[str, str], ...]
+    pending_settlement_evidence_ids: tuple[str, ...] = ()
     source_provider_unavailable: bool = False
     source_last_success_at: str | None = None
     source_last_error_code: str | None = None
@@ -280,28 +439,369 @@ def _sha256(value: object, field: str) -> str:
     return value
 
 
-class _ContinuousSessionState:
-    _SCHEMA = "autosport.continuous_session"
-    _VERSION = 2
-    _FIELDS = {
-        "schema",
-        "schema_version",
-        "session_id",
-        "source_id",
-        "state",
-        "started_at",
-        "cycles_completed",
-        "last_success_at",
-        "last_error_code",
-        "last_full_refresh_at",
-        "settlement_evidence",
-        "source_gap_state",
-        "source_sync_state",
-        "source_state_delta_id",
-        "source_unresolved_gap_delta_ids",
-        "source_projection_stream_epoch",
-        "source_state_projection_backlog",
+def _bind_continuous_state_settlement_integrity(method):
+    """Bind durable outcome interpretation to module-load integrity roots."""
+
+    canonical_json_dumps = json.dumps
+    canonical_json_dumps_code = json.dumps.__code__
+    canonical_sha256 = hashlib.sha256
+    canonical_datetime_type = datetime
+    canonical_timezone_utc = timezone.utc
+    canonical_resolution_type = SettlementResolution
+    canonical_resolution_descriptors = {
+        name: canonical_resolution_type.__dict__[name]
+        for name in (
+            "event_identity",
+            "settlement_ref",
+            "quote_outcomes",
+            "evidence_id",
+            "evidence_sha256",
+            "available_at",
+        )
     }
+    canonical_hex = frozenset("0123456789abcdef")
+    canonical_outcomes = frozenset({"win", "loss", "void"})
+
+    def canonical_text(value: object, field: str) -> str:
+        if type(value) is not str or not value or value.strip() != value:
+            raise ValueError(f"{field} must be a non-empty trimmed string")
+        return value
+
+    def canonical_instant(value: object, field: str) -> datetime:
+        raw = canonical_text(value, field)
+        try:
+            parsed = canonical_datetime_type.fromisoformat(
+                raw.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError(f"{field} must be valid ISO-8601") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{field} must be timezone-aware ISO-8601")
+        return parsed.astimezone(canonical_timezone_utc)
+
+    def settlement_snapshot(
+        evidence: SettlementResolution,
+    ) -> tuple[dict[str, str], dict[str, str], str]:
+        if type(evidence) is not canonical_resolution_type:
+            raise TypeError("settlement evidence must be canonical")
+        if any(
+            canonical_resolution_type.__dict__.get(name) is not descriptor
+            for name, descriptor in canonical_resolution_descriptors.items()
+        ):
+            raise ContinuousSessionError(
+                "settlement evidence authority descriptor changed"
+            )
+
+        # Snapshot every caller-owned field exactly once. All durable comparison,
+        # hashing and publication below consume these detached values rather than
+        # rereading a live SettlementResolution after validation.
+        event_identity = evidence.event_identity
+        settlement_ref = evidence.settlement_ref
+        evidence_id = evidence.evidence_id
+        evidence_sha256 = evidence.evidence_sha256
+        available_at = evidence.available_at
+        quote_outcomes = evidence.quote_outcomes
+        if type(quote_outcomes) is not dict or not quote_outcomes:
+            raise ValueError("quote_outcomes must be a non-empty exact dict")
+        quote_outcomes = dict(quote_outcomes)
+
+        event_identity = canonical_text(event_identity, "event_identity")
+        settlement_ref = canonical_text(settlement_ref, "settlement_ref")
+        evidence_id = canonical_text(evidence_id, "evidence_id")
+        if (
+            type(evidence_sha256) is not str
+            or len(evidence_sha256) != 64
+            or any(character not in canonical_hex for character in evidence_sha256)
+        ):
+            raise ValueError(
+                "evidence_sha256 must be a lowercase SHA-256 hex digest"
+            )
+        available_at = canonical_instant(available_at, "available_at").isoformat()
+
+        normalized_outcomes: dict[str, str] = {}
+        for quote_key, outcome in quote_outcomes.items():
+            canonical_key = canonical_text(quote_key, "quote_outcomes quote_key")
+            if type(outcome) is not str or outcome not in canonical_outcomes:
+                raise ValueError("quote_outcomes contains unsupported outcome")
+            normalized_outcomes[canonical_key] = outcome
+        normalized_outcomes = dict(sorted(normalized_outcomes.items()))
+        if canonical_json_dumps.__code__ is not canonical_json_dumps_code:
+            raise ContinuousSessionError(
+                "settlement JSON digest authority changed"
+            )
+        payload = canonical_json_dumps(
+            normalized_outcomes,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        outcomes_digest = canonical_sha256(payload).hexdigest()
+        normalized = {
+            "event_identity": event_identity,
+            "settlement_ref": settlement_ref,
+            "evidence_id": evidence_id,
+            "evidence_sha256": evidence_sha256,
+            "available_at": available_at,
+        }
+        return normalized, normalized_outcomes, outcomes_digest
+
+    def guarded(self, raw, settlement_evidence):
+        if type(settlement_evidence) is not tuple:
+            raise TypeError("settlement_evidence must be a tuple")
+        return method(
+            self,
+            raw,
+            settlement_evidence,
+            _settlement_snapshot=settlement_snapshot,
+        )
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
+def _bind_continuous_state_read_settlement_integrity(method):
+    """Bind pending-outcome digest reproof against later module-global rebinding."""
+
+    kwdefaults = method.__kwdefaults__ or {}
+    canonical_settlement_evidence_validator = kwdefaults[
+        "_settlement_evidence_validator"
+    ]
+    canonical_pending_settlement_validator = kwdefaults[
+        "_pending_settlement_validator"
+    ]
+    canonical_settlement_evidence_validator_func = (
+        canonical_settlement_evidence_validator.__func__
+    )
+    canonical_pending_settlement_validator_func = (
+        canonical_pending_settlement_validator.__func__
+    )
+    canonical_settlement_evidence_validator_code = (
+        canonical_settlement_evidence_validator_func.__code__
+    )
+    canonical_pending_settlement_validator_code = (
+        canonical_pending_settlement_validator_func.__code__
+    )
+    canonical_read_roots = {
+        "_text": _text,
+        "_sha256": _sha256,
+        "_instant": _instant,
+        "strict_json_loads": strict_json_loads,
+        "datetime": datetime,
+        "timezone": timezone,
+        "SessionState": SessionState,
+        "GapState": GapState,
+        "SyncState": SyncState,
+        "ContinuousSessionError": ContinuousSessionError,
+    }
+    canonical_read_code_roots = {
+        name: root.__code__
+        for name, root in canonical_read_roots.items()
+        if hasattr(root, "__code__")
+    }
+    canonical_json_dumps = json.dumps
+    canonical_json_dumps_code = json.dumps.__code__
+    canonical_sha256 = hashlib.sha256
+    canonical_outcomes = frozenset({"win", "loss", "void"})
+
+    def pending_outcomes_digest(item: dict[str, object]) -> str:
+        if type(item) is not dict:
+            raise ContinuousSessionError(
+                "pending settlement digest input must be an exact dict"
+            )
+        quote_outcomes = item.get("quote_outcomes")
+        if type(quote_outcomes) is not dict or not quote_outcomes:
+            raise ContinuousSessionError(
+                "pending settlement quote_outcomes must be a non-empty exact dict"
+            )
+        normalized_outcomes: dict[str, str] = {}
+        for quote_key, outcome in quote_outcomes.items():
+            if (
+                type(quote_key) is not str
+                or not quote_key
+                or quote_key.strip() != quote_key
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement quote_outcomes quote_key is invalid"
+                )
+            if type(outcome) is not str or outcome not in canonical_outcomes:
+                raise ContinuousSessionError(
+                    "pending settlement quote_outcomes contains unsupported outcome"
+                )
+            normalized_outcomes[quote_key] = outcome
+        if canonical_json_dumps.__code__ is not canonical_json_dumps_code:
+            raise ContinuousSessionError(
+                "pending settlement JSON digest authority changed"
+            )
+        payload = canonical_json_dumps(
+            dict(sorted(normalized_outcomes.items())),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return canonical_sha256(payload).hexdigest()
+
+    def guarded(self):
+        if (
+            canonical_settlement_evidence_validator_func.__code__
+            is not canonical_settlement_evidence_validator_code
+            or canonical_pending_settlement_validator_func.__code__
+            is not canonical_pending_settlement_validator_code
+        ):
+            raise ContinuousSessionError(
+                "continuous settlement state validator authority changed"
+            )
+        if any(
+            method.__globals__.get(name) is not root
+            for name, root in canonical_read_roots.items()
+        ) or any(
+            root.__code__ is not canonical_read_code_roots[name]
+            for name, root in canonical_read_roots.items()
+            if name in canonical_read_code_roots
+        ):
+            raise ContinuousSessionError(
+                "continuous session state read authority changed"
+            )
+        return method(
+            self,
+            _pending_outcomes_digest=pending_outcomes_digest,
+            _settlement_evidence_validator=canonical_settlement_evidence_validator,
+            _pending_settlement_validator=canonical_pending_settlement_validator,
+        )
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
+_CONTINUOUS_STATE_PROTECTED_ENTRIES = frozenset(
+    {
+        "_read",
+        "_update",
+        "_merge_settlement_evidence",
+        "_validate_settlement_evidence",
+        "_validate_pending_settlement_resolutions",
+        "snapshot",
+        "session_id",
+        "set_state",
+        "pending_settlement_resolutions",
+        "record_settlement_evidence",
+        "validate_recovered_settlement_evidence",
+        "complete_pending_settlement_commit",
+        "record_source_projection",
+        "record_success",
+        "record_failure",
+        "_state_authority_bindings_sealed",
+    }
+)
+
+
+def _seal_continuous_state_entry(method):
+    """Install a non-shadowable instance binding for canonical state authority."""
+
+    def resolve(instance):
+        return method.__get__(instance, type(instance))
+
+    def reject_set(_instance, _value) -> None:
+        raise TypeError("continuous session state authority binding is immutable")
+
+    def reject_delete(_instance) -> None:
+        raise TypeError("continuous session state authority binding is immutable")
+
+    return property(resolve, reject_set, reject_delete, method.__doc__)
+
+
+class _ContinuousSessionStateMeta(type):
+    """Prevent class/subclass replacement of canonical durable-state entrypoints."""
+
+    def __new__(
+        mcls,
+        name,
+        bases,
+        namespace,
+        _protected_entries=_CONTINUOUS_STATE_PROTECTED_ENTRIES,
+        **kwargs,
+    ):
+        inherits_sealed_state = any(
+            any(
+                ancestor.__dict__.get(
+                    "_state_authority_bindings_sealed",
+                    False,
+                )
+                for ancestor in base.__mro__
+            )
+            for base in bases
+        )
+        if inherits_sealed_state and _protected_entries.intersection(namespace):
+            raise TypeError("continuous session state authority binding is immutable")
+        return super().__new__(mcls, name, bases, namespace, **kwargs)
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        sealed = any(
+            ancestor.__dict__.get("_state_authority_bindings_sealed", False)
+            for ancestor in cls.__mro__
+        )
+        if sealed and name in _protected_entries:
+            raise TypeError("continuous session state authority binding is immutable")
+        super().__setattr__(name, value)
+
+    def __delattr__(
+        cls,
+        name: str,
+        _protected_entries=_CONTINUOUS_STATE_PROTECTED_ENTRIES,
+    ) -> None:
+        sealed = any(
+            ancestor.__dict__.get("_state_authority_bindings_sealed", False)
+            for ancestor in cls.__mro__
+        )
+        if sealed and name in _protected_entries:
+            raise TypeError("continuous session state authority binding is immutable")
+        super().__delattr__(name)
+
+
+class _ContinuousSessionState(metaclass=_ContinuousSessionStateMeta):
+    _state_authority_bindings_sealed = True
+    _SCHEMA = "autosport.continuous_session"
+    _VERSION = 4
+    _V2_FIELDS = frozenset(
+        {
+            "schema",
+            "schema_version",
+            "session_id",
+            "source_id",
+            "state",
+            "started_at",
+            "cycles_completed",
+            "last_success_at",
+            "last_error_code",
+            "last_full_refresh_at",
+            "settlement_evidence",
+            "source_gap_state",
+            "source_sync_state",
+            "source_state_delta_id",
+            "source_unresolved_gap_delta_ids",
+            "source_projection_stream_epoch",
+            "source_state_projection_backlog",
+        }
+    )
+    _V3_FIELDS = frozenset(
+        {
+            *_V2_FIELDS,
+            "settlement_outcome_digests",
+        }
+    )
+    _FIELDS = frozenset(
+        {
+            *_V3_FIELDS,
+            "pending_settlement_resolutions",
+        }
+    )
 
     def __init__(
         self,
@@ -316,49 +816,56 @@ class _ContinuousSessionState:
         self.source_id = _text(source_id, "source_id")
         self._clock = clock
 
-        if self.path.exists():
-            raw = self._read()
-            existing_source = raw["source_id"]
-            if existing_source != self.source_id:
-                raise ContinuousSessionError(
-                    "durable session source_id does not match configured source"
+        # Session identity and economic settlement evidence share the workspace's
+        # single-writer authority. Serialize first creation/read so two processes
+        # cannot independently mint competing session identities from the same
+        # pristine workspace.
+        with WorkspaceEconomicLock(self.path.parent):
+            if self.path.exists():
+                raw = self._read()
+                existing_source = raw["source_id"]
+                if existing_source != self.source_id:
+                    raise ContinuousSessionError(
+                        "durable session source_id does not match configured source"
+                    )
+                if session_id is not None and raw["session_id"] != _text(
+                    session_id, "session_id"
+                ):
+                    raise ContinuousSessionError(
+                        "durable session_id does not match configured session"
+                    )
+            else:
+                resolved_id = _text(
+                    session_id or str(uuid.uuid4()),
+                    "session_id",
                 )
-            if session_id is not None and raw["session_id"] != _text(
-                session_id, "session_id"
-            ):
-                raise ContinuousSessionError(
-                    "durable session_id does not match configured session"
+                started_at = clock()
+                _instant(started_at, "started_at")
+                atomic_write_json(
+                    self.path,
+                    {
+                        "schema": self._SCHEMA,
+                        "schema_version": self._VERSION,
+                        "session_id": resolved_id,
+                        "source_id": self.source_id,
+                        "state": SessionState.RUNNING.value,
+                        "started_at": started_at,
+                        "cycles_completed": 0,
+                        "last_success_at": None,
+                        "last_error_code": None,
+                        "last_full_refresh_at": None,
+                        "settlement_evidence": [],
+                        "settlement_outcome_digests": {},
+                        "pending_settlement_resolutions": [],
+                        "source_gap_state": None,
+                        "source_sync_state": None,
+                        "source_state_delta_id": None,
+                        "source_unresolved_gap_delta_ids": [],
+                        "source_projection_stream_epoch": None,
+                        "source_state_projection_backlog": False,
+                    },
                 )
-        else:
-            resolved_id = _text(
-                session_id or str(uuid.uuid4()),
-                "session_id",
-            )
-            started_at = clock()
-            _instant(started_at, "started_at")
-            atomic_write_json(
-                self.path,
-                {
-                    "schema": self._SCHEMA,
-                    "schema_version": self._VERSION,
-                    "session_id": resolved_id,
-                    "source_id": self.source_id,
-                    "state": SessionState.RUNNING.value,
-                    "started_at": started_at,
-                    "cycles_completed": 0,
-                    "last_success_at": None,
-                    "last_error_code": None,
-                    "last_full_refresh_at": None,
-                    "settlement_evidence": [],
-                    "source_gap_state": None,
-                    "source_sync_state": None,
-                    "source_state_delta_id": None,
-                    "source_unresolved_gap_delta_ids": [],
-                    "source_projection_stream_epoch": None,
-                    "source_state_projection_backlog": False,
-                },
-            )
-            self._read()
+                self._read()
 
     @staticmethod
     def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:
@@ -385,31 +892,163 @@ class _ContinuousSessionState:
             _text(item["evidence_id"], "settlement_evidence evidence_id")
             _sha256(item["evidence_sha256"], "settlement_evidence evidence_sha256")
             _instant(item["available_at"], "settlement_evidence available_at")
-            values.append(
-                {
-                    "event_identity": item["event_identity"],
-                    "settlement_ref": item["settlement_ref"],
-                    "evidence_id": item["evidence_id"],
-                    "evidence_sha256": item["evidence_sha256"],
-                    "available_at": item["available_at"],
-                }
-            )
+            normalized = {
+                "event_identity": item["event_identity"],
+                "settlement_ref": item["settlement_ref"],
+                "evidence_id": item["evidence_id"],
+                "evidence_sha256": item["evidence_sha256"],
+                "available_at": item["available_at"],
+            }
+            if any(
+                prior["evidence_id"] == normalized["evidence_id"]
+                and prior != normalized
+                for prior in values
+            ):
+                raise ContinuousSessionError(
+                    "durable settlement evidence id is conflicting"
+                )
+            if any(
+                (
+                    prior["event_identity"],
+                    prior["settlement_ref"],
+                )
+                == (
+                    normalized["event_identity"],
+                    normalized["settlement_ref"],
+                )
+                and prior != normalized
+                for prior in values
+            ):
+                raise ContinuousSessionError(
+                    "durable settlement event/reference evidence is conflicting"
+                )
+            if normalized in values:
+                raise ContinuousSessionError(
+                    "durable settlement evidence entry is duplicated"
+                )
+            values.append(normalized)
         return tuple(values)
 
-    def _read(self) -> dict[str, Any]:
+    @staticmethod
+    def _validate_pending_settlement_resolutions(
+        raw: object,
+    ) -> tuple[dict[str, object], ...]:
+        if type(raw) is not list:
+            raise ContinuousSessionError(
+                "pending_settlement_resolutions must be a list"
+            )
+        values: list[dict[str, object]] = []
+        for item in raw:
+            if type(item) is not dict or set(item) != {
+                "event_identity",
+                "settlement_ref",
+                "quote_outcomes",
+                "evidence_id",
+                "evidence_sha256",
+                "available_at",
+            }:
+                raise ContinuousSessionError(
+                    "pending settlement resolution fields mismatch"
+                )
+            _text(item["event_identity"], "pending settlement event_identity")
+            _text(item["settlement_ref"], "pending settlement settlement_ref")
+            _text(item["evidence_id"], "pending settlement evidence_id")
+            _sha256(item["evidence_sha256"], "pending settlement evidence_sha256")
+            _instant(item["available_at"], "pending settlement available_at")
+            quote_outcomes = item["quote_outcomes"]
+            if type(quote_outcomes) is not dict or not quote_outcomes:
+                raise ContinuousSessionError(
+                    "pending settlement quote_outcomes must be a non-empty exact dict"
+                )
+            normalized_outcomes: dict[str, str] = {}
+            for quote_key, outcome in quote_outcomes.items():
+                canonical_key = _text(
+                    quote_key,
+                    "pending settlement quote_outcomes quote_key",
+                )
+                if type(outcome) is not str or outcome not in {
+                    "win",
+                    "loss",
+                    "void",
+                }:
+                    raise ContinuousSessionError(
+                        "pending settlement quote_outcomes contains unsupported outcome"
+                    )
+                normalized_outcomes[canonical_key] = outcome
+            normalized = {
+                "event_identity": item["event_identity"],
+                "settlement_ref": item["settlement_ref"],
+                "quote_outcomes": dict(sorted(normalized_outcomes.items())),
+                "evidence_id": item["evidence_id"],
+                "evidence_sha256": item["evidence_sha256"],
+                "available_at": item["available_at"],
+            }
+            if any(
+                prior["evidence_id"] == normalized["evidence_id"]
+                and prior != normalized
+                for prior in values
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement evidence id is conflicting"
+                )
+            if any(
+                (
+                    prior["event_identity"],
+                    prior["settlement_ref"],
+                )
+                == (
+                    normalized["event_identity"],
+                    normalized["settlement_ref"],
+                )
+                and prior != normalized
+                for prior in values
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement event/reference is conflicting"
+                )
+            if normalized in values:
+                raise ContinuousSessionError(
+                    "pending settlement resolution entry is duplicated"
+                )
+            values.append(normalized)
+        return tuple(values)
+
+    @_seal_continuous_state_entry
+    @_bind_continuous_state_read_settlement_integrity
+    def _read(
+        self,
+        *,
+        _pending_outcomes_digest: Callable[[dict[str, object]], str],
+        _settlement_evidence_validator: Callable[
+            [object],
+            tuple[dict[str, str], ...],
+        ] = _validate_settlement_evidence,
+        _pending_settlement_validator: Callable[
+            [object],
+            tuple[dict[str, object], ...],
+        ] = _validate_pending_settlement_resolutions,
+    ) -> dict[str, Any]:
         try:
             raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
             raise ContinuousSessionError(
                 "cannot verify continuous session state"
             ) from exc
-        if (
-            type(raw) is not dict
-            or set(raw) != self._FIELDS
-            or raw["schema"] != self._SCHEMA
-            or raw["schema_version"] != self._VERSION
-            or raw["source_id"] != self.source_id
-        ):
+        if type(raw) is not dict or raw.get("schema") != self._SCHEMA:
+            raise ContinuousSessionError("continuous session state schema/identity mismatch")
+        version = raw.get("schema_version")
+        if version == 2 and set(raw) == self._V2_FIELDS:
+            legacy_v2 = True
+            legacy_v3 = False
+        elif version == 3 and set(raw) == self._V3_FIELDS:
+            legacy_v2 = False
+            legacy_v3 = True
+        elif version == self._VERSION and set(raw) == self._FIELDS:
+            legacy_v2 = False
+            legacy_v3 = False
+        else:
+            raise ContinuousSessionError("continuous session state schema/identity mismatch")
+        if raw["source_id"] != self.source_id:
             raise ContinuousSessionError("continuous session state schema/identity mismatch")
         _text(raw["session_id"], "session_id")
         _instant(raw["started_at"], "started_at")
@@ -425,7 +1064,62 @@ class _ContinuousSessionState:
                 _instant(raw[name], name)
         if raw["last_error_code"] is not None:
             _text(raw["last_error_code"], "last_error_code")
-        evidence = self._validate_settlement_evidence(raw["settlement_evidence"])
+        evidence = _settlement_evidence_validator(raw["settlement_evidence"])
+        if legacy_v2:
+            outcome_digests: dict[str, str | None] = {
+                item["evidence_id"]: None for item in evidence
+            }
+            raw["schema_version"] = self._VERSION
+            raw["settlement_outcome_digests"] = outcome_digests
+            raw["pending_settlement_resolutions"] = []
+        else:
+            outcome_digests = raw["settlement_outcome_digests"]
+            if (
+                type(outcome_digests) is not dict
+                or set(outcome_digests)
+                != {item["evidence_id"] for item in evidence}
+            ):
+                raise ContinuousSessionError(
+                    "settlement outcome digest index does not match durable evidence"
+                )
+            for evidence_id, digest in outcome_digests.items():
+                _text(evidence_id, "settlement outcome evidence_id")
+                if digest is not None:
+                    _sha256(digest, "settlement outcome digest")
+            if legacy_v3:
+                raw["schema_version"] = self._VERSION
+                raw["pending_settlement_resolutions"] = []
+
+        pending = _pending_settlement_validator(
+            raw["pending_settlement_resolutions"]
+        )
+        evidence_by_id = {
+            item["evidence_id"]: item
+            for item in evidence
+        }
+        for item in pending:
+            durable = evidence_by_id.get(item["evidence_id"])
+            if durable is None or any(
+                durable[field] != item[field]
+                for field in (
+                    "event_identity",
+                    "settlement_ref",
+                    "evidence_id",
+                    "evidence_sha256",
+                    "available_at",
+                )
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement resolution is not bound to durable evidence"
+                )
+            if (
+                outcome_digests.get(item["evidence_id"]) is None
+                or outcome_digests[item["evidence_id"]]
+                != _pending_outcomes_digest(item)
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement outcome digest conflicts with durable evidence"
+                )
         gap_state = raw["source_gap_state"]
         sync_state = raw["source_sync_state"]
         if (gap_state is None) != (sync_state is None):
@@ -476,8 +1170,16 @@ class _ContinuousSessionState:
             )
         raw["state"] = state.value
         raw["settlement_evidence"] = [dict(item) for item in evidence]
+        raw["pending_settlement_resolutions"] = [
+            {
+                **item,
+                "quote_outcomes": dict(item["quote_outcomes"]),
+            }
+            for item in pending
+        ]
         return raw
 
+    @_seal_continuous_state_entry
     def snapshot(self) -> ContinuousSessionStatus:
         raw = self._read()
         return ContinuousSessionStatus(
@@ -489,6 +1191,10 @@ class _ContinuousSessionState:
             last_error_code=raw["last_error_code"],
             last_full_refresh_at=raw["last_full_refresh_at"],
             settlement_evidence=tuple(raw["settlement_evidence"]),
+            pending_settlement_evidence_ids=tuple(
+                item["evidence_id"]
+                for item in raw["pending_settlement_resolutions"]
+            ),
             source_gap_state=raw["source_gap_state"],
             source_sync_state=raw["source_sync_state"],
             source_state_delta_id=raw["source_state_delta_id"],
@@ -505,12 +1211,19 @@ class _ContinuousSessionState:
     def session_id(self) -> str:
         return self._read()["session_id"]
 
+    @_seal_continuous_state_entry
     def _update(self, mutate: Callable[[dict[str, Any]], None]) -> None:
-        raw = self._read()
-        mutate(raw)
-        atomic_write_json(self.path, raw)
-        self._read()
+        # Keep read/validate/mutate/publish under the same cross-process economic
+        # writer authority. atomic_write_json makes replacement durable, but by
+        # itself cannot prevent two processes from both deriving from one stale
+        # pre-state and last-writer-wins erasing settlement evidence.
+        with WorkspaceEconomicLock(self.path.parent):
+            raw = self._read()
+            mutate(raw)
+            atomic_write_json(self.path, raw)
+            self._read()
 
+    @_seal_continuous_state_entry
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:
         if not isinstance(state, SessionState):
             raise TypeError("state must be SessionState")
@@ -537,25 +1250,247 @@ class _ContinuousSessionState:
             ).isoformat(),
         }
 
+    @_seal_continuous_state_entry
+    @_bind_continuous_state_settlement_integrity
+    def _merge_settlement_evidence(
+        self,
+        raw: dict[str, Any],
+        settlement_evidence: tuple[SettlementResolution, ...],
+        *,
+        _settlement_snapshot: Callable[
+            [SettlementResolution],
+            tuple[dict[str, str], dict[str, str], str],
+        ],
+    ) -> tuple[
+        list[dict[str, str]],
+        dict[str, str | None],
+        list[dict[str, object]],
+        tuple[str, ...],
+    ]:
+        known = {
+            item["evidence_id"]: item
+            for item in raw["settlement_evidence"]
+        }
+        known_pairs = {
+            (item["event_identity"], item["settlement_ref"]): item
+            for item in raw["settlement_evidence"]
+        }
+        outcome_digests = dict(raw["settlement_outcome_digests"])
+        pending = {
+            item["evidence_id"]: {
+                **item,
+                "quote_outcomes": dict(item["quote_outcomes"]),
+            }
+            for item in raw["pending_settlement_resolutions"]
+        }
+        pending_pairs = {
+            (item["event_identity"], item["settlement_ref"]): item
+            for item in pending.values()
+        }
+        seen_input_ids: set[str] = set()
+        accepted_input_ids: list[str] = []
+        for evidence in settlement_evidence:
+            normalized, normalized_outcomes, outcomes_digest = (
+                _settlement_snapshot(evidence)
+            )
+            evidence_id = normalized["evidence_id"]
+            if evidence_id in seen_input_ids:
+                raise ContinuousSessionError(
+                    "settlement evidence repeats evidence_id"
+                )
+            seen_input_ids.add(evidence_id)
+            accepted_input_ids.append(evidence_id)
+            existing = known.get(evidence_id)
+            if existing is not None and existing != normalized:
+                raise ContinuousSessionError(
+                    "settlement evidence id conflicts with durable evidence"
+                )
+            pair = (normalized["event_identity"], normalized["settlement_ref"])
+            pair_existing = known_pairs.get(pair)
+            if pair_existing is not None and pair_existing != normalized:
+                raise ContinuousSessionError(
+                    "settlement event/reference conflicts with durable evidence"
+                )
+            previous_digest = outcome_digests.get(evidence_id)
+            if existing is not None and previous_digest is None:
+                raise ContinuousSessionError(
+                    "legacy settlement evidence lacks durable outcome interpretation"
+                )
+            if previous_digest is not None and previous_digest != outcomes_digest:
+                raise ContinuousSessionError(
+                    "settlement outcome interpretation conflicts with durable evidence"
+                )
+            pending_payload = {
+                **normalized,
+                "quote_outcomes": normalized_outcomes,
+            }
+            existing_pending = pending.get(evidence_id)
+            if existing_pending is not None and existing_pending != pending_payload:
+                raise ContinuousSessionError(
+                    "pending settlement evidence id conflicts with durable resolution"
+                )
+            pending_pair_existing = pending_pairs.get(pair)
+            if (
+                pending_pair_existing is not None
+                and pending_pair_existing != pending_payload
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement event/reference conflicts with durable resolution"
+                )
+            known[evidence_id] = normalized
+            known_pairs[pair] = normalized
+            outcome_digests[evidence_id] = outcomes_digest
+            # A cleared historical receipt is durable audit truth, not unfinished
+            # economic work. Re-observing the same provider result must not mint a
+            # new pending commit. Only newly admitted evidence or evidence already
+            # retained as pending may remain on the recovery path.
+            if existing is None or existing_pending is not None:
+                pending[evidence_id] = pending_payload
+                pending_pairs[pair] = pending_payload
+        return (
+            list(sorted(known.values(), key=lambda item: item["evidence_id"])),
+            dict(sorted(outcome_digests.items())),
+            list(sorted(pending.values(), key=lambda item: item["evidence_id"])),
+            tuple(accepted_input_ids),
+        )
+
     def validate_settlement_evidence(
         self,
         *,
         settlement_evidence: tuple[SettlementResolution, ...],
     ) -> None:
+        self._merge_settlement_evidence(self._read(), settlement_evidence)
+
+    @_seal_continuous_state_entry
+    def pending_settlement_resolutions(
+        self,
+    ) -> tuple[SettlementResolution, ...]:
         raw = self._read()
-        known = {
-            item["evidence_id"]: item
+        pending = tuple(
+            SettlementResolution(
+                event_identity=item["event_identity"],
+                settlement_ref=item["settlement_ref"],
+                quote_outcomes=dict(item["quote_outcomes"]),
+                evidence_id=item["evidence_id"],
+                evidence_sha256=item["evidence_sha256"],
+                available_at=item["available_at"],
+            )
+            for item in raw["pending_settlement_resolutions"]
+        )
+        # Re-prove exact metadata/outcome-digest authority through the closure-bound
+        # settlement integrity root before exposing pending truth for recovery.
+        self._merge_settlement_evidence(raw, pending)
+        return pending
+
+    @_seal_continuous_state_entry
+    def record_settlement_evidence(
+        self,
+        *,
+        settlement_evidence: tuple[SettlementResolution, ...],
+    ) -> None:
+        """Durably bind settlement interpretation before any PAPER economic commit."""
+
+        def mutate(raw: dict[str, Any]) -> None:
+            evidence, outcome_digests, pending, _ = self._merge_settlement_evidence(
+                raw,
+                settlement_evidence,
+            )
+            raw["settlement_evidence"] = evidence
+            raw["settlement_outcome_digests"] = outcome_digests
+            raw["pending_settlement_resolutions"] = pending
+
+        self._update(mutate)
+
+    @_seal_continuous_state_entry
+    def validate_recovered_settlement_evidence(
+        self,
+        *,
+        settlement_evidence: tuple[SettlementResolution, ...],
+    ) -> None:
+        """Prove recovery replays only still-pending pre-P&L durable truth."""
+
+        raw = self._read()
+        known_ids = {
+            item["evidence_id"]
             for item in raw["settlement_evidence"]
         }
-        for evidence in settlement_evidence:
-            normalized = self._normalized_settlement_evidence(evidence)
-            existing = known.get(evidence.evidence_id)
-            if existing is not None and existing != normalized:
-                raise ContinuousSessionError(
-                    "settlement evidence id conflicts with durable evidence"
-                )
-            known[evidence.evidence_id] = normalized
+        pending_ids = {
+            item["evidence_id"]
+            for item in raw["pending_settlement_resolutions"]
+        }
+        # Reuse the closure-bound durable integrity path for exact evidence,
+        # event/reference and quote-outcome digest comparison. It is intentionally
+        # side-effect free here because raw is only the freshly read candidate.
+        _, _, _, recovered_ids = self._merge_settlement_evidence(
+            raw,
+            settlement_evidence,
+        )
 
+        for evidence_id in recovered_ids:
+            if evidence_id not in known_ids:
+                raise ContinuousSessionError(
+                    "recovered settlement evidence was not durably staged before P&L"
+                )
+            if evidence_id not in pending_ids:
+                raise ContinuousSessionError(
+                    "recovered settlement evidence is no longer pending for recovery"
+                )
+
+    @_seal_continuous_state_entry
+    def complete_pending_settlement_commit(
+        self,
+        *,
+        settlement_evidence: tuple[SettlementResolution, ...],
+        retain_pending_evidence_ids: tuple[str, ...],
+    ) -> None:
+        """Clear completed replay work while retaining truth needed by open tickets."""
+
+        if type(retain_pending_evidence_ids) is not tuple:
+            raise TypeError("retain_pending_evidence_ids must be a tuple")
+        retained = {
+            _text(evidence_id, "retain_pending_evidence_id")
+            for evidence_id in retain_pending_evidence_ids
+        }
+        if len(retained) != len(retain_pending_evidence_ids):
+            raise ContinuousSessionError(
+                "retain_pending_evidence_ids contains duplicate identity"
+            )
+        def mutate(raw: dict[str, Any]) -> None:
+            pending_before = {
+                item["evidence_id"]
+                for item in raw["pending_settlement_resolutions"]
+            }
+            evidence, outcome_digests, pending, _accepted_input_ids = (
+                self._merge_settlement_evidence(
+                    raw,
+                    settlement_evidence,
+                )
+            )
+            # Consume only the detached identities returned by the closure-bound
+            # canonical snapshot; never reread the live caller objects after proof.
+            processed = set(_accepted_input_ids)
+            if not retained.issubset(processed):
+                raise ContinuousSessionError(
+                    "retained pending settlement identity was not processed"
+                )
+            if not processed.issubset(pending_before):
+                raise ContinuousSessionError(
+                    "settlement completion references evidence that is not pending"
+                )
+            raw["settlement_evidence"] = evidence
+            raw["settlement_outcome_digests"] = outcome_digests
+            raw["pending_settlement_resolutions"] = [
+                item
+                for item in pending
+                if (
+                    item["evidence_id"] not in processed
+                    or item["evidence_id"] in retained
+                )
+            ]
+
+        self._update(mutate)
+
+    @_seal_continuous_state_entry
     def record_source_projection(
         self,
         *,
@@ -605,45 +1540,245 @@ class _ContinuousSessionState:
 
         self._update(mutate)
 
+    @_seal_continuous_state_entry
     def record_success(
         self,
         *,
         at: str,
         full_refresh: bool,
         settlement_evidence: tuple[SettlementResolution, ...],
+        retain_pending_evidence_ids: tuple[str, ...],
     ) -> None:
         timestamp = _instant(at, "at")
-
+        if type(retain_pending_evidence_ids) is not tuple:
+            raise TypeError("retain_pending_evidence_ids must be a tuple")
+        retained = {
+            _text(evidence_id, "retain_pending_evidence_id")
+            for evidence_id in retain_pending_evidence_ids
+        }
+        if len(retained) != len(retain_pending_evidence_ids):
+            raise ContinuousSessionError(
+                "retain_pending_evidence_ids contains duplicate identity"
+            )
         def mutate(raw: dict[str, Any]) -> None:
+            pending_before = {
+                item["evidence_id"]
+                for item in raw["pending_settlement_resolutions"]
+            }
+            evidence, outcome_digests, pending, _accepted_input_ids = (
+                self._merge_settlement_evidence(
+                    raw,
+                    settlement_evidence,
+                )
+            )
+            # Consume only the detached identities returned by the closure-bound
+            # canonical snapshot; never reread the live caller objects after proof.
+            processed = set(_accepted_input_ids)
+            if not retained.issubset(processed):
+                raise ContinuousSessionError(
+                    "retained pending settlement identity was not processed"
+                )
+            if not processed.issubset(pending_before):
+                raise ContinuousSessionError(
+                    "successful settlement references evidence that is not pending"
+                )
+
             raw["cycles_completed"] = int(raw["cycles_completed"]) + 1
             raw["last_success_at"] = timestamp.isoformat()
             raw["last_error_code"] = None
             if full_refresh:
                 raw["last_full_refresh_at"] = timestamp.isoformat()
 
-            known = {
-                item["evidence_id"]: item
-                for item in raw["settlement_evidence"]
-            }
-            for evidence in settlement_evidence:
-                existing = known.get(evidence.evidence_id)
-                normalized = self._normalized_settlement_evidence(evidence)
-                if existing is not None:
-                    if existing != normalized:
-                        raise ContinuousSessionError(
-                            "settlement evidence id conflicts with durable evidence"
-                        )
-                    continue
-                known[evidence.evidence_id] = normalized
-            raw["settlement_evidence"] = list(
-                sorted(known.values(), key=lambda item: item["evidence_id"])
-            )
+            raw["settlement_evidence"] = evidence
+            raw["settlement_outcome_digests"] = outcome_digests
+            raw["pending_settlement_resolutions"] = [
+                item
+                for item in pending
+                if (
+                    item["evidence_id"] not in processed
+                    or item["evidence_id"] in retained
+                )
+            ]
 
         self._update(mutate)
 
+    @_seal_continuous_state_entry
     def record_failure(self, *, code: str) -> None:
         code = _text(code, "code")
         self._update(lambda raw: raw.__setitem__("last_error_code", code))
+
+
+def _bind_canonical_settlement_resolution_collection(method):
+    """Seal externally-authoritative settlement evidence before durable staging."""
+
+    resolution_type = SettlementResolution
+    lifecycle_type = ContinuousEventLifecycle
+    lifecycle_records = ContinuousEventLifecycle.records
+    lifecycle_read = ContinuousEventLifecycle._read
+    lifecycle_record_type = EventLifecycleRecord
+    collector_source_id_get = HeadlessCollectorService.source_id.fget
+    completed_phase = EventPhase.COMPLETED
+    datetime_type = datetime
+    timezone_utc = timezone.utc
+    valid_hex = frozenset("0123456789abcdef")
+    valid_outcomes = frozenset({"win", "loss", "void"})
+
+    def canonical_text(value: object, field: str) -> str:
+        if type(value) is not str or not value or value.strip() != value:
+            raise ValueError(f"{field} must be a non-empty trimmed string")
+        return value
+
+    def canonical_instant(value: object, field: str) -> datetime:
+        raw = canonical_text(value, field)
+        try:
+            parsed = datetime_type.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"{field} must be valid ISO-8601") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{field} must be timezone-aware ISO-8601")
+        return parsed.astimezone(timezone_utc)
+
+    def validate_resolution(
+        resolution: SettlementResolution,
+        *,
+        as_of: str,
+    ) -> None:
+        if type(resolution) is not resolution_type:
+            raise TypeError("settlement resolution must be canonical")
+        canonical_text(resolution.event_identity, "event_identity")
+        canonical_text(resolution.settlement_ref, "settlement_ref")
+        canonical_text(resolution.evidence_id, "evidence_id")
+        digest = resolution.evidence_sha256
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in valid_hex for character in digest)
+        ):
+            raise ValueError(
+                "evidence_sha256 must be a lowercase SHA-256 hex digest"
+            )
+        cutoff = canonical_instant(as_of, "as_of")
+        available = canonical_instant(resolution.available_at, "available_at")
+        if available > cutoff:
+            raise ValueError(
+                "settlement evidence is not causally available at session cutoff"
+            )
+        quote_outcomes = resolution.quote_outcomes
+        if type(quote_outcomes) is not dict or not quote_outcomes:
+            raise ValueError("quote_outcomes must be a non-empty exact dict")
+        for quote_key, outcome in quote_outcomes.items():
+            canonical_text(quote_key, "quote_outcomes quote_key")
+            if type(outcome) is not str or outcome not in valid_outcomes:
+                raise ValueError("quote_outcomes contains unsupported outcome")
+
+    def canonical_records(lifecycle) -> tuple[EventLifecycleRecord, ...]:
+        if type(lifecycle) is not lifecycle_type:
+            raise ContinuousSessionError(
+                "settlement lifecycle authority must be canonical"
+            )
+        if (
+            lifecycle_type.records is not lifecycle_records
+            or lifecycle_type._read is not lifecycle_read
+            or "records" in lifecycle.__dict__
+            or "_read" in lifecycle.__dict__
+        ):
+            raise ContinuousSessionError(
+                "settlement lifecycle record dispatch changed"
+            )
+        records = lifecycle_records(lifecycle)
+        if type(records) is not tuple or any(
+            type(record) is not lifecycle_record_type for record in records
+        ):
+            raise ContinuousSessionError(
+                "settlement lifecycle returned non-canonical records"
+            )
+        return records
+
+    def guarded(self, *, as_of: str):
+        return method(
+            self,
+            as_of=as_of,
+            _settlement_resolution_type=resolution_type,
+            _settlement_resolution_validate=validate_resolution,
+            _lifecycle_records=canonical_records,
+            _collector_source_id_get=collector_source_id_get,
+            _settlement_instant=canonical_instant,
+            _settlement_completed_phase=completed_phase,
+        )
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
+def _canonical_open_quote_keys_for_book(
+    coordinator,
+    book: PaperBook,
+    event_identity: str,
+    settlement_ref: str,
+    settled_at: str,
+    *,
+    _lifecycle_get: Callable[[ContinuousEventLifecycle, str], EventLifecycleRecord | None],
+    _lifecycle_record_type: type[EventLifecycleRecord],
+    _settlement_instant: Callable[[object, str], datetime],
+    _completed_phase: EventPhase,
+) -> set[str]:
+    """Resolve the exact provider/sport/native-event scope allowed to mutate P&L."""
+
+    record = _lifecycle_get(coordinator.lifecycle, event_identity)
+    if record is not None and type(record) is not _lifecycle_record_type:
+        raise ContinuousSessionError(
+            "settlement lifecycle lookup returned non-canonical record"
+        )
+    if record is None:
+        raise ContinuousSessionError(
+            "settlement event identity is absent from durable lifecycle"
+        )
+    if record.phase is not _completed_phase:
+        raise ContinuousSessionError(
+            "settlement event is not durably completed"
+        )
+    if record.settlement_ref != settlement_ref:
+        raise ContinuousSessionError(
+            "settlement evidence reference differs from durable lifecycle"
+        )
+    if record.settlement_discovered_at is None:
+        raise ContinuousSessionError(
+            "settlement lifecycle lacks durable discovery chronology"
+        )
+    if _settlement_instant(
+        record.settlement_discovered_at,
+        "settlement_discovered_at",
+    ) > _settlement_instant(settled_at, "settled_at"):
+        raise ContinuousSessionError(
+            "settlement lifecycle was discovered after the economic cutoff"
+        )
+    source_id = coordinator._settlement_source_id
+    if record.source_id != source_id:
+        raise ContinuousSessionError(
+            "settlement event source is outside continuous session authority"
+        )
+    return {
+        leg.quote_key
+        for ticket in book.tickets.values()
+        if ticket.status.value == "open"
+        # Settlement is an economic mutation, not merely a compatibility read.
+        # Legacy tickets without provider provenance remain loadable, but they
+        # cannot safely consume provider-scoped outcome truth. A multi-provider
+        # ticket is likewise ambiguous because PaperTicket provenance is
+        # ticket-level rather than leg-level; fail closed until every leg can be
+        # bound to one provider explicitly.
+        if ticket.provider_source_ids == (source_id,)
+        for leg in ticket.legs
+        # Canonical product tickets store the provider-native event id and sport
+        # on every leg. Historical full-identity aliases and sport-less legs
+        # remain readable, but cannot authorize P&L because either shape can
+        # collide across provider/sport namespaces.
+        if leg.event_id == record.event_id
+        if leg.sport == record.sport
+    }
 
 
 class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
@@ -655,6 +1790,77 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     """
 
     _settlement_consumer_bindings_sealed = False
+    _authority_fields_sealed = False
+
+    def __setattr__(self, name: str, value: object) -> None:
+        try:
+            sealed = object.__getattribute__(self, "_authority_fields_sealed")
+        except AttributeError:
+            sealed = False
+        if sealed and name in {
+            "_authority_fields_sealed",
+            "workspace",
+            "collector",
+            "lifecycle",
+            "market_store",
+            "desktop_consumer",
+            "invalidation_buffer",
+            "dependency_index",
+            "paper_book_path",
+            "outcome_authority",
+            "_outcome_resolver",
+            "settlement_learning_handoff",
+            "_settlement_prepare",
+            "_settlement_reconcile",
+            "_settlement_prepared_resolutions",
+            "_settlement_source_id",
+            "clock",
+            "required_history",
+            "max_invalidation_batches_per_tick",
+            "max_invalidation_items_per_batch",
+            "causal_view",
+            "initial_bankroll",
+            "_state",
+        }:
+            raise ContinuousSessionError(
+                f"continuous session authority field {name} is immutable after construction"
+            )
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        try:
+            sealed = object.__getattribute__(self, "_authority_fields_sealed")
+        except AttributeError:
+            sealed = False
+        if sealed and name in {
+            "_authority_fields_sealed",
+            "workspace",
+            "collector",
+            "lifecycle",
+            "market_store",
+            "desktop_consumer",
+            "invalidation_buffer",
+            "dependency_index",
+            "paper_book_path",
+            "outcome_authority",
+            "_outcome_resolver",
+            "settlement_learning_handoff",
+            "_settlement_prepare",
+            "_settlement_reconcile",
+            "_settlement_prepared_resolutions",
+            "_settlement_source_id",
+            "clock",
+            "required_history",
+            "max_invalidation_batches_per_tick",
+            "max_invalidation_items_per_batch",
+            "causal_view",
+            "initial_bankroll",
+            "_state",
+        }:
+            raise ContinuousSessionError(
+                f"continuous session authority field {name} is immutable after construction"
+            )
+        object.__delattr__(self, name)
 
     def __init__(
         self,
@@ -677,6 +1883,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         causal_view: CausalView = CausalView.AS_KNOWN_AT_DECISION,
         initial_bankroll: str = "10000",
     ) -> None:
+        self._authority_fields_sealed = False
         if not isinstance(workspace, (str, Path)):
             raise TypeError("workspace must be a path-like value")
         if not isinstance(collector, HeadlessCollectorService):
@@ -693,21 +1900,49 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         if not isinstance(dependency_index, FocusedMirrorDependencyIndex):
             raise TypeError("dependency_index must be FocusedMirrorDependencyIndex")
-        if outcome_authority is not None and not callable(
-            getattr(outcome_authority, "resolve", None)
-        ):
+        outcome_resolver = (
+            None
+            if outcome_authority is None
+            else getattr(outcome_authority, "resolve", None)
+        )
+        if outcome_resolver is not None and not callable(outcome_resolver):
             raise TypeError("outcome_authority.resolve must be callable")
+        if outcome_authority is not None and outcome_resolver is None:
+            raise TypeError("outcome_authority.resolve must be callable")
+
+        settlement_prepare = None
+        settlement_reconcile = None
+        settlement_prepared_resolutions = None
         if settlement_learning_handoff is not None:
-            if not callable(
-                getattr(settlement_learning_handoff, "reconcile_after_settlement", None)
-            ):
+            settlement_reconcile = getattr(
+                settlement_learning_handoff,
+                "reconcile_after_settlement",
+                None,
+            )
+            if not callable(settlement_reconcile):
                 raise TypeError(
                     "settlement_learning_handoff.reconcile_after_settlement must be callable"
                 )
-            prepare = getattr(settlement_learning_handoff, "prepare_settlement", None)
-            if prepare is not None and not callable(prepare):
+            settlement_prepare = getattr(
+                settlement_learning_handoff,
+                "prepare_settlement",
+                None,
+            )
+            if settlement_prepare is not None and not callable(settlement_prepare):
                 raise TypeError(
                     "settlement_learning_handoff.prepare_settlement must be callable"
+                )
+            settlement_prepared_resolutions = getattr(
+                settlement_learning_handoff,
+                "prepared_settlement_resolutions",
+                None,
+            )
+            if (
+                settlement_prepared_resolutions is not None
+                and not callable(settlement_prepared_resolutions)
+            ):
+                raise TypeError(
+                    "settlement_learning_handoff.prepared_settlement_resolutions must be callable"
                 )
 
         self.workspace = Path(workspace)
@@ -724,7 +1959,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             else Path(paper_book_path)
         )
         self.outcome_authority = outcome_authority
+        self._outcome_resolver = outcome_resolver
         self.settlement_learning_handoff = settlement_learning_handoff
+        self._settlement_prepare = settlement_prepare
+        self._settlement_reconcile = settlement_reconcile
+        self._settlement_prepared_resolutions = settlement_prepared_resolutions
+        self._settlement_source_id = _text(
+            collector.source_id,
+            "collector source_id",
+        )
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
         if isinstance(required_history, timedelta) and required_history.total_seconds() < 0:
             raise ValueError("required_history cannot be negative")
@@ -756,9 +1999,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self._state = _ContinuousSessionState(
             self.workspace / "continuous_session.json",
             session_id=session_id,
-            source_id=collector.source_id,
+            source_id=self._settlement_source_id,
             clock=self.clock,
         )
+        self._authority_fields_sealed = True
 
     @property
     def session_id(self) -> str:
@@ -778,6 +2022,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             source_provider_unavailable=source_last_error == "ProviderUnavailableError",
             source_last_success_at=source_last_success,
             source_last_error_code=source_last_error,
+            pending_settlement_evidence_ids=(
+                snapshot.pending_settlement_evidence_ids
+            ),
             source_gap_state=snapshot.source_gap_state,
             source_sync_state=snapshot.source_sync_state,
             source_state_delta_id=snapshot.source_state_delta_id,
@@ -860,24 +2107,59 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         )
         return self._state.snapshot()
 
+    @_seal_settlement_consumer_entry
+    @_bind_canonical_settlement_resolution_collection
     def _settlement_resolutions(
         self,
         *,
         as_of: str,
+        _settlement_resolution_type: type[SettlementResolution],
+        _settlement_resolution_validate: Callable[..., None],
+        _lifecycle_records: Callable[[ContinuousEventLifecycle], tuple[EventLifecycleRecord, ...]],
+        _collector_source_id_get: Callable[[HeadlessCollectorService], str],
+        _settlement_instant: Callable[[object, str], datetime],
+        _settlement_completed_phase: EventPhase,
     ) -> tuple[SettlementResolution, ...]:
-        if self.outcome_authority is None:
+        if self._outcome_resolver is None:
             return ()
+        if _collector_source_id_get(self.collector) != self._settlement_source_id:
+            raise ContinuousSessionError(
+                "collector source identity changed after settlement authority binding"
+            )
+        cutoff = _settlement_instant(as_of, "as_of")
         resolutions: list[SettlementResolution] = []
-        for record in self.lifecycle.records():
-            if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
+        for record in _lifecycle_records(self.lifecycle):
+            # A continuous session is bound to exactly one collector source. A
+            # shared lifecycle may contain other providers, but their settlement
+            # records are outside this session's economic authority.
+            if record.source_id != self._settlement_source_id:
                 continue
-            resolution = self.outcome_authority.resolve(record, as_of=as_of)
+            if record.phase is not _settlement_completed_phase or record.settlement_ref is None:
+                continue
+            if record.settlement_discovered_at is None:
+                raise ContinuousSessionError(
+                    "settlement lifecycle lacks durable discovery chronology"
+                )
+            if _settlement_instant(
+                record.settlement_discovered_at,
+                "settlement_discovered_at",
+            ) > cutoff:
+                raise ContinuousSessionError(
+                    "settlement lifecycle was discovered after the evidence cutoff"
+                )
+            resolution = self._outcome_resolver(record, as_of=as_of)
             if resolution is None:
                 continue
-            if not isinstance(resolution, SettlementResolution):
+            if type(resolution) is not _settlement_resolution_type:
                 raise ContinuousSessionError(
-                    "outcome authority must return SettlementResolution or None"
+                    "outcome authority must return canonical SettlementResolution or None"
                 )
+            try:
+                _settlement_resolution_validate(resolution, as_of=as_of)
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "settlement resolution failed canonical validation"
+                ) from exc
             if resolution.event_identity != record.identity:
                 raise ContinuousSessionError(
                     "settlement evidence event identity does not match lifecycle identity"
@@ -886,9 +2168,137 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "settlement evidence reference does not match lifecycle evidence"
                 )
-            resolution.validate(as_of=as_of)
             resolutions.append(resolution)
         return tuple(resolutions)
+
+    @_seal_settlement_consumer_entry
+    @_bind_canonical_settlement_resolution_collection
+    def _pending_settlement_resolutions(
+        self,
+        *,
+        as_of: str,
+        _settlement_resolution_type: type[SettlementResolution],
+        _settlement_resolution_validate: Callable[..., None],
+        _lifecycle_records: Callable[[ContinuousEventLifecycle], tuple[EventLifecycleRecord, ...]],
+        _collector_source_id_get: Callable[[HeadlessCollectorService], str],
+        _settlement_instant: Callable[[object, str], datetime],
+        _settlement_completed_phase: EventPhase,
+    ) -> tuple[SettlementResolution, ...]:
+        if _collector_source_id_get(self.collector) != self._settlement_source_id:
+            raise ContinuousSessionError(
+                "collector source identity changed after settlement authority binding"
+            )
+        cutoff = _settlement_instant(as_of, "as_of")
+        pending = self._state.pending_settlement_resolutions()
+        if type(pending) is not tuple:
+            raise ContinuousSessionError(
+                "pending settlement recovery must return a tuple"
+            )
+        records = {
+            record.identity: record
+            for record in _lifecycle_records(self.lifecycle)
+            if record.source_id == self._settlement_source_id
+        }
+        for resolution in pending:
+            if type(resolution) is not _settlement_resolution_type:
+                raise ContinuousSessionError(
+                    "pending settlement recovery returned non-canonical evidence"
+                )
+            try:
+                _settlement_resolution_validate(resolution, as_of=as_of)
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "pending settlement recovery failed canonical validation"
+                ) from exc
+            record = records.get(resolution.event_identity)
+            if (
+                record is None
+                or record.phase is not _settlement_completed_phase
+                or record.settlement_ref != resolution.settlement_ref
+                or record.settlement_discovered_at is None
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement recovery conflicts with durable lifecycle"
+                )
+            if _settlement_instant(
+                record.settlement_discovered_at,
+                "settlement_discovered_at",
+            ) > cutoff:
+                raise ContinuousSessionError(
+                    "pending settlement lifecycle was discovered after the evidence cutoff"
+                )
+        return pending
+
+    @_seal_settlement_consumer_entry
+    @_bind_canonical_settlement_resolution_collection
+    def _recovered_settlement_resolutions(
+        self,
+        *,
+        as_of: str,
+        _settlement_resolution_type: type[SettlementResolution],
+        _settlement_resolution_validate: Callable[..., None],
+        _lifecycle_records: Callable[[ContinuousEventLifecycle], tuple[EventLifecycleRecord, ...]],
+        _collector_source_id_get: Callable[[HeadlessCollectorService], str],
+        _settlement_instant: Callable[[object, str], datetime],
+        _settlement_completed_phase: EventPhase,
+    ) -> tuple[SettlementResolution, ...]:
+        if self._settlement_prepared_resolutions is None:
+            return ()
+        if _collector_source_id_get(self.collector) != self._settlement_source_id:
+            raise ContinuousSessionError(
+                "collector source identity changed after settlement authority binding"
+            )
+        cutoff = _settlement_instant(as_of, "as_of")
+        recovered = self._settlement_prepared_resolutions(
+            paper_book_path=self.paper_book_path,
+        )
+        if type(recovered) is not tuple:
+            raise ContinuousSessionError(
+                "prepared settlement recovery must return a tuple"
+            )
+        records = {
+            record.identity: record
+            for record in _lifecycle_records(self.lifecycle)
+            if record.source_id == self._settlement_source_id
+        }
+        seen_evidence_ids: set[str] = set()
+        for resolution in recovered:
+            if type(resolution) is not _settlement_resolution_type:
+                raise ContinuousSessionError(
+                    "prepared settlement recovery returned non-canonical evidence"
+                )
+            try:
+                _settlement_resolution_validate(resolution, as_of=as_of)
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "prepared settlement recovery failed canonical validation"
+                ) from exc
+            if resolution.evidence_id in seen_evidence_ids:
+                raise ContinuousSessionError(
+                    "prepared settlement recovery repeats evidence identity"
+                )
+            seen_evidence_ids.add(resolution.evidence_id)
+            record = records.get(resolution.event_identity)
+            if (
+                record is None
+                or record.phase is not _settlement_completed_phase
+                or record.settlement_ref != resolution.settlement_ref
+                or record.settlement_discovered_at is None
+            ):
+                raise ContinuousSessionError(
+                    "prepared settlement recovery conflicts with durable lifecycle"
+                )
+            if _settlement_instant(
+                record.settlement_discovered_at,
+                "settlement_discovered_at",
+            ) > cutoff:
+                raise ContinuousSessionError(
+                    "prepared settlement lifecycle was discovered after the evidence cutoff"
+                )
+        self._state.validate_recovered_settlement_evidence(
+            settlement_evidence=recovered,
+        )
+        return recovered
 
     def _load_book(self) -> PaperBook:
         if self.paper_book_path.exists():
@@ -901,27 +2311,86 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self,
         *,
         resolutions: tuple[SettlementResolution, ...],
+        settled_at: str,
         _settlement_engine_type: type[SettlementEngine],
+        _settlement_scope_resolver: Callable[[object, PaperBook, str], set[str]],
+        _settlement_resolution_type: type[SettlementResolution],
+        _settlement_resolution_validate: Callable[..., None],
+        _settlement_instant: Callable[..., datetime],
+        _paper_book_type: type[PaperBook],
+        _paper_book_load: Callable[[str | Path], PaperBook],
+        _paper_book_save: Callable[[PaperBook, str | Path], None],
+        _workspace_lock_type: type[WorkspaceEconomicLock],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        if type(resolutions) is not tuple:
+            raise TypeError("settlement resolutions must be a tuple")
         if not resolutions:
             return (), ()
         if SettlementEngine is not _settlement_engine_type:
             raise ContinuousSessionError(
                 "settlement engine constructor origin changed"
             )
-        unique: dict[str, SettlementResolution] = {}
-        for resolution in resolutions:
-            unique.setdefault(resolution.evidence_id, resolution)
 
-        with WorkspaceEconomicLock(self.workspace):
-            book = self._load_book()
+        canonical_settled_at = _settlement_instant(
+            settled_at,
+            "settled_at",
+        ).isoformat()
+        unique: dict[str, SettlementResolution] = {}
+        event_ref_authority: dict[tuple[str, str], str] = {}
+        for resolution in resolutions:
+            if type(resolution) is not _settlement_resolution_type:
+                raise ContinuousSessionError(
+                    "settlement handoff contains non-canonical resolution evidence"
+                )
+            try:
+                _settlement_resolution_validate(
+                    resolution,
+                    as_of=canonical_settled_at,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "settlement resolution failed canonical validation"
+                ) from exc
+
+            previous = unique.get(resolution.evidence_id)
+            if previous is not None and previous != resolution:
+                raise ContinuousSessionError(
+                    "settlement evidence id has multiple authorities"
+                )
+            event_ref = (resolution.event_identity, resolution.settlement_ref)
+            previous_event_ref_authority = event_ref_authority.get(event_ref)
+            if (
+                previous_event_ref_authority is not None
+                and previous_event_ref_authority != resolution.evidence_id
+            ):
+                raise ContinuousSessionError(
+                    "settlement event/reference has multiple evidence authorities"
+                )
+            unique[resolution.evidence_id] = resolution
+            event_ref_authority[event_ref] = resolution.evidence_id
+
+        with _workspace_lock_type(self.workspace):
+            if self.paper_book_path.exists():
+                book = _paper_book_load(self.paper_book_path)
+            else:
+                book = _paper_book_type(self.initial_bankroll)
+            if type(book) is not _paper_book_type:
+                raise ContinuousSessionError(
+                    "settlement book loader returned non-canonical type"
+                )
             engine = _settlement_engine_type()
             if type(engine) is not _settlement_engine_type:
                 raise ContinuousSessionError(
                     "settlement engine constructor returned non-canonical type"
                 )
             for resolution in unique.values():
-                allowed = self._open_quote_keys_for_book(book, resolution.event_identity)
+                allowed = _settlement_scope_resolver(
+                    self,
+                    book,
+                    resolution.event_identity,
+                    resolution.settlement_ref,
+                    canonical_settled_at,
+                )
                 scoped = {
                     quote_key: outcome
                     for quote_key, outcome in resolution.quote_outcomes.items()
@@ -929,27 +2398,85 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 }
                 if scoped:
                     engine.record(scoped)
-            settled = tuple(engine.settle_ready(book))
+            settled = tuple(
+                engine.settle_ready(
+                    book,
+                    settled_at=canonical_settled_at,
+                )
+            )
             if settled:
-                book.save(self.paper_book_path)
+                _paper_book_save(book, self.paper_book_path)
 
         return settled, tuple(unique)
 
-    @staticmethod
-    def _open_quote_keys_for_book(
-        book: PaperBook,
-        event_identity: str,
-    ) -> set[str]:
-        parts = {event_identity}
-        if ":" in event_identity:
-            parts.add(event_identity.split(":", 1)[1])
-        return {
-            leg.quote_key
-            for ticket in book.tickets.values()
-            if ticket.status.value == "open"
-            for leg in ticket.legs
-            if leg.event_id in parts
-        }
+    @_seal_settlement_consumer_entry
+    @_bind_canonical_settlement_engine
+    def _retained_pending_settlement_ids(
+        self,
+        *,
+        resolutions: tuple[SettlementResolution, ...],
+        settled_at: str,
+        _settlement_engine_type: type[SettlementEngine],
+        _settlement_scope_resolver: Callable[[object, PaperBook, str], set[str]],
+        _settlement_resolution_type: type[SettlementResolution],
+        _settlement_resolution_validate: Callable[..., None],
+        _settlement_instant: Callable[..., datetime],
+        _paper_book_type: type[PaperBook],
+        _paper_book_load: Callable[[str | Path], PaperBook],
+        _paper_book_save: Callable[[PaperBook, str | Path], None],
+        _workspace_lock_type: type[WorkspaceEconomicLock],
+    ) -> tuple[str, ...]:
+        """Retain staged truth while any canonical open ticket can still consume it."""
+
+        if type(resolutions) is not tuple:
+            raise TypeError("settlement resolutions must be a tuple")
+        if not resolutions:
+            return ()
+        canonical_settled_at = _settlement_instant(
+            settled_at,
+            "settled_at",
+        ).isoformat()
+        retained: list[str] = []
+        seen: set[str] = set()
+        with _workspace_lock_type(self.workspace):
+            if not self.paper_book_path.exists():
+                return ()
+            book = _paper_book_load(self.paper_book_path)
+            if type(book) is not _paper_book_type:
+                raise ContinuousSessionError(
+                    "settlement book loader returned non-canonical type"
+                )
+            for resolution in resolutions:
+                if type(resolution) is not _settlement_resolution_type:
+                    raise ContinuousSessionError(
+                        "pending retention contains non-canonical resolution evidence"
+                    )
+                try:
+                    _settlement_resolution_validate(
+                        resolution,
+                        as_of=canonical_settled_at,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ContinuousSessionError(
+                        "pending retention resolution failed canonical validation"
+                    ) from exc
+                allowed = _settlement_scope_resolver(
+                    self,
+                    book,
+                    resolution.event_identity,
+                    resolution.settlement_ref,
+                    canonical_settled_at,
+                )
+                if (
+                    any(
+                        quote_key in allowed
+                        for quote_key in resolution.quote_outcomes
+                    )
+                    and resolution.evidence_id not in seen
+                ):
+                    retained.append(resolution.evidence_id)
+                    seen.add(resolution.evidence_id)
+        return tuple(retained)
 
     def tick(self) -> ContinuousTickResult:
         self._require_running()
@@ -959,6 +2486,48 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             cycle = self.collector.run_cycle()
             source_snapshot = self._refresh_source_state_projection()
             if cycle.provider_unavailable:
+                # Provider availability cannot revoke truth already staged before a
+                # previous crash. Recover only the durable pending commit; do not call
+                # the outcome authority or mint new settlement evidence on this path.
+                pending_resolutions = self._pending_settlement_resolutions(
+                    as_of=now,
+                )
+                recovered_resolutions: tuple[SettlementResolution, ...] = ()
+                settled: tuple[str, ...] = ()
+                evidence_ids: tuple[str, ...] = ()
+                if pending_resolutions:
+                    if self._settlement_prepare is not None:
+                        self._settlement_prepare(
+                            paper_book_path=self.paper_book_path,
+                            resolutions=pending_resolutions,
+                            at=now,
+                        )
+                    recovered_resolutions = self._recovered_settlement_resolutions(
+                        as_of=now,
+                    )
+                    recovery_resolutions = (
+                        pending_resolutions + recovered_resolutions
+                    )
+                    settled, evidence_ids = self._settle(
+                        resolutions=recovery_resolutions,
+                        settled_at=now,
+                    )
+                    if self._settlement_reconcile is not None:
+                        self._settlement_reconcile(
+                            paper_book_path=self.paper_book_path,
+                            resolutions=recovery_resolutions,
+                            settled_ticket_ids=settled,
+                            at=now,
+                        )
+                    retained_pending_ids = self._retained_pending_settlement_ids(
+                        resolutions=recovery_resolutions,
+                        settled_at=now,
+                    )
+                    self._state.complete_pending_settlement_commit(
+                        settlement_evidence=recovery_resolutions,
+                        retain_pending_evidence_ids=retained_pending_ids,
+                    )
+
                 self._state.record_failure(code="ProviderUnavailableError")
                 snapshot = self._state.snapshot()
                 return ContinuousTickResult(
@@ -988,8 +2557,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         self.invalidation_buffer.pending_count > 0
                         or self.invalidation_buffer.full_refresh_required
                     ),
-                    settled_ticket_ids=(),
-                    settlement_evidence_ids=(),
+                    settled_ticket_ids=settled,
+                    settlement_evidence_ids=evidence_ids,
                     last_success_at=snapshot.last_success_at,
                 )
 
@@ -1037,36 +2606,48 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 if input_id not in newly_registered:
                     newly_registered.append(input_id)
 
-            resolutions = self._settlement_resolutions(as_of=now)
-            self._state.validate_settlement_evidence(
-                settlement_evidence=resolutions
+            current_resolutions = self._settlement_resolutions(as_of=now)
+            # Settlement identity, exact quote outcomes and their digest are one
+            # pre-P&L commit record.  The pending journal survives a crash before
+            # learning preparation, PaperBook mutation or post-settlement ACK.
+            self._state.record_settlement_evidence(
+                settlement_evidence=current_resolutions
             )
-            if self.settlement_learning_handoff is not None:
-                prepare = getattr(
-                    self.settlement_learning_handoff,
-                    "prepare_settlement",
-                    None,
+            pending_resolutions = self._pending_settlement_resolutions(
+                as_of=now,
+            )
+            if self._settlement_prepare is not None:
+                self._settlement_prepare(
+                    paper_book_path=self.paper_book_path,
+                    resolutions=pending_resolutions,
+                    at=now,
                 )
-                if prepare is not None:
-                    prepare(
-                        paper_book_path=self.paper_book_path,
-                        resolutions=resolutions,
-                        at=now,
-                    )
-            settled, evidence_ids = self._settle(resolutions=resolutions)
-            if self.settlement_learning_handoff is not None:
-                self.settlement_learning_handoff.reconcile_after_settlement(
+            recovered_resolutions = self._recovered_settlement_resolutions(
+                as_of=now,
+            )
+            resolutions = pending_resolutions + recovered_resolutions
+            settled, evidence_ids = self._settle(
+                resolutions=resolutions,
+                settled_at=now,
+            )
+            if self._settlement_reconcile is not None:
+                self._settlement_reconcile(
                     paper_book_path=self.paper_book_path,
                     resolutions=resolutions,
                     settled_ticket_ids=settled,
                     at=now,
                 )
 
+            retained_pending_ids = self._retained_pending_settlement_ids(
+                resolutions=resolutions,
+                settled_at=now,
+            )
             cycle_index = self._state.snapshot().cycles_completed + 1
             self._state.record_success(
                 at=now,
                 full_refresh=full_refresh,
                 settlement_evidence=resolutions,
+                retain_pending_evidence_ids=retained_pending_ids,
             )
             return ContinuousTickResult(
                 session_id=self.session_id,
@@ -1087,12 +2668,35 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 last_success_at=self._state.snapshot().last_success_at or now,
             )
         except Exception as exc:
-            self._state.record_failure(code=type(exc).__name__)
+            try:
+                self._state.record_failure(code=type(exc).__name__)
+            except Exception as checkpoint_exc:
+                # Diagnostic checkpoint failure must never replace the market,
+                # settlement, replay or economic error that caused this tick to fail.
+                try:
+                    exc.add_note(
+                        "continuous-session failure checkpoint also failed: "
+                        f"{type(checkpoint_exc).__name__}: {checkpoint_exc}"
+                    )
+                except Exception:
+                    pass
             raise
 
 # Seal the consumer entry after class creation. The metaclass data descriptor also
 # makes direct type.__setattr__/type.__delattr__ respect the same class-level fence.
 _ContinuousSessionCoordinatorMeta._settle = _build_settlement_consumer_class_guard(
     "_settle"
+)
+_ContinuousSessionCoordinatorMeta._settlement_resolutions = (
+    _build_settlement_consumer_class_guard("_settlement_resolutions")
+)
+_ContinuousSessionCoordinatorMeta._pending_settlement_resolutions = (
+    _build_settlement_consumer_class_guard("_pending_settlement_resolutions")
+)
+_ContinuousSessionCoordinatorMeta._retained_pending_settlement_ids = (
+    _build_settlement_consumer_class_guard("_retained_pending_settlement_ids")
+)
+_ContinuousSessionCoordinatorMeta._recovered_settlement_resolutions = (
+    _build_settlement_consumer_class_guard("_recovered_settlement_resolutions")
 )
 ContinuousSessionCoordinator._settlement_consumer_bindings_sealed = True

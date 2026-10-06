@@ -188,8 +188,14 @@ class CommittedIngestionOutcome:
     quality_flags: tuple[str, ...]
     health_before: _SourceHealthSnapshot | None = None
 
-    def _record_health_once(self, store: SourceHealthStore) -> SourceHealthState:
-        return store.record_success(
+    def _record_health_once(
+        self,
+        store: SourceHealthStore,
+        *,
+        _record_success=SourceHealthStore.record_success,
+    ) -> SourceHealthState:
+        return _record_success(
+            store,
             self.source_id,
             now=self.now,
             received=self.received,
@@ -200,14 +206,20 @@ class CommittedIngestionOutcome:
             quality_flags=self.quality_flags,
         )
 
-    def record_health(self, store: SourceHealthStore) -> SourceHealthState:
+    def record_health(
+        self,
+        store: SourceHealthStore,
+        *,
+        _record_success_if_current=SourceHealthStore.record_success_if_current,
+    ) -> SourceHealthState:
         """Repair health only when compare-and-apply is atomic and provably safe."""
         if self.health_before is None:
             raise RuntimeError(
                 "committed ingestion outcome lacks pre-health state for a safe retry"
             )
         expected_after = self.health_before.after_success(self)
-        return store.record_success_if_current(
+        return _record_success_if_current(
+            store,
             self.health_before.to_state(),
             ambiguous_after=expected_after.to_state(),
             now=self.now,

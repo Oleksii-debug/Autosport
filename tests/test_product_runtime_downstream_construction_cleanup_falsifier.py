@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport.causal_collector import CanonicalDesktopApplication
 from autosport.product_runtime import build_autonomous_product_runtime
 from autosport.storage import SQLiteMarketStore
 
@@ -23,31 +24,29 @@ class _Source:
         raise AssertionError("construction failure test must not resolve market events")
 
 
-class _TrackingMarketStore(SQLiteMarketStore):
-    instances: list["_TrackingMarketStore"] = []
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.close_calls = 0
-        type(self).instances.append(self)
-
-    def close(self) -> None:
-        self.close_calls += 1
-        super().close()
-
-
 class ProductRuntimeDownstreamConstructionCleanupFalsifierTests(unittest.TestCase):
     def test_failure_after_successful_mirror_restore_closes_open_market_store(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            _TrackingMarketStore.instances.clear()
+            stores = []
+            close_calls = []
+            original_close = SQLiteMarketStore.close
 
-            with patch(
-                "autosport.product_runtime.SQLiteMarketStore",
-                _TrackingMarketStore,
-            ), patch(
-                "autosport.product_runtime.CanonicalDesktopApplication",
-                side_effect=RuntimeError("forced-downstream-construction-failure"),
+            def tracked_close(store):
+                close_calls.append(store)
+                return original_close(store)
+
+            def fail_application_init(_self, market_bus, *_args, **_kwargs):
+                stores.append(market_bus.store)
+                raise RuntimeError("forced-downstream-construction-failure")
+
+            with (
+                patch.object(SQLiteMarketStore, "close", tracked_close),
+                patch.object(
+                    CanonicalDesktopApplication,
+                    "__init__",
+                    fail_application_init,
+                ),
             ):
                 with self.assertRaisesRegex(
                     RuntimeError,
@@ -59,19 +58,12 @@ class ProductRuntimeDownstreamConstructionCleanupFalsifierTests(unittest.TestCas
                         initial_bankroll="100",
                     )
 
-            self.assertEqual(len(_TrackingMarketStore.instances), 1)
-            store = _TrackingMarketStore.instances[0]
-            try:
-                self.assertEqual(
-                    store.close_calls,
-                    1,
-                    "construction unwind must close SQLiteMarketStore exactly once",
-                )
-            finally:
-                # Keep this expected-RED falsifier from leaking a real handle in the
-                # test runner while the parent implementation still misses cleanup.
-                if store.close_calls == 0:
-                    store.close()
+            self.assertEqual(len(stores), 1)
+            self.assertEqual(
+                close_calls.count(stores[0]),
+                1,
+                "construction unwind must close SQLiteMarketStore exactly once",
+            )
 
 
 if __name__ == "__main__":

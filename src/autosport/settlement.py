@@ -282,6 +282,7 @@ def _build_serialized_settlement_operations():
     )
     validate_book = paper_book_type._validate_loaded_state
     settlement_result = paper_book_type._settlement_result
+    validate_settled_at = paper_book_type._validate_settled_at
     settle_book = paper_book_type.settle
 
     # Function identity alone does not bind the module globals resolved at call
@@ -521,7 +522,12 @@ def _build_serialized_settlement_operations():
             outcomes_descriptor.__set__(self, published)
             issue_outcomes_authority(self, published)
 
-    def settle_ready(self, book: PaperBook) -> list[str]:
+    def settle_ready(
+        self,
+        book: PaperBook,
+        *,
+        settled_at: str | None = None,
+    ) -> list[str]:
         # Keep one exact lock from outcome snapshot through the entire canonical
         # PaperBook economic commit. record() consumes this same closure-owned
         # lock, so neither operation can be retargeted at runtime.
@@ -566,6 +572,8 @@ def _build_serialized_settlement_operations():
                         voids,
                     )
                 )
+                if settled_at is not None:
+                    validate_settled_at(settled_at, ticket.placed_at)
                 plan.append((ticket.ticket_id, winning, voids))
 
             settled: list[str] = []
@@ -578,6 +586,7 @@ def _build_serialized_settlement_operations():
                     ticket_id,
                     winning,
                     voids,
+                    settled_at=settled_at,
                 )
                 settled.append(ticket_id)
             return settled

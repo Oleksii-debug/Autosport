@@ -1,7 +1,7 @@
 import unittest
 from decimal import Decimal, localcontext
 
-from autosport.domain import TicketLeg
+from autosport.domain import TicketLeg, TicketStatus
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
 
@@ -262,6 +262,57 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         self.assertEqual(policy.minimum_cash_reserve_fraction, Decimal("0.10"))
         self.assertTrue(policy.evaluate(PaperBook("100"), "10").allowed)
 
+
+    def test_risk_captured_raw_paperbook_settlement_supports_lay_before_guard_rebinding(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg(
+            "event-raw-lay",
+            "market-raw-lay",
+            "selection-raw-lay",
+            Decimal("5"),
+            exchange_side="lay",
+            market_semantics_id="exchange.match.odds.v1",
+        )
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-10-06T00:00:00+00:00",
+        )
+
+        status, payout, balance = (
+            risk_module._CANONICAL_PAPERBOOK_SETTLEMENT_RESULT(
+                ticket,
+                Decimal("0"),
+                {leg.settlement_key},
+                set(),
+            )
+        )
+        self.assertIs(status, TicketStatus.LOST)
+        self.assertEqual(payout, Decimal("0"))
+        self.assertEqual(balance, Decimal("0"))
+
+        status, payout, balance = (
+            risk_module._CANONICAL_PAPERBOOK_SETTLEMENT_RESULT(
+                ticket,
+                Decimal("0"),
+                set(),
+                set(),
+            )
+        )
+        self.assertIs(status, TicketStatus.WON)
+        self.assertEqual(payout, Decimal("50"))
+        self.assertEqual(balance, Decimal("50"))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "unknown winning settlement key",
+        ):
+            risk_module._CANONICAL_PAPERBOOK_SETTLEMENT_RESULT(
+                ticket,
+                Decimal("0"),
+                {leg.quote_key},
+                set(),
+            )
 
     def test_open_lay_uses_liability_for_committed_risk_exposure(self) -> None:
         book = PaperBook("100")

@@ -7111,3 +7111,96 @@ def test_tick_economic_recovery_does_not_trust_replacement_values(
         assert coordinator.paper_book_path == original_book
         assert coordinator.initial_bankroll == original_bankroll
 
+@pytest.mark.parametrize(
+    "authority_name",
+    ("_state", "dependency_index", "invalidation_buffer"),
+)
+def test_tick_failure_restores_deleted_coordinator_authority(
+    authority_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical = getattr(coordinator, authority_name)
+
+        def delete_and_raise() -> None:
+            delattr(coordinator, authority_name)
+            raise RuntimeError("deleted coordinator authority")
+
+        coordinator.collector = _Collector(callback=delete_and_raise)
+
+        with pytest.raises(RuntimeError, match="deleted coordinator authority"):
+            coordinator.tick()
+
+        assert getattr(coordinator, authority_name) is canonical
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("_mirror", "_dirty", "_lock", "_max_dirty_keys"),
+)
+def test_tick_failure_restores_deleted_canonical_invalidation_structure(
+    field_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+        canonical_value = getattr(buffer, field_name)
+
+        def delete_and_raise() -> None:
+            delattr(buffer, field_name)
+            raise RuntimeError("deleted invalidation structure")
+
+        coordinator.collector = _Collector(callback=delete_and_raise)
+
+        with pytest.raises(RuntimeError, match="deleted invalidation structure"):
+            coordinator.tick()
+
+        assert getattr(buffer, field_name) is canonical_value
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+
+def test_tick_invalidation_structure_recovery_does_not_trust_foreign_limit_equality() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+        canonical_limit = buffer._max_dirty_keys
+        equality_calls = 0
+
+        class HostileLimit:
+            def __eq__(self, _other):
+                nonlocal equality_calls
+                equality_calls += 1
+                raise AssertionError("foreign invalidation limit equality executed")
+
+            def __ne__(self, _other):
+                nonlocal equality_calls
+                equality_calls += 1
+                raise AssertionError("foreign invalidation limit inequality executed")
+
+        def mutate_and_raise() -> None:
+            buffer._max_dirty_keys = HostileLimit()
+            raise RuntimeError("foreign invalidation limit")
+
+        coordinator.collector = _Collector(callback=mutate_and_raise)
+
+        with pytest.raises(RuntimeError, match="foreign invalidation limit"):
+            coordinator.tick()
+
+        assert equality_calls == 0
+        assert buffer._max_dirty_keys == canonical_limit
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+

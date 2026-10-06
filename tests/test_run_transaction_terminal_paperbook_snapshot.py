@@ -145,7 +145,9 @@ class RunTransactionTerminalPaperBookSnapshotTests(unittest.TestCase):
 
             # A later run may legitimately advance the shared canonical PaperBook.
             # Historical run evidence must remain the exact committed NEW bytes.
-            PaperBook("4321").save(book_path)
+            advanced_book = PaperBook.load(book_path)
+            advanced_book.balance += Decimal("1")
+            advanced_book.save(book_path)
 
             detached = RunTransaction(root, "terminal-retained")
             snapshot = detached.verified_terminal_paper_book_snapshot()
@@ -162,7 +164,9 @@ class RunTransactionTerminalPaperBookSnapshotTests(unittest.TestCase):
                 run_id="terminal-tamper",
             )
 
-            PaperBook("777").save(tx.terminal_book_snapshot_path)
+            tamper_path = root / "tamper-terminal.json"
+            PaperBook("777").save(tamper_path)
+            tx.terminal_book_snapshot_path.write_bytes(tamper_path.read_bytes())
 
             detached = RunTransaction(root, "terminal-tamper")
             with self.assertRaisesRegex(

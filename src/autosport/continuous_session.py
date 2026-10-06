@@ -581,13 +581,19 @@ class _ContinuousSessionState:
         _version: int = _CONTINUOUS_SESSION_ERROR_VERSION,
         _max_bytes: int = _CONTINUOUS_SESSION_ERROR_MAX_BYTES,
         _max_code_chars: int = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS,
+        _read_error_checkpoint_bytes: Callable[..., bytes] = _read_error_checkpoint_bytes,
+        _read_error_checkpoint_bytes_code: object = _read_error_checkpoint_bytes.__code__,
     ) -> dict[str, Any]:
-        if getattr(_strict_json_loads, "__code__", None) is not _strict_json_loads_code:
+        if (
+            getattr(_strict_json_loads, "__code__", None) is not _strict_json_loads_code
+            or getattr(_read_error_checkpoint_bytes, "__code__", None)
+            is not _read_error_checkpoint_bytes_code
+        ):
             raise ContinuousSessionError(
                 "canonical operational-checkpoint parser code identity changed"
             )
         try:
-            encoded = self._read_error_checkpoint_bytes(_max_bytes=_max_bytes)
+            encoded = _read_error_checkpoint_bytes(self, _max_bytes=_max_bytes)
             if len(encoded) > _max_bytes:
                 raise ContinuousSessionError(
                     "continuous session operational error checkpoint "
@@ -668,12 +674,16 @@ class _ContinuousSessionState:
         _max_bytes: int = _CONTINUOUS_SESSION_ERROR_MAX_BYTES,
         _max_code_chars: int = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS,
         _json_dumps: Callable[..., str] = json.dumps,
+        _json_dump: Callable[..., Any] = json.dump,
         _atomic_write_json: Callable[[str | Path, dict[str, Any]], None] = atomic_write_json,
         _json_dumps_code: object = json.dumps.__code__,
+        _json_dump_code: object = json.dump.__code__,
         _atomic_write_json_code: object = atomic_write_json.__code__,
     ) -> None:
         if (
             getattr(_json_dumps, "__code__", None) is not _json_dumps_code
+            or json.dump is not _json_dump
+            or getattr(_json_dump, "__code__", None) is not _json_dump_code
             or getattr(_atomic_write_json, "__code__", None)
             is not _atomic_write_json_code
         ):

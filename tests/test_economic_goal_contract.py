@@ -111,6 +111,16 @@ def test_contract_rejects_noncanonical_authority_inputs(
         _goal(**{field: value})
 
 
+def test_contract_rejects_oversize_authority_identity_text() -> None:
+    with pytest.raises(EconomicGoalContractError, match="text size limit"):
+        _goal(goal_id="g" * 513)
+
+
+def test_contract_rejects_unbounded_restriction_cardinality() -> None:
+    with pytest.raises(EconomicGoalContractError, match="restriction-count limit"):
+        _goal(blocked_sports=frozenset(f"sport:{index}" for index in range(1025)))
+
+
 def test_automatic_transition_accepts_only_safety_non_expansion() -> None:
     previous = _goal()
     candidate = replace(

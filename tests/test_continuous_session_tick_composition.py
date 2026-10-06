@@ -440,3 +440,151 @@ def test_tick_rejects_prepare_time_economic_path_rebinding_before_settlement() -
         assert not original_book.exists()
         assert not replacement_book.exists()
 
+def test_tick_snapshots_cycle_metadata_before_callbacks() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Cycle:
+            provider_unavailable = False
+            source_id = "provider-a"
+            committed_delta_ids = ("delta-original",)
+
+        cycle = Cycle()
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = _DeltaStore()
+
+            def run_cycle(self):
+                return cycle
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                cycle.source_id = "provider-a:attacker"
+                cycle.committed_delta_ids = ("delta-attacker",)
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        result = coordinator.tick()
+
+        assert result.source_id == "provider-a"
+        assert result.committed_delta_ids == ("delta-original",)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    (
+        ("source_id", " provider-a"),
+        ("provider_unavailable", 1),
+        ("committed_delta_ids", ["delta-1"]),
+        ("committed_delta_ids", ("",)),
+    ),
+)
+def test_tick_rejects_invalid_collector_cycle_metadata(
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Cycle:
+            provider_unavailable = False
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+        cycle = Cycle()
+        setattr(cycle, field_name, invalid_value)
+
+        class Collector:
+            def run_cycle(self):
+                return cycle
+
+        coordinator.collector = Collector()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="collector returned invalid continuous-session cycle metadata",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_reconcile_time_economic_path_rebinding_before_success() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        replacement_book = root / "attacker-paper-book.json"
+        record = continuous_session.EventLifecycleRecord(
+            identity="provider-a:event-1",
+            source_id="provider-a",
+            sport="table_tennis",
+            event_id="event-1",
+            phase=continuous_session.EventPhase.COMPLETED,
+            first_discovered_at=_AT,
+            last_available_at=_AT,
+            scheduled_start_at=None,
+            completion_ref="completion-1",
+            settlement_ref="settlement-1",
+            completion_discovered_at=_AT,
+            settlement_discovered_at=_AT,
+            last_discovered_at=_AT,
+        )
+        resolution = continuous_session.SettlementResolution(
+            event_identity=record.identity,
+            settlement_ref="settlement-1",
+            quote_outcomes={"quote-1": "win"},
+            evidence_id="evidence-reconcile-rebind",
+            evidence_sha256="c" * 64,
+            available_at=_AT,
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+            def records(self):
+                return (record,)
+
+        class OutcomeAuthority:
+            def resolve(self, _record, *, as_of: str):
+                assert as_of == _AT
+                return resolution
+
+        class Handoff:
+            def prepare_settlement(self, **_kwargs):
+                return ()
+
+            def reconcile_after_settlement(self, **_kwargs):
+                coordinator.paper_book_path = replacement_book
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.outcome_authority = OutcomeAuthority()
+        coordinator.settlement_learning_handoff = Handoff()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="settlement economic configuration changed during tick",
+        ):
+            coordinator.tick()
+
+        snapshot = coordinator._state.snapshot()
+        assert snapshot.cycles_completed == 0
+        assert snapshot.last_error_code == "ContinuousSessionError"
+

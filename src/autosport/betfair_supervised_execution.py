@@ -820,6 +820,27 @@ def _build_canonical_place_action_dispatch():
     canonical_acknowledgement_type = ExternalAcknowledgement
     canonical_instruction_report_type = BetfairInstructionReport
     canonical_execution_report_type = BetfairPlaceExecutionReport
+    authority_getattribute_roots = tuple(
+        (
+            authority_type,
+            authority_type.__getattribute__,
+        )
+        for authority_type in (
+            canonical_profile_type,
+            canonical_bound_type,
+            canonical_approval_type,
+            canonical_constraint_type,
+            canonical_profile_binding_type,
+            canonical_action_type,
+            canonical_plan_type,
+            canonical_ledger_type,
+            canonical_goal_contract_type,
+            canonical_acknowledgement_type,
+            canonical_instruction_report_type,
+            canonical_execution_report_type,
+        )
+    )
+    canonical_ledger_setattr = canonical_ledger_type.__setattr__
 
     canonical_profile_require = canonical_profile_type.__dict__.get("require")
     canonical_profile_state_of = canonical_profile_type.__dict__.get("state_of")
@@ -1419,6 +1440,11 @@ def _build_canonical_place_action_dispatch():
             and ExternalAcknowledgement is canonical_acknowledgement_type
             and BetfairInstructionReport is canonical_instruction_report_type
             and BetfairPlaceExecutionReport is canonical_execution_report_type
+            and all(
+                authority_type.__getattribute__ is getattribute
+                for authority_type, getattribute in authority_getattribute_roots
+            )
+            and canonical_ledger_type.__setattr__ is canonical_ledger_setattr
             and canonical_profile_type.__dict__.get("require")
             is canonical_profile_require
             and getattr(canonical_profile_require, "__code__", None)

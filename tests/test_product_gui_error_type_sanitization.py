@@ -38,12 +38,14 @@ class ProductGuiErrorTypeSanitizationTests(unittest.TestCase):
             "RuntimeError\nBearer_SECRET_123",
             "Помилка_СЕКРЕТ",
             "RuntimeError-C:\\Users\\operator\\token.txt",
+            "ApiKeySECRET123456",
             "E" * 512,
         )
         for hostile_name in cases:
             with self.subTest(hostile_name=hostile_name[:40]):
                 rendered = self._terminal_error_type(hostile_name)
                 self.assertIsNotNone(_SAFE_ERROR_TYPE.fullmatch(rendered))
+                self.assertEqual(rendered, "RuntimeError")
                 self.assertNotIn("SECRET", rendered)
                 self.assertNotIn("СЕКРЕТ", rendered)
                 self.assertNotIn("\n", rendered)

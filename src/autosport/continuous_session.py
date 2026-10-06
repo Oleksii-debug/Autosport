@@ -1326,10 +1326,6 @@ class _ContinuousSessionState:
         _update_method_code: object = _update.__code__,
         _text_validator: Callable[[object, str], str] = _text,
         _text_validator_code: object = _text.__code__,
-        _write_error_checkpoint_method: Callable[
-            ["_ContinuousSessionState", str | None], None
-        ] = _write_error_checkpoint,
-        _write_error_checkpoint_method_code: object = _write_error_checkpoint.__code__,
     ) -> None:
         if not isinstance(state, SessionState):
             raise TypeError("state must be SessionState")
@@ -1344,10 +1340,6 @@ class _ContinuousSessionState:
             or getattr(_update_method, "__code__", None) is not _update_method_code
             or _text is not _text_validator
             or getattr(_text_validator, "__code__", None) is not _text_validator_code
-            or type(self)._write_error_checkpoint
-            is not _write_error_checkpoint_method
-            or getattr(_write_error_checkpoint_method, "__code__", None)
-            is not _write_error_checkpoint_method_code
         ):
             raise ContinuousSessionError(
                 "canonical state-transition error authority changed"
@@ -1423,7 +1415,7 @@ class _ContinuousSessionState:
             # predecessor generation can publish and return a stale failure
             # receipt because bounded record_failure() deliberately avoids the
             # O(history) canonical-session read.
-            _write_error_checkpoint_method(self, None)
+            self._write_error_checkpoint(None)
 
         _update_method(
             self,
@@ -1716,10 +1708,6 @@ class _ContinuousSessionState:
         _update_method_code: object = _update.__code__,
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
-        _write_error_checkpoint_method: Callable[
-            ["_ContinuousSessionState", str | None], None
-        ] = _write_error_checkpoint,
-        _write_error_checkpoint_method_code: object = _write_error_checkpoint.__code__,
     ) -> int:
         if (
             type(self)._update is not _update_method
@@ -1732,10 +1720,6 @@ class _ContinuousSessionState:
             _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
-            or type(self)._write_error_checkpoint
-            is not _write_error_checkpoint_method
-            or getattr(_write_error_checkpoint_method, "__code__", None)
-            is not _write_error_checkpoint_method_code
         ):
             raise ContinuousSessionError(
                 "canonical success timestamp authority changed"
@@ -1821,7 +1805,7 @@ class _ContinuousSessionState:
             # Every successful generation advance leaves a bounded tombstone
             # carrying the new generation, fencing stale record_failure()
             # publishers without rereading settlement history.
-            _write_error_checkpoint_method(self, None)
+            self._write_error_checkpoint(None)
 
         updated = _update_method(
             self,

@@ -2580,3 +2580,24 @@ def test_fresh_failure_checkpoint_remains_visible_when_generation_is_unchanged()
         )
         assert reopened.snapshot().last_error_code == "SECOND_FAILURE"
 
+
+
+def test_bootstrap_rejects_runtime_path_exists_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+
+        def attacker_exists(_path: Path) -> bool:
+            raise AssertionError("runtime-rebound Path.exists executed")
+
+        monkeypatch.setattr(Path, "exists", attacker_exists)
+        try:
+            continuous_session._ContinuousSessionState(
+                root / "continuous_session.json",
+                session_id="session-a",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "bootstrap authority changed" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound Path.exists was accepted")

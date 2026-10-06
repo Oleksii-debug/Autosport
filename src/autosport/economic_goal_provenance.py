@@ -123,6 +123,7 @@ def provenance_for(
     _goal_type=_CANONICAL_GOAL_TYPE,
     _goal_validator=_CANONICAL_GOAL_VALIDATOR,
     _provenance_type=_CANONICAL_PROVENANCE_TYPE,
+    _provenance_validator=_CANONICAL_PROVENANCE_VALIDATOR,
     _contract_sha256=contract_sha256,
     _schema=PROVENANCE_SCHEMA,
     _schema_version=PROVENANCE_SCHEMA_VERSION,
@@ -133,7 +134,7 @@ def provenance_for(
     if type(contract) is not _goal_type:
         raise _goal_error("provenance requires an EconomicGoalContract")
     _goal_validator(contract)
-    return _provenance_type(
+    provenance = _provenance_type(
         schema=_schema,
         schema_version=_schema_version,
         goal_id=contract.goal_id,
@@ -141,6 +142,8 @@ def provenance_for(
         bankroll_id=contract.bankroll_id,
         contract_sha256=_contract_sha256(contract),
     )
+    _provenance_validator(provenance)
+    return provenance
 
 
 def verify_provenance(

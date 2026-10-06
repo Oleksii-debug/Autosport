@@ -415,15 +415,18 @@ class EconomicGoalStore:
         _json_decoder=economic_goal_from_json,
         _binding_resolver=_resolve_store_binding,
         _error_type=EconomicGoalContractError,
+        _max_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
     ) -> EconomicGoalContract:
         _, _, _, path_open = _binding_resolver(self)
         try:
             with path_open("r", encoding="utf-8") as handle:
-                text = handle.read()
-        except OSError as exc:
+                text = handle.read(_max_chars + 1)
+        except (OSError, UnicodeError) as exc:
             raise _error_type(
                 f"cannot read persisted economic goal: {exc}"
             ) from exc
+        if len(text) > _max_chars:
+            raise _error_type("economic goal JSON text exceeds the canonical size limit")
         return _json_decoder(text)
 
     def initialize_owner(
@@ -456,6 +459,7 @@ class EconomicGoalStore:
         _json_decoder=economic_goal_from_json,
         _binding_resolver=_resolve_store_binding,
         _error_type=EconomicGoalContractError,
+        _max_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
     ) -> None:
         """Publish one machine revision only when durable authority cannot expand."""
 
@@ -463,11 +467,13 @@ class EconomicGoalStore:
         with _lock_type(workspace):
             try:
                 with path_open("r", encoding="utf-8") as handle:
-                    previous_text = handle.read()
-            except OSError as exc:
+                    previous_text = handle.read(_max_chars + 1)
+            except (OSError, UnicodeError) as exc:
                 raise _error_type(
                     f"cannot read persisted economic goal: {exc}"
                 ) from exc
+            if len(previous_text) > _max_chars:
+                raise _error_type("economic goal JSON text exceeds the canonical size limit")
             previous = _json_decoder(previous_text)
             _transition_validator(previous, candidate)
             _writer(path, _payload_encoder(candidate))

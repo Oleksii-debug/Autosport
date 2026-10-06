@@ -487,7 +487,7 @@ class ProposedTicketRiskContext:
         if self.risk_of_ruin_upper_bound is not None:
             bound = self.risk_of_ruin_upper_bound
             if (
-                not isinstance(bound, Decimal)
+                type(bound) is not Decimal
                 or not bound.is_finite()
                 or bound < Decimal("0")
                 or bound > Decimal("1")
@@ -495,8 +495,9 @@ class ProposedTicketRiskContext:
                 raise ValueError(
                     "risk_of_ruin_upper_bound must be an exact Decimal between 0 and 1"
                 )
-        if self.risk_of_ruin_evidence is not None and not isinstance(
-            self.risk_of_ruin_evidence, RiskOfRuinEvidence
+        if (
+            self.risk_of_ruin_evidence is not None
+            and type(self.risk_of_ruin_evidence) is not RiskOfRuinEvidence
         ):
             raise ValueError(
                 "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"
@@ -887,6 +888,11 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 False,
                 "portfolio risk-of-ruin provenance-bound evidence is required by economic goal",
             )
+        if type(evidence) is not RiskOfRuinEvidence:
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin evidence is invalid",
+            )
         if evidence.upper_bound > goal.max_risk_of_ruin:
             return RiskDecision(
                 False,
@@ -957,7 +963,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 False,
                 "multi-candidate portfolio risk-of-ruin requires vector-bound evidence",
             )
-        if not isinstance(evidence, RiskOfRuinVectorEvidence):
+        if type(evidence) is not RiskOfRuinVectorEvidence:
             return RiskDecision(
                 False,
                 "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
@@ -1778,9 +1784,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             )
         if (
             risk_of_ruin_vector_evidence is not None
-            and not isinstance(
-                risk_of_ruin_vector_evidence, RiskOfRuinVectorEvidence
-            )
+            and type(risk_of_ruin_vector_evidence) is not RiskOfRuinVectorEvidence
         ):
             return StakeVectorDecision(
                 "WAIT",

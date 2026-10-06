@@ -834,7 +834,7 @@ def test_tick_rejects_unregistered_affected_input_id() -> None:
         )
 
 
-def test_tick_rejects_derived_index_drain_selector_mutation() -> None:
+def test_tick_rejects_derived_dependency_index_before_invalidation_drain() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         coordinator = _base_coordinator(root)
@@ -850,22 +850,21 @@ def test_tick_rejects_derived_index_drain_selector_mutation() -> None:
             full_refresh_required = False
 
             def drain(self, *, max_items: int):
-                assert max_items == 250
-                assert index.unregister("input-a")
-                index.register("input-a", source_ids="provider-b")
-                return continuous_session.MirrorInvalidationBatch(
-                    changed_keys=(),
-                    full_refresh_required=False,
-                    has_more=False,
+                raise AssertionError(
+                    "invalidation drain ran before dependency subtype rejection"
                 )
 
         class Desktop:
             def drain(self, **_kwargs):
-                return ()
+                raise AssertionError(
+                    "desktop ran before dependency subtype rejection"
+                )
 
         class Lifecycle:
             def register_eligible(self, *_args, **_kwargs):
-                return ()
+                raise AssertionError(
+                    "lifecycle ran before dependency subtype rejection"
+                )
 
         coordinator.collector = _Collector()
         coordinator.invalidation_buffer = Buffer()
@@ -875,14 +874,9 @@ def test_tick_rejects_derived_index_drain_selector_mutation() -> None:
 
         with pytest.raises(
             continuous_session.ContinuousSessionError,
-            match="routing authority changed during invalidation drain",
+            match="canonical dependency index subtype is not supported",
         ):
             coordinator.tick()
-
-        assert (
-            coordinator._state.snapshot().last_error_code
-            == "ContinuousSessionError"
-        )
 
 
 def test_tick_rejects_invalidation_drain_selector_mutation() -> None:
@@ -1502,6 +1496,74 @@ def test_register_rejects_collateral_selector_mutation() -> None:
             dependency_index=index,
             register_input=malicious_register,
             source_ids="provider-a",
+        )
+
+
+def test_register_rejects_canonical_dependency_index_subclass() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    class DerivedIndex(continuous_session.FocusedMirrorDependencyIndex):
+        def register(self, *_args, **_kwargs):
+            raise AssertionError("derived register authority executed")
+
+    index = DerivedIndex(MarketMirror())
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency index subtype is not supported",
+    ):
+        coordinator._register_input(
+            "input-a",
+            dependency_index=index,
+            register_input=index.register,
+            source_ids="provider-a",
+        )
+
+
+def test_retire_rejects_canonical_dependency_index_subclass() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    class DerivedIndex(continuous_session.FocusedMirrorDependencyIndex):
+        def unregister(self, *_args, **_kwargs):
+            raise AssertionError("derived unregister authority executed")
+
+    index = DerivedIndex(MarketMirror())
+    continuous_session.FocusedMirrorDependencyIndex.register(
+        index,
+        "input-a",
+        source_ids="provider-a",
+    )
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency index subtype is not supported",
+    ):
+        coordinator._retire_input(
+            "input-a",
+            dependency_index=index,
+            unregister_input=index.unregister,
+        )
+
+
+def test_invalidation_drain_rejects_canonical_dependency_index_subclass() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+
+    class DerivedIndex(continuous_session.FocusedMirrorDependencyIndex):
+        def affected_inputs(self, _batch):
+            raise AssertionError("derived routing authority executed")
+
+    index = DerivedIndex(mirror)
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency index subtype is not supported",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=index.affected_inputs,
+            max_batches=4,
+            max_items=250,
         )
 
 

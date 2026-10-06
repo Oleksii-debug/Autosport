@@ -2882,23 +2882,42 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     self._state,
                     settlement_evidence=resolutions,
                 )
-                if self.settlement_learning_handoff is not None:
-                    prepare = getattr(
-                        self.settlement_learning_handoff,
+                learning_handoff = self.settlement_learning_handoff
+                prepare_settlement = None
+                reconcile_after_settlement = None
+                if learning_handoff is not None:
+                    prepare_settlement = getattr(
+                        learning_handoff,
                         "prepare_settlement",
                         None,
                     )
-                    if prepare is not None:
-                        prepare(
-                            paper_book_path=self.paper_book_path,
-                            resolutions=_detached_settlement_resolutions_method(
-                                resolutions
-                            ),
-                            at=now,
+                    reconcile_after_settlement = getattr(
+                        learning_handoff,
+                        "reconcile_after_settlement",
+                        None,
+                    )
+                    if (
+                        prepare_settlement is not None
+                        and not callable(prepare_settlement)
+                    ):
+                        raise ContinuousSessionError(
+                            "settlement learning prepare callback is not callable"
                         )
+                    if not callable(reconcile_after_settlement):
+                        raise ContinuousSessionError(
+                            "settlement learning reconcile callback is not callable"
+                        )
+                if prepare_settlement is not None:
+                    prepare_settlement(
+                        paper_book_path=self.paper_book_path,
+                        resolutions=_detached_settlement_resolutions_method(
+                            resolutions
+                        ),
+                        at=now,
+                    )
                 settled, evidence_ids = self._settle(resolutions=resolutions)
-                if self.settlement_learning_handoff is not None:
-                    self.settlement_learning_handoff.reconcile_after_settlement(
+                if reconcile_after_settlement is not None:
+                    reconcile_after_settlement(
                         paper_book_path=self.paper_book_path,
                         resolutions=_detached_settlement_resolutions_method(
                             resolutions

@@ -787,7 +787,7 @@ def test_in_place_gate_state_mutation_fails_closed_before_attempt() -> None:
 
         with pytest.raises(
             BetfairSupervisedExecutionError,
-            match="gate authority state changed",
+            match="dependency binding changed",
         ):
             execute_betfair_supervised_action(
                 ledger,
@@ -813,7 +813,7 @@ def test_in_place_credential_mutation_fails_closed_before_attempt() -> None:
 
         with pytest.raises(
             BetfairSupervisedExecutionError,
-            match="credential authority changed",
+            match="dependency binding changed",
         ):
             execute_betfair_supervised_action(
                 ledger,
@@ -847,7 +847,7 @@ def test_transport_method_rebinding_fails_closed_before_attempt(monkeypatch) -> 
 
         with pytest.raises(
             BetfairSupervisedExecutionError,
-            match="dependency dispatch changed",
+            match="dependency binding changed",
         ):
             execute_betfair_supervised_action(
                 ledger,
@@ -1152,7 +1152,7 @@ def test_gate_getattribute_rebinding_fails_closed_before_attempt(monkeypatch) ->
 
         with pytest.raises(
             BetfairSupervisedExecutionError,
-            match="dependency dispatch changed",
+            match="canonical Betfair client dispatch changed",
         ):
             execute_betfair_supervised_action(
                 ledger,
@@ -1188,7 +1188,7 @@ def test_transport_getattribute_rebinding_fails_closed_before_attempt(monkeypatc
 
         with pytest.raises(
             BetfairSupervisedExecutionError,
-            match="dependency dispatch changed",
+            match="dependency binding changed",
         ):
             execute_betfair_supervised_action(
                 ledger,
@@ -1230,7 +1230,7 @@ def test_gate_owner_authority_method_rebinding_fails_closed_before_attempt(
 
         with pytest.raises(
             BetfairSupervisedExecutionError,
-            match="dependency dispatch changed",
+            match="canonical Betfair client dispatch changed",
         ):
             execute_betfair_supervised_action(
                 ledger,
@@ -1244,5 +1244,42 @@ def test_gate_owner_authority_method_rebinding_fails_closed_before_attempt(
             )
 
         assert hostile_calls == 0
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_provider_write_preflight_has_no_mutable_weak_binding_registry() -> None:
+    preflight = betfair_execution._canonical_place_client_preflight
+    for cell in preflight.__closure__ or ():
+        try:
+            value = cell.cell_contents
+        except ValueError:
+            continue
+        assert type(value).__name__ != "WeakKeyDictionary"
+
+
+def test_provider_write_dependency_proof_mutation_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        namespace = object.__getattribute__(client, "__dict__")
+        namespace["_autosport_provider_write_dependency_proof"] = b"\\x00" * 32
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="dependency binding changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-mutated-client-proof",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
         assert transport.calls == []
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}

@@ -50,6 +50,15 @@ _BASE_OBSERVED_RESOURCE_CLASSES = (
     "internal_queues",
     "temporary_artifacts",
 )
+# This deterministic scenario intentionally uses an in-memory idle ProductCollectorSource,
+# a synchronous collector (injected sleep, no scheduled retry owner), and no child-process
+# launcher. Those resource classes are absent by construction for this scenario; they
+# remain required in a provider/package scenario that actually instantiates them.
+_SCENARIO_NOT_APPLICABLE_RESOURCE_CLASSES = (
+    "provider_transports",
+    "timers_scheduled_jobs",
+    "subprocesses",
+)
 
 
 class _ExpectedQualificationFailure(RuntimeError):
@@ -403,6 +412,14 @@ def main(argv: list[str] | None = None) -> int:
     platform_not_applicable_resource_classes = (
         () if os.name == "nt" else ("workspace_handles",)
     )
+    not_applicable_resource_classes = tuple(
+        sorted(
+            {
+                *_SCENARIO_NOT_APPLICABLE_RESOURCE_CLASSES,
+                *platform_not_applicable_resource_classes,
+            }
+        )
+    )
     observed_resource_classes = list(_BASE_OBSERVED_RESOURCE_CLASSES)
     if windows_probe_status == "PASS":
         observed_resource_classes.append("workspace_handles")
@@ -410,7 +427,7 @@ def main(argv: list[str] | None = None) -> int:
     applicable_required_resource_classes = tuple(
         resource_class
         for resource_class in _REQUIRED_RESOURCE_CLASSES
-        if resource_class not in platform_not_applicable_resource_classes
+        if resource_class not in not_applicable_resource_classes
     )
     missing_resource_classes = tuple(
         resource_class
@@ -450,8 +467,15 @@ def main(argv: list[str] | None = None) -> int:
             applicable_required_resource_classes
         ),
         "observed_resource_classes": list(observed_resource_classes),
+        "scenario_id": "headless_idle_product_runtime_v1",
+        "scenario_not_applicable_resource_classes": list(
+            _SCENARIO_NOT_APPLICABLE_RESOURCE_CLASSES
+        ),
         "platform_not_applicable_resource_classes": list(
             platform_not_applicable_resource_classes
+        ),
+        "not_applicable_resource_classes": list(
+            not_applicable_resource_classes
         ),
         "missing_resource_classes": list(missing_resource_classes),
         "resource_coverage_complete": not missing_resource_classes,

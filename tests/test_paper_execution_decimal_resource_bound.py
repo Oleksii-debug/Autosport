@@ -76,6 +76,23 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         ):
             evidence(odds="1" * 8193)
 
+    def test_huge_integer_ingress_is_rejected_before_decimal_construction(self) -> None:
+        huge = 1 << 1_000_000
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "must be a finite Decimal",
+        ):
+            legacy._decimal(huge, "value")
+
+    def test_boundary_sized_integer_ingress_remains_accepted(self) -> None:
+        value = 10 ** 8191
+
+        parsed = legacy._decimal(value, "value")
+
+        self.assertEqual(parsed, Decimal(value))
+        self.assertEqual(len(format(parsed, "f")), 8192)
+
     def test_decimal_ingress_rejects_float_and_custom_string_coercion(self) -> None:
         class DecimalLike:
             def __str__(self) -> str:

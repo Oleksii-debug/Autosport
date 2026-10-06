@@ -251,6 +251,57 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             ProductEconomicSession.__eq__ = original_eq
 
 
+    def test_transition_rejects_rebound_product_session_constructor_and_validator(self) -> None:
+        store = self._store()
+        first = store.current()
+
+        originals = (
+            ("__init__", ProductEconomicSession.__init__),
+            ("__post_init__", ProductEconomicSession.__post_init__),
+        )
+        for name, original in originals:
+            with self.subTest(method=name):
+                def hostile(*args, **kwargs):
+                    raise AssertionError(
+                        f"rebound ProductEconomicSession {name} executed"
+                    )
+
+                setattr(ProductEconomicSession, name, hostile)
+                try:
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.transition_to_current_goal(first)
+                finally:
+                    setattr(ProductEconomicSession, name, original)
+
+
+    def test_transition_rejects_in_place_product_session_constructor_and_validator_code_mutation(self) -> None:
+        store = self._store()
+        first = store.current()
+
+        for name in ("__init__", "__post_init__"):
+            with self.subTest(method=name):
+                original = getattr(ProductEconomicSession, name)
+                original_code = original.__code__
+
+                def hostile(*args, **kwargs):
+                    raise AssertionError(
+                        f"mutated ProductEconomicSession {name} executed"
+                    )
+
+                try:
+                    original.__code__ = hostile.__code__
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.transition_to_current_goal(first)
+                finally:
+                    original.__code__ = original_code
+
+
     def test_transition_rejects_in_place_product_session_equality_code_mutation(self) -> None:
         store = self._store()
         first = store.current()

@@ -959,6 +959,27 @@ def _closure_callable_by_qualname(root, suffix: str):
     raise AssertionError(f"closure callable not found: {suffix}")
 
 
+def test_ticket_id_text_coercion_ignores_module_rebinding(monkeypatch) -> None:
+    issue_ticket_id = _closure_callable_by_qualname(
+        PaperBook.open_ticket,
+        "_seal_paperbook_open_transition_authority.<locals>.issue_ticket_id",
+    )
+    attacker_calls = 0
+
+    def hostile_str(_value):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        return "forged-ticket-id"
+
+    monkeypatch.setattr(paper_module, "str", hostile_str, raising=False)
+
+    ticket_id = issue_ticket_id()
+
+    assert type(ticket_id) is str
+    assert ticket_id != "forged-ticket-id"
+    assert attacker_calls == 0
+
+
 def test_extracted_hidden_writer_wrappers_cannot_mint_authority() -> None:
     book = PaperBook("100")
     ticket = book.open_ticket([_leg()], "10", placed_at=_TS)

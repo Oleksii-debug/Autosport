@@ -647,3 +647,110 @@ def test_policy_version_declares_projection_not_second_provider_authority():
     assert MARKETBOOK_RETRY_BACKOFF_POLICY_VERSION == (
         "betfair.list-market-book.retry-backoff-projection.v3"
     )
+
+
+def test_gate_seals_late_module_enum_and_helper_rebinding(monkeypatch):
+    plan = _plan()
+    batch = plan.batches[0]
+    gate = _gate(plan)
+
+    monkeypatch.setattr(_retry_module, "MarketBookAttemptOutcome", object)
+    monkeypatch.setattr(_retry_module, "MarketBookRetryDisposition", object)
+    monkeypatch.setattr(
+        _retry_module,
+        "_provider_code",
+        lambda value, optional=True: "FORGED",
+    )
+    monkeypatch.setattr(
+        _retry_module,
+        "_utc_microseconds",
+        lambda value, name: -1,
+    )
+
+    state = gate.record_outcome(
+        batch.batch_id,
+        observed_at=NOW,
+        outcome=MarketBookAttemptOutcome.PROVIDER_FAILURE,
+        provider_error_code="SERVICE_BUSY",
+    )
+    assert state.batches[0].last_provider_error_code == "SERVICE_BUSY"
+
+    decision = gate.admit(batch.batch_id, observed_at=NOW)
+    assert (
+        decision.disposition
+        is MarketBookRetryDisposition.PROVIDER_RECOVERY_REQUIRED
+    )
+    assert decision.observed_at_utc_us > 0
+
+
+def test_gate_revalidates_mutated_restart_state_after_lifecycle_rebind(
+    monkeypatch,
+):
+    plan = _plan()
+    batch = plan.batches[0]
+    state = _gate(plan).record_outcome(
+        batch.batch_id,
+        observed_at=NOW,
+        outcome=MarketBookAttemptOutcome.PROVIDER_FAILURE,
+        provider_error_code="SERVICE_BUSY",
+    )
+    object.__setattr__(
+        state.batches[0],
+        "provider_failure_observed_at_utc_us",
+        None,
+    )
+
+    monkeypatch.setattr(
+        _retry_module.MarketBookRetryBatchState,
+        "__post_init__",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        _retry_module.MarketBookRetryBackoffState,
+        "__post_init__",
+        lambda self: None,
+    )
+
+    with pytest.raises(
+        MarketBookRetryBackoffError,
+        match="provider recovery state is contradictory",
+    ):
+        _gate(plan, state=state)
+
+
+def test_restart_duplicate_rejection_is_sealed_against_helper_rebind(
+    monkeypatch,
+):
+    plan = _plan()
+    state = _gate(plan).snapshot()
+    canonical = json.loads(state.to_json())
+    evidence = json.dumps(
+        canonical["evidence"],
+        separators=(",", ":"),
+    )
+    encoded = (
+        '{"evidence":'
+        + evidence
+        + ',"state_id":"'
+        + canonical["state_id"]
+        + '","state_id":"'
+        + canonical["state_id"]
+        + '"}'
+    )
+
+    monkeypatch.setattr(
+        _retry_module,
+        "_strict_json_object",
+        lambda pairs: dict(pairs),
+    )
+    monkeypatch.setattr(
+        _retry_module,
+        "_reject_json_constant",
+        lambda value: None,
+    )
+
+    with pytest.raises(
+        MarketBookRetryBackoffError,
+        match="duplicate JSON key: state_id",
+    ):
+        MarketBookRetryBackoffState.from_json(plan, encoded)

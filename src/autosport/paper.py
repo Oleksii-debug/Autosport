@@ -173,6 +173,7 @@ def _make_ticket_opening_authority_registry():
     require_registry_key_code = require_registry_key.__code__
     commitment_for = _ticket_opening_commitment
     commitment_code = commitment_for.__code__
+    commitment_defaults = commitment_for.__defaults__
 
     object_getattribute = object.__getattribute__
 
@@ -191,7 +192,10 @@ def _make_ticket_opening_authority_registry():
             raise ValueError("PaperBook registry key validator authority changed")
 
     def require_commitment_authority() -> None:
-        if commitment_for.__code__ is not commitment_code:
+        if (
+            commitment_for.__code__ is not commitment_code
+            or commitment_for.__defaults__ is not commitment_defaults
+        ):
             raise ValueError("PaperBook ticket opening commitment authority changed")
 
     def register_book(book: object) -> None:
@@ -3088,3 +3092,4 @@ _install_paperbook_visible_state_authority(
     PaperBook.__dict__["_validate_loaded_state"].__func__
 )
 del _install_paperbook_visible_state_authority
+

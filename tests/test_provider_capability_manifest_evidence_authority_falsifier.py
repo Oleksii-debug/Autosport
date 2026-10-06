@@ -744,3 +744,74 @@ def test_manifest_identity_rejects_coordinated_dependency_rebinding() -> None:
     ):
         _ = manifest.manifest_id
 
+def test_manifest_identity_rejects_internal_validation_dispatch_bypass(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=25,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    stream = next(
+        fact
+        for fact in manifest.facts
+        if fact.capability is ProviderManifestCapability.STREAM
+    )
+    object.__setattr__(stream, "state", ProviderManifestState.PROVEN)
+
+    monkeypatch.setattr(type(manifest), "_validate_facts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        type(manifest),
+        "_validate_dependencies",
+        lambda *args, **kwargs: None,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="stream extension truth changed after validation",
+    ):
+        _ = manifest.manifest_id
+
+
+def test_manifest_identity_rejects_state_reader_rebinding(monkeypatch) -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=26,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+
+    monkeypatch.setattr(
+        type(manifest),
+        "state_of",
+        lambda self, capability: ProviderManifestState.PROVEN,
+    )
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="canonical manifest validator changed",
+    ):
+        _ = manifest.manifest_id
+

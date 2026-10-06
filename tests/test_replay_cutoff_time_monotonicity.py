@@ -231,6 +231,51 @@ class ReplayCutoffTimeMonotonicityTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_committed_cutoff_checks_all_prior_later_time_frontiers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+
+                latest_time = self.CUTOFF + timedelta(seconds=10)
+                self.replay(store, as_of=latest_time)
+
+                earlier_same_frontier = self.CUTOFF + timedelta(seconds=5)
+                self.replay(store, as_of=earlier_same_frontier)
+                prior_rows = store._validated_replay_cutoff_rows()
+                self.assertEqual(len(prior_rows), 2)
+                self.assertEqual({row[2] for row in prior_rows}, {1})
+
+                second = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:06+00:00",
+                )
+                self.assertTrue(store.append(second))
+
+                middle_time = self.CUTOFF + timedelta(seconds=7)
+                self.forged_cutoff(
+                    store,
+                    as_of=middle_time,
+                    max_generation=2,
+                    prior_rows=prior_rows,
+                    tx_suffix="7",
+                    commit_machine=True,
+                )
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "commit retroactively advances append generation",
+                ):
+                    self.replay(store, as_of=latest_time)
+            finally:
+                store.close()
+
     def test_pending_retrograde_cutoff_is_not_machine_committed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

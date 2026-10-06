@@ -349,6 +349,10 @@ def _make_ticket_opening_authority_registry():
     def register_book(book: object) -> None:
         require_registry_key_authority(book)
         with guard:
+            if book in authorities:
+                raise RuntimeError(
+                    "PaperBook opening authority registry is already established"
+                )
             authorities[book] = {}
 
     def record(book: object, ticket: PaperTicket) -> None:
@@ -490,6 +494,10 @@ def _make_paperbook_causal_history_authority_registry():
     def register_book(book: object) -> None:
         require_registry_key_authority(book)
         with guard:
+            if book in authorities:
+                raise RuntimeError(
+                    "PaperBook causal history authority registry is already established"
+                )
             authorities[book] = ((), ())
 
     def revoke(book: object) -> None:
@@ -639,11 +647,22 @@ def _make_paperbook_operation_lock_registry():
                 if current is not None and current[0] is dead_ref:
                     entries.pop(_identity, None)
 
-        weak_book = weak_ref_factory(book, cleanup)
-        require_lock_factory_authority()
-        book_lock = lock_factory()
-        require_lock_factory_authority()
         with guard:
+            current = entries.get(identity)
+            if current is not None:
+                current_book = current[0]()
+                if current_book is book:
+                    raise RuntimeError(
+                        "PaperBook operation lock registry is already established"
+                    )
+                if current_book is not None:
+                    raise RuntimeError(
+                        "PaperBook operation lock identity is already owned"
+                    )
+            weak_book = weak_ref_factory(book, cleanup)
+            require_lock_factory_authority()
+            book_lock = lock_factory()
+            require_lock_factory_authority()
             entries[identity] = (weak_book, book_lock)
 
     def require_lock(book: object) -> threading.RLock:

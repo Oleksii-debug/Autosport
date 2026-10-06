@@ -304,3 +304,79 @@ def test_session_turnover_require_current_rejects_predecessor_after_goal_transit
             session_store=session_store,
             session_evidence=successor,
         )
+
+
+def test_session_turnover_counts_parlay_ticket_stake_once(tmp_path):
+    EconomicGoalStore(tmp_path).initialize_owner(_goal())
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    session_store = ProductEconomicSessionStore(tmp_path)
+    session = session_store.current()
+
+    current = PaperBook.load(tmp_path / "paper_book.json")
+    legs = [_leg("parlay-a"), _leg("parlay-b")]
+    ticket = current.open_ticket(
+        legs,
+        Decimal("4"),
+        placed_at=session.started_at,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+    window = ProductDayRiskWindowStore(tmp_path).current()
+    witness = current._validate_product_day_admission_witness(
+        (
+            session.started_at,
+            window.day_key,
+            window.window_start,
+            window.window_end_exclusive,
+            window.state_sha256,
+            window.authority_generation,
+        ),
+        ticket_id=ticket.ticket_id,
+    )
+    current._product_day_admissions[ticket.ticket_id] = witness
+    _fixture_causal_advance()(current, ticket.ticket_id, witness)
+    current.save(tmp_path / "paper_book.json")
+
+    evidence = _resolve(
+        tmp_path,
+        PaperBook.load(tmp_path / "paper_book.json"),
+        session_store,
+    )
+
+    assert evidence.confirmed_turnover == Decimal("4")
+    assert evidence.constituent_count == 1
+
+
+def test_session_turnover_is_invariant_to_later_settlement(tmp_path):
+    EconomicGoalStore(tmp_path).initialize_owner(_goal())
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    session_store = ProductEconomicSessionStore(tmp_path)
+    session = session_store.current()
+
+    current = PaperBook.load(tmp_path / "paper_book.json")
+    ticket_id = _add_current_admission(
+        tmp_path,
+        current,
+        stake="4",
+        suffix="settlement",
+        placed_at=session.started_at,
+    )
+    current.save(tmp_path / "paper_book.json")
+    before_book = PaperBook.load(tmp_path / "paper_book.json")
+    before = _resolve(tmp_path, before_book, session_store)
+
+    settled = PaperBook.load(tmp_path / "paper_book.json")
+    ticket = settled.tickets[ticket_id]
+    settled.settle(ticket_id, set(), {ticket.legs[0].quote_key})
+    settled.save(tmp_path / "paper_book.json")
+    after = _resolve(
+        tmp_path,
+        PaperBook.load(tmp_path / "paper_book.json"),
+        session_store,
+    )
+
+    assert after.confirmed_turnover == before.confirmed_turnover == Decimal("4")
+    assert after.constituent_sha256 == before.constituent_sha256
+    assert after.evidence_sha256 == before.evidence_sha256

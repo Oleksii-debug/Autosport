@@ -439,13 +439,26 @@ def _run_reserved(
             if run_id is not None
             else runtime.ledger.events()
         )
-    except Exception:
-        return False
-    return any(
-        item.get("event_type") == "RUN_RESERVED"
-        and item.get("payload", {}).get("trigger_id") == decision_id
-        for item in events
-    )
+    except Exception as exc:
+        raise PaperExecutionAdoptionError(
+            "paper-value execution reservation history cannot be verified"
+        ) from exc
+
+    for item in events:
+        if type(item) is not dict:
+            raise PaperExecutionAdoptionError(
+                "paper-value execution reservation history is malformed"
+            )
+        if item.get("event_type") != "RUN_RESERVED":
+            continue
+        payload = item.get("payload")
+        if type(payload) is not dict or type(payload.get("trigger_id")) is not str:
+            raise PaperExecutionAdoptionError(
+                "paper-value execution reservation identity is malformed"
+            )
+        if payload["trigger_id"] == decision_id:
+            return True
+    return False
 
 
 def _durable_record_for_call(

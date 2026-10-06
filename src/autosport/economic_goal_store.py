@@ -86,61 +86,85 @@ _RESTRICTION_FIELDS: Final = (
 
 
 def _require_exact_keys(
-    name: str, value: dict[str, object], expected: frozenset[str]
+    name: str,
+    value: dict[str, object],
+    expected: frozenset[str],
+    _error_type=EconomicGoalContractError,
 ) -> None:
     keys = frozenset(value)
     if keys != expected:
         missing = sorted(expected - keys)
         extra = sorted(keys - expected)
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"{name} keys must match schema exactly; missing={missing!r} extra={extra!r}"
         )
 
 
-def _decimal_text(name: str, value: object) -> Decimal:
+def _decimal_text(
+    name: str,
+    value: object,
+    _decimal_type=Decimal,
+    _invalid_operation=InvalidOperation,
+    _error_type=EconomicGoalContractError,
+) -> Decimal:
     if type(value) is not str:
-        raise EconomicGoalContractError(f"{name} must be a Decimal string")
+        raise _error_type(f"{name} must be a Decimal string")
     if not value or value != value.strip():
-        raise EconomicGoalContractError(f"{name} must be a canonical Decimal string")
+        raise _error_type(f"{name} must be a canonical Decimal string")
     if len(value) > _MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"{name} Decimal text exceeds the canonical size limit"
         )
     try:
-        parsed = Decimal(value)
-    except InvalidOperation as exc:
-        raise EconomicGoalContractError(f"{name} is not a valid Decimal string") from exc
+        parsed = _decimal_type(value)
+    except _invalid_operation as exc:
+        raise _error_type(f"{name} is not a valid Decimal string") from exc
     if not parsed.is_finite():
-        raise EconomicGoalContractError(f"{name} must be finite")
+        raise _error_type(f"{name} must be finite")
     if str(parsed) != value:
-        raise EconomicGoalContractError(f"{name} must use canonical Decimal text")
+        raise _error_type(f"{name} must use canonical Decimal text")
     return parsed
 
 
-def _restriction_set(name: str, value: object) -> frozenset[str]:
+def _restriction_set(
+    name: str,
+    value: object,
+    _error_type=EconomicGoalContractError,
+) -> frozenset[str]:
     if type(value) is not list:
-        raise EconomicGoalContractError(f"{name} must be a sorted JSON array")
+        raise _error_type(f"{name} must be a sorted JSON array")
     if len(value) > _MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"{name} exceeds the canonical restriction-count limit"
         )
     for item in value:
         if type(item) is not str:
-            raise EconomicGoalContractError(f"{name} must contain only strings")
+            raise _error_type(f"{name} must contain only strings")
         if (
             not item
             or item != item.strip()
             or len(item) > _MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS
             or "\x00" in item
         ):
-            raise EconomicGoalContractError(
+            raise _error_type(
                 f"{name} contains non-canonical restriction text"
             )
     if value != sorted(value) or len(value) != len(set(value)):
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"{name} must be sorted and contain unique strings"
         )
     return frozenset(value)
+
+
+_CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
+_CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
+_CANONICAL_OBJECTIVE_TYPE: Final = EconomicObjective
+_CANONICAL_AUTOMATION_TYPE: Final = AutomationLevel
+_CANONICAL_TRANSITION_VALIDATOR: Final = validate_automatic_transition
+_CANONICAL_STRICT_JSON_LOADS: Final = strict_json_loads
+_CANONICAL_ATOMIC_WRITE_JSON: Final = atomic_write_json
+_CANONICAL_WORKSPACE_LOCK_TYPE: Final = WorkspaceEconomicLock
+_CANONICAL_PATH_TYPE: Final = Path
 
 
 def economic_goal_to_payload(
@@ -199,8 +223,8 @@ def economic_goal_to_payload(
         "blocked_markets": sorted(contract.blocked_markets),
     }
     return {
-        "schema": ECONOMIC_GOAL_SCHEMA,
-        "schema_version": ECONOMIC_GOAL_SCHEMA_VERSION,
+        "schema": _schema,
+        "schema_version": _schema_version,
         "contract": body,
     }
 
@@ -228,10 +252,10 @@ def economic_goal_from_payload(
     root: dict[str, object] = payload
     _exact_keys("economic goal payload", root, _root_keys)
 
-    if type(root["schema"]) is not str or root["schema"] != ECONOMIC_GOAL_SCHEMA:
+    if type(root["schema"]) is not str or root["schema"] != _schema:
         raise _goal_error("unsupported economic goal schema")
     version = root["schema_version"]
-    if type(version) is not int or version != ECONOMIC_GOAL_SCHEMA_VERSION:
+    if type(version) is not int or version != _schema_version:
         raise _goal_error("unsupported economic goal schema_version")
 
     raw_contract = root["contract"]
@@ -308,34 +332,54 @@ class EconomicGoalStore:
 
     FILE_NAME: Final = "economic_goal_contract.json"
 
-    def __init__(self, workspace: str | Path) -> None:
-        self.workspace = Path(workspace)
+    def __init__(
+        self,
+        workspace: str | Path,
+        _path_type=_CANONICAL_PATH_TYPE,
+    ) -> None:
+        self.workspace = _path_type(workspace)
         self.path = self.workspace / self.FILE_NAME
 
-    def load(self) -> EconomicGoalContract:
+    def load(
+        self,
+        _json_decoder=economic_goal_from_json,
+    ) -> EconomicGoalContract:
         try:
             text = self.path.read_text(encoding="utf-8")
         except OSError as exc:
             raise EconomicGoalContractError(
                 f"cannot read persisted economic goal: {exc}"
             ) from exc
-        return economic_goal_from_json(text)
+        return _json_decoder(text)
 
-    def initialize_owner(self, contract: EconomicGoalContract) -> None:
+    def initialize_owner(
+        self,
+        contract: EconomicGoalContract,
+        _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
+        _payload_encoder=economic_goal_to_payload,
+        _writer=_CANONICAL_ATOMIC_WRITE_JSON,
+    ) -> None:
         """Create the first owner contract while holding the economic writer lock."""
 
-        with WorkspaceEconomicLock(self.workspace):
+        with _lock_type(self.workspace):
             if self.path.exists():
                 raise EconomicGoalContractError(
                     "persisted economic goal already exists; owner replacement requires "
                     "a separate authority boundary"
                 )
-            atomic_write_json(self.path, economic_goal_to_payload(contract))
+            _writer(self.path, _payload_encoder(contract))
 
-    def persist_automatic_successor(self, candidate: EconomicGoalContract) -> None:
+    def persist_automatic_successor(
+        self,
+        candidate: EconomicGoalContract,
+        _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
+        _transition_validator=_CANONICAL_TRANSITION_VALIDATOR,
+        _payload_encoder=economic_goal_to_payload,
+        _writer=_CANONICAL_ATOMIC_WRITE_JSON,
+    ) -> None:
         """Publish one machine revision only when durable authority cannot expand."""
 
-        with WorkspaceEconomicLock(self.workspace):
+        with _lock_type(self.workspace):
             previous = self.load()
-            validate_automatic_transition(previous, candidate)
-            atomic_write_json(self.path, economic_goal_to_payload(candidate))
+            _transition_validator(previous, candidate)
+            _writer(self.path, _payload_encoder(candidate))

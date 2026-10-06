@@ -431,7 +431,7 @@ def economic_goal_from_json(
         raise _error_type("economic goal JSON text exceeds the canonical size limit")
     try:
         payload = _loads(text)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError, OverflowError) as exc:
         raise _error_type("invalid economic goal JSON") from exc
     return _payload_decoder(payload)
 

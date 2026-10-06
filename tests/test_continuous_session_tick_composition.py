@@ -6338,3 +6338,204 @@ def test_desktop_failure_after_consuming_invalidation_preserves_error_and_recove
         assert buffer.pending_count == 0
         assert buffer.full_refresh_required is True
         assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+class _InjectAfterCoordinatorDrainLock:
+    def __init__(
+        self,
+        buffer: continuous_session.BoundedMirrorInvalidationBuffer,
+    ) -> None:
+        self.buffer = buffer
+        self.injected = False
+        self._entered_with_dirty = False
+
+    def __enter__(self):
+        self._entered_with_dirty = bool(self.buffer._dirty)
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        if (
+            not self.injected
+            and self._entered_with_dirty
+            and not self.buffer._dirty
+            and not self.buffer._full_refresh_required
+        ):
+            self.buffer._dirty[("provider-a", "quote-late")] = None
+            self.injected = True
+
+
+def _coordinator_with_late_post_drain_invalidation(
+    root: Path,
+) -> tuple[
+    continuous_session.ContinuousSessionCoordinator,
+    continuous_session.BoundedMirrorInvalidationBuffer,
+]:
+    coordinator = _base_coordinator(root)
+    mirror = MarketMirror()
+    buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+    buffer._dirty[("provider-a", "quote-initial")] = None
+    buffer._lock = _InjectAfterCoordinatorDrainLock(buffer)
+    coordinator.invalidation_buffer = buffer
+    coordinator.dependency_index = (
+        continuous_session.FocusedMirrorDependencyIndex(mirror)
+    )
+    coordinator.collector = _Collector()
+
+    class Desktop:
+        def drain(self, **_kwargs):
+            return ()
+
+    coordinator.desktop_consumer = Desktop()
+    return coordinator, buffer
+
+
+def test_event_lifecycle_cannot_consume_post_drain_invalidations() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator, buffer = _coordinator_with_late_post_drain_invalidation(root)
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                assert buffer.drain(max_items=250).changed_keys == (
+                    ("provider-a", "quote-late"),
+                )
+                return ()
+
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="event lifecycle consumed pending invalidations",
+        ):
+            coordinator.tick()
+
+        assert buffer.pending_count == 0
+        assert buffer.full_refresh_required is True
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_event_lifecycle_failure_after_consuming_post_drain_invalidation_recovers() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator, buffer = _coordinator_with_late_post_drain_invalidation(root)
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                buffer.drain(max_items=250)
+                raise RuntimeError("lifecycle failed after consuming invalidation")
+
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            RuntimeError,
+            match="lifecycle failed after consuming invalidation",
+        ):
+            coordinator.tick()
+
+        assert buffer.pending_count == 0
+        assert buffer.full_refresh_required is True
+        assert coordinator._state.snapshot().last_error_code == "RuntimeError"
+
+
+def test_settlement_resolution_cannot_consume_post_drain_invalidations() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator, buffer = _coordinator_with_late_post_drain_invalidation(root)
+        record = continuous_session.EventLifecycleRecord(
+            identity="provider-a:event-1",
+            source_id="provider-a",
+            sport="table_tennis",
+            event_id="event-1",
+            phase=continuous_session.EventPhase.COMPLETED,
+            first_discovered_at=_AT,
+            last_available_at=_AT,
+            scheduled_start_at=None,
+            completion_ref="completion-1",
+            settlement_ref="settlement-1",
+            completion_discovered_at=_AT,
+            settlement_discovered_at=_AT,
+            last_discovered_at=_AT,
+        )
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+            def records(self):
+                return (record,)
+
+        class OutcomeAuthority:
+            def resolve(self, _record, *, as_of: str):
+                assert as_of == _AT
+                buffer.drain(max_items=250)
+                return None
+
+        coordinator.lifecycle = Lifecycle()
+        coordinator.outcome_authority = OutcomeAuthority()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="settlement resolution consumed pending invalidations",
+        ):
+            coordinator.tick()
+
+        assert buffer.pending_count == 0
+        assert buffer.full_refresh_required is True
+
+
+def test_settlement_prepare_cannot_consume_post_drain_invalidations() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator, buffer = _coordinator_with_late_post_drain_invalidation(root)
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class Handoff:
+            def prepare_settlement(self, **_kwargs):
+                buffer.drain(max_items=250)
+                return ()
+
+            def reconcile_after_settlement(self, **_kwargs):
+                raise AssertionError("reconcile ran after prepare stole invalidation")
+
+        coordinator.lifecycle = Lifecycle()
+        coordinator.settlement_learning_handoff = Handoff()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="settlement preparation consumed pending invalidations",
+        ):
+            coordinator.tick()
+
+        assert buffer.pending_count == 0
+        assert buffer.full_refresh_required is True
+
+
+def test_settlement_reconcile_cannot_consume_post_drain_invalidations() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator, buffer = _coordinator_with_late_post_drain_invalidation(root)
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class Handoff:
+            def prepare_settlement(self, **_kwargs):
+                return ()
+
+            def reconcile_after_settlement(self, **_kwargs):
+                buffer.drain(max_items=250)
+
+        coordinator.lifecycle = Lifecycle()
+        coordinator.settlement_learning_handoff = Handoff()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="settlement reconciliation consumed pending invalidations",
+        ):
+            coordinator.tick()
+
+        assert buffer.pending_count == 0
+        assert buffer.full_refresh_required is True

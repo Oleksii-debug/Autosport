@@ -429,3 +429,32 @@ def test_contract_validation_ignores_rebound_scalar_bounds(monkeypatch) -> None:
         _goal(goal_id="g" * 513)
     with pytest.raises(EconomicGoalContractError, match="restriction-count limit"):
         _goal(blocked_sports=frozenset(f"sport:{index}" for index in range(1025)))
+
+
+def test_public_transition_authority_rejects_helper_injection() -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+
+    with pytest.raises(TypeError):
+        validate_automatic_transition(
+            previous,
+            candidate,
+            _cap_guard=lambda *args: None,
+        )  # type: ignore[call-arg]
+
+
+def test_public_transition_ignores_rebound_bound_implementation_alias(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound bound transition implementation executed")
+
+    monkeypatch.setattr(
+        economic_goal_module,
+        "_validate_automatic_transition_bound",
+        forged,
+    )
+
+    validate_automatic_transition(previous, candidate)
+    previous.validate_automatic_successor(candidate)

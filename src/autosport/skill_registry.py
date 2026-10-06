@@ -514,7 +514,8 @@ class SkillRegistry:
             process.start()
         except Exception as exc:
             pipe_close_ok = _close_pipe_endpoints(receiver,sender)
-            if not _close_process_handle(process):
+            handle_close_ok = _close_process_handle(process)
+            if not handle_close_ok:
                 return None,"HANDLER_START_HANDLE_CLOSE_FAILED"
             if not pipe_close_ok:
                 return None,"HANDLER_START_PIPE_CLOSE_FAILED"
@@ -523,7 +524,7 @@ class SkillRegistry:
             sender.close()
         except Exception:
             stop_error = _stop_process_bounded(process)
-            receiver.close()
+            _close_pipe_endpoints(receiver,sender)
             if stop_error == "HANDLE_CLOSE_FAILED":
                 return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
             if stop_error == "STOP_FAILED":
@@ -533,61 +534,75 @@ class SkillRegistry:
             process.join(timeout_seconds)
         except Exception:
             stop_error = _stop_process_bounded(process)
-            receiver.close()
+            pipe_close_ok = _close_pipe_endpoints(receiver)
             if stop_error == "HANDLE_CLOSE_FAILED":
                 return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
             if stop_error == "STOP_FAILED":
                 return None,"HANDLER_PROCESS_STOP_FAILED"
+            if not pipe_close_ok:
+                return None,"HANDLER_PROCESS_PIPE_CLOSE_FAILED"
             return None,"HANDLER_PROCESS_JOIN_FAILED"
         try:
             alive = process.is_alive()
         except Exception:
             stop_error = _stop_process_bounded(process)
-            receiver.close()
+            pipe_close_ok = _close_pipe_endpoints(receiver)
             if stop_error == "HANDLE_CLOSE_FAILED":
                 return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
             if stop_error == "STOP_FAILED":
                 return None,"HANDLER_PROCESS_STOP_FAILED"
+            if not pipe_close_ok:
+                return None,"HANDLER_PROCESS_PIPE_CLOSE_FAILED"
             return None,"HANDLER_PROCESS_STATE_UNAVAILABLE"
         if alive:
             # The timeout is an execution-authority boundary, not the start of
             # another multi-second wait. Force-stop the isolated child first,
             # then spend only a small bounded grace reaping its process handle.
             stop_error = _stop_process_bounded(process)
-            receiver.close()
+            pipe_close_ok = _close_pipe_endpoints(receiver)
             if stop_error == "HANDLE_CLOSE_FAILED":
                 return None,"HANDLER_TIMEOUT_HANDLE_CLOSE_FAILED"
             if stop_error == "STOP_FAILED":
                 return None,"HANDLER_TIMEOUT_STOP_FAILED"
+            if not pipe_close_ok:
+                return None,"HANDLER_TIMEOUT_PIPE_CLOSE_FAILED"
             return None,"HANDLER_TIMEOUT"
         try:
             has_result = receiver.poll()
         except Exception:
             # Polling/deserializing a child result is an infrastructure boundary.
-            # Any ordinary pipe/protocol exception must become durable terminal
-            # truth instead of escaping with the run still marked RUNNING.
-            close_ok = _close_process_handle(process)
-            receiver.close()
-            if not close_ok:
+            # Cleanup attempts must not short-circuit each other.
+            pipe_close_ok = _close_pipe_endpoints(receiver)
+            handle_close_ok = _close_process_handle(process)
+            if not handle_close_ok:
                 return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+            if not pipe_close_ok:
+                return None,"HANDLER_RESULT_PIPE_CLOSE_FAILED"
             return None,"HANDLER_RESULT_UNAVAILABLE"
         if not has_result:
-            close_ok = _close_process_handle(process)
-            receiver.close()
-            if not close_ok:
+            pipe_close_ok = _close_pipe_endpoints(receiver)
+            handle_close_ok = _close_process_handle(process)
+            if not handle_close_ok:
                 return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+            if not pipe_close_ok:
+                return None,"HANDLER_RESULT_PIPE_CLOSE_FAILED"
             return None,"HANDLER_PROCESS_EXITED"
         try:
             kind,value=receiver.recv()
         except Exception:
-            close_ok = _close_process_handle(process)
-            receiver.close()
-            if not close_ok:
+            pipe_close_ok = _close_pipe_endpoints(receiver)
+            handle_close_ok = _close_process_handle(process)
+            if not handle_close_ok:
                 return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+            if not pipe_close_ok:
+                return None,"HANDLER_RESULT_PIPE_CLOSE_FAILED"
             return None,"HANDLER_RESULT_UNAVAILABLE"
-        receiver.close()
-        if not _close_process_handle(process):
+        pipe_close_ok = _close_pipe_endpoints(receiver)
+        handle_close_ok = _close_process_handle(process)
+        if not handle_close_ok:
             return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+        if not pipe_close_ok:
+            return None,"HANDLER_RESULT_PIPE_CLOSE_FAILED"
         if kind=="ERROR":
             return None,"HANDLER_ERROR_"+_text(value,"handler error type").upper()
         if kind!="OK":

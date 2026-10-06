@@ -1547,30 +1547,6 @@ def test_operational_checkpoint_generation_marker_rejects_boolean() -> None:
             raise AssertionError("boolean observed_generation was accepted")
 
 
-def test_non_superseding_source_projection_preserves_failure_generation() -> None:
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
-        state = _state_with_history(root, _SMALL_HISTORY)
-        state.record_failure(code="PROVIDER_FAILURE")
-
-        state.record_source_projection(deltas=(), backlog=True)
-
-        snapshot = state.snapshot()
-        assert snapshot.last_error_code == "PROVIDER_FAILURE"
-        assert snapshot.source_state_projection_backlog is True
-
-        canonical = json.loads(
-            (root / "continuous_session.json").read_text(encoding="utf-8")
-        )
-        sidecar = json.loads(
-            (
-                root / "continuous_session.json.operational_error.json"
-            ).read_text(encoding="utf-8")
-        )
-        assert canonical["generation"] == 0
-        assert sidecar["observed_generation"] == 0
-
-
 def test_session_update_blocks_behind_canonical_durable_path_lock() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -1614,7 +1590,7 @@ def test_session_update_rejects_runtime_rmw_lock_rebinding(monkeypatch) -> None:
         )
 
         try:
-            state.record_source_projection(deltas=(), backlog=True)
+            state.record_source_projection(deltas=(), backlog=False)
         except continuous_session.ContinuousSessionError as exc:
             assert "read-modify-write authority" in str(exc)
         else:

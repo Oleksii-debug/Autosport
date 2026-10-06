@@ -3022,6 +3022,10 @@ def test_provider_unavailable_tick_uses_bounded_failure_publication() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         state = _state_with_history(root, _LARGE_HISTORY)
+        state.record_source_projection(
+            deltas=(_projection_delta(1),),
+            backlog=False,
+        )
 
         class ProviderUnavailableCycle:
             provider_unavailable = True
@@ -3059,8 +3063,8 @@ def test_provider_unavailable_tick_uses_bounded_failure_publication() -> None:
         assert result.cycle_index == _LARGE_HISTORY
         assert result.source_id == "provider-a"
         assert result.source_provider_unavailable is True
-        assert result.source_gap_states == ()
-        assert result.source_sync_states == ()
+        assert result.source_gap_states == ("NONE",)
+        assert result.source_sync_states == ("READY",)
         assert result.last_success_at == _AT
         error_path = root / "continuous_session.json.operational_error.json"
         payload = json.loads(error_path.read_text(encoding="utf-8"))

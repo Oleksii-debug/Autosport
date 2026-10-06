@@ -2718,6 +2718,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             FocusedMirrorDependency.__eq__
         ),
         _dependency_equals_code: object = FocusedMirrorDependency.__eq__.__code__,
+        _invalidation_buffer_type: type[BoundedMirrorInvalidationBuffer] = (
+            BoundedMirrorInvalidationBuffer
+        ),
+        _force_full_refresh: Callable[[BoundedMirrorInvalidationBuffer], None] = (
+            BoundedMirrorInvalidationBuffer.force_full_refresh
+        ),
+        _force_full_refresh_code: object = (
+            BoundedMirrorInvalidationBuffer.force_full_refresh.__code__
+        ),
     ) -> tuple[
         tuple[str, ...],
         bool,
@@ -2961,6 +2970,35 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     matched_set.update(keys)
                     matched_keys_storage[input_id] = matched_set
 
+        @contextmanager
+        def consumed_batch_recovery() -> Iterator[None]:
+            try:
+                yield
+            except Exception as exc:
+                if type(invalidation_buffer) is _invalidation_buffer_type:
+                    try:
+                        if (
+                            BoundedMirrorInvalidationBuffer is not _invalidation_buffer_type
+                            or _invalidation_buffer_type.force_full_refresh
+                            is not _force_full_refresh
+                            or getattr(_force_full_refresh, "__code__", None)
+                            is not _force_full_refresh_code
+                        ):
+                            raise ContinuousSessionError(
+                                "canonical invalidation recovery authority changed"
+                            )
+                        _force_full_refresh(invalidation_buffer)
+                    except Exception as recovery_exc:
+                        try:
+                            exc.add_note(
+                                "consumed invalidation batch could not be promoted "
+                                "to full-refresh recovery: "
+                                f"{type(recovery_exc).__name__}: {recovery_exc}"
+                            )
+                        except BaseException:
+                            pass
+                raise
+
         affected: list[str] = []
         full_refresh_required = False
         last_has_more = False
@@ -2973,111 +3011,112 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             matching_state_before_drain = capture_matching_key_state()
             matching_keys_before_drain = matching_keys_authority()
             batch = drain_invalidation(max_items=max_items)
-            if dependency_index.input_ids != indexed_input_ids:
-                restore_dependency_authority()
-                restore_matching_key_state(matching_state_before_drain)
-                raise ContinuousSessionError(
-                    "invalidation drain mutated dependency index input identity state"
-                )
-            try:
-                require_dependency_authority(
-                    "dependency index routing authority changed during invalidation drain"
-                )
-                current_matching_keys = matching_keys_authority()
-            except Exception:
-                restore_matching_key_state(matching_state_before_drain)
-                raise
-            if current_matching_keys != matching_keys_before_drain:
-                restore_matching_key_state(matching_state_before_drain)
-                raise ContinuousSessionError(
-                    "dependency index matched-key routing changed during invalidation drain"
-                )
-            if (
-                type(batch) is not MirrorInvalidationBatch
-                or type(batch.changed_keys) is not tuple
-                or type(batch.full_refresh_required) is not bool
-                or type(batch.has_more) is not bool
-                or any(
-                    type(key) is not tuple
-                    or len(key) != 2
-                    or any(
-                        type(part) is not str
-                        or not part
-                        or part.strip() != part
-                        for part in key
-                    )
-                    for key in batch.changed_keys
-                )
-                or len(set(batch.changed_keys)) != len(batch.changed_keys)
-                or (
-                    batch.full_refresh_required
-                    and (bool(batch.changed_keys) or batch.has_more)
-                )
-            ):
-                raise ContinuousSessionError(
-                    "invalidation buffer returned an invalid batch"
-                )
-            batch_changed_keys = batch.changed_keys
-            batch_full_refresh_required = batch.full_refresh_required
-            batch_has_more = batch.has_more
-            routed = affected_inputs(batch)
-            if (
-                batch.changed_keys != batch_changed_keys
-                or batch.full_refresh_required is not batch_full_refresh_required
-                or batch.has_more is not batch_has_more
-            ):
-                raise ContinuousSessionError(
-                    "dependency index routing mutated invalidation batch truth"
-                )
-            if dependency_index.input_ids != indexed_input_ids:
-                raise ContinuousSessionError(
-                    "dependency index routing mutated input identity state"
-                )
-            require_dependency_authority(
-                "dependency index routing authority changed during affected-input routing"
-            )
-            if (
-                type(routed) is not tuple
-                or any(
-                    type(input_id) is not str
-                    or not input_id
-                    or input_id.strip() != input_id
-                    for input_id in routed
-                )
-                or len(set(routed)) != len(routed)
-            ):
-                raise ContinuousSessionError(
-                    "dependency index returned invalid affected inputs"
-                )
-            if any(input_id not in indexed_input_ids for input_id in routed):
-                raise ContinuousSessionError(
-                    "dependency index routed an unregistered input"
-                )
-            if not batch_full_refresh_required:
-                routed_ids = set(routed)
-                expected_routed = tuple(
-                    input_id
-                    for input_id in indexed_input_ids
-                    if input_id in routed_ids
-                )
-                if routed != expected_routed:
+            with consumed_batch_recovery():
+                if dependency_index.input_ids != indexed_input_ids:
+                    restore_dependency_authority()
+                    restore_matching_key_state(matching_state_before_drain)
                     raise ContinuousSessionError(
-                        "dependency index affected input routing is reordered"
+                        "invalidation drain mutated dependency index input identity state"
                     )
-            if (
-                batch_full_refresh_required
-                and routed != indexed_input_ids
-            ):
-                raise ContinuousSessionError(
-                    "dependency index full refresh routing is incomplete or reordered"
+                try:
+                    require_dependency_authority(
+                        "dependency index routing authority changed during invalidation drain"
+                    )
+                    current_matching_keys = matching_keys_authority()
+                except Exception:
+                    restore_matching_key_state(matching_state_before_drain)
+                    raise
+                if current_matching_keys != matching_keys_before_drain:
+                    restore_matching_key_state(matching_state_before_drain)
+                    raise ContinuousSessionError(
+                        "dependency index matched-key routing changed during invalidation drain"
+                    )
+                if (
+                    type(batch) is not MirrorInvalidationBatch
+                    or type(batch.changed_keys) is not tuple
+                    or type(batch.full_refresh_required) is not bool
+                    or type(batch.has_more) is not bool
+                    or any(
+                        type(key) is not tuple
+                        or len(key) != 2
+                        or any(
+                            type(part) is not str
+                            or not part
+                            or part.strip() != part
+                            for part in key
+                        )
+                        for key in batch.changed_keys
+                    )
+                    or len(set(batch.changed_keys)) != len(batch.changed_keys)
+                    or (
+                        batch.full_refresh_required
+                        and (bool(batch.changed_keys) or batch.has_more)
+                    )
+                ):
+                    raise ContinuousSessionError(
+                        "invalidation buffer returned an invalid batch"
+                    )
+                batch_changed_keys = batch.changed_keys
+                batch_full_refresh_required = batch.full_refresh_required
+                batch_has_more = batch.has_more
+                routed = affected_inputs(batch)
+                if (
+                    batch.changed_keys != batch_changed_keys
+                    or batch.full_refresh_required is not batch_full_refresh_required
+                    or batch.has_more is not batch_has_more
+                ):
+                    raise ContinuousSessionError(
+                        "dependency index routing mutated invalidation batch truth"
+                    )
+                if dependency_index.input_ids != indexed_input_ids:
+                    raise ContinuousSessionError(
+                        "dependency index routing mutated input identity state"
+                    )
+                require_dependency_authority(
+                    "dependency index routing authority changed during affected-input routing"
                 )
-            affected.extend(routed)
-            full_refresh_required = (
-                full_refresh_required or batch_full_refresh_required
-            )
-            last_has_more = batch_has_more
-            if not batch_has_more:
-                break
+                if (
+                    type(routed) is not tuple
+                    or any(
+                        type(input_id) is not str
+                        or not input_id
+                        or input_id.strip() != input_id
+                        for input_id in routed
+                    )
+                    or len(set(routed)) != len(routed)
+                ):
+                    raise ContinuousSessionError(
+                        "dependency index returned invalid affected inputs"
+                    )
+                if any(input_id not in indexed_input_ids for input_id in routed):
+                    raise ContinuousSessionError(
+                        "dependency index routed an unregistered input"
+                    )
+                if not batch_full_refresh_required:
+                    routed_ids = set(routed)
+                    expected_routed = tuple(
+                        input_id
+                        for input_id in indexed_input_ids
+                        if input_id in routed_ids
+                    )
+                    if routed != expected_routed:
+                        raise ContinuousSessionError(
+                            "dependency index affected input routing is reordered"
+                        )
+                if (
+                    batch_full_refresh_required
+                    and routed != indexed_input_ids
+                ):
+                    raise ContinuousSessionError(
+                        "dependency index full refresh routing is incomplete or reordered"
+                    )
+                affected.extend(routed)
+                full_refresh_required = (
+                    full_refresh_required or batch_full_refresh_required
+                )
+                last_has_more = batch_has_more
+                if not batch_has_more:
+                    break
 
         matching_state_before_backlog = capture_matching_key_state()
         matching_keys_before_backlog = matching_keys_authority()

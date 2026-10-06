@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tkinter as tk
+from decimal import Decimal
 from pathlib import Path
 from tkinter import ttk
 
@@ -53,7 +54,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
 
     def _resolve_product_runtime_binding(
         self,
-    ) -> tuple[Path, str, ResearchStrategyPlan | None]:
+    ) -> tuple[Path, str, ResearchStrategyPlan | None, str]:
         """Bind the runtime to the exact currently active economic workspace."""
 
         strategy_id = self.__dict__.get("_active_strategy_id")
@@ -82,16 +83,28 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             )
 
         session = self.__dict__.get("session")
-        if session is not None:
-            try:
-                session_workspace = Path(session.workspace)
-            except (AttributeError, TypeError, ValueError, OSError) as exc:
-                raise RuntimeError("active session workspace is not canonical") from exc
-            if session_workspace != expected_workspace:
-                raise RuntimeError(
-                    "active session workspace does not match active strategy identity"
-                )
-        return expected_workspace, strategy_id, research_plan
+        if session is None:
+            raise RuntimeError("active economic session is unavailable")
+        try:
+            session_workspace = Path(session.workspace)
+        except (AttributeError, TypeError, ValueError, OSError) as exc:
+            raise RuntimeError("active session workspace is not canonical") from exc
+        if session_workspace != expected_workspace:
+            raise RuntimeError(
+                "active session workspace does not match active strategy identity"
+            )
+
+        try:
+            initial_bankroll = session.book.initial_bankroll
+        except AttributeError as exc:
+            raise RuntimeError("active session bankroll identity is unavailable") from exc
+        if (
+            type(initial_bankroll) is not Decimal
+            or not initial_bankroll.is_finite()
+            or initial_bankroll <= 0
+        ):
+            raise RuntimeError("active session initial bankroll is not canonical")
+        return expected_workspace, strategy_id, research_plan, str(initial_bankroll)
 
     def _clear_product_runtime_binding(self) -> None:
         self._product_runtime_workspace = None
@@ -242,9 +255,12 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             return
 
         try:
-            workspace, restore_strategy_id, restore_research_plan = (
-                self._resolve_product_runtime_binding()
-            )
+            (
+                workspace,
+                restore_strategy_id,
+                restore_research_plan,
+                initial_bankroll,
+            ) = self._resolve_product_runtime_binding()
         except Exception:
             message = text("ui.product_runtime.status.workspace_identity_mismatch")
             self.product_status.set(message)
@@ -316,7 +332,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
                 workspace=workspace,
                 source_factory=source_factory,
                 expected_source_id=expected_source_id,
-                initial_bankroll="10000",
+                initial_bankroll=initial_bankroll,
                 poll_seconds=_PRODUCT_POLL_SECONDS,
             )
         except BaseException as exc:

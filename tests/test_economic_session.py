@@ -1138,6 +1138,28 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         finally:
             economic_session._PRODUCT_TIME_NS = original
 
+    def test_require_current_ignores_late_current_method_rebinding(self) -> None:
+        store = ProductEconomicSessionStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+        evidence = store.current()
+        original = ProductEconomicSessionStore.current
+        hostile_called = False
+
+        def hostile(_self):
+            nonlocal hostile_called
+            hostile_called = True
+            raise AssertionError("hostile current dispatch executed")
+
+        ProductEconomicSessionStore.current = hostile
+        try:
+            self.assertEqual(store.require_current(evidence), evidence)
+        finally:
+            ProductEconomicSessionStore.current = original
+
+        self.assertFalse(hostile_called)
+
     def test_under_lock_revalidation_accepts_exact_current_product_session(self) -> None:
         store = ProductEconomicSessionStore(
             self.workspace,

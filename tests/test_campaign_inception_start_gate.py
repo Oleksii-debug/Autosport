@@ -330,6 +330,33 @@ def test_oversized_inception_state_fails_closed_before_json_decode(
         )
 
 
+def test_inception_state_directory_symlink_is_rejected_before_external_write(
+    tmp_path: Path,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    state_directory = locator.workspace / "campaign-inception-v1"
+    external_directory = tmp_path / "external-inception-state"
+    external_directory.mkdir()
+    try:
+        state_directory.symlink_to(external_directory, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink creation unavailable: {exc}")
+
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="state directory must be a real directory",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    # The rejection happens before WorkspaceEconomicLock or receipt publication can
+    # create any file through the aliased directory.
+    assert tuple(external_directory.iterdir()) == ()
+
+
 def test_inception_state_symlink_is_not_followed(
     tmp_path: Path,
 ) -> None:

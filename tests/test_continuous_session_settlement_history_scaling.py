@@ -2267,6 +2267,8 @@ def _projection_delta(
     delta_id: str | None = None,
     epoch: str = "epoch-a",
     position: int | None = None,
+    revision_of: str | None = None,
+    revision_number: int = 0,
 ) -> continuous_session.CollectorDelta:
     resolved_position = index if position is None else position
     return continuous_session.CollectorDelta(
@@ -2286,6 +2288,8 @@ def _projection_delta(
         collector_received_at=_AT,
         collector_committed_at=_AT,
         desktop_available_at=_AT,
+        revision_of=revision_of,
+        revision_number=revision_number,
         gap_state=continuous_session.GapState.NONE,
         sync_state=continuous_session.SyncState.READY,
     )
@@ -2413,7 +2417,7 @@ def test_source_projection_rejects_regressive_positions_within_epoch() -> None:
                 backlog=False,
             )
         except continuous_session.ContinuousSessionError as exc:
-            assert "positions must increase" in str(exc)
+            assert "position moved backwards" in str(exc)
         else:
             raise AssertionError("regressive projection positions were accepted")
 
@@ -2432,9 +2436,9 @@ def test_source_projection_rejects_equal_positions_within_epoch() -> None:
                 backlog=False,
             )
         except continuous_session.ContinuousSessionError as exc:
-            assert "positions must increase" in str(exc)
+            assert "requires a revision" in str(exc)
         else:
-            raise AssertionError("duplicate projection positions were accepted")
+            raise AssertionError("equal non-revision projection positions were accepted")
 
 
 def test_source_projection_allows_position_reset_on_epoch_change() -> None:
@@ -2482,3 +2486,26 @@ def test_source_projection_requires_exact_tuple() -> None:
             assert "exact tuple" in str(exc)
         else:
             raise AssertionError("non-tuple projection batch was accepted")
+
+
+def test_source_projection_allows_equal_position_explicit_revision() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        state.record_source_projection(
+            deltas=(
+                _projection_delta(1, delta_id="base-delta", position=5),
+                _projection_delta(
+                    2,
+                    delta_id="revision-delta",
+                    position=5,
+                    revision_of="base-delta",
+                    revision_number=1,
+                ),
+            ),
+            backlog=False,
+        )
+
+        snapshot = state.snapshot()
+        assert snapshot.source_state_delta_id == "revision-delta"

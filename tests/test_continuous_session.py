@@ -1047,5 +1047,44 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+
+    def test_tick_result_does_not_reread_session_after_success_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            page = CatalogPage(
+                source_id="provider-a",
+                stream_epoch="epoch-1",
+                cursor="cursor-1",
+                position=1,
+                events=(_event(phase=EventPhase.PRE_MATCH),),
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(page),
+                clock,
+            )
+            original_snapshot = coordinator._state.snapshot
+            initial_cycles = original_snapshot().cycles_completed
+
+            def guarded_snapshot():
+                if coordinator._state._cycles_completed > initial_cycles:
+                    raise AssertionError(
+                        "successful tick result reread a later session generation"
+                    )
+                return original_snapshot()
+
+            coordinator._state.snapshot = guarded_snapshot
+            try:
+                result = coordinator.tick()
+                self.assertEqual(result.cycle_index, initial_cycles + 1)
+                self.assertEqual(
+                    result.last_success_at,
+                    "2026-09-19T21:20:00+00:00",
+                )
+            finally:
+                coordinator._state.snapshot = original_snapshot
+                store.close()
+
 if __name__ == "__main__":
     unittest.main()

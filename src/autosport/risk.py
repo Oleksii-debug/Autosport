@@ -10,6 +10,7 @@ from decimal import (
     Inexact,
     InvalidOperation,
     Overflow,
+    ROUND_DOWN,
     ROUND_HALF_EVEN,
     Underflow,
     localcontext,
@@ -1633,6 +1634,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         history_rooms = self._goal_history_rooms(book, goal, context=context)
         if history_rooms is None:
             return None
+        session_room, day_room, drawdown_room, turnover_room = history_rooms
 
         try:
             ticket_fraction, committed_fraction = self._effective_fraction_limits()
@@ -1644,18 +1646,59 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 reserve_limit = initial_bankroll * self.minimum_cash_reserve_fraction
                 committed_room = committed_limit - committed_stake
                 reserve_room = balance - reserve_limit
-            caps = [
-                signal_limit,
-                ticket_limit,
+
+            capital_factor = (
+                Decimal("1")
+                if context is None
+                else _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                    Decimal("1"),
+                    context.legs,
+                )
+            )
+            if not capital_factor.is_finite() or capital_factor <= 0:
+                return None
+
+            capital_rooms = (
                 committed_room,
                 reserve_room,
                 balance,
-                *history_rooms,
+                session_room,
+                day_room,
+                drawdown_room,
+            )
+            capital_stake_caps: list[Decimal] = []
+            for room in capital_rooms:
+                if not room.is_finite():
+                    return None
+                with localcontext(self._decimal_context()) as inverse_context:
+                    # This is a limit-tightening inverse, not economic valuation.
+                    # If liability/stake is non-terminating in Decimal arithmetic,
+                    # round only toward zero so the derived stake can never exceed
+                    # the capital room. evaluate() re-proves exact liability later.
+                    inverse_context.traps[Inexact] = False
+                    inverse_context.rounding = ROUND_DOWN
+                    stake_cap = room / capital_factor
+                if not stake_cap.is_finite():
+                    return None
+                capital_stake_caps.append(stake_cap)
+
+            caps = [
+                signal_limit,
+                ticket_limit,
+                turnover_room,
+                *capital_stake_caps,
             ]
             if goal.max_stake_amount is not None:
                 caps.append(goal.max_stake_amount)
             amount = min(caps)
-        except (ArithmeticError, TypeError, ValueError):
+            if context is not None and amount > 0:
+                exact_capital = _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                    amount,
+                    context.legs,
+                )
+                if any(exact_capital > room for room in capital_rooms):
+                    return None
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
             return None
 
         if not isinstance(amount, Decimal) or not amount.is_finite() or amount <= 0:

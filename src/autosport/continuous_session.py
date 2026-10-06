@@ -967,7 +967,7 @@ class _ContinuousSessionState:
             raw["generation"] = 0
         try:
             _text(raw["session_id"], "session_id")
-            started_at = _instant(raw["started_at"], "started_at")
+            started_at = _instant_validator(raw["started_at"], "started_at")
         except (TypeError, ValueError) as exc:
             raise ContinuousSessionError(
                 "continuous session state contains invalid identity/timestamp field"
@@ -1422,13 +1422,24 @@ class _ContinuousSessionState:
     @staticmethod
     def _normalized_settlement_evidence(
         evidence: SettlementResolution,
+        *,
+        _instant_validator: Callable[[object, str], datetime] = _instant,
+        _instant_validator_code: object = _instant.__code__,
     ) -> dict[str, str]:
+        if (
+            _instant is not _instant_validator
+            or getattr(_instant_validator, "__code__", None)
+            is not _instant_validator_code
+        ):
+            raise ContinuousSessionError(
+                "canonical settlement evidence timestamp authority changed"
+            )
         return {
             "event_identity": evidence.event_identity,
             "settlement_ref": evidence.settlement_ref,
             "evidence_id": evidence.evidence_id,
             "evidence_sha256": evidence.evidence_sha256,
-            "available_at": _instant(
+            "available_at": _instant_validator(
                 evidence.available_at,
                 "available_at",
             ).isoformat(),
@@ -1668,6 +1679,8 @@ class _ContinuousSessionState:
         _validate_resolution_code: object = SettlementResolution.validate.__code__,
         _update_method: Callable[..., dict[str, Any]] = _update,
         _update_method_code: object = _update.__code__,
+        _instant_validator: Callable[[object, str], datetime] = _instant,
+        _instant_validator_code: object = _instant.__code__,
     ) -> int:
         if (
             type(self)._update is not _update_method
@@ -1675,6 +1688,14 @@ class _ContinuousSessionState:
         ):
             raise ContinuousSessionError(
                 "canonical success read-modify-write authority changed"
+            )
+        if (
+            _instant is not _instant_validator
+            or getattr(_instant_validator, "__code__", None)
+            is not _instant_validator_code
+        ):
+            raise ContinuousSessionError(
+                "canonical success timestamp authority changed"
             )
         if (
             getattr(
@@ -1689,7 +1710,7 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "canonical settlement evidence validation authority changed"
             )
-        timestamp = _instant(at, "at")
+        timestamp = _instant_validator(at, "at")
         if type(full_refresh) is not bool:
             raise TypeError("full_refresh must be boolean")
         if type(settlement_evidence) is not tuple:
@@ -1721,7 +1742,7 @@ class _ContinuousSessionState:
                     "success timestamp precedes session start"
                 )
             if raw["last_success_at"] is not None:
-                previous_success = _instant(
+                previous_success = _instant_validator(
                     raw["last_success_at"],
                     "last_success_at",
                 )

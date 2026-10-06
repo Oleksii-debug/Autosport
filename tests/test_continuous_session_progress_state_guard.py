@@ -868,3 +868,98 @@ def test_tick_rejects_runtime_causal_time_validator_rebinding(
         ):
             coordinator.tick()
 
+def _status_coordinator(
+    state: continuous_session._ContinuousSessionState,
+):
+    coordinator = object.__new__(
+        continuous_session.ContinuousSessionCoordinator
+    )
+    coordinator._state = state
+    coordinator.collector = object.__new__(
+        continuous_session.HeadlessCollectorService
+    )
+    coordinator.collector._state = type(
+        "CollectorStateStub",
+        (),
+        {
+            "snapshot": lambda _self: {
+                "last_success_at": None,
+                "last_error_code": None,
+            }
+        },
+    )()
+    coordinator.invalidation_buffer = type(
+        "InvalidationBufferStub",
+        (),
+        {
+            "pending_count": 0,
+            "full_refresh_required": False,
+        },
+    )()
+    return coordinator
+
+
+def test_status_ignores_instance_shadowed_session_snapshot() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+        coordinator = _status_coordinator(state)
+
+        def attacker_snapshot() -> object:
+            raise AssertionError("instance-shadowed session status snapshot executed")
+
+        state.snapshot = attacker_snapshot  # type: ignore[method-assign]
+
+        status = coordinator.status()
+        assert status.state is continuous_session.SessionState.RUNNING
+
+
+def test_status_ignores_instance_shadowed_collector_status() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+        coordinator = _status_coordinator(state)
+
+        def attacker_status() -> dict[str, object]:
+            raise AssertionError("instance-shadowed collector status executed")
+
+        coordinator.collector.status = attacker_status  # type: ignore[method-assign]
+
+        status = coordinator.status()
+        assert status.source_last_error_code is None
+
+
+@pytest.mark.parametrize("authority", ("session", "collector", "replace"))
+def test_status_rejects_rebound_truth_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    authority: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+        coordinator = _status_coordinator(state)
+
+        if authority == "session":
+            def attacker_snapshot(_self: object) -> object:
+                raise AssertionError("class-rebound session snapshot executed")
+            monkeypatch.setattr(
+                continuous_session._ContinuousSessionState,
+                "snapshot",
+                attacker_snapshot,
+            )
+        elif authority == "collector":
+            def attacker_status(_self: object) -> dict[str, object]:
+                raise AssertionError("class-rebound collector status executed")
+            monkeypatch.setattr(
+                continuous_session.HeadlessCollectorService,
+                "status",
+                attacker_status,
+            )
+        else:
+            def attacker_replace(*_args: object, **_kwargs: object) -> object:
+                raise AssertionError("runtime-rebound status replace executed")
+            monkeypatch.setattr(continuous_session, "replace", attacker_replace)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical coordinator status authority changed",
+        ):
+            coordinator.status()
+

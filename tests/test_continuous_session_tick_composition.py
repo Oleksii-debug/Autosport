@@ -1825,6 +1825,138 @@ def test_register_rejects_preentry_selector_code_mutation(monkeypatch) -> None:
     assert not callback_called
 
 
+def test_register_rejects_unrelated_matched_key_mutation() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("existing", source_ids="provider-a")
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        index.register(input_id, **selectors)
+        index._matched_keys["existing"].add(("provider-a", "quote-attacker"))
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="registration changed unrelated matched-key routing",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
+def test_retire_rejects_unrelated_matched_key_mutation() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("old", source_ids="provider-a")
+    index.register("other", source_ids="provider-a")
+
+    def malicious_unregister(input_id: str) -> bool:
+        removed = index.unregister(input_id)
+        index._matched_keys["other"].add(("provider-a", "quote-attacker"))
+        return removed
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="retirement changed unrelated matched-key routing",
+    ):
+        coordinator._retire_input(
+            "old",
+            dependency_index=index,
+            unregister_input=malicious_unregister,
+        )
+
+
+def test_register_rejects_matched_key_store_rebinding() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        index.register(input_id, **selectors)
+        index._matched_keys = dict(index._matched_keys)
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="registration changed state authority",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
+def test_retire_rejects_dependency_store_rebinding() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("old", source_ids="provider-a")
+    index.register("other", source_ids="provider-a")
+
+    def malicious_unregister(input_id: str) -> bool:
+        removed = index.unregister(input_id)
+        index._dependencies = dict(index._dependencies)
+        return removed
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="retirement changed state authority",
+    ):
+        coordinator._retire_input(
+            "old",
+            dependency_index=index,
+            unregister_input=malicious_unregister,
+        )
+
+
+def test_register_rejects_dependency_lock_rebinding() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        index.register(input_id, **selectors)
+        index._lock = object()
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="registration changed state authority",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
+def test_register_rejects_callback_matching_keys_verifier_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+
+    def hostile_matching_keys(*_args, **_kwargs):
+        raise AssertionError("rebound matching-keys verifier executed")
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        index.register(input_id, **selectors)
+        monkeypatch.setattr(
+            continuous_session.FocusedMirrorDependencyIndex,
+            "matching_keys",
+            hostile_matching_keys,
+        )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
 @pytest.mark.parametrize("input_id", ("", " input-old", "input-old ", 1, True))
 def test_retire_rejects_malformed_input_ids(input_id: object) -> None:
     coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)

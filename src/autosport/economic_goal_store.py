@@ -269,6 +269,8 @@ def _snapshot_economic_goal_contract(
     contract: EconomicGoalContract,
     _goal_type=EconomicGoalContract,
     _goal_validator=EconomicGoalContract.__post_init__,
+    _object_new=object.__new__,
+    _object_setattr=object.__setattr__,
     _error_type=EconomicGoalContractError,
 ) -> EconomicGoalContract:
     """Capture one validated, non-shared contract image for authority decisions."""
@@ -277,43 +279,39 @@ def _snapshot_economic_goal_contract(
         raise _error_type(
             "economic goal persistence requires an EconomicGoalContract"
         )
-    try:
-        snapshot = _goal_type(
-            goal_id=contract.goal_id,
-            revision=contract.revision,
-            bankroll_id=contract.bankroll_id,
-            currency=contract.currency,
-            objective=contract.objective,
-            max_stake_fraction=contract.max_stake_fraction,
-            max_stake_amount=contract.max_stake_amount,
-            max_session_loss_fraction=contract.max_session_loss_fraction,
-            max_day_loss_fraction=contract.max_day_loss_fraction,
-            max_drawdown_fraction=contract.max_drawdown_fraction,
-            max_capital_at_risk_fraction=contract.max_capital_at_risk_fraction,
-            max_event_concentration_fraction=contract.max_event_concentration_fraction,
-            max_market_concentration_fraction=contract.max_market_concentration_fraction,
-            max_provider_concentration_fraction=contract.max_provider_concentration_fraction,
-            max_sport_concentration_fraction=contract.max_sport_concentration_fraction,
-            max_turnover_fraction=contract.max_turnover_fraction,
-            max_risk_of_ruin=contract.max_risk_of_ruin,
-            max_execution_slippage_fraction=contract.max_execution_slippage_fraction,
-            max_quote_age_seconds=contract.max_quote_age_seconds,
-            minimum_data_quality=contract.minimum_data_quality,
-            max_concurrent_positions=contract.max_concurrent_positions,
-            max_parlay_legs=contract.max_parlay_legs,
-            automation_level=contract.automation_level,
-            emergency_stop=contract.emergency_stop,
-            blocked_sports=contract.blocked_sports,
-            blocked_providers=contract.blocked_providers,
-            blocked_markets=contract.blocked_markets,
-        )
-        _goal_validator(snapshot)
-        return snapshot
-    except _error_type:
-        raise
-    except (TypeError, ValueError) as exc:
-        raise _error_type("malformed economic goal contract") from exc
-
+    snapshot = _object_new(_goal_type)
+    for name, value in (
+        ("goal_id", contract.goal_id),
+        ("revision", contract.revision),
+        ("bankroll_id", contract.bankroll_id),
+        ("currency", contract.currency),
+        ("objective", contract.objective),
+        ("max_stake_fraction", contract.max_stake_fraction),
+        ("max_stake_amount", contract.max_stake_amount),
+        ("max_session_loss_fraction", contract.max_session_loss_fraction),
+        ("max_day_loss_fraction", contract.max_day_loss_fraction),
+        ("max_drawdown_fraction", contract.max_drawdown_fraction),
+        ("max_capital_at_risk_fraction", contract.max_capital_at_risk_fraction),
+        ("max_event_concentration_fraction", contract.max_event_concentration_fraction),
+        ("max_market_concentration_fraction", contract.max_market_concentration_fraction),
+        ("max_provider_concentration_fraction", contract.max_provider_concentration_fraction),
+        ("max_sport_concentration_fraction", contract.max_sport_concentration_fraction),
+        ("max_turnover_fraction", contract.max_turnover_fraction),
+        ("max_risk_of_ruin", contract.max_risk_of_ruin),
+        ("max_execution_slippage_fraction", contract.max_execution_slippage_fraction),
+        ("max_quote_age_seconds", contract.max_quote_age_seconds),
+        ("minimum_data_quality", contract.minimum_data_quality),
+        ("max_concurrent_positions", contract.max_concurrent_positions),
+        ("max_parlay_legs", contract.max_parlay_legs),
+        ("automation_level", contract.automation_level),
+        ("emergency_stop", contract.emergency_stop),
+        ("blocked_sports", contract.blocked_sports),
+        ("blocked_providers", contract.blocked_providers),
+        ("blocked_markets", contract.blocked_markets),
+    ):
+        _object_setattr(snapshot, name, value)
+    _goal_validator(snapshot)
+    return snapshot
 
 def economic_goal_to_payload(
     contract: EconomicGoalContract,

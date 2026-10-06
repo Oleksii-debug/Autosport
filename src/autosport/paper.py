@@ -1340,11 +1340,26 @@ class PaperBook:
             if action == "open":
                 if ticket_id in opened:
                     raise ValueError("PaperBook lifecycle opens a ticket more than once")
+                if any(leg.exchange_side == "lay" for leg in ticket.legs) and len(ticket.legs) != 1:
+                    raise ValueError(
+                        "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                    )
                 try:
-                    replay_balance = _CANONICAL_DEBIT_BALANCE(replay_balance, ticket.stake)
+                    locked_capital = (
+                        _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                            ticket.stake,
+                            ticket.legs[0],
+                        )
+                        if len(ticket.legs) == 1
+                        else ticket.stake
+                    )
+                    replay_balance = _CANONICAL_DEBIT_BALANCE(
+                        replay_balance,
+                        locked_capital,
+                    )
                 except ValueError as exc:
                     raise ValueError(
-                        f"PaperBook lifecycle stake for ticket {ticket_id} was not affordable"
+                        f"PaperBook lifecycle locked capital for ticket {ticket_id} was not affordable"
                     ) from exc
                 opened.add(ticket_id)
                 open_order.append(ticket_id)
@@ -1454,13 +1469,71 @@ class PaperBook:
             quote_keys = [leg.quote_key for leg in ticket.legs]
             if len(quote_keys) != len(set(quote_keys)):
                 raise ValueError("PaperBook snapshot ticket contains duplicate quote_key leg")
+            if any(leg.exchange_side == "lay" for leg in ticket.legs) and len(ticket.legs) != 1:
+                raise ValueError(
+                    "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                )
 
-            if ticket.status in {_CANONICAL_TICKET_STATUS_OPEN, _CANONICAL_TICKET_STATUS_LOST} and ticket.payout != 0:
-                raise ValueError("PaperBook snapshot open/lost ticket payout must be zero")
-            if ticket.status is _CANONICAL_TICKET_STATUS_VOID and ticket.payout != ticket.stake:
-                raise ValueError("PaperBook snapshot void ticket payout must equal stake")
-            if ticket.status is _CANONICAL_TICKET_STATUS_WON and ticket.payout <= ticket.stake:
-                raise ValueError("PaperBook snapshot won ticket payout must exceed stake")
+            is_lay = (
+                len(ticket.legs) == 1
+                and ticket.legs[0].exchange_side == "lay"
+            )
+            if is_lay:
+                locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                    ticket.stake,
+                    ticket.legs[0],
+                )
+                if ticket.status in {
+                    _CANONICAL_TICKET_STATUS_OPEN,
+                    _CANONICAL_TICKET_STATUS_LOST,
+                }:
+                    expected_payout = _CANONICAL_PAPER_DECIMAL_TYPE("0")
+                elif ticket.status is _CANONICAL_TICKET_STATUS_VOID:
+                    expected_payout = locked_capital
+                elif ticket.status is _CANONICAL_TICKET_STATUS_WON:
+                    try:
+                        with _CANONICAL_LOCALCONTEXT(
+                            _CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()
+                        ) as context:
+                            expected_payout = locked_capital + ticket.stake
+                            if context.flags[_CANONICAL_INEXACT_SIGNAL]:
+                                raise ValueError(
+                                    "PaperBook LAY payout witness loses Decimal precision"
+                                )
+                    except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+                        raise ValueError(
+                            "PaperBook LAY payout witness is not representable"
+                        ) from exc
+                else:
+                    raise ValueError(
+                        "PaperBook snapshot ticket status is unsupported"
+                    )
+                if ticket.payout != expected_payout:
+                    raise ValueError(
+                        "PaperBook snapshot LAY payout is inconsistent with locked-capital economics"
+                    )
+            else:
+                if ticket.status in {
+                    _CANONICAL_TICKET_STATUS_OPEN,
+                    _CANONICAL_TICKET_STATUS_LOST,
+                } and ticket.payout != 0:
+                    raise ValueError(
+                        "PaperBook snapshot open/lost ticket payout must be zero"
+                    )
+                if (
+                    ticket.status is _CANONICAL_TICKET_STATUS_VOID
+                    and ticket.payout != ticket.stake
+                ):
+                    raise ValueError(
+                        "PaperBook snapshot void ticket payout must equal stake"
+                    )
+                if (
+                    ticket.status is _CANONICAL_TICKET_STATUS_WON
+                    and ticket.payout <= ticket.stake
+                ):
+                    raise ValueError(
+                        "PaperBook snapshot won ticket payout must exceed stake"
+                    )
 
         _CANONICAL_VALIDATE_LIFECYCLE_REACHABILITY(book)
 

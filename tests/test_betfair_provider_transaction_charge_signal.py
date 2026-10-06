@@ -52,6 +52,7 @@ def _statement_row(
     nested_raw: str | None = None,
     item_class: str = "UNKNOWN",
     amount: int = -1,
+    ref_id: str = "0",
 ) -> dict[str, object]:
     if nested_raw is None:
         nested_raw = json.dumps(
@@ -59,7 +60,7 @@ def _statement_row(
             separators=(",", ":"),
         )
     return {
-        "refId": "0",
+        "refId": ref_id,
         "itemDate": "2026-09-21T09:27:13Z",
         "amount": amount,
         "balance": 100,
@@ -179,6 +180,16 @@ def test_near_miss_statement_rows_never_mint_transaction_charge_signal(
         )
     ).statement.items[0]
 
+    assert item.provider_charge_class is None
+    assert item.provider_transaction_id is None
+
+
+def test_transaction_charge_requires_documented_account_level_ref_id() -> None:
+    item = _read(
+        _statement_row(ref_id="provider-row-123")
+    ).statement.items[0]
+
+    assert item.ref_id == "provider-row-123"
     assert item.provider_charge_class is None
     assert item.provider_transaction_id is None
 

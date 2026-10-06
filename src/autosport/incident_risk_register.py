@@ -189,7 +189,7 @@ _OPERATOR_SECRET_PATTERNS: Final = (
     # Bare scheme-prefixed credentials may be pasted without the header name.
     # Keep the shape broad enough to redact short lab/test tokens as well.
     re.compile(r"(?i)\b(?:bearer|basic|token)\s+[A-Za-z0-9._~+/=-]+"),
-    re.compile(r'''(?i)\b(?:api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer[_-]?token|client[_-]?secret|secret[_-]?key|secret[_-]?access[_-]?key|session[_-]?token|security[_-]?token|access[_-]?key[_-]?id|password|passwd|pwd|token)\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)'''),
+    # URI userinfo commonly appears in database/proxy DSNs copied into incident\n    # text. Preserve the scheme/host for diagnosis while removing credentials.\n    re.compile(r"(?i)\\b([a-z][a-z0-9+.-]*://)[^\\s/@:]+:[^\\s/@]+@"),\n    re.compile(r'''(?i)\b(?:api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer[_-]?token|client[_-]?secret|secret[_-]?key|secret[_-]?access[_-]?key|session[_-]?token|security[_-]?token|access[_-]?key[_-]?id|password|passwd|pwd|token)\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)'''),
     re.compile(r"-----BEGIN [^\r\n-]*PRIVATE KEY-----[\s\S]*?-----END [^\r\n-]*PRIVATE KEY-----"),
     re.compile(r"\b(?:AKIA|ASIA|AIDA|AROA|AGPA|ANPA|ANVA|ASCA)[0-9A-Z]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),

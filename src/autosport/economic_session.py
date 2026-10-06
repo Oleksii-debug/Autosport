@@ -705,6 +705,8 @@ def _decode_state(
     return canonical
 
 
+_PRODUCT_ECONOMIC_SESSION_TYPE: Final = ProductEconomicSession
+_EXACT_TYPE: Final = type
 _PRODUCT_ECONOMIC_SESSION_EQ: Final = ProductEconomicSession.__eq__
 _PRODUCT_ECONOMIC_SESSION_EQ_CODE: Final = getattr(
     _PRODUCT_ECONOMIC_SESSION_EQ,
@@ -867,6 +869,8 @@ class ProductEconomicSessionStore:
         self._economic_goal_store_init_witness = _ECONOMIC_GOAL_STORE_INIT
         self._economic_goal_store_constructor_witness = _construct_economic_goal_store
         self._authority_type_witness = _AUTHORITY_TYPE
+        self._product_economic_session_type_witness = _PRODUCT_ECONOMIC_SESSION_TYPE
+        self._exact_type_witness = _EXACT_TYPE
         self._product_economic_session_eq_witness = _PRODUCT_ECONOMIC_SESSION_EQ
         self._product_economic_session_eq_code_witness = _PRODUCT_ECONOMIC_SESSION_EQ_CODE
         self._product_economic_session_init_witness = _PRODUCT_ECONOMIC_SESSION_INIT
@@ -930,7 +934,10 @@ class ProductEconomicSessionStore:
         _getattr=getattr,
         _callable=callable,
     ) -> None:
-        if _type(self) is not ProductEconomicSessionStore:
+        if (
+            _type is not self._exact_type_witness
+            or _type(self) is not ProductEconomicSessionStore
+        ):
             raise _error_type(
                 "economic-session store must retain exact ProductEconomicSessionStore authority"
             )
@@ -1046,6 +1053,8 @@ class ProductEconomicSessionStore:
             or MonotonicWorkspaceAuthority.commit is not self._authority_commit_witness
             or PaperBook.load is not self._paperbook_load_witness
             or PaperBook._validate_loaded_state is not self._paperbook_validate_witness
+            or _PRODUCT_ECONOMIC_SESSION_TYPE is not self._product_economic_session_type_witness
+            or ProductEconomicSession is not self._product_economic_session_type_witness
             or ProductEconomicSession.__eq__ is not self._product_economic_session_eq_witness
             or _any(
                 ProductEconomicSession.__dict__[name] is not descriptor
@@ -1160,11 +1169,11 @@ class ProductEconomicSessionStore:
         previous: ProductEconomicSession,
     ) -> ProductEconomicSession:
         """Explicitly terminate one session and publish its owner-authorized successor."""
-        if type(previous) is not ProductEconomicSession:
+        self._require_configuration_authority()
+        if self._exact_type_witness(previous) is not self._product_economic_session_type_witness:
             raise EconomicSessionMismatchError(
                 "previous must be exact ProductEconomicSession evidence"
             )
-        self._require_configuration_authority()
         with self._workspace_lock_scope_witness(self._workspace_witness):
             self._require_configuration_authority()
             if not self._lexists_witness(self._state_path_witness):
@@ -1342,13 +1351,14 @@ class ProductEconomicSessionStore:
         )
         return self._evidence(payload, observed, committed.generation)
 
-    @staticmethod
     def _evidence(
+        self,
         payload: dict[str, object],
         state_sha256: str,
         generation: int,
     ) -> ProductEconomicSession:
-        return ProductEconomicSession(
+        self._require_configuration_authority()
+        return self._product_economic_session_type_witness(
             workspace_instance_id=str(payload["workspace_instance_id"]),
             session_id=str(payload["session_id"]),
             goal_id=str(payload["goal_id"]),

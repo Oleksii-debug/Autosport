@@ -5682,6 +5682,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     effects_invalidation_baseline,
                     message="success publication consumed pending invalidations",
                 )
+                require_state_identity()
+                require_dependency_index_identity()
+                require_tick_dependency_routing_authority(
+                    "dependency routing authority changed during success publication"
+                )
+                require_economic_context()
                 final_invalidation_snapshot = invalidation_backlog_snapshot()
                 if final_invalidation_snapshot is not None:
                     pending_full_refresh, pending_keys = final_invalidation_snapshot

@@ -1019,3 +1019,123 @@ def test_tick_keeps_invalidation_bound_methods_after_provider_rebinding() -> Non
         assert index.unregister_calls == 1
         assert index.input_ids == ("input-new",)
 
+def test_tick_rejects_registration_without_published_index_effect() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Index:
+            input_ids = ()
+
+            def affected_inputs(self, _batch):
+                return ()
+
+            def register(self, _input_id: str, **_selectors):
+                return None
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                register_input,
+                **_kwargs,
+            ):
+                register_input("input-new")
+                return ("input-new",)
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.dependency_index = Index()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency index registration did not publish the input",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_false_retirement_receipt_that_keeps_input() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Index:
+            input_ids = ("input-old",)
+
+            def affected_inputs(self, _batch):
+                return ()
+
+            def unregister(self, _input_id: str):
+                return True
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                retire_input,
+                **_kwargs,
+            ):
+                retire_input("input-old")
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.dependency_index = Index()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency index retirement did not remove the input",
+        ):
+            coordinator.tick()
+
+
+def test_tick_does_not_report_retirement_when_index_reports_no_effect() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Index:
+            input_ids = ("input-old",)
+
+            def affected_inputs(self, _batch):
+                return ()
+
+            def unregister(self, _input_id: str):
+                return False
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                retire_input,
+                **_kwargs,
+            ):
+                retire_input("input-old")
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.dependency_index = Index()
+        coordinator.lifecycle = Lifecycle()
+
+        result = coordinator.tick()
+
+        assert result.retired_input_ids == ()
+

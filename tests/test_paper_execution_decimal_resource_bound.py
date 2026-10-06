@@ -514,6 +514,93 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(result.worst_case_exposure, Decimal("5.00"))
 
 
+    def test_public_execution_ignores_rebound_enum_and_type_globals(self) -> None:
+        current_action = ExecutionAction(
+            action_id="authority-action",
+            bookmaker_id="paper-venue",
+            account_id="paper-account",
+            event_id="event-1",
+            market_id="market-authority",
+            selection_id="selection-authority",
+            side="BACK",
+            requested_odds="2.50",
+            requested_stake="10.00",
+            quote_id="quote-authority",
+            quote_observed_at="2026-10-05T00:00:00+00:00",
+            expires_at="2026-10-05T00:01:00+00:00",
+        )
+        current_plan = ExecutionPlan(
+            plan_id="plan-public-authority",
+            bookmaker_profile_version="paper-profile-v1",
+            decision_id="decision-public-authority",
+            approval_id="paper-only",
+            created_at="2026-10-05T00:00:00+00:00",
+            actions=(current_action,),
+        )
+        model = PaperExecutionModelConfig(
+            model_id="paper-reality",
+            model_version="2",
+            evidence_grade=EvidenceGrade.SYNTHETIC,
+            evidence_source="test-seeded-model",
+            seed="fixed-seed",
+            max_quote_age_ms=5_000,
+            min_delay_ms=100,
+            max_delay_ms=100,
+            rejected_bps=0,
+            partial_bps=0,
+            unknown_bps=0,
+            partial_fill_bps=5_000,
+            max_slippage_bps=0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper.jsonl")
+            names = (
+                "EvidenceGrade",
+                "PaperAttemptOutcome",
+                "RecoveryDecision",
+                "ExecutionPlan",
+                "PaperExecutionModelConfig",
+                "PaperExecutionLedger",
+                "Mapping",
+                "PaperExecutionEvidenceRegistry",
+            )
+            sentinel = object()
+            previous = {
+                name: public_paper.__dict__.get(name, sentinel)
+                for name in names
+            }
+
+            class ForbiddenAuthority:
+                def __getattr__(self, name: str):
+                    raise AssertionError(f"rebound public authority executed: {name}")
+
+                def __call__(self, *args, **kwargs):
+                    raise AssertionError("rebound public authority constructor executed")
+
+            try:
+                forbidden = ForbiddenAuthority()
+                for name in names:
+                    public_paper.__dict__[name] = forbidden
+
+                result = execute_paper_plan(
+                    plan=current_plan,
+                    trigger_id="trigger-public-authority",
+                    config=model,
+                    ledger=ledger,
+                    started_at="2026-10-05T00:00:00.100000+00:00",
+                )
+            finally:
+                for name, value in previous.items():
+                    if value is sentinel:
+                        public_paper.__dict__.pop(name, None)
+                    else:
+                        public_paper.__dict__[name] = value
+
+            self.assertTrue(result.completed)
+            self.assertTrue(result.all_actions_accepted)
+            self.assertEqual(len(result.attempts), 1)
+
     def test_synthetic_execution_ignores_rebound_deterministic_helper(self) -> None:
         current_action = ExecutionAction(
             action_id="resource-action",

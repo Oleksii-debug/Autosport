@@ -11,6 +11,7 @@ from autosport.participant_identity import (
     LineageRelation,
     ParticipantIdentityError,
     ParticipantIdentityRegistry,
+    RosterMembership,
 )
 
 
@@ -110,6 +111,59 @@ class SportSeasonIdentityTests(unittest.TestCase):
                 view=IdentityView.RESTATED_RESEARCH,
             ),
             (lineage,),
+        )
+
+    def test_event_roster_rejects_non_participant_entity_kinds(self) -> None:
+        for kind in (EntityKind.SPORT, EntityKind.LEAGUE, EntityKind.SEASON):
+            with self.subTest(kind=kind):
+                path = Path(self.temporary.name) / f"identity-{kind.value.lower()}.json"
+                registry = ParticipantIdentityRegistry.initialize_pristine(path)
+                non_participant = identity(
+                    f"{kind.value.lower()}:example",
+                    kind,
+                    f"canonical:{kind.value.lower()}:example",
+                )
+                registry.add_entity(non_participant)
+                with self.assertRaisesRegex(
+                    ParticipantIdentityError,
+                    "PARTICIPANT or TEAM",
+                ):
+                    registry.add_roster_membership(
+                        RosterMembership(
+                            "event-1",
+                            "provider-a",
+                            non_participant.entity_id,
+                            T0,
+                            None,
+                            T0,
+                            SHA,
+                        )
+                    )
+                self.assertEqual(
+                    ParticipantIdentityRegistry(path).roster_at(
+                        "event-1",
+                        "provider-a",
+                        as_of=T1,
+                    ),
+                    (),
+                )
+
+    def test_event_roster_accepts_participant_and_team_identities(self) -> None:
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        participant = identity("participant:1", EntityKind.PARTICIPANT, "provider:p1")
+        team = identity("team:1", EntityKind.TEAM, "provider:t1")
+        registry.add_entity(participant)
+        registry.add_entity(team)
+        registry.add_roster_membership(
+            RosterMembership("event-1", "provider-a", participant.entity_id, T0, None, T0, SHA)
+        )
+        registry.add_roster_membership(
+            RosterMembership("event-1", "provider-a", team.entity_id, T0, None, T0, "b" * 64)
+        )
+        reopened = ParticipantIdentityRegistry(self.path)
+        self.assertEqual(
+            {entity.entity_id for entity in reopened.roster_at("event-1", "provider-a", as_of=T1)},
+            {participant.entity_id, team.entity_id},
         )
 
     def test_cross_kind_correction_fails_closed(self) -> None:

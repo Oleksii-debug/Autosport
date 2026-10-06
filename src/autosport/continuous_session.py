@@ -1214,7 +1214,7 @@ class _ContinuousSessionState:
         _normalized_settlement_evidence_code: object = (
             _normalized_settlement_evidence.__func__.__code__
         ),
-    ) -> None:
+    ) -> int:
         if (
             getattr(
                 _normalized_settlement_evidence,
@@ -1257,11 +1257,12 @@ class _ContinuousSessionState:
             if self._error_checkpoint_present():
                 self._write_error_checkpoint(None)
 
-        self._update(
+        updated = self._update(
             mutate,
             advance_generation=True,
             finalize_under_lock=finalize,
         )
+        return int(updated["cycles_completed"])
 
     def record_failure(
         self,
@@ -1705,8 +1706,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     at=now,
                 )
 
-            cycle_index = self._state.snapshot().cycles_completed + 1
-            self._state.record_success(
+            cycle_index = self._state.record_success(
                 at=now,
                 full_refresh=full_refresh,
                 settlement_evidence=resolutions,

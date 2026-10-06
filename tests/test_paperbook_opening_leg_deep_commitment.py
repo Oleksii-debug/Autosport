@@ -283,6 +283,26 @@ def test_opening_registry_ignores_ticket_mapping_descriptor_rebinding(monkeypatc
     paper_module._require_ticket_opening_authority(book)
 
 
+def test_opening_commitment_ignores_rebound_slot_descriptors(monkeypatch) -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    expected = paper_module._ticket_opening_commitment(ticket)
+
+    class HostileDescriptor:
+        def __get__(self, instance, owner):
+            raise AssertionError("rebound opening slot descriptor executed")
+
+        def __set__(self, instance, value):
+            raise AssertionError("rebound opening slot descriptor setter executed")
+
+    monkeypatch.setattr(PaperBook, "tickets", HostileDescriptor(), raising=False)
+    monkeypatch.setattr(paper_module.PaperTicket, "stake", HostileDescriptor(), raising=False)
+    monkeypatch.setattr(TicketLeg, "locked_odds", HostileDescriptor(), raising=False)
+
+    assert paper_module._ticket_opening_commitment(ticket) == expected
+    paper_module._require_ticket_opening_authority(book)
+
+
 def test_opening_registry_ignores_rebound_commitment_module_dispatch(monkeypatch) -> None:
     book = PaperBook("100")
     book.open_ticket([_leg()], "10", placed_at=_TS)

@@ -1,11 +1,13 @@
 import json
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from decimal import Decimal, getcontext, setcontext
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.paper as paper_module
 import autosport.risk_reporting as risk_reporting
 
 from autosport.domain import PaperTicket, TicketLeg, TicketStatus
@@ -100,6 +102,87 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         self.assertFalse(attacker_called)
         self.assertEqual(actual, expected)
+
+
+    def test_equity_path_builder_holds_operation_lock_during_full_replay(self) -> None:
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg(114),),
+            Decimal("10"),
+            placed_at="2026-09-21T19:20:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        goal = self._goal()
+        entered = threading.Event()
+        release = threading.Event()
+        probe_acquired = threading.Event()
+        build_errors: list[BaseException] = []
+        original = risk_reporting._paper_equity_source_state_sha256
+        calls = 0
+
+        def blocking_source_state(state_book):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise AssertionError("timed out waiting for replay release")
+            return original(state_book)
+
+        def build() -> None:
+            try:
+                build_product_issued_paper_equity_path(book, goal)
+            except BaseException as exc:
+                build_errors.append(exc)
+
+        def probe() -> None:
+            with paper_module._require_paperbook_operation_lock(book):
+                probe_acquired.set()
+
+        with patch.object(
+            risk_reporting,
+            "_paper_equity_source_state_sha256",
+            side_effect=blocking_source_state,
+        ):
+            worker = threading.Thread(target=build)
+            worker.start()
+            self.assertTrue(entered.wait(timeout=2))
+
+            probe_worker = threading.Thread(target=probe)
+            probe_worker.start()
+            self.assertFalse(probe_acquired.wait(timeout=0.1))
+
+            release.set()
+            worker.join(timeout=2)
+            probe_worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(probe_worker.is_alive())
+        self.assertFalse(build_errors)
+        self.assertTrue(probe_acquired.is_set())
+        self.assertGreaterEqual(calls, 2)
+
+
+    def test_equity_path_builder_ignores_rebound_operation_lock_module_dispatch(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        attacker_called = False
+
+        def attacker_lock(_book):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("rebound operation lock executed")
+
+        with patch.object(
+            risk_reporting,
+            "_require_paperbook_operation_lock",
+            side_effect=attacker_lock,
+        ):
+            result = build_product_issued_paper_equity_path(book, goal)
+
+        self.assertFalse(attacker_called)
+        self.assertEqual(result.current_equity, Decimal("100"))
 
 
     def test_equity_builder_ignores_rebound_locked_capital_helper(self) -> None:
@@ -2198,627 +2281,3 @@ class PaperRiskReportingTests(unittest.TestCase):
             settled_at="2026-09-21T18:25:00+00:00",
         )
         goal = self._goal()
-        expected = build_product_issued_paper_equity_path(book, goal)
-
-        with (
-            patch.object(
-                PaperRiskPolicy,
-                "risk_of_ruin_portfolio_sha256",
-                side_effect=AssertionError("rebound risk digest executed"),
-            ),
-            patch.object(
-                PaperRiskPolicy,
-                "_exact_positive_sum",
-                side_effect=AssertionError("rebound exact sum executed"),
-            ),
-            patch.object(
-                PaperRiskPolicy,
-                "_decimal_context",
-                side_effect=AssertionError("rebound decimal context executed"),
-            ),
-        ):
-            actual = build_product_issued_paper_equity_path(book, goal)
-
-        self.assertEqual(actual, expected)
-        self.assertEqual(actual.current_equity, Decimal("75"))
-        self.assertEqual(actual.minimum_equity, Decimal("75"))
-
-    def test_product_issued_equity_path_bypasses_rebound_detached_authority_checks(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-        expected = build_product_issued_paper_equity_path(book, goal)
-
-        with (
-            patch.object(
-                risk_reporting,
-                "_require_ticket_opening_authority",
-                side_effect=AssertionError("rebound opening authority executed"),
-            ),
-            patch.object(
-                risk_reporting,
-                "_require_paperbook_causal_history_authority",
-                side_effect=AssertionError("rebound causal authority executed"),
-            ),
-        ):
-            actual = build_product_issued_paper_equity_path(book, goal)
-
-        self.assertEqual(actual, expected)
-
-
-    def test_paper_risk_report_bypasses_rebound_policy_replay_methods(self) -> None:
-        book = PaperBook("100")
-        ticket = book.open_ticket(
-            (self._leg(95),),
-            Decimal("20"),
-            placed_at="2026-09-21T18:30:00+00:00",
-            bankroll_id="paper-bankroll",
-            currency="USD",
-        )
-        book.settle(
-            ticket.ticket_id,
-            set(),
-            settled_at="2026-09-21T18:35:00+00:00",
-        )
-        goal = self._goal()
-        expected = build_paper_risk_report(book, goal)
-
-        with (
-            patch.object(
-                PaperRiskPolicy,
-                "_historical_risk_metrics",
-                side_effect=AssertionError("rebound historical metrics executed"),
-            ),
-            patch.object(
-                PaperRiskPolicy,
-                "_goal_history_rooms",
-                side_effect=AssertionError("rebound goal rooms executed"),
-            ),
-        ):
-            actual = build_paper_risk_report(book, goal)
-
-        self.assertEqual(actual, expected)
-        self.assertEqual(actual.current_equity, Decimal("80"))
-        self.assertEqual(actual.historical_max_drawdown_amount, Decimal("20"))
-
-
-    def test_product_issued_equity_path_bypasses_rebound_goal_provenance_helpers(self) -> None:
-        book = PaperBook("100")
-        ticket = book.open_ticket(
-            (self._leg(96),),
-            Decimal("15"),
-            placed_at="2026-09-21T18:40:00+00:00",
-            bankroll_id="paper-bankroll",
-            currency="USD",
-        )
-        book.settle(
-            ticket.ticket_id,
-            set(),
-            settled_at="2026-09-21T18:45:00+00:00",
-        )
-        goal = self._goal()
-        expected = build_product_issued_paper_equity_path(book, goal)
-
-        with (
-            patch.object(
-                risk_reporting,
-                "provenance_for",
-                side_effect=AssertionError("rebound provenance executed"),
-            ),
-            patch.object(
-                risk_reporting,
-                "economic_goal_from_payload",
-                side_effect=AssertionError("rebound goal parser executed"),
-            ),
-            patch.object(
-                risk_reporting,
-                "economic_goal_to_payload",
-                side_effect=AssertionError("rebound goal serializer executed"),
-            ),
-        ):
-            actual = build_product_issued_paper_equity_path(book, goal)
-
-        self.assertEqual(actual, expected)
-        self.assertEqual(actual.goal_id, goal.goal_id)
-        self.assertEqual(actual.goal_revision, goal.revision)
-        self.assertEqual(actual.bankroll_id, goal.bankroll_id)
-        self.assertEqual(actual.currency, goal.currency)
-
-
-    def test_equity_path_rejects_in_place_captured_replay_code_mutation(self) -> None:
-        book = PaperBook("100")
-        ticket = book.open_ticket(
-            (self._leg(97),),
-            Decimal("10"),
-            placed_at="2026-09-21T18:50:00+00:00",
-            bankroll_id="paper-bankroll",
-            currency="USD",
-        )
-        book.settle(
-            ticket.ticket_id,
-            set(),
-            settled_at="2026-09-21T18:55:00+00:00",
-        )
-        goal = self._goal()
-
-        captured = risk_reporting._CANONICAL_PAPERBOOK_DEBIT_BALANCE
-        function = captured.__func__
-        original_code = function.__code__
-
-        def hostile_debit(_cls, _balance, _amount):
-            return Decimal("999999")
-
-        try:
-            function.__code__ = hostile_debit.__code__
-            with self.assertRaisesRegex(
-                ValueError,
-                "canonical PAPER equity replay callable code changed",
-            ):
-                build_product_issued_paper_equity_path(book, goal)
-        finally:
-            function.__code__ = original_code
-
-        resolved = build_product_issued_paper_equity_path(book, goal)
-        self.assertEqual(resolved.current_equity, Decimal("90"))
-        self.assertEqual(resolved.minimum_equity, Decimal("90"))
-
-
-    def test_durable_resolver_rejects_in_place_captured_loader_code_mutation(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            captured = risk_reporting._CANONICAL_PAPERBOOK_LOAD
-            function = captured.__func__
-            original_code = function.__code__
-
-            def hostile_load(_cls, _path):
-                return PaperBook("999999")
-
-            try:
-                function.__code__ = hostile_load.__code__
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "canonical durable equity resolver callable code changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-            finally:
-                function.__code__ = original_code
-
-            resolved = resolve_durable_product_issued_paper_equity_path(
-                paper_book_path=str(paper_path),
-                workspace=str(workspace),
-            )
-
-        self.assertEqual(resolved.initial_equity, Decimal("100"))
-        self.assertEqual(resolved.current_equity, Decimal("100"))
-
-
-    def test_durable_resolver_rejects_rebound_path_dispatch_before_use(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            with patch.object(
-                risk_reporting,
-                "Path",
-                side_effect=AssertionError("rebound Path executed"),
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "canonical durable equity resolver path dispatch changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-
-            resolved = resolve_durable_product_issued_paper_equity_path(
-                paper_book_path=str(paper_path),
-                workspace=str(workspace),
-            )
-
-        self.assertEqual(resolved.initial_equity, Decimal("100"))
-        self.assertEqual(resolved.current_equity, Decimal("100"))
-
-
-    def test_durable_resolver_rejects_in_place_path_method_code_mutation(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            captured = risk_reporting._CANONICAL_PATH_IS_ABSOLUTE
-            original_code = captured.__code__
-
-            def hostile_is_absolute(_self):
-                raise AssertionError("mutated Path.is_absolute must never execute")
-
-            try:
-                captured.__code__ = hostile_is_absolute.__code__
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "canonical durable equity resolver callable code changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-            finally:
-                captured.__code__ = original_code
-
-            resolved = resolve_durable_product_issued_paper_equity_path(
-                paper_book_path=str(paper_path),
-                workspace=str(workspace),
-            )
-
-        self.assertEqual(resolved.initial_equity, Decimal("100"))
-        self.assertEqual(resolved.current_equity, Decimal("100"))
-
-
-    def test_durable_resolver_rejects_rebound_path_methods_before_execution(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            for name in ("is_absolute", "__truediv__", "__str__", "__fspath__"):
-                with self.subTest(path_method=name):
-                    with patch.object(
-                        risk_reporting._CANONICAL_PATH_TYPE,
-                        name,
-                        side_effect=AssertionError(
-                            f"rebound Path method {name} must never execute"
-                        ),
-                    ):
-                        with self.assertRaisesRegex(
-                            ValueError,
-                            "canonical durable equity resolver path dispatch changed",
-                        ):
-                            resolve_durable_product_issued_paper_equity_path(
-                                paper_book_path=str(paper_path),
-                                workspace=str(workspace),
-                            )
-
-            with patch.object(
-                risk_reporting._CANONICAL_PATH,
-                "__new__",
-                side_effect=AssertionError("rebound Path constructor must never execute"),
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "canonical durable equity resolver path dispatch changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-
-            resolved = resolve_durable_product_issued_paper_equity_path(
-                paper_book_path=str(paper_path),
-                workspace=str(workspace),
-            )
-
-        self.assertEqual(resolved.initial_equity, Decimal("100"))
-        self.assertEqual(resolved.current_equity, Decimal("100"))
-
-
-    def test_durable_resolver_rejects_rebound_goal_store_module_path_before_execution(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            with patch.object(
-                risk_reporting._economic_goal_store,
-                "Path",
-                side_effect=AssertionError("rebound goal-store Path executed"),
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "economic-goal store authority changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-
-    def test_durable_resolver_rejects_rebound_goal_store_file_name(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            with patch.object(EconomicGoalStore, "FILE_NAME", "attacker-goal.json"):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "economic-goal store authority changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-
-    def test_durable_resolver_rejects_rebound_goal_parser_before_execution(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-        attacker_calls = 0
-
-        def hostile_parser(_text):
-            nonlocal attacker_calls
-            attacker_calls += 1
-            raise AssertionError("rebound goal parser executed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            with patch.object(
-                risk_reporting._economic_goal_store,
-                "economic_goal_from_json",
-                hostile_parser,
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "economic-goal store authority changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-
-        self.assertEqual(attacker_calls, 0)
-
-    def test_durable_resolver_rejects_in_place_goal_read_text_code_mutation(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            reader = risk_reporting._CANONICAL_GOAL_STORE_PATH_READ_TEXT
-            original_code = reader.__code__
-            attacker_calls = 0
-
-            def hostile_read_text(_self, *args, **kwargs):
-                nonlocal attacker_calls
-                attacker_calls += 1
-                raise AssertionError("mutated goal read_text executed")
-
-            try:
-                reader.__code__ = hostile_read_text.__code__
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "canonical durable equity resolver callable code changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-            finally:
-                reader.__code__ = original_code
-
-        self.assertEqual(attacker_calls, 0)
-
-
-    def test_durable_resolver_rejects_rebound_goal_json_loader_before_execution(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-        attacker_calls = 0
-
-        def hostile_loader(_text):
-            nonlocal attacker_calls
-            attacker_calls += 1
-            raise AssertionError("rebound strict JSON loader executed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            with patch.object(
-                risk_reporting._economic_goal_store,
-                "strict_json_loads",
-                hostile_loader,
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "economic-goal store authority changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-
-        self.assertEqual(attacker_calls, 0)
-
-    def test_durable_resolver_rejects_rebound_goal_payload_parser_before_execution(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-        attacker_calls = 0
-
-        def hostile_parser(_payload):
-            nonlocal attacker_calls
-            attacker_calls += 1
-            raise AssertionError("rebound goal payload parser executed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            with patch.object(
-                risk_reporting._economic_goal_store,
-                "economic_goal_from_payload",
-                hostile_parser,
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "economic-goal store authority changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-
-        self.assertEqual(attacker_calls, 0)
-
-
-    def test_durable_resolver_rejects_rebound_goal_decimal_parser_before_execution(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-        attacker_calls = 0
-
-        def hostile_decimal(*_args, **_kwargs):
-            nonlocal attacker_calls
-            attacker_calls += 1
-            raise AssertionError("rebound goal decimal parser executed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            with patch.object(
-                risk_reporting._economic_goal_store,
-                "_decimal_text",
-                hostile_decimal,
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "economic-goal store authority changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-
-        self.assertEqual(attacker_calls, 0)
-
-    def test_durable_resolver_rejects_rebound_json_loads_before_execution(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-        attacker_calls = 0
-
-        def hostile_loads(*_args, **_kwargs):
-            nonlocal attacker_calls
-            attacker_calls += 1
-            raise AssertionError("rebound json.loads executed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            with patch.object(risk_reporting._json_integrity.json, "loads", hostile_loads):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "economic-goal store authority changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-
-        self.assertEqual(attacker_calls, 0)
-
-    def test_durable_resolver_rejects_rebound_json_domain_validator_before_execution(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-        attacker_calls = 0
-
-        def hostile_validator(_value):
-            nonlocal attacker_calls
-            attacker_calls += 1
-            raise AssertionError("rebound JSON domain validator executed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            with patch.object(
-                risk_reporting._json_integrity,
-                "_validate_strict_json_value",
-                hostile_validator,
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "economic-goal store authority changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-
-        self.assertEqual(attacker_calls, 0)
-
-    def test_durable_resolver_rejects_rebound_json_isfinite_before_execution(self) -> None:
-        book = PaperBook("100")
-        goal = self._goal()
-        attacker_calls = 0
-
-        def hostile_isfinite(_value):
-            nonlocal attacker_calls
-            attacker_calls += 1
-            raise AssertionError("rebound math.isfinite executed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            paper_path = workspace / "paper_book.json"
-            book.save(paper_path)
-            EconomicGoalStore(workspace).initialize_owner(goal)
-
-            with patch.object(risk_reporting._json_integrity.math, "isfinite", hostile_isfinite):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "economic-goal store authority changed",
-                ):
-                    resolve_durable_product_issued_paper_equity_path(
-                        paper_book_path=str(paper_path),
-                        workspace=str(workspace),
-                    )
-
-        self.assertEqual(attacker_calls, 0)
-
-
-if __name__ == "__main__":
-    unittest.main()

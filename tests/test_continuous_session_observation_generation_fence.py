@@ -116,3 +116,46 @@ def test_stale_successful_observation_cannot_run_product_side_effects() -> None:
         assert canonical["generation"] == 1
         assert canonical["cycles_completed"] == 1
         assert canonical["last_error_code"] is None
+
+
+def test_source_projection_does_not_supersede_active_operational_failure() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "continuous_session.json"
+        state = continuous_session._ContinuousSessionState(
+            path,
+            session_id="session-projection-preserves-failure",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        failure = state.record_failure(code="ProviderUnavailableError")
+        sidecar_path = path.with_name(f"{path.name}.operational_error.json")
+        sidecar_before = sidecar_path.read_bytes()
+
+        delta = continuous_session.CollectorDelta(
+            schema_version=1,
+            delta_id="delta-1",
+            source_id="provider-a",
+            lawful_terms_ref="terms-1",
+            retention_ref="retention-1",
+            stream_epoch="epoch-1",
+            source_cursor="cursor-1",
+            cursor_position=1,
+            event_dedupe_key="event-dedupe-1",
+            event_id="event-1",
+            source_payload_digest="0" * 64,
+            canonical_event_digest="1" * 64,
+            source_observed_at=_AT,
+            collector_received_at=_AT,
+            collector_committed_at=_AT,
+            desktop_available_at=_AT,
+            gap_state=continuous_session.GapState.NONE,
+            sync_state=continuous_session.SyncState.READY,
+        )
+        state.record_source_projection(deltas=(delta,), backlog=False)
+
+        canonical = json.loads(path.read_text(encoding="utf-8"))
+        assert canonical["generation"] == failure.generation
+        assert sidecar_path.read_bytes() == sidecar_before
+        snapshot = state.snapshot()
+        assert snapshot.last_error_code == "ProviderUnavailableError"
+        assert snapshot.source_state_delta_id == "delta-1"

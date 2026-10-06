@@ -1297,9 +1297,7 @@ def test_process_control_interrupt_releases_projection_lease_and_propagates_unch
     assert len(state.markets[0].accepted_at_utc_us) == 1
 
 
-def test_success_cleanup_process_control_interrupt_retries_release(
-    monkeypatch,
-):
+def test_instance_shadow_complete_cannot_bypass_projection_cleanup(monkeypatch):
     plan = _plan(
         market_ids=("1.001",),
         order_projection="EXECUTABLE",
@@ -1307,18 +1305,67 @@ def test_success_cleanup_process_control_interrupt_retries_release(
     batch = plan.batches[0]
     client, transport = _client(_payload(batch.market_ids))
     rate_gate, concurrency_gate = _gates()
-    original_complete = concurrency_gate.complete
+
+    monkeypatch.setattr(
+        concurrency_gate,
+        "complete",
+        lambda *args, **kwargs: None,
+    )
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="shadowed-complete",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+    assert len(transport.calls) == 1
+    assert concurrency_gate.snapshot().active == ()
+
+
+def test_success_cleanup_process_control_interrupt_retries_release():
+    plan = _plan(
+        market_ids=("1.001",),
+        order_projection="EXECUTABLE",
+    )
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
     interrupt = KeyboardInterrupt("cleanup stop")
-    calls = 0
+    original_lock = concurrency_gate._lock
 
-    def interrupt_once(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise interrupt
-        return original_complete(*args, **kwargs)
+    class InterruptCleanupLock:
+        def __init__(self):
+            self.armed = False
+            self.raise_once = True
+            self.entries = 0
 
-    monkeypatch.setattr(concurrency_gate, "complete", interrupt_once)
+        def __enter__(self):
+            self.entries += 1
+            return original_lock.__enter__()
+
+        def __exit__(self, exc_type, exc, tb):
+            result = original_lock.__exit__(exc_type, exc, tb)
+            if self.armed and self.raise_once and exc_type is None:
+                self.raise_once = False
+                raise interrupt
+            return result
+
+    cleanup_lock = InterruptCleanupLock()
+    concurrency_gate._lock = cleanup_lock
+
+    original_post = client._transport.post
+
+    def arm_cleanup_then_return(*args, **kwargs):
+        response = original_post(*args, **kwargs)
+        cleanup_lock.armed = True
+        return response
+
+    client._transport.post = arm_cleanup_then_return
 
     with pytest.raises(KeyboardInterrupt) as exc_info:
         read_market_book_batch(
@@ -1332,14 +1379,12 @@ def test_success_cleanup_process_control_interrupt_retries_release(
         )
 
     assert exc_info.value is interrupt
-    assert calls == 2
     assert len(transport.calls) == 1
+    assert cleanup_lock.entries >= 3
     assert concurrency_gate.snapshot().active == ()
 
 
-def test_cleanup_process_control_supersedes_regular_transport_failure(
-    monkeypatch,
-):
+def test_cleanup_process_control_supersedes_regular_transport_failure():
     plan = _plan(
         market_ids=("1.001",),
         order_projection="EXECUTABLE",
@@ -1347,9 +1392,29 @@ def test_cleanup_process_control_supersedes_regular_transport_failure(
     batch = plan.batches[0]
     rate_gate, concurrency_gate = _gates()
     cleanup_interrupt = KeyboardInterrupt("cleanup interrupt")
+    original_lock = concurrency_gate._lock
+
+    class InterruptCleanupLock:
+        def __init__(self):
+            self.armed = False
+            self.raise_once = True
+
+        def __enter__(self):
+            return original_lock.__enter__()
+
+        def __exit__(self, exc_type, exc, tb):
+            result = original_lock.__exit__(exc_type, exc, tb)
+            if self.armed and self.raise_once and exc_type is None:
+                self.raise_once = False
+                raise cleanup_interrupt
+            return result
+
+    cleanup_lock = InterruptCleanupLock()
+    concurrency_gate._lock = cleanup_lock
 
     class FailingTransport:
         def post(self, url, *, headers, body, timeout_seconds):
+            cleanup_lock.armed = True
             raise BetfairReadOnlyError("network failed")
 
     client = BetfairReadOnlyClient(
@@ -1357,11 +1422,6 @@ def test_cleanup_process_control_supersedes_regular_transport_failure(
         transport=FailingTransport(),
         clock=lambda: NOW,
     )
-
-    def interrupted_complete(*args, **kwargs):
-        raise cleanup_interrupt
-
-    monkeypatch.setattr(concurrency_gate, "complete", interrupted_complete)
 
     with pytest.raises(KeyboardInterrupt) as exc_info:
         read_market_book_batch(
@@ -1375,7 +1435,7 @@ def test_cleanup_process_control_supersedes_regular_transport_failure(
         )
 
     assert exc_info.value is cleanup_interrupt
-    assert len(concurrency_gate.snapshot().active) == 1
+    assert concurrency_gate.snapshot().active == ()
 
 
 def test_attempt_executor_records_provider_and_protocol_failures():

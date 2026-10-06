@@ -8,6 +8,7 @@ authority.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -128,10 +129,13 @@ def _release_projection_lease(
     gate: BetfairMarketBookProjectionConcurrencyGate,
     request_id: str,
     lease_generation: int | None,
+    *,
+    complete: Callable[..., None],
 ) -> None:
     if lease_generation is None:
         return
-    gate.complete(
+    complete(
+        gate,
         request_id,
         lease_generation=lease_generation,
         observed_at=_transport_now(client),
@@ -144,11 +148,19 @@ def _release_projection_lease_after_failure(
     request_id: str,
     lease_generation: int | None,
     primary: BaseException,
+    *,
+    complete: Callable[..., None],
 ) -> None:
     """Best-effort cleanup without masking the primary dispatch failure."""
 
     try:
-        _release_projection_lease(client, gate, request_id, lease_generation)
+        _release_projection_lease(
+            client,
+            gate,
+            request_id,
+            lease_generation,
+            complete=complete,
+        )
     except BaseException as cleanup_exc:
         # A fresh process-control interruption during cleanup supersedes an
         # ordinary primary error. If process control is already the primary,
@@ -567,6 +579,7 @@ def _install_transport_result_authority() -> None:
     validate_attempt_execution = MarketBookBatchAttemptExecution.__post_init__
     rate_reserve = BetfairMarketBookPerMarketRateGate.reserve
     concurrency_begin = BetfairMarketBookProjectionConcurrencyGate.begin
+    concurrency_complete = BetfairMarketBookProjectionConcurrencyGate.complete
 
     def read_market_book_batch(
         client: _base.BetfairReadOnlyClient,
@@ -632,6 +645,7 @@ def _install_transport_result_authority() -> None:
                     request,
                     lease_generation,
                     exc,
+                    complete=concurrency_complete,
                 )
                 raise
             denial = MarketBookBatchAdmissionError(
@@ -644,6 +658,7 @@ def _install_transport_result_authority() -> None:
                 request,
                 lease_generation,
                 denial,
+                complete=concurrency_complete,
             )
             raise denial from exc
         if rate_decision.allowed is not True:
@@ -657,6 +672,7 @@ def _install_transport_result_authority() -> None:
                 request,
                 lease_generation,
                 denial,
+                complete=concurrency_complete,
             )
             raise denial
 
@@ -672,6 +688,7 @@ def _install_transport_result_authority() -> None:
                 request,
                 lease_generation,
                 exc,
+                complete=concurrency_complete,
             )
             raise
         else:
@@ -681,6 +698,7 @@ def _install_transport_result_authority() -> None:
                     concurrency_gate,
                     request,
                     lease_generation,
+                    complete=concurrency_complete,
                 )
             except BaseException as exc:
                 if isinstance(exc, Exception):
@@ -696,6 +714,7 @@ def _install_transport_result_authority() -> None:
                     request,
                     lease_generation,
                     exc,
+                    complete=concurrency_complete,
                 )
                 raise
         key = id(result)

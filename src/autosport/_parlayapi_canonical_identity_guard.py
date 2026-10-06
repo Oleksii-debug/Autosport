@@ -42,6 +42,8 @@ def _event_id(event: dict[str, Any]) -> str:
         raw_event_id = event["canonical_event_id"]
     else:
         raise provider.ProviderPayloadError("event is missing id")
+    if type(raw_event_id) is not str:
+        raise provider.ProviderPayloadError("event id must be a string")
     return provider._provider_identity(  # noqa: SLF001 - product guard over owning adapter
         raw_event_id,
         field="event id",
@@ -103,8 +105,11 @@ def _validate_stable_bookmaker_keys(events: list[dict[str, Any]]) -> None:
                 raise provider.ProviderPayloadError(
                     "bookmaker is missing stable provider key identity"
                 )
+            raw_bookmaker_key = bookmaker["key"]
+            if type(raw_bookmaker_key) is not str:
+                raise provider.ProviderPayloadError("bookmaker key must be a string")
             provider._provider_identity(  # noqa: SLF001
-                bookmaker["key"],
+                raw_bookmaker_key,
                 field="bookmaker key",
                 allow_colon=False,
             )
@@ -117,11 +122,34 @@ def _validate_stable_bookmaker_keys(events: list[dict[str, Any]]) -> None:
                 raw_market_key = market.get("key")
                 if raw_market_key is None or raw_market_key == "":
                     raise provider.ProviderPayloadError("market is missing key")
+                if type(raw_market_key) is not str:
+                    raise provider.ProviderPayloadError("market key must be a string")
                 provider._provider_identity(  # noqa: SLF001
                     raw_market_key,
                     field="market key",
                     allow_colon=False,
                 )
+                outcomes = market.get("outcomes", [])
+                if type(outcomes) is not list:
+                    raise provider.ProviderPayloadError("market outcomes must be a list")
+                for outcome in outcomes:
+                    if type(outcome) is not dict:
+                        raise provider.ProviderPayloadError("outcome entries must be objects")
+                    raw_selection = outcome.get("name")
+                    if type(raw_selection) is not str:
+                        raise provider.ProviderPayloadError("outcome name must be a string")
+                    provider._provider_identity(  # noqa: SLF001
+                        raw_selection,
+                        field="outcome name",
+                    )
+                    raw_point = outcome.get("point")
+                    if raw_point is not None and (
+                        type(raw_point) not in {str, int, float}
+                        or type(raw_point) is bool
+                    ):
+                        raise provider.ProviderPayloadError(
+                            "outcome point must be a canonical JSON scalar"
+                        )
 
 
 def _strict_snapshot_quotes(

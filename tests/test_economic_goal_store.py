@@ -1245,3 +1245,27 @@ def test_store_public_methods_reject_writer_and_decoder_injection(tmp_path) -> N
     store.initialize_owner(goal)
     with pytest.raises(TypeError):
         store.load(_json_decoder=lambda text: goal)  # type: ignore[call-arg]
+
+
+def test_store_transition_proof_is_bound_to_exact_persisted_payload(tmp_path) -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(previous)
+
+    canonical_transition = economic_goal_store_module._CANONICAL_TRANSITION_VALIDATOR
+
+    def mutate_original_after_proof_input_is_built(before, snapshot):
+        canonical_transition(before, snapshot)
+        object.__setattr__(candidate, "max_stake_fraction", Decimal("0.99"))
+
+    economic_goal_store_module._BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR(
+        store,
+        candidate,
+        _transition_validator=mutate_original_after_proof_input_is_built,
+    )
+
+    restored = EconomicGoalStore(tmp_path).load()
+    assert restored.revision == 2
+    assert restored.max_stake_fraction == Decimal("0.01")
+    assert candidate.max_stake_fraction == Decimal("0.99")

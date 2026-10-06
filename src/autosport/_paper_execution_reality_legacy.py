@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from .real_execution_ledger import (
     ExecutionAction,
     ExecutionPlan,
+    _MAX_EXECUTION_DECIMAL_TEXT_LENGTH,
     _validate_decimal_text_resource_bound,
 )
 
@@ -24,8 +25,8 @@ _CANONICAL_DECIMAL_TYPE = Decimal
 _CANONICAL_INVALID_OPERATION = InvalidOperation
 _CANONICAL_DECIMAL_RESOURCE_VALIDATOR = _validate_decimal_text_resource_bound
 _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE = _validate_decimal_text_resource_bound.__code__
+_CANONICAL_DECIMAL_INPUT_TEXT_LIMIT = _MAX_EXECUTION_DECIMAL_TEXT_LENGTH
 _CANONICAL_DECIMAL_FORMATTER = Decimal.__format__
-_CANONICAL_TEXT_COERCION = str
 
 
 class PaperExecutionRealityError(RuntimeError):
@@ -101,14 +102,18 @@ def _decimal(
     if validator.__code__ is not _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE:
         raise ValueError("decimal resource validator authority changed")
     decimal_type = _CANONICAL_DECIMAL_TYPE
-    text_coercion = _CANONICAL_TEXT_COERCION
     invalid_operation = _CANONICAL_INVALID_OPERATION
     try:
-        parsed = (
-            value
-            if type(value) is decimal_type
-            else decimal_type(text_coercion(value))
-        )
+        if type(value) is decimal_type:
+            parsed = value
+        elif type(value) is str:
+            if len(value) > _CANONICAL_DECIMAL_INPUT_TEXT_LIMIT:
+                raise ValueError("decimal input text exceeds resource limit")
+            parsed = decimal_type(value)
+        elif type(value) is int:
+            parsed = decimal_type(value)
+        else:
+            raise ValueError(f"{name} must be a Decimal, decimal string, or int")
     except (invalid_operation, ValueError, TypeError) as exc:
         raise ValueError(f"{name} must be a finite Decimal") from exc
     if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):

@@ -583,6 +583,128 @@ class IncidentRiskStoreTests(unittest.TestCase):
             self.store.path.write_bytes(target.read_bytes())
             target.unlink(missing_ok=True)
 
+    def test_loader_rebind_fails_before_hostile_json_parser_executes(self) -> None:
+        import autosport.incident_risk_store as incident_risk_store
+
+        self.store.append(self._entry())
+        hostile_calls = 0
+
+        def hostile(_text: str):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return {}
+
+        with mock.patch.object(
+            incident_risk_store,
+            "strict_json_loads",
+            hostile,
+        ):
+            with self.assertRaisesRegex(
+                IncidentRiskStoreError,
+                "codec dependency changed: strict_json_loads",
+            ):
+                self._store(self.workspace).load()
+
+        self.assertEqual(hostile_calls, 0)
+
+    def test_entry_from_dict_rebind_fails_before_hostile_codec_executes(self) -> None:
+        self.store.append(self._entry())
+        hostile_calls = 0
+
+        def hostile(_cls, _raw):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            raise AssertionError("hostile IncidentRiskEntry.from_dict executed")
+
+        with mock.patch.object(
+            IncidentRiskEntry,
+            "from_dict",
+            classmethod(hostile),
+        ):
+            with self.assertRaisesRegex(
+                IncidentRiskStoreError,
+                r"codec dependency changed: IncidentRiskEntry\.from_dict",
+            ):
+                self._store(self.workspace).load()
+
+        self.assertEqual(hostile_calls, 0)
+
+    def test_entry_to_dict_rebind_fails_before_hostile_codec_executes(self) -> None:
+        hostile_calls = 0
+
+        def hostile(_entry):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            raise AssertionError("hostile IncidentRiskEntry.to_dict executed")
+
+        with mock.patch.object(
+            IncidentRiskEntry,
+            "to_dict",
+            hostile,
+        ):
+            with self.assertRaisesRegex(
+                IncidentRiskStoreError,
+                r"codec dependency changed: IncidentRiskEntry\.to_dict",
+            ):
+                self.store.append(self._entry())
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertFalse(self.store.path.exists())
+
+    def test_successor_validator_rebind_fails_before_hostile_execution(self) -> None:
+        import autosport.incident_risk_store as incident_risk_store
+
+        first = self._entry()
+        second = self._entry(
+            revision=2,
+            status=RiskStatus.MITIGATING,
+            mitigation="Mitigate.",
+        )
+        self.store.append(first)
+        hostile_calls = 0
+
+        def hostile(_previous, _candidate):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            raise AssertionError("hostile validate_successor executed")
+
+        with mock.patch.object(
+            incident_risk_store,
+            "validate_successor",
+            hostile,
+        ):
+            with self.assertRaisesRegex(
+                IncidentRiskStoreError,
+                "codec dependency changed: validate_successor",
+            ):
+                self.store.append(second)
+
+        self.assertEqual(hostile_calls, 0)
+
+    def test_persistence_validator_rebind_fails_before_hostile_execution(self) -> None:
+        import autosport.incident_risk_store as incident_risk_store
+
+        hostile_calls = 0
+
+        def hostile(_entry):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            raise AssertionError("hostile validate_persistence_safe executed")
+
+        with mock.patch.object(
+            incident_risk_store,
+            "validate_persistence_safe",
+            hostile,
+        ):
+            with self.assertRaisesRegex(
+                IncidentRiskStoreError,
+                "codec dependency changed: validate_persistence_safe",
+            ):
+                self.store.append(self._entry())
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertFalse(self.store.path.exists())
+
     def test_content_hash_tamper_fails_closed(self) -> None:
         self.store.append(self._entry())
         payload = json.loads(

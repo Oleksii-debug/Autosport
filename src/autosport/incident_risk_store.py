@@ -54,6 +54,156 @@ class IncidentRiskStoreError(ValueError):
     """Raised when durable incident/model-risk history is invalid or ambiguous."""
 
 
+def _make_store_codec_authority():
+    """Seal the imported parser and IncidentRiskEntry codec/validator graph."""
+
+    module_globals = globals()
+    entry_type = IncidentRiskEntry
+    entry_post_init = entry_type.__dict__["__post_init__"]
+    entry_to_dict = entry_type.__dict__["to_dict"]
+    entry_from_dict_descriptor = entry_type.__dict__["from_dict"]
+    if type(entry_from_dict_descriptor) is not classmethod:
+        raise RuntimeError("IncidentRiskEntry.from_dict must remain a classmethod")
+    entry_from_dict = entry_from_dict_descriptor.__func__
+    strict_loader = strict_json_loads
+    persistence_validator = validate_persistence_safe
+    successor_validator = validate_successor
+
+    function_witnesses = (
+        ("IncidentRiskEntry.__post_init__", entry_post_init, entry_post_init.__code__),
+        ("IncidentRiskEntry.to_dict", entry_to_dict, entry_to_dict.__code__),
+        (
+            "IncidentRiskEntry.from_dict",
+            entry_from_dict,
+            entry_from_dict.__code__,
+        ),
+        ("strict_json_loads", strict_loader, strict_loader.__code__),
+        (
+            "validate_persistence_safe",
+            persistence_validator,
+            persistence_validator.__code__,
+        ),
+        ("validate_successor", successor_validator, successor_validator.__code__),
+    )
+
+    def require() -> None:
+        expected_globals = (
+            ("IncidentRiskEntry", entry_type),
+            ("strict_json_loads", strict_loader),
+            ("validate_persistence_safe", persistence_validator),
+            ("validate_successor", successor_validator),
+        )
+        for label, expected in expected_globals:
+            if module_globals.get(label) is not expected:
+                raise IncidentRiskStoreError(
+                    "incident/model-risk store codec dependency changed: "
+                    f"{label}"
+                )
+        if entry_type.__dict__.get("__post_init__") is not entry_post_init:
+            raise IncidentRiskStoreError(
+                "incident/model-risk store codec dependency changed: "
+                "IncidentRiskEntry.__post_init__"
+            )
+        if entry_type.__dict__.get("to_dict") is not entry_to_dict:
+            raise IncidentRiskStoreError(
+                "incident/model-risk store codec dependency changed: "
+                "IncidentRiskEntry.to_dict"
+            )
+        current_from_dict = entry_type.__dict__.get("from_dict")
+        if (
+            current_from_dict is not entry_from_dict_descriptor
+            or type(current_from_dict) is not classmethod
+            or current_from_dict.__func__ is not entry_from_dict
+        ):
+            raise IncidentRiskStoreError(
+                "incident/model-risk store codec dependency changed: "
+                "IncidentRiskEntry.from_dict"
+            )
+        for label, function, expected_code in function_witnesses:
+            if function.__code__ is not expected_code:
+                raise IncidentRiskStoreError(
+                    "incident/model-risk store codec dependency changed: "
+                    f"{label}.__code__"
+                )
+
+    require_code = require.__code__
+
+    def _require() -> None:
+        if require.__code__ is not require_code:
+            raise IncidentRiskStoreError(
+                "incident/model-risk store codec authority guard changed"
+            )
+        require()
+
+    def parse_json(text: str) -> object:
+        _require()
+        decoded = strict_loader(text)
+        _require()
+        return decoded
+
+    def validate_entry(entry: IncidentRiskEntry) -> None:
+        _require()
+        if type(entry) is not entry_type:
+            raise IncidentRiskStoreError(
+                "durable history accepts exact IncidentRiskEntry values only"
+            )
+        entry_post_init(entry)
+        _require()
+
+    def to_dict(entry: IncidentRiskEntry) -> dict[str, object]:
+        _require()
+        if type(entry) is not entry_type:
+            raise IncidentRiskStoreError(
+                "incident/model-risk store codec requires exact IncidentRiskEntry"
+            )
+        raw = entry_to_dict(entry)
+        _require()
+        return raw
+
+    def from_dict(raw: object) -> IncidentRiskEntry:
+        _require()
+        entry = entry_from_dict(entry_type, raw)
+        _require()
+        if type(entry) is not entry_type:
+            raise IncidentRiskStoreError(
+                "decoded durable history entry must be exact IncidentRiskEntry"
+            )
+        return entry
+
+    def validate_safe(entry: IncidentRiskEntry) -> None:
+        _require()
+        persistence_validator(entry)
+        _require()
+
+    def validate_next(
+        previous: IncidentRiskEntry,
+        candidate: IncidentRiskEntry,
+    ) -> None:
+        _require()
+        successor_validator(previous, candidate)
+        _require()
+
+    return (
+        parse_json,
+        validate_entry,
+        to_dict,
+        from_dict,
+        validate_safe,
+        validate_next,
+    )
+
+
+(
+    _STORE_STRICT_JSON_LOADS,
+    _STORE_VALIDATE_ENTRY,
+    _STORE_ENTRY_TO_DICT,
+    _STORE_ENTRY_FROM_DICT,
+    _STORE_VALIDATE_PERSISTENCE_SAFE,
+    _STORE_VALIDATE_SUCCESSOR,
+) = _make_store_codec_authority()
+del _make_store_codec_authority
+
+
 def _sha256_text(name: str, value: object) -> str:
     if (
         type(value) is not str
@@ -118,7 +268,7 @@ def _validate_histories(
 
         try:
             for entry in history:
-                entry.__post_init__()
+                _STORE_VALIDATE_ENTRY(entry)
         except (IncidentRiskRegisterError, TypeError, ValueError) as exc:
             raise IncidentRiskStoreError(
                 "durable incident/model-risk history contains an invalid entry snapshot"
@@ -135,7 +285,7 @@ def _validate_histories(
             )
         try:
             for previous, candidate in zip(history, history[1:]):
-                validate_successor(previous, candidate)
+                _STORE_VALIDATE_SUCCESSOR(previous, candidate)
         except (IncidentRiskRegisterError, TypeError, ValueError) as exc:
             raise IncidentRiskStoreError(
                 "durable incident/model-risk revision chain is invalid"
@@ -157,7 +307,7 @@ def _histories_json(
     return [
         {
             "entry_id": history[0].entry_id,
-            "revisions": [entry.to_dict() for entry in history],
+            "revisions": [_STORE_ENTRY_TO_DICT(entry) for entry in history],
         }
         for history in histories
     ]
@@ -543,7 +693,7 @@ def _decode_snapshot(text: str) -> IncidentRiskStoreSnapshot:
             "incident/model-risk store JSON must be text"
         )
     try:
-        raw = strict_json_loads(text)
+        raw = _STORE_STRICT_JSON_LOADS(text)
     except (TypeError, ValueError) as exc:
         raise IncidentRiskStoreError(
             "invalid incident/model-risk store JSON"
@@ -597,7 +747,7 @@ def _decode_snapshot(text: str) -> IncidentRiskStoreSnapshot:
         entries: list[IncidentRiskEntry] = []
         for raw_entry in raw_revisions:
             try:
-                entry = IncidentRiskEntry.from_dict(raw_entry)
+                entry = _STORE_ENTRY_FROM_DICT(raw_entry)
             except (
                 IncidentRiskRegisterError,
                 TypeError,
@@ -664,10 +814,10 @@ def _detached_persistence_entry(entry: IncidentRiskEntry) -> IncidentRiskEntry:
             "persistence accepts exact IncidentRiskEntry values only"
         )
     try:
-        raw = entry.to_dict()
-        detached = IncidentRiskEntry.from_dict(raw)
-        validate_persistence_safe(detached)
-        if entry.to_dict() != raw:
+        raw = _STORE_ENTRY_TO_DICT(entry)
+        detached = _STORE_ENTRY_FROM_DICT(raw)
+        _STORE_VALIDATE_PERSISTENCE_SAFE(detached)
+        if _STORE_ENTRY_TO_DICT(entry) != raw:
             raise IncidentRiskStoreError(
                 "incident/model-risk entry changed while taking persistence snapshot"
             )
@@ -793,17 +943,15 @@ class IncidentRiskStore:
                     existing = history[entry.revision - 1]
                     if (
                         existing.revision == entry.revision
-                        and hmac.compare_digest(
-                            entry.fingerprint_sha256,
-                            existing.fingerprint_sha256,
-                        )
+                        and _STORE_ENTRY_TO_DICT(entry)
+                        == _STORE_ENTRY_TO_DICT(existing)
                     ):
                         return before
                     raise IncidentRiskStoreError(
                         "same durable revision cannot be rebound to different content"
                     )
                 try:
-                    validate_successor(latest, entry)
+                    _STORE_VALIDATE_SUCCESSOR(latest, entry)
                 except (
                     IncidentRiskRegisterError,
                     TypeError,

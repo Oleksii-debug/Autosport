@@ -3387,6 +3387,37 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             FocusedMirrorDependencyIndex.matching_keys
         ),
         _matching_keys_reader_code: object = FocusedMirrorDependencyIndex.matching_keys.__code__,
+        _dependency_register_method: Callable[..., FocusedMirrorDependency] = (
+            FocusedMirrorDependencyIndex.register
+        ),
+        _dependency_register_method_code: object = FocusedMirrorDependencyIndex.register.__code__,
+        _dependency_unregister_method: Callable[..., bool] = (
+            FocusedMirrorDependencyIndex.unregister
+        ),
+        _dependency_unregister_method_code: object = FocusedMirrorDependencyIndex.unregister.__code__,
+        _dependency_affected_inputs_method: Callable[..., tuple[str, ...]] = (
+            FocusedMirrorDependencyIndex.affected_inputs
+        ),
+        _dependency_affected_inputs_method_code: object = (
+            FocusedMirrorDependencyIndex.affected_inputs.__code__
+        ),
+        _dependency_input_ids_descriptor: object = (
+            FocusedMirrorDependencyIndex.__dict__["input_ids"]
+        ),
+        _dependency_input_ids_getter_code: object = (
+            FocusedMirrorDependencyIndex.input_ids.fget.__code__
+        ),
+        _lifecycle_type: type[ContinuousEventLifecycle] = ContinuousEventLifecycle,
+        _lifecycle_register_eligible_method: Callable[..., tuple[str, ...]] = (
+            ContinuousEventLifecycle.register_eligible
+        ),
+        _lifecycle_register_eligible_method_code: object = (
+            ContinuousEventLifecycle.register_eligible.__code__
+        ),
+        _lifecycle_records_method: Callable[..., tuple[EventLifecycleRecord, ...]] = (
+            ContinuousEventLifecycle.records
+        ),
+        _lifecycle_records_method_code: object = ContinuousEventLifecycle.records.__code__,
     ) -> ContinuousTickResult:
         state = self._state
         if (
@@ -3604,6 +3635,58 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "continuous-session dependency index authority changed during tick"
                 )
 
+        def require_lifecycle_dispatch_authority() -> None:
+            if type(dependency_index) is _dependency_index_type:
+                descriptor = _dependency_index_type.__dict__.get("input_ids")
+                if (
+                    FocusedMirrorDependencyIndex is not _dependency_index_type
+                    or getattr(dependency_register, "__self__", None)
+                    is not dependency_index
+                    or getattr(dependency_register, "__func__", None)
+                    is not _dependency_register_method
+                    or getattr(_dependency_register_method, "__code__", None)
+                    is not _dependency_register_method_code
+                    or getattr(dependency_unregister, "__self__", None)
+                    is not dependency_index
+                    or getattr(dependency_unregister, "__func__", None)
+                    is not _dependency_unregister_method
+                    or getattr(_dependency_unregister_method, "__code__", None)
+                    is not _dependency_unregister_method_code
+                    or getattr(dependency_affected_inputs, "__self__", None)
+                    is not dependency_index
+                    or getattr(dependency_affected_inputs, "__func__", None)
+                    is not _dependency_affected_inputs_method
+                    or getattr(_dependency_affected_inputs_method, "__code__", None)
+                    is not _dependency_affected_inputs_method_code
+                    or descriptor is not _dependency_input_ids_descriptor
+                    or getattr(descriptor, "fget", None) is None
+                    or getattr(descriptor.fget, "__code__", None)
+                    is not _dependency_input_ids_getter_code
+                ):
+                    raise ContinuousSessionError(
+                        "canonical dependency lifecycle dispatch authority changed"
+                    )
+            if type(lifecycle) is _lifecycle_type:
+                if (
+                    ContinuousEventLifecycle is not _lifecycle_type
+                    or getattr(lifecycle_register_eligible, "__self__", None)
+                    is not lifecycle
+                    or getattr(lifecycle_register_eligible, "__func__", None)
+                    is not _lifecycle_register_eligible_method
+                    or getattr(_lifecycle_register_eligible_method, "__code__", None)
+                    is not _lifecycle_register_eligible_method_code
+                    or getattr(lifecycle_records, "__self__", None) is not lifecycle
+                    or getattr(lifecycle_records, "__func__", None)
+                    is not _lifecycle_records_method
+                    or getattr(_lifecycle_records_method, "__code__", None)
+                    is not _lifecycle_records_method_code
+                ):
+                    raise ContinuousSessionError(
+                        "canonical event lifecycle dispatch authority changed"
+                    )
+
+        require_lifecycle_dispatch_authority()
+
         def require_economic_context() -> None:
             if (
                 self.workspace != workspace
@@ -3647,6 +3730,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
             require_state_identity()
             require_dependency_index_identity()
+            require_lifecycle_dispatch_authority()
         except Exception as exc:
             state_was_rebound = restore_state_identity()
             if state_was_rebound:
@@ -3785,6 +3869,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     raise ContinuousSessionError(
                         "desktop consumer returned invalid delivered delta ids"
                     )
+                require_lifecycle_dispatch_authority()
                 affected, full_refresh, backlog = _drain_invalidations_method(
                     self,
                     invalidation_buffer=invalidation_buffer,
@@ -3844,6 +3929,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 retired: list[str] = []
 
                 def register(input_id: str, **selectors: object) -> None:
+                    require_lifecycle_dispatch_authority()
                     registered_now = _register_input_method(
                         self,
                         input_id,
@@ -3872,6 +3958,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                             )
 
                 def retire(input_id: str) -> None:
+                    require_lifecycle_dispatch_authority()
                     if _retire_input_method(
                         self,
                         input_id,
@@ -3889,6 +3976,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                             lifecycle_expected_dependencies.pop(input_id, None)
                             lifecycle_expected_matching_keys.pop(input_id, None)
 
+                require_lifecycle_dispatch_authority()
                 registered = lifecycle_register_eligible(
                     market_store,
                     as_of=now,
@@ -3898,6 +3986,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
                 require_state_identity()
                 require_dependency_index_identity()
+                require_lifecycle_dispatch_authority()
                 if (
                     type(registered) is not tuple
                     or any(
@@ -3995,6 +4084,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         "lifecycle registration receipt conflicts with coordinator callbacks"
                     )
 
+                require_lifecycle_dispatch_authority()
                 resolutions = _settlement_resolutions_method(
                     self,
                     as_of=now,

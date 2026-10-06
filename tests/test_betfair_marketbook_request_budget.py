@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from fractions import Fraction
 import itertools
 
@@ -106,6 +107,44 @@ def test_unknown_noncanonical_or_duplicate_price_data_fails_closed():
         budget(1, ("EX_TRADED", "EX_TRADED"))
     with pytest.raises(MarketBookBudgetError, match="sequence"):
         MarketBookRequestBudget(("1.1",), "EX_TRADED")
+
+
+class _ExplosiveString(str):
+    def strip(self, *args, **kwargs):
+        raise AssertionError("str subclass hook must not execute")
+
+
+class _ExplosiveSequence(Sequence):
+    def __len__(self):
+        raise AssertionError("sequence subclass hook must not execute")
+
+    def __getitem__(self, index):
+        raise AssertionError("sequence subclass hook must not execute")
+
+
+class _ExplosiveInt(int):
+    def __le__(self, other):
+        raise AssertionError("int subclass comparison hook must not execute")
+
+
+def test_polymorphic_token_ingress_fails_before_caller_hooks_execute():
+    with pytest.raises(MarketBookBudgetError, match="exact list or tuple"):
+        MarketBookRequestBudget(_ExplosiveSequence())
+
+    with pytest.raises(MarketBookBudgetError, match="exact strings"):
+        MarketBookRequestBudget((_ExplosiveString("1.1"),))
+
+    with pytest.raises(MarketBookBudgetError, match="exact strings"):
+        MarketBookRequestBudget(("1.1",), (_ExplosiveString("EX_BEST_OFFERS"),))
+
+
+def test_polymorphic_depth_fails_before_integer_hooks_execute():
+    with pytest.raises(MarketBookBudgetError, match="exact integer"):
+        MarketBookRequestBudget(
+            ("1.1",),
+            ("EX_BEST_OFFERS",),
+            _ExplosiveInt(3),
+        )
 
 
 def test_market_ids_are_nonempty_unique_canonical_tokens():

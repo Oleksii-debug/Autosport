@@ -103,7 +103,12 @@ class _EconomicGoalContractMeta(type):
 
 
 
-def _build_contract_class_guard(name: str):
+def _build_contract_class_guard(
+    name: str,
+    _getattr=getattr,
+    _attribute_error=AttributeError,
+    _type_error=TypeError,
+):
     """Block direct base-metaclass mutation of sealed contract authority names."""
 
     class _ContractClassGuard:
@@ -117,19 +122,19 @@ def _build_contract_class_guard(name: str):
                     binding = ancestor.__dict__[name]
                     break
             else:
-                raise AttributeError(name)
-            descriptor_get = getattr(binding, "__get__", None)
+                raise _attribute_error(name)
+            descriptor_get = _getattr(binding, "__get__", None)
             if descriptor_get is None:
                 return binding
             return descriptor_get(None, instance)
 
         def __set__(self, _instance, _value) -> None:
-            raise TypeError(
+            raise _type_error(
                 "economic-goal public authority operation binding is immutable"
             )
 
         def __delete__(self, _instance) -> None:
-            raise TypeError(
+            raise _type_error(
                 "economic-goal public authority operation binding is immutable"
             )
 
@@ -469,8 +474,9 @@ def _canonical_contract_snapshot(
     contract: EconomicGoalContract,
     _field_getters=_CANONICAL_CONTRACT_FIELD_GETTERS,
     _contract_type=_CANONICAL_CONTRACT_TYPE,
+    _tuple=tuple,
 ) -> tuple[object, ...]:
-    return tuple(
+    return _tuple(
         getter(contract, _contract_type)
         for _, getter in _field_getters
     )
@@ -557,43 +563,55 @@ def _validate_contract_bound(
     _restrictions_validator("blocked_markets", blocked_markets)
 
 
-def _capture_callable_authority_graph(root):
+def _capture_callable_authority_graph(
+    root,
+    _callable=callable,
+    _getattr=getattr,
+    _id=id,
+    _set=set,
+    _tuple=tuple,
+):
     """Capture every callable reachable through function defaults, cycle-safely."""
 
     captured = []
-    seen: set[int] = set()
+    seen: set[int] = _set()
 
     def visit(candidate) -> None:
-        if not callable(candidate):
+        if not _callable(candidate):
             return
-        identity = id(candidate)
+        identity = _id(candidate)
         if identity in seen:
             return
         seen.add(identity)
-        defaults = getattr(candidate, "__defaults__", None)
-        kwdefaults = getattr(candidate, "__kwdefaults__", None)
-        kwdefault_items = tuple((kwdefaults or {}).items())
+        defaults = _getattr(candidate, "__defaults__", None)
+        kwdefaults = _getattr(candidate, "__kwdefaults__", None)
+        kwdefault_items = _tuple((kwdefaults or {}).items())
         captured.append(
             (
                 candidate,
-                getattr(candidate, "__code__", None),
+                _getattr(candidate, "__code__", None),
                 defaults,
                 kwdefaults,
                 kwdefault_items,
             )
         )
         for value in defaults or ():
-            if callable(value):
+            if _callable(value):
                 visit(value)
         for _, value in kwdefault_items:
-            if callable(value):
+            if _callable(value):
                 visit(value)
 
     visit(root)
-    return tuple(captured)
+    return _tuple(captured)
 
 
-def _make_contract_post_init_authority(operation):
+def _make_contract_post_init_authority(
+    operation,
+    _enumerate=enumerate,
+    _getattr=getattr,
+    _tuple=tuple,
+):
     authority_graph = _capture_callable_authority_graph(operation)
     error_type = EconomicGoalContractError
 
@@ -604,19 +622,19 @@ def _make_contract_post_init_authority(operation):
             expected_defaults,
             expected_kwdefaults,
             expected_kwdefault_items,
-        ) in enumerate(authority_graph):
-            if getattr(callable_object, "__code__", None) is not expected_code:
+        ) in _enumerate(authority_graph):
+            if _getattr(callable_object, "__code__", None) is not expected_code:
                 if index == 0:
                     raise error_type("economic-goal contract validator authority changed")
                 raise error_type("economic-goal contract nested validator authority changed")
-            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+            if _getattr(callable_object, "__defaults__", None) is not expected_defaults:
                 if index == 0:
                     raise error_type("economic-goal contract validator defaults authority changed")
                 raise error_type("economic-goal contract nested validator defaults authority changed")
-            current_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
+            current_kwdefaults = _getattr(callable_object, "__kwdefaults__", None)
             if (
                 current_kwdefaults is not expected_kwdefaults
-                or tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
+                or _tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
             ):
                 if index == 0:
                     raise error_type(
@@ -711,7 +729,12 @@ def _contract_init_authority(
     _validator(self)
 
 
-def _make_contract_constructor_authority(operation):
+def _make_contract_constructor_authority(
+    operation,
+    _enumerate=enumerate,
+    _getattr=getattr,
+    _tuple=tuple,
+):
     authority_graph = _capture_callable_authority_graph(operation)
     error_type = EconomicGoalContractError
 
@@ -722,19 +745,19 @@ def _make_contract_constructor_authority(operation):
             expected_defaults,
             expected_kwdefaults,
             expected_kwdefault_items,
-        ) in enumerate(authority_graph):
-            if getattr(callable_object, "__code__", None) is not expected_code:
+        ) in _enumerate(authority_graph):
+            if _getattr(callable_object, "__code__", None) is not expected_code:
                 if index == 0:
                     raise error_type("economic-goal constructor authority changed")
                 raise error_type("economic-goal constructor nested authority changed")
-            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+            if _getattr(callable_object, "__defaults__", None) is not expected_defaults:
                 if index == 0:
                     raise error_type("economic-goal constructor defaults authority changed")
                 raise error_type("economic-goal constructor nested defaults authority changed")
-            current_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
+            current_kwdefaults = _getattr(callable_object, "__kwdefaults__", None)
             if (
                 current_kwdefaults is not expected_kwdefaults
-                or tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
+                or _tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
             ):
                 if index == 0:
                     raise error_type(
@@ -1009,7 +1032,12 @@ def _validate_automatic_transition_bound(
     _restrictions_guard("blocked_markets", previous_view["blocked_markets"], candidate_view["blocked_markets"])
 
 
-def _make_transition_validator_authority(operation):
+def _make_transition_validator_authority(
+    operation,
+    _enumerate=enumerate,
+    _getattr=getattr,
+    _tuple=tuple,
+):
     authority_graph = _capture_callable_authority_graph(operation)
 
     def require_authority() -> None:
@@ -1019,8 +1047,8 @@ def _make_transition_validator_authority(operation):
             expected_defaults,
             expected_kwdefaults,
             expected_kwdefault_items,
-        ) in enumerate(authority_graph):
-            if getattr(callable_object, "__code__", None) is not expected_code:
+        ) in _enumerate(authority_graph):
+            if _getattr(callable_object, "__code__", None) is not expected_code:
                 if index == 0:
                     raise EconomicGoalContractError(
                         "automatic transition validator authority changed"
@@ -1028,7 +1056,7 @@ def _make_transition_validator_authority(operation):
                 raise EconomicGoalContractError(
                     "automatic transition nested validator authority changed"
                 )
-            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+            if _getattr(callable_object, "__defaults__", None) is not expected_defaults:
                 if index == 0:
                     raise EconomicGoalContractError(
                         "automatic transition validator defaults authority changed"
@@ -1036,10 +1064,10 @@ def _make_transition_validator_authority(operation):
                 raise EconomicGoalContractError(
                     "automatic transition nested validator defaults authority changed"
                 )
-            current_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
+            current_kwdefaults = _getattr(callable_object, "__kwdefaults__", None)
             if (
                 current_kwdefaults is not expected_kwdefaults
-                or tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
+                or _tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
             ):
                 if index == 0:
                     raise EconomicGoalContractError(

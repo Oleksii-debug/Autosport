@@ -530,6 +530,18 @@ def test_result_is_deterministic_across_account_and_scope_input_order() -> None:
     assert forward.assessment_sha256 == reverse.assessment_sha256
 
 
+def test_pathological_provider_balance_exponent_fails_before_fixed_point_allocation() -> None:
+    action = _action("a", "provider-a", "acct-a", "10")
+    bound = _bound(action)
+    state = _state("provider-a", "acct-a", "1e1000000")
+
+    with pytest.raises(
+        ProviderAccountFundingError,
+        match="representation exceeds resource limit",
+    ):
+        _assess(bound, (state,))
+
+
 def test_unrelated_account_state_does_not_change_exact_plan_projection() -> None:
     action = _action("a", "provider-a", "acct-a", "10")
     bound = _bound(action)

@@ -117,7 +117,20 @@ class PortfolioAwareCandidateOptimizer:
         *,
         stake: Decimal | str,
     ) -> list[CandidatePortfolioImpact]:
-        amount = Decimal(str(stake))
+        # Financial/economic ingress must not silently promote binary floats,
+        # bools, integers, Decimal subclasses, or arbitrary __str__ providers into
+        # stake authority. Preserve the established exact Decimal/text API only.
+        if type(stake) is Decimal:
+            amount = stake
+        elif type(stake) is str:
+            try:
+                amount = Decimal(stake)
+            except DecimalException as exc:
+                raise ValueError(
+                    "stake must be an exact Decimal or decimal text"
+                ) from exc
+        else:
+            raise ValueError("stake must be an exact Decimal or decimal text")
         if not amount.is_finite():
             raise ValueError("stake must be finite")
         if amount <= 0:

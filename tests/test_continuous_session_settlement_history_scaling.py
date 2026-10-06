@@ -280,3 +280,77 @@ def test_conflicting_same_generation_error_authorities_fail_closed() -> None:
             pass
         else:
             raise AssertionError("conflicting same-generation error authorities were accepted")
+
+
+def test_oversized_failure_code_is_rejected_before_operational_write() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        writes: list[tuple[Path, object]] = []
+        original_write = continuous_session.atomic_write_json
+
+        def recording_write(path: Path, payload: object) -> None:
+            writes.append((Path(path), payload))
+            original_write(path, payload)
+
+        with patch.object(continuous_session, "atomic_write_json", recording_write):
+            try:
+                state.record_failure(
+                    code="x" * (state._MAX_ERROR_CODE_CHARS + 1),
+                )
+            except ValueError as exc:
+                assert "resource limit" in str(exc)
+            else:
+                raise AssertionError("oversized failure code was accepted")
+
+        assert writes == []
+        assert not (
+            root / "continuous_session.json.operational_error.json"
+        ).exists()
+
+
+def test_oversized_operational_checkpoint_fails_before_json_parse() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
+        error_path = root / "continuous_session.json.operational_error.json"
+        error_path.write_bytes(
+            b"x" * (state._MAX_ERROR_CHECKPOINT_BYTES + 1),
+        )
+        parser_calls = 0
+
+        def forbidden_parser(raw: object) -> object:
+            nonlocal parser_calls
+            parser_calls += 1
+            raise AssertionError("oversized checkpoint reached JSON parser")
+
+        with patch.object(
+            continuous_session,
+            "strict_json_loads",
+            forbidden_parser,
+        ):
+            try:
+                state._read_error_checkpoint()
+            except continuous_session.ContinuousSessionError as exc:
+                assert "resource limit" in str(exc)
+            else:
+                raise AssertionError("oversized operational checkpoint was accepted")
+
+        assert parser_calls == 0
+
+
+def test_operational_checkpoint_serialized_bytes_remain_bounded() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(
+            code="e" * state._MAX_ERROR_CODE_CHARS,
+        )
+        error_path = root / "continuous_session.json.operational_error.json"
+
+        assert error_path.stat().st_size <= state._MAX_ERROR_CHECKPOINT_BYTES
+        assert (
+            state._read_error_checkpoint()["last_error_code"]
+            == "e" * state._MAX_ERROR_CODE_CHARS
+        )

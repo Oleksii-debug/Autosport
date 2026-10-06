@@ -228,6 +228,7 @@ _CANONICAL_PATH_CONSTRUCTOR: Final = Path
 _CANONICAL_PATH_TYPE: Final = type(Path("."))
 _CANONICAL_PATH_RESOLVE: Final = Path.resolve
 _CANONICAL_PATH_JOIN: Final = Path.__truediv__
+_CANONICAL_PATH_LSTAT: Final = Path.lstat
 _CANONICAL_STORE_FILE_NAME: Final = "economic_goal_contract.json"
 _CANONICAL_OPEN_READ_ONLY_DESCRIPTOR: Final = _open_read_only_descriptor
 _CANONICAL_OS_FSTAT: Final = os.fstat
@@ -845,6 +846,7 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
         _path_type=_CANONICAL_PATH_TYPE,
         _path_resolve=_CANONICAL_PATH_RESOLVE,
         _path_join=_CANONICAL_PATH_JOIN,
+        _path_lstat=_CANONICAL_PATH_LSTAT,
         _bindings=_STORE_BINDINGS_BY_ID,
         _weakref_ref=weakref.ref,
         _file_name=_CANONICAL_STORE_FILE_NAME,
@@ -878,14 +880,15 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
                 _bindings.pop(store_id, None)
 
         store_ref = _weakref_ref(self, release_binding)
-        path_lstat = path.lstat
         path_open = path.open
 
         def path_exists(
             _error_type=EconomicGoalContractError,
+            _lstat=_path_lstat,
+            _path=path,
         ) -> bool:
             try:
-                path_lstat()
+                _lstat(_path)
             except FileNotFoundError:
                 return False
             except OSError as exc:

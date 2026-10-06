@@ -936,18 +936,33 @@ def test_codec_ignores_rebound_size_bounds(monkeypatch) -> None:
         economic_goal_from_payload(oversized_member)
 
 
-def test_store_path_exists_witness_ignores_rebound_error(monkeypatch, tmp_path) -> None:
+def test_store_path_exists_ignores_preconstruction_lstat_rebinding(monkeypatch, tmp_path) -> None:
+    original = _goal()
+    initial = EconomicGoalStore(tmp_path)
+    initial.initialize_owner(original)
+    authority_path = tmp_path.resolve() / "economic_goal_contract.json"
+    before = authority_path.read_bytes()
+    calls = 0
+
     def forged_lstat(self):
-        raise PermissionError("lstat blocked")
+        nonlocal calls
+        calls += 1
+        raise FileNotFoundError("forged not-found authority")
 
     monkeypatch.setattr(type(tmp_path), "lstat", forged_lstat)
-    store = EconomicGoalStore(tmp_path)
-    canonical_error = EconomicGoalContractError
-    monkeypatch.setattr(economic_goal_store_module, "EconomicGoalContractError", RuntimeError)
+    restarted = EconomicGoalStore(tmp_path)
+    candidate = replace(
+        original,
+        revision=2,
+        max_stake_fraction=Decimal("0.01"),
+    )
 
-    with pytest.raises(canonical_error) as excinfo:
-        store.initialize_owner(_goal())
-    assert type(excinfo.value) is canonical_error
+    with pytest.raises(EconomicGoalContractError, match="already exists"):
+        restarted.initialize_owner(candidate)
+
+    assert calls == 0
+    assert authority_path.read_bytes() == before
+    assert restarted.load() == original
 
 
 def test_store_captures_transitive_path_witnesses(monkeypatch, tmp_path) -> None:

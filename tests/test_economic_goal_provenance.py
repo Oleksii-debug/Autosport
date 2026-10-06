@@ -332,3 +332,43 @@ def test_public_provenance_operations_ignore_rebound_bound_implementation_aliase
     evidence = provenance_for(goal)
     assert evidence == expected
     verify_provenance(goal, evidence)
+
+
+def test_provenance_identity_is_bound_to_one_canonical_contract_snapshot() -> None:
+    goal = _goal()
+    canonical_encoder = economic_goal_provenance_module.economic_goal_to_payload
+
+    def encode_then_mutate(contract):
+        payload = canonical_encoder(contract)
+        object.__setattr__(goal, "goal_id", "mutated-after-snapshot")
+        object.__setattr__(goal, "revision", 99)
+        return payload
+
+    evidence = economic_goal_provenance_module._provenance_for_bound(
+        goal,
+        _payload_encoder=encode_then_mutate,
+    )
+
+    assert evidence.goal_id == "owner-goal-v1"
+    assert evidence.revision == 1
+    assert goal.goal_id == "mutated-after-snapshot"
+    assert goal.revision == 99
+
+
+def test_provenance_verification_uses_canonical_contract_snapshot_after_capture() -> None:
+    goal = _goal()
+    evidence = provenance_for(goal)
+    canonical_encoder = economic_goal_provenance_module.economic_goal_to_payload
+
+    def encode_then_mutate(contract):
+        payload = canonical_encoder(contract)
+        object.__setattr__(goal, "bankroll_id", "mutated-after-snapshot")
+        return payload
+
+    economic_goal_provenance_module._verify_provenance_bound(
+        goal,
+        evidence,
+        _payload_encoder=encode_then_mutate,
+    )
+
+    assert goal.bankroll_id == "mutated-after-snapshot"

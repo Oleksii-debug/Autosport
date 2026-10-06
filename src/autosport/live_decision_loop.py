@@ -3145,16 +3145,20 @@ class PersistentLiveDecisionLoop:
         gate: str,
         decision_context_sha256: str,
         actionability_wait_evidence: tuple[dict[str, object], ...] | None = None,
+        bind_actionability_wait_evidence: bool = True,
     ) -> tuple[str, str]:
+        if type(bind_actionability_wait_evidence) is not bool:
+            raise TypeError("bind_actionability_wait_evidence must be a bool")
         wait_evidence_sha256 = None
         if gate == _GATE_ACTIONABILITY_WAIT:
             if not actionability_wait_evidence:
                 raise LiveDecisionProgressError(
                     "actionability WAIT identity requires durable evidence"
                 )
-            wait_evidence_sha256 = _canonical_json_sha256(
-                actionability_wait_evidence
-            )
+            if bind_actionability_wait_evidence:
+                wait_evidence_sha256 = _canonical_json_sha256(
+                    actionability_wait_evidence
+                )
         elif actionability_wait_evidence is not None:
             raise LiveDecisionProgressError(
                 "actionability WAIT identity evidence is forbidden for other gates"
@@ -3480,12 +3484,34 @@ class PersistentLiveDecisionLoop:
             if self._progress is not None
             else self._health_boundaries_for_progress()
         )
+        bind_actionability_wait_evidence = True
+        if (
+            canonical_actionability_wait is not None
+            and self._progress is not None
+            and self._progress.phase == _PHASE_APPEND_PENDING
+            and self._progress.decision_id is not None
+        ):
+            legacy_wait_decision_id = self._decision_identity(
+                plan=plan,
+                market_state_sha256=market_state_sha256,
+                gate=gate,
+                decision_context_sha256=decision_context_sha256,
+                actionability_wait_evidence=canonical_actionability_wait,
+                bind_actionability_wait_evidence=False,
+            )[1]
+            if self._progress.decision_id == legacy_wait_decision_id:
+                # A pre-v5 crash may already have durably reserved the legacy v4
+                # identity before this process upgraded. Finish that exact reserved
+                # transaction instead of reminting it under the evidence-bound v5 ID.
+                bind_actionability_wait_evidence = False
+
         context_hash, decision_id = self._decision_identity(
             plan=plan,
             market_state_sha256=market_state_sha256,
             gate=gate,
             decision_context_sha256=decision_context_sha256,
             actionability_wait_evidence=canonical_actionability_wait,
+            bind_actionability_wait_evidence=bind_actionability_wait_evidence,
         )
         prepared_execution: PreparedPaperExecution | None = None
         expected_execution_payload = None
@@ -3524,7 +3550,13 @@ class PersistentLiveDecisionLoop:
         record_payload = {
             "schema": "autosport.persistent_live_decision",
             "schema_version": (
-                5 if canonical_actionability_wait is not None else 3
+                (
+                    5
+                    if bind_actionability_wait_evidence
+                    else 4
+                )
+                if canonical_actionability_wait is not None
+                else 3
             ),
             "loop_id": self.loop_id,
             "mode": self.mode.value,

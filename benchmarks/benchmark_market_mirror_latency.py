@@ -11,6 +11,8 @@ from time import perf_counter_ns
 from typing import Sequence
 
 from autosport.market_bus import MarketEventBus
+from autosport.market_mirror import MarketMirror
+from autosport.market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from autosport.providers import CanonicalNormalizer, ProviderQuote
 from autosport.storage import SQLiteMarketStore
 
@@ -93,11 +95,15 @@ def run_latency_benchmark(
 
     samples_ns: list[int] = []
     accepted = 0
+    expected_latest: dict[tuple[str, str], dict[str, object]] = {}
     with tempfile.TemporaryDirectory() as tmp:
         store = SQLiteMarketStore(Path(tmp) / "market-mirror-latency.db")
         try:
             normalizer = CanonicalNormalizer()
+            mirror = MarketMirror()
+            invalidations = BoundedMirrorInvalidationBuffer(mirror)
             bus = MarketEventBus(store)
+            bus.subscribe(invalidations.accept_persisted)
             total = warmup + count
             for index in range(total):
                 quote = _build_quote(index, quote_keys)
@@ -105,6 +111,7 @@ def run_latency_benchmark(
                     event = normalizer.normalize("benchmark", quote)
                     if not bus.publish(event):
                         raise RuntimeError("warmup event was not accepted by the local Market Mirror")
+                    expected_latest[(event.source_id, event.quote_key)] = event.to_dict()
                     continue
 
                 started_ns = perf_counter_ns()
@@ -117,6 +124,25 @@ def run_latency_benchmark(
                     raise RuntimeError("latency clock did not advance for a measured event")
                 samples_ns.append(elapsed_ns)
                 accepted += 1
+                expected_latest[(event.source_id, event.quote_key)] = event.to_dict()
+
+            mirror_view = mirror.view()
+            expected_quote_keys = min(total, quote_keys)
+            if mirror_view.revision != total or len(mirror_view.events) != expected_quote_keys:
+                raise RuntimeError(
+                    "market mirror benchmark workload did not fully apply: "
+                    f"expected_revision={total} actual_revision={mirror_view.revision} "
+                    f"expected_quote_keys={expected_quote_keys} "
+                    f"actual_quote_keys={len(mirror_view.events)}"
+                )
+            actual_latest = {
+                (event.source_id, event.quote_key): event.to_dict()
+                for event in mirror_view.events
+            }
+            if actual_latest != expected_latest:
+                raise RuntimeError(
+                    "market mirror benchmark projection did not preserve exact latest payloads"
+                )
         finally:
             store.close()
 

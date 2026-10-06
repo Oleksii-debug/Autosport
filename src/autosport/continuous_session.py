@@ -1689,18 +1689,32 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         for record in self.lifecycle.records():
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
                 continue
+            # Snapshot lifecycle causality before entering the external outcome
+            # authority.  The authority receives the live record for protocol
+            # compatibility, but it must not be able to rewrite the identity or
+            # settlement reference that product state made authoritative before
+            # the callback.
+            record_identity = record.identity
+            record_settlement_ref = record.settlement_ref
             resolution = self.outcome_authority.resolve(record, as_of=as_of)
+            if (
+                record.identity != record_identity
+                or record.settlement_ref != record_settlement_ref
+            ):
+                raise ContinuousSessionError(
+                    "outcome authority mutated lifecycle settlement identity"
+                )
             if resolution is None:
                 continue
             if type(resolution) is not SettlementResolution:
                 raise ContinuousSessionError(
                     "outcome authority must return exact SettlementResolution or None"
                 )
-            if resolution.event_identity != record.identity:
+            if resolution.event_identity != record_identity:
                 raise ContinuousSessionError(
                     "settlement evidence event identity does not match lifecycle identity"
                 )
-            if resolution.settlement_ref != record.settlement_ref:
+            if resolution.settlement_ref != record_settlement_ref:
                 raise ContinuousSessionError(
                     "settlement evidence reference does not match lifecycle evidence"
                 )

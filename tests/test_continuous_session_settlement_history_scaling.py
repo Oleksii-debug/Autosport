@@ -1739,6 +1739,54 @@ def test_stale_failure_writer_cannot_clobber_newer_failure_sidecar() -> None:
         assert sidecar["observed_generation"] == canonical["generation"]
 
 
+def test_same_generation_failure_marker_conflict_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+        sidecar_path = root / "continuous_session.json.operational_error.json"
+        original = json.loads(sidecar_path.read_text(encoding="utf-8"))
+
+        mutations = (
+            ("observed_cycles_completed", original["observed_cycles_completed"] + 1),
+            (
+                "observed_last_success_at",
+                (
+                    None
+                    if original["observed_last_success_at"] is not None
+                    else "2026-10-06T04:53:00+00:00"
+                ),
+            ),
+            (
+                "observed_state",
+                (
+                    "PAUSED"
+                    if original["observed_state"] != "PAUSED"
+                    else "STOPPED"
+                ),
+            ),
+        )
+        for field, value in mutations:
+            corrupted = dict(original)
+            corrupted[field] = value
+            sidecar_path.write_text(
+                json.dumps(corrupted, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            before = sidecar_path.read_bytes()
+
+            try:
+                state.record_failure(code="SECOND_FAILURE")
+            except continuous_session.ContinuousSessionError as exc:
+                assert "same-generation operational error checkpoint markers" in str(exc)
+            else:
+                raise AssertionError(
+                    f"same-generation {field} conflict was overwritten"
+                )
+
+            assert sidecar_path.read_bytes() == before
+
+
 def test_stale_instance_failure_cannot_overwrite_newer_canonical_generation() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

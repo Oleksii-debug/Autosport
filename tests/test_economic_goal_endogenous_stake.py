@@ -160,6 +160,43 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             risk_of_ruin_upper_bound=risk_of_ruin_upper_bound,
         )
 
+    @staticmethod
+    def _lay_context(
+        goal: EconomicGoalContract,
+        *,
+        odds: str,
+        event_id: str = "event-lay",
+        market_id: str = "market-lay",
+        selection_id: str = "selection-lay",
+    ) -> ProposedTicketRiskContext:
+        decimal_odds = Decimal(odds)
+        event = MarketEvent(
+            event_id=event_id,
+            market_id=market_id,
+            selection_id=selection_id,
+            decimal_odds=decimal_odds,
+            observed_ts="2026-09-17T15:00:00+00:00",
+            source_id="provider-lay",
+            sequence=1,
+            source_ts="2026-09-17T14:59:59+00:00",
+            ingest_ts="2026-09-17T15:00:00+00:00",
+            exchange_side="lay",
+        )
+        leg = TicketLeg(
+            event_id=event_id,
+            market_id=market_id,
+            selection_id=selection_id,
+            locked_odds=decimal_odds,
+            exchange_side="lay",
+        )
+        return ProposedTicketRiskContext(
+            legs=(leg,),
+            quotes=(event,),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+            proposal_ts=event.observed_ts,
+        )
+
     @classmethod
     def _bound_ruin_context(
         cls,
@@ -329,6 +366,62 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
 
 
 
+
+    def test_lay_endogenous_stake_is_sized_from_liability_room(self) -> None:
+        goal = self._goal(
+            max_stake_fraction=Decimal("1"),
+            max_capital_at_risk_fraction=Decimal("0.40"),
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        context = self._lay_context(goal, odds="5")
+
+        amount = policy.derive_goal_stake(
+            book,
+            Decimal("1"),
+            context=context,
+        )
+
+        self.assertEqual(amount, Decimal("10"))
+        assert amount is not None
+        self.assertTrue(policy.evaluate(book, amount, context=context).allowed)
+
+    def test_lay_endogenous_stake_fails_closed_when_inverse_is_not_representable(self) -> None:
+        goal = self._goal(
+            max_stake_fraction=Decimal("1"),
+            max_capital_at_risk_fraction=Decimal("0.20"),
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        context = self._lay_context(goal, odds="1.3")
+
+        amount = policy.derive_goal_stake(
+            book,
+            Decimal("1"),
+            context=context,
+        )
+
+        self.assertIsNone(amount)
+
+    def test_lay_stake_vector_reserves_liability_in_shadow_book(self) -> None:
+        goal = self._goal(
+            max_stake_fraction=Decimal("1"),
+            max_capital_at_risk_fraction=Decimal("0.40"),
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        context = self._lay_context(goal, odds="5")
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"),),
+            contexts=(context,),
+        )
+
+        self.assertEqual(decision.action, "STAKE_VECTOR")
+        self.assertEqual(decision.stakes, (Decimal("10"),))
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
 
     def test_single_goal_stake_rejects_context_subclass(self) -> None:
         class DerivedContext(ProposedTicketRiskContext):

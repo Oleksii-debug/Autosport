@@ -220,3 +220,221 @@ def test_profile_state_method_rebinding_cannot_mint_canonical_capability_truth()
         ProviderManifestState.NOT_PROVEN
     )
 
+def test_postconstruction_extension_state_mutation_cannot_mint_truth() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=11,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    stream = next(
+        fact
+        for fact in manifest.facts
+        if fact.capability is ProviderManifestCapability.STREAM
+    )
+    object.__setattr__(stream, "state", ProviderManifestState.PROVEN)
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="stream extension truth changed after validation",
+    ):
+        manifest.supports(ProviderManifestCapability.STREAM)
+
+
+def test_postconstruction_extension_authority_mutation_cannot_mint_truth() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=12,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    stream = next(
+        fact
+        for fact in manifest.facts
+        if fact.capability is ProviderManifestCapability.STREAM
+    )
+    object.__setattr__(
+        stream,
+        "authority",
+        ProviderManifestFactAuthority.EXPLICIT_EVIDENCE,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="stream extension truth changed after validation",
+    ):
+        manifest.state_of(ProviderManifestCapability.STREAM)
+
+
+def test_postconstruction_canonical_state_mutation_cannot_widen_truth() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=13,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    prematch = next(
+        fact
+        for fact in manifest.facts
+        if fact.capability is ProviderManifestCapability.PREMATCH_QUOTES
+    )
+    assert prematch.state is ProviderManifestState.NOT_PROVEN
+    object.__setattr__(prematch, "state", ProviderManifestState.PROVEN)
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="prematch_quotes canonical truth changed after validation",
+    ):
+        manifest.supports(ProviderManifestCapability.PREMATCH_QUOTES)
+
+
+def test_postconstruction_fact_tuple_replacement_fails_closed() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=14,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    object.__setattr__(manifest, "facts", manifest.facts[:-1])
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="manifest fact vocabulary changed after validation",
+    ):
+        manifest.state_of(ProviderManifestCapability.LIVE_QUOTES)
+
+
+def test_postconstruction_profile_mutation_invalidates_manifest_read() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=15,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    live = next(
+        fact
+        for fact in profile.facts
+        if fact.capability is BookmakerCapability.LIVE_QUOTES_READ
+    )
+    object.__setattr__(live, "state", BookmakerCapabilityState.UNSUPPORTED)
+
+    with pytest.raises(Exception, match="does not match capability profile identity"):
+        manifest.state_of(ProviderManifestCapability.LIVE_QUOTES)
+
+
+def test_supports_rejects_state_reader_rebinding(monkeypatch) -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=16,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+
+    monkeypatch.setattr(
+        type(manifest),
+        "state_of",
+        lambda self, capability: ProviderManifestState.PROVEN,
+    )
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="canonical manifest state reader changed",
+    ):
+        manifest.supports(ProviderManifestCapability.STREAM)
+
+
+def test_state_of_rejects_inplace_authority_reader_code_mutation(monkeypatch) -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=17,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    resolver = provider_manifest_module._canonical_capability_for
+
+    def hostile_resolver(capability):
+        return BookmakerCapability.LIVE_QUOTES_READ
+
+    monkeypatch.setattr(resolver, "__code__", hostile_resolver.__code__)
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="canonical manifest read authority changed",
+    ):
+        manifest.state_of(ProviderManifestCapability.STREAM)
+

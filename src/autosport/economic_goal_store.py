@@ -1109,6 +1109,7 @@ EconomicGoalStore._authority_operations_sealed = True
 # metaclass after the canonical class bindings are final so even those base-type
 # operations must cross the immutable authority guard.
 for _sealed_store_name in (
+    "__init__",
     "load",
     "initialize_owner",
     "persist_automatic_successor",

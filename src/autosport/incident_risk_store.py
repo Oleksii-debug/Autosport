@@ -46,6 +46,7 @@ _ROOT_KEYS: Final = frozenset(
 )
 _HISTORY_KEYS: Final = frozenset({"entry_id", "revisions"})
 _AVAILABILITY_KEYS: Final = frozenset({"entry_id", "revision", "available_at"})
+_MAX_STORE_BYTES: Final = 64 * 1024 * 1024
 
 
 class IncidentRiskStoreError(ValueError):
@@ -288,6 +289,10 @@ def _read_stable_store_text(path: Path) -> str:
         raise IncidentRiskStoreError(
             "durable incident/model-risk store path must be a regular non-aliased file"
         )
+    if path_before.st_size > _MAX_STORE_BYTES:
+        raise IncidentRiskStoreError(
+            "durable incident/model-risk store exceeds resource limit"
+        )
 
     try:
         descriptor = _open_read_only_descriptor(path)
@@ -328,6 +333,7 @@ def _read_stable_store_text(path: Path) -> str:
         if (
             not stat.S_ISREG(opened_before.st_mode)
             or opened_before.st_nlink != 1
+            or opened_before.st_size > _MAX_STORE_BYTES
             or not stat.S_ISREG(path_after_open.st_mode)
             or path_after_open.st_nlink != 1
             or not _stable_stat_metadata(path_before, path_after_open)

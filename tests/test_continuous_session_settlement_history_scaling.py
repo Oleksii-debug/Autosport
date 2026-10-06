@@ -716,3 +716,26 @@ def test_operational_checkpoint_state_marker_fails_closed_when_invalid() -> None
             assert "observed_state" in str(exc)
         else:
             raise AssertionError("invalid sidecar observed_state was accepted")
+
+
+def test_operational_checkpoint_open_is_nonblocking_before_type_verification() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
+
+        original_open = continuous_session.os.open
+        observed_flags: list[int] = []
+
+        def observing_open(path: object, flags: int, *args: object) -> int:
+            observed_flags.append(flags)
+            return original_open(path, flags, *args)
+
+        with patch.object(continuous_session.os, "open", observing_open):
+            checkpoint = state._read_error_checkpoint()
+
+        assert checkpoint["last_error_code"] == "SYNTHETIC_PROVIDER_FAILURE"
+        assert observed_flags
+        nonblock = getattr(continuous_session.os, "O_NONBLOCK", 0)
+        if nonblock:
+            assert observed_flags[0] & nonblock

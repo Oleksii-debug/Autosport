@@ -498,6 +498,7 @@ class PreEvaluationEvidenceStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = _canonical_json(envelope) + b"\n"
         temporary: Path | None = None
+        primary_error: BaseException | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 "wb",
@@ -512,12 +513,29 @@ class PreEvaluationEvidenceStore:
                 os.fsync(handle.fileno())
             os.replace(temporary, self._path)
             temporary = None
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
             if temporary is not None:
                 try:
                     temporary.unlink()
                 except FileNotFoundError:
                     pass
+                except BaseException as cleanup_exc:
+                    if primary_error is None:
+                        raise
+                    if (
+                        not isinstance(cleanup_exc, Exception)
+                        and isinstance(primary_error, Exception)
+                    ):
+                        raise
+                    add_note = getattr(primary_error, "add_note", None)
+                    if callable(add_note):
+                        add_note(
+                            "pre-evaluation temporary cleanup failed: "
+                            f"{cleanup_exc.__class__.__name__}: {cleanup_exc}"
+                        )
 
     def load(self) -> PreEvaluationSessionEvidence:
         try:

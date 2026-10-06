@@ -278,6 +278,74 @@ def test_store_cleans_unique_temporary_when_replace_fails(
     assert list(tmp_path.glob(f".{store.path.name}.*.tmp")) == []
 
 
+def test_store_cleanup_failure_does_not_mask_publication_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s1",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    original_unlink = Path.unlink
+
+    def fail_replace(source, destination) -> None:
+        raise OSError("replace blocked")
+
+    def fail_temp_unlink(path: Path, *args, **kwargs):
+        if path.name.startswith(f".{store.path.name}.") and path.name.endswith(".tmp"):
+            raise OSError("unlink blocked")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(pre_evaluation_evidence.os, "replace", fail_replace)
+    monkeypatch.setattr(Path, "unlink", fail_temp_unlink)
+
+    with pytest.raises(OSError, match="replace blocked") as exc_info:
+        store.save(evidence)
+
+    notes = getattr(exc_info.value, "__notes__", ())
+    assert any("temporary cleanup failed" in note for note in notes)
+    assert not store.path.exists()
+
+
+def test_store_cleanup_error_does_not_replace_process_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s1",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    original_unlink = Path.unlink
+    interrupt = KeyboardInterrupt("operator stop")
+
+    def interrupt_replace(source, destination) -> None:
+        raise interrupt
+
+    def fail_temp_unlink(path: Path, *args, **kwargs):
+        if path.name.startswith(f".{store.path.name}.") and path.name.endswith(".tmp"):
+            raise OSError("unlink blocked")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(pre_evaluation_evidence.os, "replace", interrupt_replace)
+    monkeypatch.setattr(Path, "unlink", fail_temp_unlink)
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        store.save(evidence)
+
+    assert exc_info.value is interrupt
+    notes = getattr(exc_info.value, "__notes__", ())
+    assert any("temporary cleanup failed" in note for note in notes)
+    assert not store.path.exists()
+
+
 def test_durable_restart_replays_exact_authority_and_rejects_semantic_tamper(
     tmp_path: Path,
 ) -> None:

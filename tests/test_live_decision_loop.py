@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport.decision_ledger import (
@@ -16,6 +17,8 @@ from autosport.decision_ledger import (
 )
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
+from autosport.ingestion import IngestionStats
+from autosport.ingestion_health import SourceHealthStore
 from autosport.event_lifecycle import (
     CatalogEvent,
     CatalogPage,
@@ -30,6 +33,7 @@ from autosport.live_decision_loop import (
     PersistentLiveDecisionLoop,
 )
 from autosport.market_bus import MarketEventBus
+from autosport.market_mirror_health import ProviderHealthReplayBoundary
 from autosport.opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
@@ -46,7 +50,7 @@ from autosport.portfolio_plan import (
     PortfolioDependencyGraph,
     PortfolioPlan,
 )
-from autosport.providers import ProviderUnavailableError
+from autosport.providers import InMemoryProvider, ProviderQuote, ProviderUnavailableError
 from autosport.scientific_registry import ScientificRegistry, StrategyVersion
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.storage import SQLiteMarketStore
@@ -84,7 +88,10 @@ class _DurableObserver:
         try:
             bus = MarketEventBus(store)
             bus.subscribe(updates.accept_persisted)
-            bus.publish_many(item)
+            # This fixture represents already product-stamped live observations.
+            # Use the explicit internal live seam so restart tests carry the same
+            # prospective receipt authority as production IngestionEngine writes.
+            bus._publish_many_live_ingestion(item)
         finally:
             store.close()
         return object()
@@ -96,6 +103,15 @@ class _EmptyIntentFactory:
         strategy_version_id: str = "live-test-strategy-v1",
     ) -> None:
         self.strategy_version_id = strategy_version_id
+        self.source_sha256 = hashlib.sha256(
+            b"tests.test_live_decision_loop:_EmptyIntentFactory:v1"
+        ).hexdigest()
+        self.environment_sha256 = hashlib.sha256(
+            b"tests.test_live_decision_loop:environment:v1"
+        ).hexdigest()
+        self.config_sha256 = hashlib.sha256(
+            b"tests.test_live_decision_loop:empty-intent-config:v1"
+        ).hexdigest()
         self.calls: list[tuple[str, tuple[tuple[str, int, str], ...]]] = []
 
     def __call__(self, input_id, snapshot):
@@ -118,6 +134,12 @@ class _PositiveIntentFactory:
         strategy_version_id: str = "live-test-strategy-v1",
     ) -> None:
         self.strategy_version_id = strategy_version_id
+        self.source_sha256 = hashlib.sha256(
+            b"tests.test_live_decision_loop:_EmptyIntentFactory:v1"
+        ).hexdigest()
+        self.environment_sha256 = hashlib.sha256(
+            b"tests.test_live_decision_loop:environment:v1"
+        ).hexdigest()
         self.config_sha256 = config_sha256
         self.calls = 0
 
@@ -361,9 +383,250 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 LiveDecisionProgressError,
-                "factory strategy-version provenance changed",
+                "factory strategy_version_id provenance changed",
             ):
                 loop._decision_context_sha256()
+
+    def test_factory_source_environment_and_config_must_match_registry(self) -> None:
+        for attribute in (
+            "source_sha256",
+            "environment_sha256",
+            "config_sha256",
+        ):
+            with self.subTest(attribute=attribute):
+                with tempfile.TemporaryDirectory() as directory:
+                    workspace = Path(directory)
+                    factory = _EmptyIntentFactory()
+                    setattr(factory, attribute, "f" * 64)
+                    with self.assertRaisesRegex(
+                        LiveDecisionProgressError,
+                        rf"factory {attribute} provenance changed",
+                    ):
+                        self._loop(
+                            workspace,
+                            observer=_DurableObserver(workspace, [()]),
+                            factory=factory,
+                            clock=_ManualClock(self.START),
+                        )
+
+    def test_factory_scientific_provenance_cannot_mutate_after_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=factory,
+                clock=_ManualClock(self.START),
+            )
+
+            for attribute in (
+                "source_sha256",
+                "environment_sha256",
+                "config_sha256",
+            ):
+                original = getattr(factory, attribute)
+                setattr(factory, attribute, "f" * 64)
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    rf"factory {attribute} provenance changed",
+                ):
+                    loop._decision_context_sha256()
+                setattr(factory, attribute, original)
+
+    def test_intent_factory_cannot_observe_ephemeral_mirror_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seen_revisions = []
+
+            def revision_sensitive_factory(input_id, snapshot):
+                del input_id
+                seen_revisions.append(snapshot.revision)
+                if snapshot.revision != 0:
+                    raise AssertionError(
+                        "ephemeral mirror revision reached economic strategy input"
+                    )
+                return ()
+
+            revision_sensitive_factory.strategy_version_id = "live-test-strategy-v1"
+            revision_sensitive_factory.source_sha256 = self.INTENT_SOURCE_SHA256
+            revision_sensitive_factory.environment_sha256 = (
+                self.INTENT_ENVIRONMENT_SHA256
+            )
+            revision_sensitive_factory.config_sha256 = self.INTENT_CONFIG_SHA256
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=revision_sensitive_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(seen_revisions, [0])
+            self.assertGreater(loop.mirror_updates.mirror.revision, 0)
+
+    def test_intent_factories_receive_isolated_market_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            base = self._event(selection="selection-a", sequence=1)
+            event = MarketEvent.from_dict(
+                {
+                    **base.to_dict(),
+                    "metadata": {"nested": {"origin": "canonical"}},
+                }
+            )
+            seen = []
+
+            def mutating_factory(input_id, snapshot):
+                self.assertEqual(len(snapshot.events), 1)
+                metadata = snapshot.events[0].metadata
+                seen.append((input_id, metadata["nested"]["origin"]))
+                metadata["nested"]["origin"] = f"mutated-by-{input_id}"
+                return ()
+
+            mutating_factory.strategy_version_id = "live-test-strategy-v1"
+            mutating_factory.source_sha256 = self.INTENT_SOURCE_SHA256
+            mutating_factory.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            mutating_factory.config_sha256 = self.INTENT_CONFIG_SHA256
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=mutating_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.register_input("input-b", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                seen,
+                [
+                    ("input-a", "canonical"),
+                    ("input-b", "canonical"),
+                ],
+            )
+            durable = loop.mirror_updates.mirror.snapshot()
+            self.assertEqual(
+                durable[0].metadata,
+                {"nested": {"origin": "canonical"}},
+            )
+
+    def test_pending_replay_hides_reconstructed_mirror_revision_from_factory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seen_revisions = []
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id
+                seen_revisions.append(snapshot.revision)
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+            self.assertEqual(seen_revisions, [0])
+
+            replay_revisions = []
+
+            def replay_factory(input_id, snapshot):
+                del input_id
+                replay_revisions.append(snapshot.revision)
+                return ()
+
+            replay_factory.strategy_version_id = "live-test-strategy-v1"
+            replay_factory.source_sha256 = self.INTENT_SOURCE_SHA256
+            replay_factory.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            replay_factory.config_sha256 = self.INTENT_CONFIG_SHA256
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=replay_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(replay_revisions, [0])
+
+    def test_factory_provenance_is_checked_before_live_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=factory,
+                clock=_ManualClock(self.START),
+            )
+            factory.source_sha256 = "f" * 64
+            snapshot = loop.mirror_updates.mirror.view()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "factory source_sha256 provenance changed",
+            ):
+                loop._refresh_intents_from_snapshots(
+                    {"input-a": snapshot},
+                )
+
+            self.assertEqual(factory.calls, [])
+            self.assertNotIn("input-a", loop._intent_cache)
+
+    def test_factory_self_provenance_mutation_is_rejected_before_cache_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            calls = []
+
+            def self_mutating_factory(input_id, snapshot):
+                calls.append(input_id)
+                self_mutating_factory.source_sha256 = "f" * 64
+                return ()
+
+            self_mutating_factory.strategy_version_id = "live-test-strategy-v1"
+            self_mutating_factory.source_sha256 = self.INTENT_SOURCE_SHA256
+            self_mutating_factory.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            self_mutating_factory.config_sha256 = self.INTENT_CONFIG_SHA256
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=self_mutating_factory,
+                clock=_ManualClock(self.START),
+            )
+            snapshot = loop.mirror_updates.mirror.view()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "factory source_sha256 provenance changed",
+            ):
+                loop._refresh_intents_from_snapshots(
+                    {"input-a": snapshot},
+                )
+
+            self.assertEqual(calls, ["input-a"])
+            self.assertNotIn("input-a", loop._intent_cache)
 
     def test_emitted_intent_cannot_relabel_registered_strategy_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -428,6 +691,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     market_state_sha256="6" * 64,
                     affected_input_ids=(),
                     gate="normal",
+                    provider_health_boundaries=(),
                 )
 
             self.assertFalse((workspace / "decisions.jsonl").exists())
@@ -453,7 +717,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             record = JsonlDecisionLedger(
                 workspace / "decisions.jsonl"
             ).verified_records()[0]
-            self.assertEqual(record.payload["schema_version"], 2)
+            self.assertEqual(record.payload["schema_version"], 3)
             self.assertEqual(
                 record.payload["intent_strategy_version_id"],
                 loop.intent_provenance.strategy_version_id,
@@ -463,6 +727,933 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 record.payload["intent_provenance_sha256"],
                 loop.intent_provenance.provenance_sha256,
             )
+
+    def test_health_bound_live_decision_persists_exact_horizon_in_progress_and_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_time = self.START + timedelta(milliseconds=500)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=health_time.isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            loop._default_health_store = health_store
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            expected_boundary = {
+                "source_id": "provider-a",
+                "recorded_at": health_time.isoformat(),
+                "transition_order": 1,
+            }
+            progress = json.loads(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(progress["schema_version"], 2)
+            self.assertEqual(
+                progress["provider_health_boundaries"],
+                [expected_boundary],
+            )
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            detached_payload = record.to_dict()["payload"]
+            self.assertEqual(detached_payload["schema_version"], 3)
+            self.assertEqual(
+                detached_payload["provider_health_boundaries"],
+                [expected_boundary],
+            )
+
+    def test_custom_observer_adopts_existing_canonical_health_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_time = self.START + timedelta(milliseconds=500)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=health_time.isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            progress = loop._load_progress()
+            self.assertIsNotNone(progress)
+            self.assertEqual(
+                progress.provider_health_boundaries,
+                (
+                    ProviderHealthReplayBoundary(
+                        source_id="provider-a",
+                        recorded_at=health_time.isoformat(),
+                        transition_order=1,
+                    ),
+                ),
+            )
+            self.assertIsNotNone(loop._default_health_store)
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(
+                record.to_dict()["payload"]["provider_health_boundaries"],
+                [
+                    {
+                        "source_id": "provider-a",
+                        "recorded_at": health_time.isoformat(),
+                        "transition_order": 1,
+                    }
+                ],
+            )
+
+    def test_custom_observer_cannot_bypass_failed_canonical_health_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_failure(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                error=TimeoutError("durable provider failure"),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("provider health", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertIsNotNone(loop._default_health_store)
+            self.assertEqual(
+                loop._default_health_store.get("provider-a").status,
+                "failed",
+            )
+
+    def test_custom_observer_provider_gap_binds_canonical_failed_health_horizon(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_time = self.START + timedelta(milliseconds=500)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+
+            def failing_observer(updates):
+                del updates
+                health_store.record_failure(
+                    "provider-a",
+                    now=health_time.isoformat(),
+                    error=ProviderUnavailableError("provider offline"),
+                )
+                raise ProviderUnavailableError("provider offline")
+
+            loop = self._loop(
+                workspace,
+                observer=failing_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.PROVIDER_GAP)
+            progress = loop._load_progress()
+            self.assertIsNotNone(progress)
+            self.assertEqual(progress.gate, "provider_gap")
+            self.assertEqual(
+                progress.provider_health_boundaries,
+                (
+                    ProviderHealthReplayBoundary(
+                        source_id="provider-a",
+                        recorded_at=health_time.isoformat(),
+                        transition_order=1,
+                    ),
+                ),
+            )
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            payload = record.to_dict()["payload"]
+            self.assertEqual(payload["gate"], "provider_gap")
+            self.assertEqual(
+                payload["provider_health_boundaries"],
+                [
+                    {
+                        "source_id": "provider-a",
+                        "recorded_at": health_time.isoformat(),
+                        "transition_order": 1,
+                    }
+                ],
+            )
+
+    def test_custom_observer_provider_gap_requires_identified_failed_health(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("provider unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input(
+                "input-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable failed provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertFalse((workspace / "source_health.json").exists())
+
+    def test_custom_observer_provider_gap_rejects_only_healthy_health_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("provider unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable failed provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertEqual(health_store.get("provider-a").status, "healthy")
+
+    def test_custom_observer_provider_gap_without_provider_cannot_borrow_failure_from_another_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=400)).isoformat(),
+                received=0,
+                accepted=0,
+                rejected=0,
+                cursor=None,
+                latest_source_ts=None,
+                quality_flags=(),
+            )
+            health_store.record_failure(
+                "provider-b",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                error=ProviderUnavailableError("provider-b offline"),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("observation unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            loop.register_input(
+                "input-b",
+                source_ids="provider-b",
+                selection_ids="selection-b",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable failed provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertEqual(health_store.get("provider-a").status, "healthy")
+            self.assertEqual(health_store.get("provider-b").status, "failed")
+            loop.close()
+
+    def test_custom_observer_provider_gap_without_provider_accepts_only_all_bound_failed_sources(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_failure(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=400)).isoformat(),
+                error=ProviderUnavailableError("provider-a offline"),
+            )
+            health_store.record_failure(
+                "provider-b",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                error=ProviderUnavailableError("provider-b offline"),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("observation unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            loop.register_input(
+                "input-b",
+                source_ids="provider-b",
+                selection_ids="selection-b",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.PROVIDER_GAP)
+            progress = loop._load_progress()
+            self.assertIsNotNone(progress)
+            self.assertEqual(progress.gate, "provider_gap")
+            self.assertEqual(
+                tuple(
+                    boundary.source_id
+                    for boundary in progress.provider_health_boundaries
+                ),
+                ("provider-a", "provider-b"),
+            )
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(record.payload["gate"], "provider_gap")
+            self.assertEqual(
+                tuple(
+                    boundary["source_id"]
+                    for boundary in record.payload["provider_health_boundaries"]
+                ),
+                ("provider-a", "provider-b"),
+            )
+            loop.close()
+
+    def test_provider_gap_cannot_borrow_failure_from_another_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=400)).isoformat(),
+                received=0,
+                accepted=0,
+                rejected=0,
+                cursor=None,
+                latest_source_ts=None,
+                quality_flags=(),
+            )
+            health_store.record_failure(
+                "provider-b",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                error=ProviderUnavailableError("provider-b offline"),
+            )
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+
+            def ambiguous_failure(updates):
+                del updates
+                raise ProviderUnavailableError("observation unavailable")
+
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=InMemoryProvider("provider-a", []),
+                observation_runner=ambiguous_failure,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            loop.register_input(
+                "input-b",
+                source_ids="provider-b",
+                selection_ids="selection-b",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable failed provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertEqual(health_store.get("provider-a").status, "healthy")
+            self.assertEqual(health_store.get("provider-b").status, "failed")
+
+
+    def test_default_provider_health_write_failure_cannot_mint_provider_gap_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+
+            class FailingProvider:
+                source_id = "provider-a"
+
+                def read_batch(self, max_items=1000):
+                    del max_items
+                    raise ProviderUnavailableError("provider offline")
+
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=FailingProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            with patch.object(
+                SourceHealthStore,
+                "record_failure",
+                side_effect=OSError("health failure publication failed"),
+            ):
+                result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable failed provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertEqual(health_store.get("provider-a").status, "healthy")
+            loop.close()
+
+    def test_default_provider_first_failure_health_write_failure_cannot_mint_zero_boundary_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+
+            class FailingProvider:
+                source_id = "provider-a"
+
+                def read_batch(self, max_items=1000):
+                    del max_items
+                    raise ProviderUnavailableError("provider offline")
+
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=FailingProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            with patch.object(
+                SourceHealthStore,
+                "record_failure",
+                side_effect=OSError("health failure publication failed"),
+            ):
+                result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable failed provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertEqual(
+                SourceHealthStore(
+                    workspace / "source_health.json"
+                ).get("provider-a").status,
+                "unknown",
+            )
+            loop.close()
+
+    def test_custom_observer_corrupt_canonical_health_authority_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            (workspace / "source_health.json").write_text(
+                '{"schema_version":3,"sources":',
+                encoding="utf-8",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("health authority is unreadable", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+
+    def test_health_advance_after_capture_backpressures_before_pending_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop._default_health_store = health_store
+            loop.register_input("input-a", selection_ids="selection-a")
+            original_capture = loop._capture_provider_health_boundaries
+
+            def capture_then_advance(*args, **kwargs):
+                boundaries = original_capture(*args, **kwargs)
+                health_store.record_failure(
+                    "provider-a",
+                    now=(decision_time + timedelta(milliseconds=250)).isoformat(),
+                    error=TimeoutError("health advanced after decision capture"),
+                )
+                return boundaries
+
+            with patch.object(
+                loop,
+                "_capture_provider_health_boundaries",
+                side_effect=capture_then_advance,
+            ):
+                result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("provider health advanced", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertEqual(health_store.get("provider-a").status, "failed")
+
+    def test_pending_restart_replays_bound_health_horizon_after_later_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_time = self.START + timedelta(milliseconds=500)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=health_time.isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id, snapshot
+                raise RuntimeError("simulated process loss after health-bound pending")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
+
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(decision_time),
+            )
+            first._default_health_store = health_store
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "health-bound pending",
+            ):
+                first.run_cycle()
+
+            pending = json.loads(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(pending["phase"], "pending")
+            self.assertEqual(
+                pending["provider_health_boundaries"][0]["transition_order"],
+                1,
+            )
+
+            health_store.record_failure(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=750)).isoformat(),
+                error=TimeoutError("later durable provider failure"),
+            )
+            self.assertEqual(health_store.get("provider-a").status, "failed")
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            resumed._default_health_store = SourceHealthStore(
+                workspace / "source_health.json"
+            )
+
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_observer.calls, 0)
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(
+                record.to_dict()["payload"]["provider_health_boundaries"][0][
+                    "transition_order"
+                ],
+                1,
+            )
+            self.assertEqual(
+                resumed._default_health_store.get("provider-a").status,
+                "failed",
+            )
+
+    def test_empty_default_provider_snapshot_still_binds_health_horizon(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=InMemoryProvider("provider-a", []),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            progress = loop._load_progress()
+            self.assertIsNotNone(progress)
+            self.assertEqual(len(progress.provider_health_boundaries), 1)
+            self.assertEqual(
+                progress.provider_health_boundaries[0].source_id,
+                "provider-a",
+            )
+            self.assertEqual(
+                progress.provider_health_boundaries[0].transition_order,
+                1,
+            )
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(
+                record.to_dict()["payload"]["provider_health_boundaries"][0][
+                    "source_id"
+                ],
+                "provider-a",
+            )
+            loop.close()
+
+    def test_all_registered_provider_dependencies_require_health_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),), ()],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop._default_health_store = health_store
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            loop.register_input(
+                "input-b",
+                source_ids="provider-b",
+                selection_ids="selection-b",
+            )
+
+            blocked = loop.run_cycle()
+
+            self.assertEqual(blocked.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("provider health", blocked.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            health_store.record_success(
+                "provider-b",
+                now=(self.START + timedelta(milliseconds=750)).isoformat(),
+                received=0,
+                accepted=0,
+                rejected=0,
+                cursor="0",
+                latest_source_ts=None,
+                quality_flags=(),
+            )
+            decided = loop.run_cycle()
+
+            self.assertEqual(decided.status, LiveCycleStatus.DECIDED)
+            progress = loop._load_progress()
+            self.assertEqual(
+                tuple(
+                    boundary.source_id
+                    for boundary in progress.provider_health_boundaries
+                ),
+                ("provider-a", "provider-b"),
+            )
+
+    def test_provider_gap_zero_decision_preserves_failed_health_horizon(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+
+            class FailingProvider:
+                source_id = "provider-a"
+
+                def read_batch(self, max_items=1000):
+                    del max_items
+                    raise ProviderUnavailableError("provider offline")
+
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=FailingProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.PROVIDER_GAP)
+            progress = loop._load_progress()
+            self.assertEqual(progress.gate, "provider_gap")
+            self.assertEqual(len(progress.provider_health_boundaries), 1)
+            boundary = progress.provider_health_boundaries[0]
+            self.assertEqual(boundary.source_id, "provider-a")
+            self.assertEqual(boundary.transition_order, 1)
+            self.assertEqual(
+                SourceHealthStore(
+                    workspace / "source_health.json"
+                ).get("provider-a").status,
+                "failed",
+            )
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            payload = record.to_dict()["payload"]
+            self.assertEqual(payload["gate"], "provider_gap")
+            self.assertEqual(
+                payload["provider_health_boundaries"][0]["transition_order"],
+                1,
+            )
+            self.assertFalse(any(stake > 0 for stake in result.plan.stakes))
+            loop.close()
 
     @staticmethod
     def _register_two(loop: PersistentLiveDecisionLoop) -> None:
@@ -480,6 +1671,62 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             market_ids="market-1",
             selection_ids="selection-b",
         )
+
+    def test_input_registration_permutation_has_one_canonical_decision_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as left_directory, tempfile.TemporaryDirectory() as right_directory:
+            left_workspace = Path(left_directory)
+            right_workspace = Path(right_directory)
+            clock_left = _ManualClock(self.START + timedelta(seconds=1))
+            clock_right = _ManualClock(self.START + timedelta(seconds=1))
+            batch = (
+                self._event(selection="selection-a", sequence=1),
+                self._event(selection="selection-b", sequence=1),
+            )
+            left = self._loop(
+                left_workspace,
+                observer=_DurableObserver(left_workspace, [batch]),
+                factory=_EmptyIntentFactory(),
+                clock=clock_left,
+            )
+            right = self._loop(
+                right_workspace,
+                observer=_DurableObserver(right_workspace, [batch]),
+                factory=_EmptyIntentFactory(),
+                clock=clock_right,
+            )
+
+            left.register_input("input-b", selection_ids="selection-b")
+            left.register_input("input-a", selection_ids="selection-a")
+            right.register_input("input-a", selection_ids="selection-a")
+            right.register_input("input-b", selection_ids="selection-b")
+
+            self.assertEqual(left.dependencies.input_ids, ("input-a", "input-b"))
+            self.assertEqual(right.dependencies.input_ids, ("input-a", "input-b"))
+
+            left_result = left.run_cycle()
+            right_result = right.run_cycle()
+
+            self.assertEqual(left_result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(right_result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(left_result.affected_input_ids, ("input-a", "input-b"))
+            self.assertEqual(right_result.affected_input_ids, ("input-a", "input-b"))
+            self.assertEqual(left_result.plan.plan_sha256, right_result.plan.plan_sha256)
+            self.assertEqual(left_result.decision_id, right_result.decision_id)
+
+            left_record = JsonlDecisionLedger(
+                left_workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            right_record = JsonlDecisionLedger(
+                right_workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(
+                left_record.payload["market_state_sha256"],
+                right_record.payload["market_state_sha256"],
+            )
+            self.assertEqual(
+                left_record.payload["decision_context_sha256"],
+                right_record.payload["decision_context_sha256"],
+            )
 
     def test_first_cycle_rebuilds_all_then_only_affected_input_recomputes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -526,6 +1773,1450 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(
                 len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
                 2,
+            )
+
+    def test_concurrent_update_during_multi_input_cut_retries_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(selection="selection-a", sequence=1),
+                        self._event(selection="selection-b", sequence=1),
+                    ),
+                    (),
+                ],
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            self._register_two(loop)
+
+            real_capture = loop.dependencies.coherent_decision_views
+            injected = {"done": False}
+            concurrent = self._event(
+                selection="selection-b",
+                sequence=2,
+                odds="3.20",
+                observed=self.START + timedelta(milliseconds=1500),
+            )
+
+            def capture_then_advance(*args, **kwargs):
+                snapshots = real_capture(*args, **kwargs)
+                if not injected["done"]:
+                    injected["done"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(concurrent)
+                    finally:
+                        store.close()
+                    loop.mirror_updates.accept_persisted(concurrent)
+                return snapshots
+
+            with patch.object(
+                loop.dependencies,
+                "coherent_decision_views",
+                side_effect=capture_then_advance,
+            ):
+                first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertEqual(first.affected_input_ids, ("input-a", "input-b"))
+            self.assertIn("revision advanced", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [
+                    ("input-a", (("selection-a", 1, "open"),)),
+                    ("input-b", (("selection-b", 2, "open"),)),
+                ],
+            )
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 1)
+
+    def test_drained_unrouted_key_retries_before_decision_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (self._event(selection="selection-a", sequence=1),),
+                    (),
+                ],
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-all", source_ids="provider-a")
+
+            real_capture = loop.dependencies.coherent_decision_views
+            real_write_pending = loop._write_pending
+            state = {"injected": False, "routed": False, "batch": None}
+            concurrent = self._event(
+                selection="selection-b",
+                sequence=2,
+                odds="3.20",
+                observed=self.START + timedelta(milliseconds=500),
+            )
+
+            def inject_and_drain_before_capture(*args, **kwargs):
+                if not state["injected"]:
+                    state["injected"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(concurrent)
+                    finally:
+                        store.close()
+                    loop.mirror_updates.accept_persisted(concurrent)
+                    state["batch"] = loop.mirror_updates.drain()
+                    self.assertEqual(loop.mirror_updates.pending_count, 0)
+                return real_capture(*args, **kwargs)
+
+            def route_before_pending_publication(*args, **kwargs):
+                if not state["routed"]:
+                    state["routed"] = True
+                    affected = loop.dependencies.affected_inputs(state["batch"])
+                    self.assertEqual(affected, ("input-all",))
+                return real_write_pending(*args, **kwargs)
+
+            with (
+                patch.object(
+                    loop.dependencies,
+                    "coherent_decision_views",
+                    side_effect=inject_and_drain_before_capture,
+                ),
+                patch.object(
+                    loop,
+                    "_write_pending",
+                    side_effect=route_before_pending_publication,
+                ),
+            ):
+                first = loop.run_cycle()
+
+            self.assertTrue(state["injected"])
+            self.assertTrue(state["routed"])
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("dependency registry/routing changed", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(loop.progress_path.exists())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(len(factory.calls), 1)
+            self.assertEqual(factory.calls[0][0], "input-all")
+            self.assertEqual(
+                {item[0] for item in factory.calls[0][1]},
+                {"selection-a", "selection-b"},
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+
+    def test_external_canonical_paperbook_advance_retries_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            book = PaperBook("1000")
+            ledger = PaperExecutionLedger(workspace / "paper-execution.jsonl")
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=PaperExecutionModelConfig(
+                    model_id="live-book-currentness-test",
+                    model_version="1",
+                    evidence_grade=EvidenceGrade.SYNTHETIC,
+                    evidence_source="live-book-currentness-test",
+                    seed="live-book-currentness-test",
+                    max_quote_age_ms=5_000,
+                    min_delay_ms=0,
+                    max_delay_ms=0,
+                    rejected_bps=0,
+                    partial_bps=0,
+                    unknown_bps=0,
+                    partial_fill_bps=5000,
+                    max_slippage_bps=0,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+                book=book,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            externally_advanced = PaperBook.load(workspace / "paper_book.json")
+            externally_advanced.open_ticket(
+                [
+                    TicketLeg(
+                        event_id="external-event",
+                        market_id="external-market",
+                        selection_id="external-selection",
+                        locked_odds=Decimal("2"),
+                        sport="table_tennis",
+                        exchange_side="back",
+                    )
+                ],
+                Decimal("10"),
+                placed_at=(
+                    self.START + timedelta(milliseconds=500)
+                ).isoformat(),
+            )
+            externally_advanced.save(workspace / "paper_book.json")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("canonical PaperBook advanced", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(loop.progress_path.exists())
+
+    def test_portfolio_change_during_market_cut_retries_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            book = PaperBook("1000")
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),), ()],
+                ),
+                factory=factory,
+                clock=clock,
+                book=book,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            real_capture = loop.dependencies.coherent_decision_views
+            injected = {"done": False}
+
+            def capture_then_change_portfolio(*args, **kwargs):
+                snapshots = real_capture(*args, **kwargs)
+                if not injected["done"]:
+                    injected["done"] = True
+                    book.open_ticket(
+                        [
+                            TicketLeg(
+                                event_id="existing-event",
+                                market_id="existing-market",
+                                selection_id="existing-selection",
+                                locked_odds=Decimal("2"),
+                                sport="table_tennis",
+                                exchange_side="back",
+                            )
+                        ],
+                        Decimal("10"),
+                        placed_at=(
+                            clock.value + timedelta(microseconds=1)
+                        ).isoformat(),
+                    )
+                return snapshots
+
+            with patch.object(
+                loop.dependencies,
+                "coherent_decision_views",
+                side_effect=capture_then_change_portfolio,
+            ):
+                first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("portfolio/risk/dependency context advanced", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(loop.progress_path.exists())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+            self.assertEqual(
+                second.plan.portfolio_sha256,
+                loop.authority.risk_policy.risk_of_ruin_portfolio_sha256(book),
+            )
+
+    def test_dependency_registry_change_during_market_cut_retries_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [
+                        (
+                            self._event(selection="selection-a", sequence=1),
+                            self._event(selection="selection-b", sequence=1),
+                        ),
+                        (),
+                    ],
+                ),
+                factory=factory,
+                clock=clock,
+            )
+            self._register_two(loop)
+
+            real_capture = loop.dependencies.coherent_decision_views
+            injected = {"done": False}
+
+            def capture_then_retire_input(*args, **kwargs):
+                snapshots = real_capture(*args, **kwargs)
+                if not injected["done"]:
+                    injected["done"] = True
+                    self.assertTrue(loop.unregister_input("input-b"))
+                return snapshots
+
+            with patch.object(
+                loop.dependencies,
+                "coherent_decision_views",
+                side_effect=capture_then_retire_input,
+            ):
+                first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("dependency registry advanced", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(loop.progress_path.exists())
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_same_id_dependency_registry_aba_retries_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),), ()],
+                ),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            real_capture = loop.dependencies.coherent_decision_views
+            injected = {"done": False}
+
+            def capture_then_rebind_same_id(*args, **kwargs):
+                snapshots = real_capture(*args, **kwargs)
+                if not injected["done"]:
+                    injected["done"] = True
+                    self.assertTrue(loop.unregister_input("input-a"))
+                    loop.register_input("input-a", selection_ids="selection-b")
+                return snapshots
+
+            with patch.object(
+                loop.dependencies,
+                "coherent_decision_views",
+                side_effect=capture_then_rebind_same_id,
+            ):
+                first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("portfolio/risk/dependency context advanced", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(loop.progress_path.exists())
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_update_during_final_coherence_getter_retries_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),), ()],
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            concurrent = self._event(
+                selection="selection-a",
+                sequence=2,
+                odds="2.20",
+                observed=self.START + timedelta(milliseconds=500),
+            )
+            descriptor = type(loop.mirror_updates).full_refresh_required
+            injected = {"done": False}
+
+            def final_gate_then_advance(instance):
+                prior = descriptor.__get__(instance, type(instance))
+                if not injected["done"]:
+                    injected["done"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(concurrent)
+                    finally:
+                        store.close()
+                    instance.accept_persisted(concurrent)
+                return prior
+
+            with patch.object(
+                type(loop.mirror_updates),
+                "full_refresh_required",
+                property(final_gate_then_advance),
+            ):
+                first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("revision advanced", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 2, "open"),))],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_future_local_availability_cannot_enter_old_decision_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            late = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START + timedelta(seconds=2),
+            )
+            late = MarketEvent.from_dict(
+                {
+                    **late.to_dict(),
+                    "source_ts": self.START.isoformat(),
+                }
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(late,), ()]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("not causally available", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            clock.value = self.START + timedelta(seconds=3)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_future_source_time_waits_until_causal_without_new_update(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            future_source = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START,
+            )
+            future_source = MarketEvent.from_dict(
+                {
+                    **future_source.to_dict(),
+                    "source_ts": (
+                        self.START + timedelta(seconds=2)
+                    ).isoformat(),
+                    "ingest_ts": (
+                        self.START + timedelta(seconds=1)
+                    ).isoformat(),
+                }
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(future_source,), ()]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("source evidence from the future", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            clock.value = self.START + timedelta(seconds=3)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_future_observation_fallback_waits_without_new_update(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            future_observed = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START + timedelta(seconds=2),
+            )
+            future_observed = MarketEvent.from_dict(
+                {
+                    **future_observed.to_dict(),
+                    "source_ts": None,
+                    "ingest_ts": (
+                        self.START + timedelta(seconds=1)
+                    ).isoformat(),
+                }
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(future_observed,), ()]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("source evidence from the future", first.detail)
+            self.assertEqual(factory.calls, [])
+
+            clock.value = self.START + timedelta(seconds=3)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+
+    def test_future_local_stale_provider_evidence_does_not_backpressure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=10))
+            stale = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START + timedelta(seconds=11),
+            )
+            stale = MarketEvent.from_dict(
+                {
+                    **stale.to_dict(),
+                    "source_ts": (
+                        self.START - timedelta(seconds=10)
+                    ).isoformat(),
+                }
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(stale,)]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_future_local_closed_evidence_does_not_backpressure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            closed = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START + timedelta(seconds=2),
+                status="closed",
+            )
+            closed = MarketEvent.from_dict(
+                {
+                    **closed.to_dict(),
+                    "source_ts": self.START.isoformat(),
+                }
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(closed,)]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_wrapped_observation_health_disagreement_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+
+            def observer(updates):
+                store = SQLiteMarketStore(workspace / "market.db")
+                try:
+                    bus = MarketEventBus(store)
+                    bus.subscribe(updates.accept_persisted)
+                    bus.publish(event)
+                finally:
+                    store.close()
+                return SimpleNamespace(
+                    stats=IngestionStats(
+                        source_id=event.source_id,
+                        received=1,
+                        accepted=1,
+                        rejected=0,
+                        elapsed_seconds=0.01,
+                        cursor="1",
+                        quality_flags=(),
+                        health_status="healthy",
+                    ),
+                    health=SimpleNamespace(status="degraded"),
+                )
+
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("quality is degraded", result.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertEqual(loop.mirror_updates.pending_count, 1)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+    def test_degraded_observation_blocks_economic_cut_until_healthy_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            calls = {"value": 0}
+
+            def observer(updates):
+                calls["value"] += 1
+                if calls["value"] == 1:
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        bus = MarketEventBus(store)
+                        bus.subscribe(updates.accept_persisted)
+                        bus.publish(event)
+                    finally:
+                        store.close()
+                    return SimpleNamespace(
+                        stats=IngestionStats(
+                            source_id=event.source_id,
+                            received=1,
+                            accepted=1,
+                            rejected=0,
+                            elapsed_seconds=0.01,
+                            cursor="1",
+                            quality_flags=("PROVIDER_SEQUENCE_GAP",),
+                            health_status="degraded",
+                        )
+                    )
+                return IngestionStats(
+                    source_id=event.source_id,
+                    received=0,
+                    accepted=0,
+                    rejected=0,
+                    elapsed_seconds=0.01,
+                    cursor="1",
+                    quality_flags=(),
+                    health_status="healthy",
+                )
+
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            degraded = loop.run_cycle()
+
+            self.assertEqual(degraded.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("quality is degraded", degraded.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertTrue(loop._needs_cache_rebuild)
+            self.assertEqual(loop.mirror_updates.pending_count, 1)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            healthy = loop.run_cycle()
+
+            self.assertEqual(healthy.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertEqual(loop.mirror_updates.pending_count, 0)
+            self.assertFalse(loop._needs_cache_rebuild)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_default_provider_tolerated_future_skew_waits_then_activates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            provider_time = self.START + timedelta(seconds=3)
+            provider = InMemoryProvider(
+                "provider-a",
+                [
+                    ProviderQuote(
+                        provider_event_id="event-1",
+                        provider_market_id="winner",
+                        provider_selection_id="selection-a",
+                        decimal_odds=Decimal("2.00"),
+                        observed_ts=self.START.isoformat(),
+                        sequence=1,
+                        source_ts=provider_time.isoformat(),
+                    )
+                ],
+            )
+            factory = _EmptyIntentFactory()
+            decision_clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=registry,
+                provider=provider,
+                ingestion_policy=IngestionPolicy(
+                    max_batch_size=100,
+                    stale_after_seconds=60,
+                    max_future_skew_seconds=5,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                clock=decision_clock,
+            )
+            loop.register_input("input-a", source_ids="provider-a")
+            receipt_clock = {
+                "value": (self.START + timedelta(seconds=1)).isoformat()
+            }
+
+            with patch(
+                "autosport.ingestion._utc_now_iso",
+                side_effect=lambda: receipt_clock["value"],
+            ):
+                first = loop.run_cycle()
+
+                self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+                self.assertIn("source evidence from the future", first.detail)
+                self.assertEqual(factory.calls, [])
+                self.assertFalse((workspace / "decisions.jsonl").exists())
+                self.assertEqual(loop.mirror_updates.pending_count, 0)
+
+                decision_clock.value = self.START + timedelta(seconds=4)
+                receipt_clock["value"] = (
+                    self.START + timedelta(seconds=4)
+                ).isoformat()
+                second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("provider-a:selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+            loop.close()
+
+    def test_default_provider_large_future_skew_survives_degrade_then_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            provider_time = self.START + timedelta(seconds=10)
+            provider = InMemoryProvider(
+                "provider-a",
+                [
+                    ProviderQuote(
+                        provider_event_id="event-1",
+                        provider_market_id="winner",
+                        provider_selection_id="selection-a",
+                        decimal_odds=Decimal("2.00"),
+                        observed_ts=self.START.isoformat(),
+                        sequence=1,
+                        source_ts=provider_time.isoformat(),
+                    )
+                ],
+            )
+            factory = _EmptyIntentFactory()
+            decision_clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=registry,
+                provider=provider,
+                ingestion_policy=IngestionPolicy(
+                    max_batch_size=100,
+                    stale_after_seconds=60,
+                    max_future_skew_seconds=5,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                clock=decision_clock,
+            )
+            loop.register_input("input-a", source_ids="provider-a")
+            receipt_clock = {
+                "value": (self.START + timedelta(seconds=1)).isoformat()
+            }
+
+            with patch(
+                "autosport.ingestion._utc_now_iso",
+                side_effect=lambda: receipt_clock["value"],
+            ):
+                degraded = loop.run_cycle()
+                self.assertEqual(degraded.status, LiveCycleStatus.BACKPRESSURE)
+                self.assertIn("quality is degraded", degraded.detail)
+                self.assertEqual(loop.mirror_updates.pending_count, 1)
+                self.assertEqual(factory.calls, [])
+
+                decision_clock.value = self.START + timedelta(seconds=6)
+                receipt_clock["value"] = (
+                    self.START + timedelta(seconds=6)
+                ).isoformat()
+                still_future = loop.run_cycle()
+                self.assertEqual(
+                    still_future.status,
+                    LiveCycleStatus.BACKPRESSURE,
+                )
+                self.assertIn(
+                    "source evidence from the future",
+                    still_future.detail,
+                )
+                self.assertEqual(loop.mirror_updates.pending_count, 0)
+                self.assertEqual(factory.calls, [])
+
+                decision_clock.value = self.START + timedelta(seconds=11)
+                receipt_clock["value"] = (
+                    self.START + timedelta(seconds=11)
+                ).isoformat()
+                recovered = loop.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("provider-a:selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+            loop.close()
+
+    def test_default_provider_degraded_quality_blocks_economic_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            receive_time = self.START + timedelta(seconds=1)
+            provider = InMemoryProvider(
+                "provider-a",
+                [
+                    ProviderQuote(
+                        provider_event_id="event-1",
+                        provider_market_id="winner",
+                        provider_selection_id="selection-a",
+                        decimal_odds=Decimal("2.00"),
+                        observed_ts=self.START.isoformat(),
+                        sequence=1,
+                        source_ts=self.START.isoformat(),
+                    )
+                ],
+                quality_flags=("PROVIDER_SEQUENCE_GAP",),
+            )
+            factory = _EmptyIntentFactory()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=registry,
+                provider=provider,
+                ingestion_policy=IngestionPolicy(
+                    max_batch_size=100,
+                    stale_after_seconds=60,
+                    max_future_skew_seconds=5,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(receive_time + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", source_ids="provider-a")
+
+            with patch(
+                "autosport.ingestion._utc_now_iso",
+                return_value=receive_time.isoformat(),
+            ):
+                result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("quality is degraded", result.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertEqual(loop.mirror_updates.pending_count, 1)
+            health = SourceHealthStore(
+                workspace / "source_health.json"
+            ).get("provider-a")
+            self.assertEqual(health.status, "degraded")
+            self.assertEqual(
+                health.quality_flags,
+                ("PROVIDER_SEQUENCE_GAP",),
+            )
+            persisted = SQLiteMarketStore(workspace / "market.db")
+            try:
+                events = persisted.events()
+            finally:
+                persisted.close()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].ingest_ts, receive_time.isoformat())
+            loop.close()
+
+    def test_market_update_after_coherent_capture_cannot_publish_stale_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            first_event = self._event(selection="selection-a", sequence=1)
+            concurrent = self._event(
+                selection="selection-a",
+                sequence=2,
+                odds="2.20",
+                observed=self.START + timedelta(milliseconds=1500),
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(first_event,), ()]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            real_write_pending = loop._write_pending
+            injected = {"done": False}
+
+            def advance_after_capture(*args, **kwargs):
+                if not injected["done"]:
+                    injected["done"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(concurrent)
+                    finally:
+                        store.close()
+                    loop.mirror_updates.accept_persisted(concurrent)
+                return real_write_pending(*args, **kwargs)
+
+            with patch.object(
+                loop,
+                "_write_pending",
+                side_effect=advance_after_capture,
+            ):
+                first = loop.run_cycle()
+
+            self.assertTrue(injected["done"])
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn(
+                "market revision advanced after decision snapshot capture",
+                first.detail,
+            )
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertIsNone(loop._load_progress())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_reentrant_market_mutation_is_blocked_before_pending_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            first_event = self._event(selection="selection-a", sequence=1)
+            concurrent = self._event(
+                selection="selection-a",
+                sequence=2,
+                odds="2.20",
+                observed=self.START + timedelta(milliseconds=1500),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(first_event,)]),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            attempted = {"value": False}
+
+            def mutate_during_progress_write(path, payload):
+                self.assertEqual(Path(path), loop.progress_path)
+                attempted["value"] = True
+                loop.mirror_updates.mirror.apply(concurrent)
+                self.fail("reentrant mirror mutation unexpectedly passed revision guard")
+
+            with patch(
+                "autosport.live_decision_loop.atomic_write_json",
+                side_effect=mutate_during_progress_write,
+            ):
+                result = loop.run_cycle()
+
+            self.assertTrue(attempted["value"])
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn(
+                "market revision advanced after decision snapshot capture",
+                result.detail,
+            )
+            self.assertIsNone(loop._load_progress())
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertEqual(loop.mirror_updates.mirror.revision, 1)
+
+    def test_reentrant_dependency_registration_is_blocked_before_pending_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            first_event = self._event(selection="selection-a", sequence=1)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(first_event,)]),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            attempted = {"value": False}
+
+            def mutate_during_progress_write(path, payload):
+                self.assertEqual(Path(path), loop.progress_path)
+                attempted["value"] = True
+                loop.dependencies.register(
+                    "input-b",
+                    selection_ids="selection-b",
+                )
+                self.fail("reentrant dependency mutation unexpectedly passed registry guard")
+
+            with patch(
+                "autosport.live_decision_loop.atomic_write_json",
+                side_effect=mutate_during_progress_write,
+            ):
+                result = loop.run_cycle()
+
+            self.assertTrue(attempted["value"])
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn(
+                "dependency registry advanced after decision snapshot capture",
+                result.detail,
+            )
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+            self.assertIsNone(loop._load_progress())
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+    def test_provider_gap_full_cut_rejects_concurrent_update_before_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            first_event = self._event(selection="selection-a", sequence=1)
+            observer_calls = {"count": 0}
+
+            def observer(updates):
+                observer_calls["count"] += 1
+                if observer_calls["count"] == 1:
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(first_event)
+                    finally:
+                        store.close()
+                    updates.accept_persisted(first_event)
+                    return
+                raise ProviderUnavailableError("simulated provider gap")
+
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+            concurrent = self._event(
+                selection="selection-a",
+                sequence=2,
+                odds="2.20",
+                observed=self.START + timedelta(milliseconds=1500),
+            )
+            real_capture = loop.dependencies.coherent_decision_views
+            injected = {"done": False}
+
+            def full_capture_then_advance(*args, **kwargs):
+                snapshots = real_capture(*args, **kwargs)
+                if kwargs.get("incremental") is False and not injected["done"]:
+                    injected["done"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(concurrent)
+                    finally:
+                        store.close()
+                    loop.mirror_updates.accept_persisted(concurrent)
+                return snapshots
+
+            clock.value = self.START + timedelta(seconds=2)
+            with patch.object(
+                loop.dependencies,
+                "coherent_decision_views",
+                side_effect=full_capture_then_advance,
+            ):
+                second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIsNone(second.plan)
+            self.assertIn(
+                "market revision advanced during full decision snapshot capture",
+                second.detail,
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+            # The update is already in canonical mirror truth on the next full cut.
+            # Pending incremental invalidation must not starve provider-gap ZERO.
+            clock.value = self.START + timedelta(seconds=3)
+            third = loop.run_cycle()
+
+            self.assertEqual(third.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertIsNotNone(third.plan)
+            self.assertEqual(third.plan.action, PortfolioAction.ZERO)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                2,
+            )
+
+    def test_provider_gap_rejects_portfolio_change_during_full_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            book = PaperBook("1000")
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [
+                        ProviderUnavailableError("simulated provider gap"),
+                        ProviderUnavailableError("simulated provider gap"),
+                    ],
+                ),
+                factory=factory,
+                clock=clock,
+                book=book,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            real_capture = loop.dependencies.coherent_decision_views
+            injected = {"done": False}
+
+            def full_capture_then_change_portfolio(*args, **kwargs):
+                snapshots = real_capture(*args, **kwargs)
+                if kwargs.get("incremental") is False and not injected["done"]:
+                    injected["done"] = True
+                    book.open_ticket(
+                        [
+                            TicketLeg(
+                                event_id="existing-event",
+                                market_id="existing-market",
+                                selection_id="existing-selection",
+                                locked_odds=Decimal("2"),
+                                sport="table_tennis",
+                                exchange_side="back",
+                            )
+                        ],
+                        Decimal("10"),
+                        placed_at=(
+                            clock.value + timedelta(microseconds=1)
+                        ).isoformat(),
+                    )
+                return snapshots
+
+            with patch.object(
+                loop.dependencies,
+                "coherent_decision_views",
+                side_effect=full_capture_then_change_portfolio,
+            ):
+                first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIsNone(first.plan)
+            self.assertIn("PaperBook/risk context advanced", first.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(loop.progress_path.exists())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertIsNotNone(second.plan)
+            self.assertEqual(second.plan.action, PortfolioAction.ZERO)
+            self.assertEqual(
+                second.plan.portfolio_sha256,
+                loop.authority.risk_policy.risk_of_ruin_portfolio_sha256(book),
+            )
+
+    def test_provider_gap_does_not_publish_zero_from_future_local_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            late = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START + timedelta(seconds=2),
+            )
+            late = MarketEvent.from_dict(
+                {
+                    **late.to_dict(),
+                    "source_ts": self.START.isoformat(),
+                }
+            )
+            published = {"done": False}
+
+            def failing_observer(updates):
+                if not published["done"]:
+                    published["done"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(late)
+                    finally:
+                        store.close()
+                    updates.accept_persisted(late)
+                raise ProviderUnavailableError("simulated provider gap")
+
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=failing_observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("provider gap decision cut was not causally coherent", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            clock.value = self.START + timedelta(seconds=3)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertIsNotNone(second.plan)
+            self.assertEqual(second.plan.action, PortfolioAction.ZERO)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
             )
 
     def test_single_dirty_and_no_change_cycles_avoid_unrelated_mirror_scans(self) -> None:
@@ -787,6 +3478,135 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 1)
             self.assertEqual(len(ledger.verified_records()), 2)
 
+    def test_paper_execution_model_swap_invalidates_pending_decision_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            book = PaperBook("1000")
+            ledger = PaperExecutionLedger(workspace / "paper-execution.jsonl")
+
+            def model(model_id, seed):
+                return PaperExecutionModelConfig(
+                    model_id=model_id,
+                    model_version="1",
+                    evidence_grade=EvidenceGrade.SYNTHETIC,
+                    evidence_source=model_id,
+                    seed=seed,
+                    max_quote_age_ms=5_000,
+                    min_delay_ms=0,
+                    max_delay_ms=0,
+                    rejected_bps=0,
+                    partial_bps=0,
+                    unknown_bps=0,
+                    partial_fill_bps=5000,
+                    max_slippage_bps=0,
+                )
+
+            execution_a = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=model("live-model-a", "seed-a"),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            execution_b = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=model("live-model-b", "seed-b"),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),), ()],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+                book=book,
+                paper_execution=execution_a,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            context_a = loop._decision_context_sha256()
+            loop.paper_execution = execution_b
+            context_b = loop._decision_context_sha256()
+            self.assertNotEqual(context_a, context_b)
+            loop.paper_execution = execution_a
+
+            real_refresh = loop._refresh_intents_from_snapshots
+
+            def refresh_then_swap_execution(snapshots):
+                real_refresh(snapshots)
+                loop.paper_execution = execution_b
+
+            with patch.object(
+                loop,
+                "_refresh_intents_from_snapshots",
+                side_effect=refresh_then_swap_execution,
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "progress changed before durable ledger publication",
+                ):
+                    loop.run_cycle()
+
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertEqual(loop._load_progress().phase, "pending")
+
+            loop.paper_execution = execution_a
+            clock.value = self.START + timedelta(seconds=2)
+            recovered = loop.run_cycle()
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_live_loop_rejects_noncanonical_paper_execution_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            book = PaperBook("1000")
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=PaperExecutionLedger(workspace / "alternate-paper-execution.jsonl"),
+                config=PaperExecutionModelConfig(
+                    model_id="alternate-ledger-test",
+                    model_version="1",
+                    evidence_grade=EvidenceGrade.SYNTHETIC,
+                    evidence_source="alternate-ledger-test",
+                    seed="alternate-ledger-test",
+                    max_quote_age_ms=5_000,
+                    min_delay_ms=0,
+                    max_delay_ms=0,
+                    rejected_bps=0,
+                    partial_bps=0,
+                    unknown_bps=0,
+                    partial_fill_bps=5000,
+                    max_slippage_bps=0,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical live workspace PAPER execution ledger",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=1)),
+                    book=book,
+                    paper_execution=execution,
+                )
+
     def test_post_execution_book_publish_restart_reuses_durable_plan_and_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -926,6 +3746,74 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 1,
             )
 
+    def test_stale_peer_cannot_overwrite_another_pending_decision_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+
+            # Construct the peer before the first writer publishes PENDING so its
+            # in-memory progress generation is deliberately stale (None).
+            peer_observer = _DurableObserver(workspace, [()])
+            peer = self._loop(
+                workspace,
+                observer=peer_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            self.assertIsNone(peer._progress)
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated process loss after pending cursor",
+            ):
+                first.run_cycle()
+
+            durable_before = first._load_progress()
+            self.assertIsNotNone(durable_before)
+            self.assertEqual(durable_before.phase, "pending")
+
+            raced = peer.run_cycle()
+
+            self.assertEqual(raced.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("progress advanced during snapshot assembly", raced.detail)
+            self.assertEqual(peer_observer.calls, 1)
+            self.assertEqual(peer._load_progress(), durable_before)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+            )
+            recovered = resumed.run_cycle()
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
     def test_pending_restart_recovers_before_polling_new_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -938,6 +3826,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 raise RuntimeError("simulated process loss after pending cursor")
 
             fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
 
             first = self._loop(
                 workspace,
@@ -990,6 +3881,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 raise RuntimeError("simulated process loss after pending cursor")
 
             fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
 
             first = self._loop(
                 workspace,
@@ -1006,12 +3900,14 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             store = SQLiteMarketStore(workspace / "market.db")
             try:
-                store.append(
-                    self._event(
-                        selection="selection-a",
-                        sequence=2,
-                        odds="2.10",
-                        observed=self.START + timedelta(milliseconds=500),
+                MarketEventBus(store)._publish_many_live_ingestion(
+                    (
+                        self._event(
+                            selection="selection-a",
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(milliseconds=500),
+                        ),
                     )
                 )
             finally:
@@ -1036,6 +3932,100 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_factory.calls, [])
             self.assertFalse((workspace / "decisions.jsonl").exists())
 
+    def test_pending_restart_rejects_factory_source_swap_before_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
+
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed_factory = _EmptyIntentFactory()
+            resumed_factory.source_sha256 = "f" * 64
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "factory source_sha256 provenance changed",
+            ):
+                self._loop(
+                    workspace,
+                    observer=resumed_observer,
+                    factory=resumed_factory,
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+    def test_pending_recovery_rechecks_factory_provenance_before_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed_factory = _EmptyIntentFactory()
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=resumed_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            original_refresh = resumed._refresh_intents_from_replay
+
+            def refresh_then_mutate(*args, **kwargs):
+                original_refresh(*args, **kwargs)
+                resumed_factory.source_sha256 = "f" * 64
+
+            with patch.object(
+                resumed,
+                "_refresh_intents_from_replay",
+                side_effect=refresh_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "factory source_sha256 provenance changed",
+                ):
+                    resumed.run_cycle()
+
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertEqual(resumed._load_progress().phase, "pending")
+
     def test_pending_restart_rejects_changed_intent_provenance_before_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -1044,6 +4034,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 raise RuntimeError("simulated process loss after pending cursor")
 
             fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
 
             first = self._loop(
                 workspace,
@@ -1135,6 +4128,53 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 0)
             self.assertFalse((workspace / "decisions.jsonl").exists())
 
+    def test_dependency_registry_mutation_is_blocked_while_decision_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated process loss after pending cursor",
+            ):
+                loop.run_cycle()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "economic decision is unfinished",
+            ):
+                loop.unregister_input("input-a")
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "economic decision is unfinished",
+            ):
+                loop.register_input("input-b", selection_ids="selection-b")
+
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+            self.assertEqual(
+                tuple(loop._input_specs),
+                ("input-a",),
+            )
+            self.assertTrue(loop.progress_path.exists())
+            self.assertEqual(loop._load_progress().phase, "pending")
+
     def test_pending_restart_rejects_changed_paper_book_before_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -1143,6 +4183,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 raise RuntimeError("simulated process loss after pending cursor")
 
             fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
 
             first = self._loop(
                 workspace,
@@ -1308,12 +4351,14 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             store = SQLiteMarketStore(workspace / "market.db")
             try:
-                store.append(
-                    self._event(
-                        selection="selection-b",
-                        sequence=1,
-                        odds="3.00",
-                        observed=self.START + timedelta(seconds=2),
+                MarketEventBus(store)._publish_many_live_ingestion(
+                    (
+                        self._event(
+                            selection="selection-b",
+                            sequence=1,
+                            odds="3.00",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
                     )
                 )
             finally:
@@ -1453,7 +4498,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             store = SQLiteMarketStore(workspace / "market.db")
             try:
-                store.append(quote)
+                MarketEventBus(store)._publish_many_live_ingestion((quote,))
             finally:
                 store.close()
 
@@ -1731,6 +4776,472 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             self.assertEqual(final.status, LiveCycleStatus.DECIDED)
             self.assertGreater((workspace / "decisions.jsonl").stat().st_size, before_size)
+
+    def test_legacy_committed_record_cannot_authorize_current_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            result = loop.run_cycle()
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            progress = loop._progress
+            self.assertIsNotNone(progress)
+            self.assertEqual(progress.phase, "committed")
+
+            class LegacyRecord:
+                payload = {"schema_version": 1}
+
+            with patch(
+                "autosport.live_decision_loop.verify_economic_goal_binding",
+                return_value=None,
+            ), patch.object(
+                loop,
+                "_verified_ledger_record_at_offset",
+                return_value=LegacyRecord(),
+            ):
+                with self.assertRaisesRegex(
+                    DecisionLedgerIntegrityError,
+                    "lacks canonical intent provenance",
+                ):
+                    loop._verify_committed_progress_ledger_binding(progress)
+
+    def test_committed_restart_requires_bound_provider_health_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_time = self.START + timedelta(milliseconds=500)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=health_time.isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            first.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first.close()
+            (workspace / "source_health.json").unlink()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "bound provider health replay history is missing",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+
+    def test_committed_restart_rejects_corrupt_bound_provider_health_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            first.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first.close()
+            (workspace / "source_health.json").write_text(
+                '{"schema_version":3,"sources":',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "bound provider health replay history is unreadable",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+
+    def test_committed_restart_does_not_regrade_history_with_new_freshness_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            first.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first.close()
+
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            resumed = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                observation_runner=_DurableObserver(workspace, [()]),
+                max_quote_age=timedelta(milliseconds=100),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+
+            progress = resumed._load_progress()
+            self.assertIsNotNone(progress)
+            self.assertEqual(progress.phase, "committed")
+            self.assertEqual(
+                progress.provider_health_boundaries[0].transition_order,
+                1,
+            )
+            resumed.close()
+
+    def test_committed_restart_replays_bound_health_before_later_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            first.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first.close()
+            health_store.record_failure(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=1500)).isoformat(),
+                error=TimeoutError("later provider failure"),
+            )
+
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+
+            progress = resumed._load_progress()
+            self.assertIsNotNone(progress)
+            self.assertEqual(progress.phase, "committed")
+            self.assertEqual(
+                progress.provider_health_boundaries[0].transition_order,
+                1,
+            )
+            self.assertEqual(health_store.get("provider-a").status, "failed")
+            resumed.close()
+
+    def test_committed_ambiguous_provider_gap_restart_requires_every_bound_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_failure(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=400)).isoformat(),
+                error=ProviderUnavailableError("provider-a offline"),
+            )
+            health_store.record_failure(
+                "provider-b",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                error=ProviderUnavailableError("provider-b offline"),
+            )
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("observation unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            first.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            first.register_input(
+                "input-b",
+                source_ids="provider-b",
+                selection_ids="selection-b",
+            )
+            gap = first.run_cycle()
+            self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
+            first.close()
+
+            health_path = workspace / "source_health.json"
+            raw = json.loads(health_path.read_text(encoding="utf-8"))
+            entry = raw["history"]["provider-a"][0]
+            healthy = dict(entry["state"])
+            healthy.update(
+                {
+                    "status": "healthy",
+                    "poll_count": 1,
+                    "total_received": 0,
+                    "total_accepted": 0,
+                    "total_rejected": 0,
+                    "total_failures": 0,
+                    "consecutive_failures": 0,
+                    "last_success_at": entry["recorded_at"],
+                    "last_error_at": None,
+                    "last_error": None,
+                    "last_cursor": None,
+                    "latest_source_ts": None,
+                    "quality_flags": [],
+                }
+            )
+            entry["state"] = healthy
+            raw["sources"]["provider-a"] = healthy
+            health_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "does not prove the failed canonical provider",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+
+    def test_committed_provider_gap_restart_requires_bound_failed_health(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+
+            class FailingProvider:
+                source_id = "provider-a"
+
+                def read_batch(self, max_items=1000):
+                    del max_items
+                    raise ProviderUnavailableError("provider offline")
+
+            first = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=FailingProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            gap = first.run_cycle()
+            self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
+            first.close()
+
+            health_path = workspace / "source_health.json"
+            raw = json.loads(health_path.read_text(encoding="utf-8"))
+            entry = raw["history"]["provider-a"][0]
+            healthy = dict(entry["state"])
+            healthy.update(
+                {
+                    "status": "healthy",
+                    "poll_count": 1,
+                    "total_received": 0,
+                    "total_accepted": 0,
+                    "total_rejected": 0,
+                    "total_failures": 0,
+                    "consecutive_failures": 0,
+                    "last_success_at": entry["recorded_at"],
+                    "last_error_at": None,
+                    "last_error": None,
+                    "last_cursor": None,
+                    "latest_source_ts": None,
+                    "quality_flags": [],
+                }
+            )
+            entry["state"] = healthy
+            raw["sources"]["provider-a"] = healthy
+            health_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "bound provider health does not contain durable failed evidence",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+
+    def test_committed_provider_gap_restart_replays_failure_before_later_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+
+            class FailingProvider:
+                source_id = "provider-a"
+
+                def read_batch(self, max_items=1000):
+                    del max_items
+                    raise ProviderUnavailableError("provider offline")
+
+            first = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=FailingProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            first.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            gap = first.run_cycle()
+            self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
+            progress = first._load_progress()
+            self.assertIsNotNone(progress)
+            failed_boundary = progress.provider_health_boundaries[0]
+            first.close()
+
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=1500)).isoformat(),
+                received=0,
+                accepted=0,
+                rejected=0,
+                cursor=None,
+                latest_source_ts=None,
+                quality_flags=(),
+            )
+            self.assertEqual(health_store.get("provider-a").status, "healthy")
+
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+
+            resumed_progress = resumed._load_progress()
+            self.assertIsNotNone(resumed_progress)
+            self.assertEqual(
+                resumed_progress.provider_health_boundaries,
+                (failed_boundary,),
+            )
+            self.assertEqual(
+                resumed_progress.provider_health_boundaries[0].transition_order,
+                1,
+            )
+            resumed.close()
 
     def test_restart_verifies_complete_historical_decision_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

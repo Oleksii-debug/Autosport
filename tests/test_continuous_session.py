@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from datetime import timedelta
+from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
 
@@ -946,6 +947,49 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertFalse(
                     coordinator.status().source_state_projection_backlog
                 )
+            finally:
+                store.close()
+
+    def test_routing_failure_retains_dirty_invalidation_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, _lifecycle, _mirror, invalidations, dependencies = (
+                _build_coordinator(root, source, clock)
+            )
+            try:
+                dependencies.register(
+                    "decision:event-1",
+                    source_ids="provider-a",
+                    sports="table_tennis",
+                    event_ids="event-1",
+                )
+                invalidations.accept_persisted(_market_event())
+                self.assertEqual(invalidations.pending_count, 1)
+
+                with patch.object(
+                    dependencies,
+                    "affected_inputs",
+                    side_effect=RuntimeError("route-failed"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "route-failed"):
+                        coordinator._drain_invalidations()
+
+                self.assertEqual(invalidations.pending_count, 1)
+                affected, full_refresh, backlog = coordinator._drain_invalidations()
+                self.assertEqual(affected, ("decision:event-1",))
+                self.assertFalse(full_refresh)
+                self.assertFalse(backlog)
+                self.assertEqual(invalidations.pending_count, 0)
             finally:
                 store.close()
 

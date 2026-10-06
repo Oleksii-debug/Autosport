@@ -15,8 +15,10 @@ from .causal_collector import (
     CanonicalDesktopApplication,
     CollectorDelta,
     CollectorDeltaStore,
+    DesktopApplicationReceipt,
     DesktopDeltaCheckpointStore,
     DesktopDeltaConsumer,
+    canonical_event_digest,
 )
 from .collector_service import CollectorServiceSource, HeadlessCollectorService
 from .continuous_session import (
@@ -519,6 +521,101 @@ def _settlement_authority_identity(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _desktop_applied_current_for_source(
+    *,
+    source_id: str,
+    market_store: SQLiteMarketStore,
+    canonical_application: CanonicalDesktopApplication,
+    _event_type=MarketEvent,
+    _receipt_type=DesktopApplicationReceipt,
+    _completed_receipts=CanonicalDesktopApplication.completed_receipts_for_source,
+    _validate_receipt=DesktopApplicationReceipt.validate,
+    _market_events=SQLiteMarketStore.events,
+    _canonical_digest=canonical_event_digest,
+    _dedupe_getter=MarketEvent.dedupe_key.fget,
+    _quote_getter=MarketEvent.quote_key.fget,
+) -> tuple[MarketEvent, ...]:
+    """Rebuild restart state only from completed canonical desktop applications.
+
+    Generic/import market history remains valid audit evidence but is insufficient
+    decision authority. Completed desktop-application receipts are retained
+    independently of collector-delta compaction and bind the exact canonical event
+    payload through its digest.
+    """
+
+    try:
+        receipts = _completed_receipts(canonical_application, source_id)
+    except Exception as exc:
+        raise ProductCompositionError(
+            "cannot verify desktop application receipts for product runtime restart"
+        ) from exc
+
+    receipt_digests: set[str] = set()
+    for receipt in receipts:
+        if type(receipt) is not _receipt_type:
+            raise ProductCompositionError(
+                "desktop application receipt type is not canonical"
+            )
+        try:
+            _validate_receipt(receipt)
+        except Exception as exc:
+            raise ProductCompositionError(
+                "desktop application receipt is invalid"
+            ) from exc
+        receipt_digests.add(receipt.canonical_event_digest)
+
+    if not receipt_digests:
+        return ()
+
+    try:
+        history = _market_events(market_store)
+    except Exception as exc:
+        raise ProductCompositionError(
+            "cannot verify canonical market history for product runtime restart"
+        ) from exc
+
+    matched_digests: set[str] = set()
+    latest: dict[tuple[str, str], MarketEvent] = {}
+    for event in history:
+        if type(event) is not _event_type:
+            raise ProductCompositionError(
+                "market history returned a non-canonical event type"
+            )
+        if event.source_id != source_id:
+            continue
+        try:
+            if _dedupe_getter is None or _quote_getter is None:
+                raise RuntimeError(
+                    "canonical MarketEvent identity descriptor is unavailable"
+                )
+            event_dedupe_key = _dedupe_getter(event)
+            digest = _canonical_digest(event)
+            quote_key = _quote_getter(event)
+        except Exception as exc:
+            raise ProductCompositionError(
+                "cannot verify canonical market identity for product runtime restart"
+            ) from exc
+        if digest not in receipt_digests:
+            continue
+        matched_digests.add(digest)
+        key = (event.source_id, quote_key)
+        previous = latest.get(key)
+        previous_dedupe_key = (
+            None if previous is None else _dedupe_getter(previous)
+        )
+        if previous is None or (event.sequence, event_dedupe_key) > (
+            previous.sequence,
+            previous_dedupe_key,
+        ):
+            latest[key] = event
+
+    if matched_digests != receipt_digests:
+        raise ProductCompositionError(
+            "desktop application receipt references missing canonical market history"
+        )
+    return tuple(latest[key] for key in sorted(latest))
+
+
 @dataclass(slots=True)
 class AutonomousProductRuntime:
     """One supported headless composition of the integrated PAPER product authorities."""
@@ -889,11 +986,7 @@ def build_autonomous_product_runtime(
         mirror = MarketMirror()
         invalidations = BoundedMirrorInvalidationBuffer(mirror)
 
-        for event in market_store.current_by_source().values():
-            invalidations.accept_persisted(event)
-
         market_bus = MarketEventBus(market_store)
-        market_bus.subscribe(invalidations.accept_persisted)
         source_health = SourceHealthStore(root / "source_health.json")
         canonical_application = CanonicalDesktopApplication(
             market_bus,
@@ -901,7 +994,20 @@ def build_autonomous_product_runtime(
             root / "desktop_application.json",
             clock=resolved_clock,
         )
+        # Restart decision state belongs to the collector/DesktopApplicationReceipt
+        # authority family. Completed application evidence survives lawful collector
+        # compaction. Generic/import rows remain canonical audit history, but neither
+        # another source nor an unreceipted row from this source may seed the
+        # autonomous decision mirror. A newer generic row also cannot hide an older,
+        # exact desktop-applied row for the same quote.
+        for event in _desktop_applied_current_for_source(
+            source_id=source_id,
+            market_store=market_store,
+            canonical_application=canonical_application,
+        ):
+            invalidations.accept_persisted(event)
 
+        market_bus.subscribe(invalidations.accept_persisted)
         dependencies = FocusedMirrorDependencyIndex(mirror)
         collector_store = CollectorDeltaStore(root / "collector_deltas.json")
         collector = HeadlessCollectorService(

@@ -8,6 +8,8 @@ import json
 
 import pytest
 
+from betfair_execution_readback_test_support import semantic_execution_readback
+
 import autosport.betfair_account_readonly as betfair_readonly
 from autosport.betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
@@ -64,6 +66,85 @@ def client_for(*responses: bytes):
         clock=lambda: FIXED_NOW,
     )
     return client, transport
+
+
+class _StrictHttpResponse:
+    def __init__(self, *, status: int, url: str, payload: bytes = b"{}") -> None:
+        self.status = status
+        self.code = status
+        self.url = url
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def geturl(self) -> str:
+        return self.url
+
+    def read(self, limit: int) -> bytes:
+        assert limit >= len(self._payload)
+        return self._payload
+
+
+class _StrictOpener:
+    def __init__(self, response: _StrictHttpResponse) -> None:
+        self.response = response
+
+    def open(self, request, timeout: float):
+        assert request.full_url
+        assert timeout > 0
+        return self.response
+
+
+def test_urllib_transport_refuses_redirect_before_follow() -> None:
+    handler = betfair_readonly._RejectBetfairRedirects()
+    with pytest.raises(BetfairReadOnlyError, match="redirect refused"):
+        handler.redirect_request(
+            object(),
+            object(),
+            302,
+            "Found",
+            {},
+            "https://example.invalid/redirect",
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "final_url", "message"),
+    (
+        (201, BETTING_JSON_RPC_ENDPOINT, "exactly 200"),
+        (200, "https://example.invalid/json-rpc", "origin changed"),
+    ),
+)
+def test_urllib_transport_requires_exact_status_and_final_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    final_url: str,
+    message: str,
+) -> None:
+    response = _StrictHttpResponse(status=status, url=final_url)
+    opener = _StrictOpener(response)
+    seen_handlers: list[object] = []
+
+    def fake_build_opener(*handlers):
+        seen_handlers.extend(handlers)
+        return opener
+
+    monkeypatch.setattr(betfair_readonly, "build_opener", fake_build_opener)
+    transport = betfair_readonly.UrllibBetfairHttpTransport()
+
+    with pytest.raises(BetfairReadOnlyError, match=message):
+        transport.post(
+            BETTING_JSON_RPC_ENDPOINT,
+            headers={"X-Application": "a", "X-Authentication": "b"},
+            body=b"{}",
+            timeout_seconds=1.0,
+        )
+    assert len(seen_handlers) == 1
+    assert isinstance(seen_handlers[0], betfair_readonly._RejectBetfairRedirects)
 
 
 def test_credentials_and_client_repr_never_expose_secrets():
@@ -398,7 +479,8 @@ def test_execution_readback_binds_action_market_account_and_all_cleared_statuses
 
 
 def test_execution_readback_authority_cannot_be_imported_or_forged():
-    client, _ = client_for(
+    capture = semantic_execution_readback(
+        [
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
             1,
@@ -408,12 +490,15 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         response({"clearedOrders": [], "moreAvailable": False}, 4),
         response({"clearedOrders": [], "moreAvailable": False}, 5),
         response({"clearedOrders": [], "moreAvailable": False}, 6),
-    )
-    capture = client.read_execution_readback(
+    ],
         action_id="action-1",
         market_id="1.234",
+        provider_order_ref=None,
+        account_id="default-account",
     )
-    capture.assert_authoritative()
+    capture._validate()
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+        capture.assert_authoritative()
 
     assert not hasattr(BetfairExecutionReadbackEnvelope, "_from_client")
     assert not hasattr(betfair_readonly, "_EXECUTION_READBACK_SEAL")
@@ -434,16 +519,17 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         capture.request_scope_sha256,
         capture.evidence_sha256,
     )
-    with pytest.raises(BetfairReadOnlyError, match="not issued"):
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         forged.assert_authoritative()
 
     copied = replace(capture)
-    with pytest.raises(BetfairReadOnlyError, match="not issued"):
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         copied.assert_authoritative()
 
 
-def test_execution_readback_detects_post_capture_origin_tampering():
-    client, _ = client_for(
+def test_semantic_execution_readback_remains_non_authoritative_after_timestamp_tamper():
+    capture = semantic_execution_readback(
+        [
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
             1,
@@ -453,19 +539,21 @@ def test_execution_readback_detects_post_capture_origin_tampering():
         response({"clearedOrders": [], "moreAvailable": False}, 4),
         response({"clearedOrders": [], "moreAvailable": False}, 5),
         response({"clearedOrders": [], "moreAvailable": False}, 6),
-    )
-    capture = client.read_execution_readback(
+    ],
         action_id="action-1",
         market_id="1.234",
+        provider_order_ref=None,
+        account_id="default-account",
     )
 
     object.__setattr__(capture, "observed_at", "2026-09-17T17:31:00+00:00")
-    with pytest.raises(BetfairReadOnlyError, match="changed after canonical adapter capture"):
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         capture.assert_authoritative()
 
 
-def test_execution_readback_detects_post_capture_scope_tampering():
-    client, _ = client_for(
+def test_semantic_execution_readback_rejects_scope_digest_tampering():
+    capture = semantic_execution_readback(
+        [
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
             1,
@@ -475,10 +563,11 @@ def test_execution_readback_detects_post_capture_scope_tampering():
         response({"clearedOrders": [], "moreAvailable": False}, 4),
         response({"clearedOrders": [], "moreAvailable": False}, 5),
         response({"clearedOrders": [], "moreAvailable": False}, 6),
-    )
-    capture = client.read_execution_readback(
+    ],
         action_id="action-1",
         market_id="1.234",
+        provider_order_ref=None,
+        account_id="default-account",
     )
 
     object.__setattr__(capture, "account_id", "forged-account")
@@ -505,26 +594,17 @@ def test_execution_readback_fails_closed_when_market_event_identity_is_unavailab
     assert len(transport.calls) == 6
 
 
-def test_bet_readback_capability_is_advertised_only_by_real_readonly_adapter():
+def test_bet_readback_capability_requires_action_bound_execution_readback():
     from autosport.bookmaker_capability import BookmakerCapability
 
-    client, _ = client_for(
-        response(
-            {
-                "currencyCode": "GBP",
-                "localeCode": "en",
-                "region": "GBR",
-                "timezone": "Europe/London",
-            },
-            1,
+    client, transport = client_for()
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="action-bound read_execution_readback evidence",
+    ):
+        client.read_account_snapshot(
+            frozenset({BookmakerCapability.BET_READBACK})
         )
-    )
 
-    snapshot = client.read_account_snapshot(
-        frozenset({BookmakerCapability.BET_READBACK})
-    )
-
-    assert snapshot.observed_capabilities == frozenset(
-        {BookmakerCapability.BET_READBACK}
-    )
-    snapshot.profile.require(BookmakerCapability.BET_READBACK)
+    assert transport.calls == []

@@ -6627,3 +6627,133 @@ def test_tick_reports_invalidation_added_during_settlement_reconciliation() -> N
         assert buffer.full_refresh_required is False
         assert status.invalidation_pending_count == 1
         assert status.invalidation_full_refresh_required is False
+
+@pytest.mark.parametrize("late_state", ("dirty", "full_refresh"))
+def test_provider_unavailable_rechecks_backlog_after_failure_publication(
+    late_state: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class ProviderUnavailableCollector(_Collector):
+            def run_cycle(self):
+                return type(
+                    "ProviderUnavailableCycle",
+                    (),
+                    {
+                        "provider_unavailable": True,
+                        "source_id": "provider-a",
+                        "committed_delta_ids": (),
+                    },
+                )()
+
+        class Buffer:
+            def __init__(self) -> None:
+                self.pending_reads = 0
+                self.full_refresh_reads = 0
+
+            @property
+            def pending_count(self) -> int:
+                self.pending_reads += 1
+                if late_state == "dirty" and self.pending_reads >= 2:
+                    return 1
+                return 0
+
+            @property
+            def full_refresh_required(self) -> bool:
+                self.full_refresh_reads += 1
+                return (
+                    late_state == "full_refresh"
+                    and self.full_refresh_reads >= 2
+                )
+
+            def drain(self, **_kwargs):
+                raise AssertionError(
+                    "provider-unavailable tick must not drain invalidations"
+                )
+
+        buffer = Buffer()
+        coordinator.collector = ProviderUnavailableCollector()
+        coordinator.invalidation_buffer = buffer
+
+        result = coordinator.tick()
+
+        assert buffer.pending_reads == 2
+        assert buffer.full_refresh_reads == 2
+        assert result.invalidation_backlog is True
+        assert result.full_refresh_required is (late_state == "full_refresh")
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ProviderUnavailableError"
+        )
+
+
+@pytest.mark.parametrize("authority_target", ("state", "dependency_index"))
+def test_provider_unavailable_rechecks_authority_after_failure_publication(
+    authority_target: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical_state = coordinator._state
+        canonical_index = coordinator.dependency_index
+        replacement_state = continuous_session._ContinuousSessionState(
+            root / "late_provider_unavailable_session.json",
+            session_id="late-provider-unavailable-session",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        replacement_index = _DependencyIndex()
+
+        class ProviderUnavailableCollector(_Collector):
+            def run_cycle(self):
+                return type(
+                    "ProviderUnavailableCycle",
+                    (),
+                    {
+                        "provider_unavailable": True,
+                        "source_id": "provider-a",
+                        "committed_delta_ids": (),
+                    },
+                )()
+
+        class Buffer:
+            full_refresh_required = False
+
+            def __init__(self) -> None:
+                self.pending_reads = 0
+
+            @property
+            def pending_count(self) -> int:
+                self.pending_reads += 1
+                if self.pending_reads == 2:
+                    if authority_target == "state":
+                        coordinator._state = replacement_state
+                    else:
+                        coordinator.dependency_index = replacement_index
+                return 0
+
+            def drain(self, **_kwargs):
+                raise AssertionError(
+                    "provider-unavailable tick must not drain invalidations"
+                )
+
+        buffer = Buffer()
+        coordinator.collector = ProviderUnavailableCollector()
+        coordinator.invalidation_buffer = buffer
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match=(
+                "continuous session state authority changed during tick"
+                if authority_target == "state"
+                else "dependency index authority changed during tick"
+            ),
+        ):
+            coordinator.tick()
+
+        assert buffer.pending_reads == 2
+        assert coordinator._state is canonical_state
+        assert coordinator.dependency_index is canonical_index
+

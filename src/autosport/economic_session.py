@@ -606,7 +606,7 @@ def _decode_state(
 ) -> dict[str, object]:
     try:
         parsed = _load_json(raw.decode("utf-8"))
-    except (UnicodeError, TypeError, ValueError) as exc:
+    except (UnicodeError, TypeError, ValueError, RecursionError) as exc:
         raise EconomicSessionIntegrityError(
             "economic-session state is not strict UTF-8 JSON"
         ) from exc

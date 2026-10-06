@@ -463,6 +463,7 @@ class _ContinuousSessionState:
         self._cycles_completed = raw["cycles_completed"]
         self._last_success_at = raw["last_success_at"]
         self._state = raw["state"]
+        self._last_error_code = raw["last_error_code"]
         self._source_gap_state = raw["source_gap_state"]
         self._source_sync_state = raw["source_sync_state"]
         self._error_path = self.path.with_name(
@@ -1182,6 +1183,7 @@ class _ContinuousSessionState:
             self._cycles_completed = updated["cycles_completed"]
             self._last_success_at = updated["last_success_at"]
             self._state = updated["state"]
+            self._last_error_code = updated["last_error_code"]
             self._source_gap_state = updated["source_gap_state"]
             self._source_sync_state = updated["source_sync_state"]
             if mutation_result is not False and finalize_under_lock is not None:
@@ -1591,6 +1593,10 @@ class _ContinuousSessionState:
                 "canonical failure publication lock authority changed"
             )
         with _durable_path_lock(self.path):
+            if self._last_error_code is not None and self._last_error_code != code:
+                raise ContinuousSessionError(
+                    "operational failure conflicts with canonical session reason"
+                )
             # Keep failure publication bounded by active cached state. A full
             # canonical _read() validates every retained settlement receipt and
             # would reintroduce the exact O(history) amplification this sidecar

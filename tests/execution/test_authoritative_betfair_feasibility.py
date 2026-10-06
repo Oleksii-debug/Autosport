@@ -1212,3 +1212,112 @@ def test_authoritative_path_leaves_market_state_expectations_unbound() -> None:
     assert result.bet_delay_seconds == receipt.bet_delay_seconds
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
 
+class _SubstitutedBoundPlan(BoundSupervisedExecutionPlan):
+    """Adversarial subclass that replaces canonical bound-plan lookup semantics."""
+
+    def verify_binding(self) -> None:
+        return None
+
+    def action_for(self, action_id: str) -> ExecutionAction:
+        action = self.execution_plan.actions[0]
+        return replace(action, market_id="forged-market")
+
+    def profile_for(self, venue_id: str, account_id: str) -> ProfileBinding:
+        return replace(self.profile_bindings[0], venue_id="forged-provider")
+
+
+def test_authoritative_feasibility_rejects_bound_plan_subclass_dispatch() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    canonical = _bound(datetime.now(timezone.utc))
+    forged = _SubstitutedBoundPlan(
+        execution_plan=canonical.execution_plan,
+        portfolio_plan_sha256=canonical.portfolio_plan_sha256,
+        economic_goal_contract_sha256=canonical.economic_goal_contract_sha256,
+        intent_id=canonical.intent_id,
+        intent_sha256=canonical.intent_sha256,
+        approval_fingerprint=canonical.approval_fingerprint,
+        profile_bindings=canonical.profile_bindings,
+        constraints=canonical.constraints,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, canonical)
+        with pytest.raises(
+            TypeError,
+            match="exact BoundSupervisedExecutionPlan",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                forged,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ("verify_binding", "action_for", "profile_for"),
+)
+def test_bound_plan_method_rebind_revokes_authoritative_feasibility(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+
+    def substituted(*args, **kwargs):
+        raise AssertionError("substituted bound-plan method must not execute")
+
+    monkeypatch.setattr(BoundSupervisedExecutionPlan, method_name, substituted)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical supervised execution plan binding changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ("verify_binding", "action_for", "profile_for"),
+)
+def test_bound_plan_method_code_mutation_revokes_authoritative_feasibility(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    canonical_method = getattr(BoundSupervisedExecutionPlan, method_name)
+
+    def substituted(*args, **kwargs):
+        raise AssertionError("mutated bound-plan method must not execute")
+
+    monkeypatch.setattr(canonical_method, "__code__", substituted.__code__)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical supervised execution plan binding changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+

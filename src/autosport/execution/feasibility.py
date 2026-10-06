@@ -477,6 +477,10 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     *,
     action_id: str,
     max_snapshot_age: timedelta,
+    _bound_type,
+    _verify_bound_binding,
+    _bound_action_for,
+    _bound_profile_for,
     _verified_execution_view,
 ) -> ExecutionFeasibilitySnapshot:
     """Resolve provider depth against the durable plan and fail closed on limits.
@@ -494,8 +498,8 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
 
     if not isinstance(ledger, RealExecutionLedger):
         raise TypeError("ledger must be RealExecutionLedger")
-    if not isinstance(bound, BoundSupervisedExecutionPlan):
-        raise TypeError("bound must be BoundSupervisedExecutionPlan")
+    if type(bound) is not _bound_type:
+        raise TypeError("bound must be exact BoundSupervisedExecutionPlan")
     if not isinstance(receipt, BetfairMarketBookDepthObservation):
         raise TypeError("receipt must be BetfairMarketBookDepthObservation")
     acquisition_started_at = market_book_depth_acquisition_started_at(receipt)
@@ -504,7 +508,7 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     # boundary for DECISION_EVIDENCE semantics.
     assert_market_book_depth_authoritative(receipt)
     _require_aware(acquisition_started_at, "acquisition_started_at")
-    bound.verify_binding()
+    _verify_bound_binding(bound)
     try:
         plan_view = _verified_execution_view(
             ledger,
@@ -523,7 +527,7 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     decision_at = _provider_timestamp(plan_view.plan_reserved_at)
     _require_aware(decision_at, "decision_at")
 
-    action = bound.action_for(action_id)
+    action = _bound_action_for(bound, action_id)
     try:
         provider_selection_id = int(action.selection_id)
     except (TypeError, ValueError) as exc:
@@ -538,7 +542,7 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     if decision_utc >= action_expiry:
         raise ValueError("execution action expired before feasibility decision")
 
-    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    binding = _bound_profile_for(bound, action.bookmaker_id, action.account_id)
     action_digest = _canonical_digest(action.to_dict())
     response_received_at = _provider_timestamp(receipt.evidence.observed_at)
     if response_received_at < acquisition_started_at:
@@ -685,6 +689,13 @@ def _install_execution_feasibility_result_authority():
     raw_assess_code = raw_assess.__code__
     canonical_assess = _assess_execution_feasibility
     canonical_assess_code = canonical_assess.__code__
+    bound_type = BoundSupervisedExecutionPlan
+    verify_bound_binding = bound_type.verify_binding
+    verify_bound_binding_code = verify_bound_binding.__code__
+    bound_action_for = bound_type.action_for
+    bound_action_for_code = bound_action_for.__code__
+    bound_profile_for = bound_type.profile_for
+    bound_profile_for_code = bound_profile_for.__code__
     verified_execution_view = RealExecutionLedger.verified_execution_view
     verified_execution_view_code = verified_execution_view.__code__
     fingerprint = _feasibility_result_fingerprint
@@ -706,6 +717,18 @@ def _install_execution_feasibility_result_authority():
                 "canonical execution feasibility assessor changed"
             )
         if (
+            BoundSupervisedExecutionPlan is not bound_type
+            or bound_type.verify_binding is not verify_bound_binding
+            or verify_bound_binding.__code__ is not verify_bound_binding_code
+            or bound_type.action_for is not bound_action_for
+            or bound_action_for.__code__ is not bound_action_for_code
+            or bound_type.profile_for is not bound_profile_for
+            or bound_profile_for.__code__ is not bound_profile_for_code
+        ):
+            raise RuntimeError(
+                "canonical supervised execution plan binding changed"
+            )
+        if (
             RealExecutionLedger.verified_execution_view
             is not verified_execution_view
             or verified_execution_view.__code__
@@ -720,6 +743,10 @@ def _install_execution_feasibility_result_authority():
             receipt,
             action_id=action_id,
             max_snapshot_age=max_snapshot_age,
+            _bound_type=bound_type,
+            _verify_bound_binding=verify_bound_binding,
+            _bound_action_for=bound_action_for,
+            _bound_profile_for=bound_profile_for,
             _verified_execution_view=verified_execution_view,
         )
         if type(result) is not ExecutionFeasibilitySnapshot:

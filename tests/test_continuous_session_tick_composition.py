@@ -1502,6 +1502,53 @@ def test_retire_rejects_malformed_input_ids(input_id: object) -> None:
         )
 
 
+@pytest.mark.parametrize("input_id", ("", " input-old", "input-old ", 1))
+def test_tick_rejects_malformed_lifecycle_retirement_id(input_id: object) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Index:
+            input_ids = ()
+
+            def affected_inputs(self, _batch):
+                return ()
+
+            def unregister(self, _input_id):
+                raise AssertionError("malformed retirement reached index callback")
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                retire_input,
+                **_kwargs,
+            ):
+                retire_input(input_id)
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.dependency_index = Index()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="dependency index retirement input id is invalid",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
 def test_tick_rejects_false_retirement_receipt_that_keeps_input() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

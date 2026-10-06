@@ -506,7 +506,11 @@ def test_operational_checkpoint_path_replacement_during_open_fails_closed() -> N
             try:
                 state._read_error_checkpoint()
             except continuous_session.ContinuousSessionError as exc:
-                assert "replaced" in str(exc) or "changed" in str(exc)
+                assert (
+                    "replaced" in str(exc)
+                    or "changed" in str(exc)
+                    or "filesystem authority" in str(exc)
+                )
             else:
                 raise AssertionError(
                     "path-replaced operational checkpoint was accepted"
@@ -1153,3 +1157,73 @@ def test_settlement_evidence_normalizer_code_identity_is_immutable() -> None:
                 raise AssertionError("mutated settlement normalizer was accepted")
         finally:
             original_normalizer.__code__ = original_code
+
+
+def test_operational_checkpoint_filesystem_function_rebinding_fails_closed(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        original_fstat = continuous_session.os.fstat
+
+        def attacker_fstat(_descriptor: object) -> object:
+            raise AssertionError("runtime-rebound os.fstat executed")
+
+        monkeypatch.setattr(continuous_session.os, "fstat", attacker_fstat)
+
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "filesystem authority" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound os.fstat was accepted")
+
+
+def test_operational_checkpoint_reader_function_rebinding_fails_closed(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        for name, replacement in (
+            ("lseek", lambda *_args: 0),
+            ("read", lambda *_args: b""),
+            ("close", lambda *_args: None),
+        ):
+            original = getattr(continuous_session.os, name)
+            monkeypatch.setattr(continuous_session.os, name, replacement)
+            try:
+                state._read_error_checkpoint()
+            except continuous_session.ContinuousSessionError as exc:
+                assert "filesystem authority" in str(exc)
+            else:
+                raise AssertionError(
+                    f"runtime-rebound os.{name} was accepted"
+                )
+            finally:
+                monkeypatch.setattr(continuous_session.os, name, original)
+
+
+def test_operational_checkpoint_path_lstat_rebinding_fails_closed(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        original_lstat = Path.lstat
+
+        def attacker_lstat(_self: Path) -> object:
+            raise AssertionError("runtime-rebound Path.lstat executed")
+
+        monkeypatch.setattr(Path, "lstat", attacker_lstat)
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "filesystem authority" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound Path.lstat was accepted")
+
+        monkeypatch.setattr(Path, "lstat", original_lstat)

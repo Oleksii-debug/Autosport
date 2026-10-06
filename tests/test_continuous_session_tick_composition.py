@@ -345,11 +345,15 @@ def test_tick_rejects_provider_time_economic_context_rebinding() -> None:
 
         class Desktop:
             def drain(self, **_kwargs):
-                return ()
+                raise AssertionError(
+                    "desktop side effects ran after economic context changed"
+                )
 
         class Lifecycle:
             def register_eligible(self, *_args, **_kwargs):
-                return ()
+                raise AssertionError(
+                    "lifecycle side effects ran after economic context changed"
+                )
 
         coordinator.desktop_consumer = Desktop()
         coordinator.lifecycle = Lifecycle()

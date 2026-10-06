@@ -405,3 +405,19 @@ def test_decision_identity_ignores_rebound_snapshotter_alias(monkeypatch) -> Non
     monkeypatch.setattr(economic_goal_provenance_module, "_snapshot_provenance", forged)
 
     assert evidence.decision_identity == expected
+
+
+def test_provenance_creation_and_identity_ignore_rebound_constructor(monkeypatch) -> None:
+    goal = _goal()
+    expected = provenance_for(goal)
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound EconomicGoalProvenance constructor executed")
+
+    monkeypatch.setattr(EconomicGoalProvenance, "__init__", forged)
+    monkeypatch.setattr(EconomicGoalProvenance, "__post_init__", forged)
+
+    evidence = provenance_for(goal)
+    assert evidence == expected
+    assert evidence.decision_identity == expected.decision_identity
+    verify_provenance(goal, evidence)

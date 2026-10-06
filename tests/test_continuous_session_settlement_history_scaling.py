@@ -4079,3 +4079,70 @@ def test_session_id_access_does_not_read_full_settlement_history() -> None:
         with patch.object(state, "_read", forbidden_reader):
             assert state.session_id == "session-history-scaling"
 
+
+
+
+def test_sidecar_reader_rejects_runtime_text_validator_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        def attacker_text(_value: object, _field: str) -> str:
+            raise AssertionError("runtime-rebound sidecar text validator executed")
+
+        monkeypatch.setattr(continuous_session, "_text", attacker_text)
+
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "parser code identity changed" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound sidecar text validator was accepted")
+
+
+def test_sidecar_reader_rejects_runtime_instant_validator_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_success(
+            at="2026-09-22T06:21:00+00:00",
+            full_refresh=False,
+            settlement_evidence=(),
+        )
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        def attacker_instant(_value: object, _field: str) -> object:
+            raise AssertionError("runtime-rebound sidecar instant validator executed")
+
+        monkeypatch.setattr(continuous_session, "_instant", attacker_instant)
+
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "parser code identity changed" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound sidecar instant validator was accepted")
+
+
+def test_sidecar_writer_rejects_runtime_text_validator_rebinding_before_publication(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        error_path = root / "continuous_session.json.operational_error.json"
+
+        def attacker_text(_value: object, _field: str) -> str:
+            raise AssertionError("runtime-rebound sidecar writer validator executed")
+
+        monkeypatch.setattr(continuous_session, "_text", attacker_text)
+
+        try:
+            state._write_error_checkpoint("CANONICAL_FAILURE")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "writer code identity changed" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound sidecar writer validator was accepted")
+
+        assert not error_path.exists()

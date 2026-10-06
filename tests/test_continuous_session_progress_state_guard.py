@@ -2072,3 +2072,97 @@ def test_tick_rejects_class_rebound_settlement_callback_copy(
         ):
             coordinator.tick()
 
+def test_tick_freezes_learning_handoff_reconcile_callback_before_prepare() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _, state = _state(root)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+        coordinator.causal_view = continuous_session.CausalView.AS_KNOWN_AT_DECISION
+        coordinator.required_history = None
+        coordinator.market_store = object()
+        coordinator.outcome_authority = None
+        coordinator.paper_book_path = root / "paper_book.json"
+        coordinator.max_invalidation_batches_per_tick = 4
+        coordinator.max_invalidation_items_per_batch = 250
+
+        class SuccessfulCycle:
+            provider_unavailable = False
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+        class DeltaStore:
+            def deltas_after_commit(self, **_kwargs):
+                return ()
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = DeltaStore()
+
+            def run_cycle(self):
+                return SuccessfulCycle()
+
+        class DesktopConsumer:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class InvalidationBuffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class DependencyIndex:
+            input_ids = ()
+
+            def affected_inputs(self, _batch):
+                return ()
+
+        class Handoff:
+            def __init__(self) -> None:
+                self.prepared = None
+                self.reconciled = None
+
+            def _attacker_reconcile(self, **_kwargs) -> None:
+                raise AssertionError(
+                    "prepare-time rebound reconcile callback executed"
+                )
+
+            def prepare_settlement(self, *, resolutions, **_kwargs):
+                self.prepared = resolutions
+                self.reconcile_after_settlement = (  # type: ignore[method-assign]
+                    self._attacker_reconcile
+                )
+                return ()
+
+            def reconcile_after_settlement(self, *, resolutions, **_kwargs):
+                self.reconciled = resolutions
+
+        handoff = Handoff()
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = DesktopConsumer()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.invalidation_buffer = InvalidationBuffer()
+        coordinator.dependency_index = DependencyIndex()
+        coordinator.settlement_learning_handoff = handoff
+
+        result = coordinator.tick()
+
+        assert result.cycle_index == 1
+        assert handoff.prepared == ()
+        assert handoff.reconciled == ()
+

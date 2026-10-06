@@ -2989,6 +2989,59 @@ def test_settlement_resolution_collection_normalizes_future_evidence_error() -> 
         raise AssertionError("future settlement resolution was accepted")
 
 
+def test_settlement_resolution_collection_rejects_callback_identity_mutation() -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    coordinator = _resolution_coordinator((record,), (_resolution(),))
+
+    class MutatingAuthority:
+        def resolve(
+            self,
+            live_record: object,
+            *,
+            as_of: str,
+        ) -> continuous_session.SettlementResolution:
+            assert as_of == _AT
+            live_record.identity = "provider-a:event-attacker"
+            live_record.settlement_ref = "settlement-attacker"
+            return continuous_session.SettlementResolution(
+                event_identity="provider-a:event-attacker",
+                settlement_ref="settlement-attacker",
+                quote_outcomes={"quote-1": "win"},
+                evidence_id="evidence-attacker",
+                evidence_sha256="a" * 64,
+                available_at=_AT,
+            )
+
+    coordinator.outcome_authority = MutatingAuthority()
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "mutated lifecycle settlement identity" in str(exc)
+    else:
+        raise AssertionError("callback lifecycle identity mutation was accepted")
+
+
+def test_settlement_resolution_collection_rejects_callback_reference_mutation_on_none() -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    coordinator = _resolution_coordinator((record,), (_resolution(),))
+
+    class MutatingAuthority:
+        def resolve(self, live_record: object, *, as_of: str) -> None:
+            assert as_of == _AT
+            live_record.settlement_ref = "settlement-attacker"
+            return None
+
+    coordinator.outcome_authority = MutatingAuthority()
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "mutated lifecycle settlement identity" in str(exc)
+    else:
+        raise AssertionError("callback mutation returning None was accepted")
+
+
 def test_collected_settlement_resolution_is_detached_from_authority_mutation() -> None:
     record = _ResolutionRecord("provider-a:event-1", "settlement-1")
     original = _resolution(outcome="win")

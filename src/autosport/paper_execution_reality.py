@@ -306,26 +306,20 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionStateError(
                     "worst_case_exposure conflicts with durable attempt economics"
                 )
+            decimal_formatter = _CANONICAL_DECIMAL_TEXT_FORMATTER
+            if (
+                decimal_formatter is not _CANONICAL_DECIMAL_TEXT_FORMATTER_IDENTITY
+                or decimal_formatter.__code__
+                is not _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE
+            ):
+                raise PaperExecutionIntegrityError(
+                    "PAPER Decimal formatter authority changed"
+                )
             payload = {
                 "pending_action_ids": list(derived.pending_action_ids),
                 "recovery_decision": derived.recovery_decision.value,
-                "worst_case_exposure": (
-                    (
-                        lambda decimal_formatter: (
-                            decimal_formatter(derived.worst_case_exposure)
-                            if (
-                                decimal_formatter
-                                is _CANONICAL_DECIMAL_TEXT_FORMATTER_IDENTITY
-                                and decimal_formatter.__code__
-                                is _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE
-                            )
-                            else (_ for _ in ()).throw(
-                                PaperExecutionIntegrityError(
-                                    "PAPER Decimal formatter authority changed"
-                                )
-                            )
-                        )
-                    )(_CANONICAL_DECIMAL_TEXT_FORMATTER)
+                "worst_case_exposure": decimal_formatter(
+                    derived.worst_case_exposure
                 ),
             }
             self._append_completion_unlocked(

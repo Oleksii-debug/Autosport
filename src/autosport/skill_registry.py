@@ -456,6 +456,8 @@ class SkillRegistry:
             process.start()
         except Exception as exc:
             receiver.close(); sender.close()
+            if not _close_process_handle(process):
+                return None,"HANDLER_START_HANDLE_CLOSE_FAILED"
             return None,"HANDLER_START_"+exc.__class__.__name__.upper()
         sender.close()
         process.join(timeout_seconds)

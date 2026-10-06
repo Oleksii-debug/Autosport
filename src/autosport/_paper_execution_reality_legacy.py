@@ -91,64 +91,56 @@ def _decimal(
     name: str,
     *,
     allow_zero: bool = False,
-    _decimal_type=_CANONICAL_DECIMAL_TYPE,
-    _invalid_operation=_CANONICAL_INVALID_OPERATION,
-    _resource_validator=_CANONICAL_DECIMAL_RESOURCE_VALIDATOR,
-    _resource_validator_code=_CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE,
-    _text_coercion=_CANONICAL_TEXT_COERCION,
 ) -> Decimal:
-    if _resource_validator.__code__ is not _resource_validator_code:
+    validator = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+    if validator.__code__ is not _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE:
         raise ValueError("decimal resource validator authority changed")
+    decimal_type = _CANONICAL_DECIMAL_TYPE
+    text_coercion = _CANONICAL_TEXT_COERCION
+    invalid_operation = _CANONICAL_INVALID_OPERATION
     try:
         parsed = (
             value
-            if type(value) is _decimal_type
-            else _decimal_type(_text_coercion(value))
+            if type(value) is decimal_type
+            else decimal_type(text_coercion(value))
         )
-    except (_invalid_operation, ValueError, TypeError) as exc:
+    except (invalid_operation, ValueError, TypeError) as exc:
         raise ValueError(f"{name} must be a finite Decimal") from exc
     if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
         comparator = ">= 0" if allow_zero else "> 0"
         raise ValueError(f"{name} must be finite and {comparator}")
-    # Reuse the execution-ledger fixed-point resource law before any durable
-    # Decimal formatting can allocate a potentially enormous expanded string.
-    _resource_validator(parsed)
+    validator(parsed)
     return parsed
 
 
-def _preflight_decimal_text_fields(
-    *values: Decimal | None,
-    _decimal_type=_CANONICAL_DECIMAL_TYPE,
-    _resource_validator=_CANONICAL_DECIMAL_RESOURCE_VALIDATOR,
-    _resource_validator_code=_CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE,
-) -> None:
+def _preflight_decimal_text_fields(*values: Decimal | None) -> None:
     """Validate every sibling Decimal before any fixed-point string is allocated."""
-    if _resource_validator.__code__ is not _resource_validator_code:
+    validator = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+    if validator.__code__ is not _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE:
         raise ValueError("decimal resource validator authority changed")
+    decimal_type = _CANONICAL_DECIMAL_TYPE
     for value in values:
         if value is None:
             continue
-        if type(value) is not _decimal_type or not value.is_finite():
+        if type(value) is not decimal_type or not value.is_finite():
             raise ValueError("Decimal must be finite")
-        _resource_validator(value)
-
-
-def _decimal_text(
-    value: Decimal,
-    _preflight=_preflight_decimal_text_fields,
-    _formatter=_CANONICAL_DECIMAL_FORMATTER,
-) -> str:
-    # Keep the scalar formatter fail-closed, while aggregate serializers call
-    # _preflight_decimal_text_fields first so no benign sibling is formatted
-    # before an oversized sibling has been rejected.
-    _preflight(value)
-    return _formatter(value, "f")
+        validator(value)
 
 
 _CANONICAL_DECIMAL_PARSER = _decimal
 _CANONICAL_DECIMAL_PARSER_CODE = _decimal.__code__
 _CANONICAL_DECIMAL_PREFLIGHT = _preflight_decimal_text_fields
 _CANONICAL_DECIMAL_PREFLIGHT_CODE = _preflight_decimal_text_fields.__code__
+
+
+def _decimal_text(value: Decimal) -> str:
+    preflight = _CANONICAL_DECIMAL_PREFLIGHT
+    if preflight.__code__ is not _CANONICAL_DECIMAL_PREFLIGHT_CODE:
+        raise ValueError("decimal preflight authority changed")
+    preflight(value)
+    return _CANONICAL_DECIMAL_FORMATTER(value, "f")
+
+
 _CANONICAL_DECIMAL_TEXT_FORMATTER = _decimal_text
 _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE = _decimal_text.__code__
 
@@ -305,12 +297,9 @@ class PaperExecutionEvidenceRecord:
     suspended: bool = False
     reason: str = "observed execution evidence"
 
-    def __post_init__(
-        self,
-        _decimal_parser=_CANONICAL_DECIMAL_PARSER,
-        _decimal_parser_code=_CANONICAL_DECIMAL_PARSER_CODE,
-    ) -> None:
-        if _decimal_parser.__code__ is not _decimal_parser_code:
+    def __post_init__(self) -> None:
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
             raise ValueError("decimal parser authority changed")
         for name in (
             "action_id",
@@ -335,8 +324,8 @@ class PaperExecutionEvidenceRecord:
         if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
             if self.accepted_odds is None or self.accepted_stake is None:
                 raise ValueError("accepted/partial evidence requires odds and stake")
-            odds = _decimal_parser(self.accepted_odds, "accepted_odds")
-            stake = _decimal_parser(self.accepted_stake, "accepted_stake")
+            odds = decimal_parser(self.accepted_odds, "accepted_odds")
+            stake = decimal_parser(self.accepted_stake, "accepted_stake")
             if odds <= 1:
                 raise ValueError("accepted_odds must be > 1")
             object.__setattr__(self, "accepted_odds", odds)
@@ -344,18 +333,14 @@ class PaperExecutionEvidenceRecord:
         elif self.accepted_odds is not None or self.accepted_stake is not None:
             raise ValueError("rejected/unknown evidence cannot claim accepted odds/stake")
 
-    def to_dict(
-        self,
-        _preflight=_CANONICAL_DECIMAL_PREFLIGHT,
-        _preflight_code=_CANONICAL_DECIMAL_PREFLIGHT_CODE,
-        _decimal_formatter=_CANONICAL_DECIMAL_TEXT_FORMATTER,
-        _decimal_formatter_code=_CANONICAL_DECIMAL_TEXT_FORMATTER_CODE,
-    ) -> dict[str, Any]:
-        if _preflight.__code__ is not _preflight_code:
+    def to_dict(self) -> dict[str, Any]:
+        preflight = _CANONICAL_DECIMAL_PREFLIGHT
+        decimal_formatter = _CANONICAL_DECIMAL_TEXT_FORMATTER
+        if preflight.__code__ is not _CANONICAL_DECIMAL_PREFLIGHT_CODE:
             raise ValueError("decimal preflight authority changed")
-        if _decimal_formatter.__code__ is not _decimal_formatter_code:
+        if decimal_formatter.__code__ is not _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE:
             raise ValueError("decimal formatter authority changed")
-        _preflight(self.accepted_odds, self.accepted_stake)
+        preflight(self.accepted_odds, self.accepted_stake)
         return {
             "action_id": self.action_id,
             "bookmaker_id": self.bookmaker_id,
@@ -370,10 +355,10 @@ class PaperExecutionEvidenceRecord:
             "evidence_grade": self.evidence_grade.value,
             "evidence_source": self.evidence_source,
             "accepted_odds": (
-                None if self.accepted_odds is None else _decimal_formatter(self.accepted_odds)
+                None if self.accepted_odds is None else decimal_formatter(self.accepted_odds)
             ),
             "accepted_stake": (
-                None if self.accepted_stake is None else _decimal_formatter(self.accepted_stake)
+                None if self.accepted_stake is None else decimal_formatter(self.accepted_stake)
             ),
             "suspended": self.suspended,
             "reason": self.reason,
@@ -469,12 +454,9 @@ class ObservedPaperExecution:
     suspended: bool = False
     reason: str = "observed execution evidence"
 
-    def __post_init__(
-        self,
-        _decimal_parser=_CANONICAL_DECIMAL_PARSER,
-        _decimal_parser_code=_CANONICAL_DECIMAL_PARSER_CODE,
-    ) -> None:
-        if _decimal_parser.__code__ is not _decimal_parser_code:
+    def __post_init__(self) -> None:
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
             raise ValueError("decimal parser authority changed")
         _text(self.action_id, "action_id")
         _timestamp(self.observed_at, "observed_at")
@@ -493,8 +475,8 @@ class ObservedPaperExecution:
         if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
             if self.accepted_odds is None or self.accepted_stake is None:
                 raise ValueError("accepted/partial observation requires odds and stake")
-            odds = _decimal_parser(self.accepted_odds, "accepted_odds")
-            stake = _decimal_parser(self.accepted_stake, "accepted_stake")
+            odds = decimal_parser(self.accepted_odds, "accepted_odds")
+            stake = decimal_parser(self.accepted_stake, "accepted_stake")
             if odds <= 1:
                 raise ValueError("accepted_odds must be > 1")
             object.__setattr__(self, "accepted_odds", odds)
@@ -534,12 +516,9 @@ class PaperLegAttempt:
     model_fingerprint: str
     reason: str
 
-    def __post_init__(
-        self,
-        _decimal_parser=_CANONICAL_DECIMAL_PARSER,
-        _decimal_parser_code=_CANONICAL_DECIMAL_PARSER_CODE,
-    ) -> None:
-        if _decimal_parser.__code__ is not _decimal_parser_code:
+    def __post_init__(self) -> None:
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
             raise ValueError("decimal parser authority changed")
         for name in (
             "attempt_id",
@@ -560,14 +539,14 @@ class PaperLegAttempt:
             _text(getattr(self, name), name)
         if type(self.sequence) is not int or self.sequence < 0:
             raise ValueError("sequence must be a non-negative int")
-        decision_odds = _decimal_parser(self.decision_odds, "decision_odds")
+        decision_odds = decimal_parser(self.decision_odds, "decision_odds")
         if decision_odds <= 1:
             raise ValueError("decision_odds must be > 1")
         object.__setattr__(self, "decision_odds", decision_odds)
         object.__setattr__(
             self,
             "requested_stake",
-            _decimal_parser(self.requested_stake, "requested_stake"),
+            decimal_parser(self.requested_stake, "requested_stake"),
         )
         decision_time = _timestamp(self.decision_observed_at, "decision_observed_at")
         execution_time = _timestamp(self.execution_observed_at, "execution_observed_at")
@@ -594,10 +573,10 @@ class PaperLegAttempt:
         if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
             if self.execution_odds is None or self.execution_stake is None:
                 raise ValueError("accepted/partial attempt requires execution odds and stake")
-            execution_odds = _decimal_parser(self.execution_odds, "execution_odds")
+            execution_odds = decimal_parser(self.execution_odds, "execution_odds")
             if execution_odds <= 1:
                 raise ValueError("execution_odds must be > 1")
-            execution_stake = _decimal_parser(self.execution_stake, "execution_stake")
+            execution_stake = decimal_parser(self.execution_stake, "execution_stake")
             if execution_stake > self.requested_stake:
                 raise ValueError("execution_stake cannot exceed requested_stake")
             if self.outcome is PaperAttemptOutcome.ACCEPTED and execution_stake != self.requested_stake:
@@ -609,18 +588,14 @@ class PaperLegAttempt:
         elif self.execution_odds is not None or self.execution_stake is not None:
             raise ValueError("rejected/unknown attempt cannot claim execution odds/stake")
 
-    def to_dict(
-        self,
-        _preflight=_CANONICAL_DECIMAL_PREFLIGHT,
-        _preflight_code=_CANONICAL_DECIMAL_PREFLIGHT_CODE,
-        _decimal_formatter=_CANONICAL_DECIMAL_TEXT_FORMATTER,
-        _decimal_formatter_code=_CANONICAL_DECIMAL_TEXT_FORMATTER_CODE,
-    ) -> dict[str, Any]:
-        if _preflight.__code__ is not _preflight_code:
+    def to_dict(self) -> dict[str, Any]:
+        preflight = _CANONICAL_DECIMAL_PREFLIGHT
+        decimal_formatter = _CANONICAL_DECIMAL_TEXT_FORMATTER
+        if preflight.__code__ is not _CANONICAL_DECIMAL_PREFLIGHT_CODE:
             raise ValueError("decimal preflight authority changed")
-        if _decimal_formatter.__code__ is not _decimal_formatter_code:
+        if decimal_formatter.__code__ is not _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE:
             raise ValueError("decimal formatter authority changed")
-        _preflight(
+        preflight(
             self.decision_odds,
             self.requested_stake,
             self.execution_odds,
@@ -639,18 +614,18 @@ class PaperLegAttempt:
             "selection_id": self.selection_id,
             "side": self.side,
             "decision_quote_id": self.decision_quote_id,
-            "decision_odds": _decimal_formatter(self.decision_odds),
-            "requested_stake": _decimal_formatter(self.requested_stake),
+            "decision_odds": decimal_formatter(self.decision_odds),
+            "requested_stake": decimal_formatter(self.requested_stake),
             "decision_observed_at": self.decision_observed_at,
             "execution_observed_at": self.execution_observed_at,
             "delay_ms": self.delay_ms,
             "quote_age_ms": self.quote_age_ms,
             "outcome": self.outcome.value,
             "execution_odds": (
-                None if self.execution_odds is None else _decimal_formatter(self.execution_odds)
+                None if self.execution_odds is None else decimal_formatter(self.execution_odds)
             ),
             "execution_stake": (
-                None if self.execution_stake is None else _decimal_formatter(self.execution_stake)
+                None if self.execution_stake is None else decimal_formatter(self.execution_stake)
             ),
             "suspended": self.suspended,
             "evidence_grade": self.evidence_grade.value,
@@ -725,12 +700,9 @@ class PaperExecutionRun:
     worst_case_exposure: Decimal
     completed: bool
 
-    def __post_init__(
-        self,
-        _decimal_parser=_CANONICAL_DECIMAL_PARSER,
-        _decimal_parser_code=_CANONICAL_DECIMAL_PARSER_CODE,
-    ) -> None:
-        if _decimal_parser.__code__ is not _decimal_parser_code:
+    def __post_init__(self) -> None:
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
             raise ValueError("decimal parser authority changed")
         for name in ("run_id", "trigger_id", "plan_id", "plan_fingerprint", "model_fingerprint"):
             _text(getattr(self, name), name)
@@ -746,7 +718,7 @@ class PaperExecutionRun:
         object.__setattr__(
             self,
             "worst_case_exposure",
-            _decimal_parser(self.worst_case_exposure, "worst_case_exposure", allow_zero=True),
+            decimal_parser(self.worst_case_exposure, "worst_case_exposure", allow_zero=True),
         )
         if type(self.completed) is not bool:
             raise ValueError("completed must be bool")
@@ -1089,15 +1061,14 @@ class PaperExecutionLedger:
         pending_action_ids: tuple[str, ...],
         recovery_decision: RecoveryDecision,
         worst_case_exposure: Decimal,
-        _decimal_formatter=_CANONICAL_DECIMAL_TEXT_FORMATTER,
-        _decimal_formatter_code=_CANONICAL_DECIMAL_TEXT_FORMATTER_CODE,
     ) -> None:
-        if _decimal_formatter.__code__ is not _decimal_formatter_code:
+        decimal_formatter = _CANONICAL_DECIMAL_TEXT_FORMATTER
+        if decimal_formatter.__code__ is not _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE:
             raise ValueError("decimal formatter authority changed")
         payload = {
             "pending_action_ids": list(pending_action_ids),
             "recovery_decision": recovery_decision.value,
-            "worst_case_exposure": _decimal_formatter(worst_case_exposure),
+            "worst_case_exposure": decimal_formatter(worst_case_exposure),
         }
         self._append_event(
             event_type="RUN_COMPLETED",

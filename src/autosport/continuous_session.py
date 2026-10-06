@@ -756,6 +756,7 @@ class _ContinuousSessionState:
         if type(raw) is not list:
             raise ContinuousSessionError("settlement_evidence must be a list")
         values: list[dict[str, str]] = []
+        evidence_ids: set[str] = set()
         for item in raw:
             if type(item) is not dict:
                 raise ContinuousSessionError(
@@ -773,7 +774,15 @@ class _ContinuousSessionState:
                 )
             _text(item["event_identity"], "settlement_evidence event_identity")
             _text(item["settlement_ref"], "settlement_evidence settlement_ref")
-            _text(item["evidence_id"], "settlement_evidence evidence_id")
+            evidence_id = _text(
+                item["evidence_id"],
+                "settlement_evidence evidence_id",
+            )
+            if evidence_id in evidence_ids:
+                raise ContinuousSessionError(
+                    "settlement_evidence evidence_id values must be unique"
+                )
+            evidence_ids.add(evidence_id)
             _sha256(item["evidence_sha256"], "settlement_evidence evidence_sha256")
             _instant(item["available_at"], "settlement_evidence available_at")
             values.append(

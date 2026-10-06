@@ -379,6 +379,28 @@ class RuntimeResourceCoverageTruthTests(unittest.TestCase):
 
 
 
+
+
+    def test_headless_idle_scenario_declares_only_uninstantiated_classes_not_applicable(
+        self,
+    ) -> None:
+        namespace = self._runner_namespace()
+        not_applicable = tuple(
+            namespace["_SCENARIO_NOT_APPLICABLE_RESOURCE_CLASSES"]
+        )
+
+        self.assertEqual(
+            set(not_applicable),
+            {
+                "provider_transports",
+                "timers_scheduled_jobs",
+                "subprocesses",
+            },
+        )
+        self.assertNotIn("subscriptions_listeners", not_applicable)
+        self.assertNotIn("persistence_handles", not_applicable)
+        self.assertNotIn("internal_queues", not_applicable)
+
     def test_workspace_handle_coverage_requires_windows_probe_evidence(self) -> None:
         namespace = self._runner_namespace()
         base_observed = tuple(namespace["_BASE_OBSERVED_RESOURCE_CLASSES"])

@@ -3962,18 +3962,21 @@ class PersistentLiveDecisionLoop:
                     raise DecisionLedgerIntegrityError(
                         "reserved live decision identity conflicts with durable evidence"
                     )
-                if existing.payload.get("paper_execution") != expected_execution_payload:
+                detached_existing_payload = existing.to_dict()["payload"]
+                if (
+                    detached_existing_payload.get("paper_execution")
+                    != expected_execution_payload
+                ):
                     raise DecisionLedgerIntegrityError(
                         "durable live decision execution-adoption evidence changed"
                     )
                 if canonical_actionability_wait is not None and (
-                    existing.payload.get("actionability_wait_evidence")
+                    detached_existing_payload.get("actionability_wait_evidence")
                     != [dict(item) for item in canonical_actionability_wait]
                 ):
                     raise DecisionLedgerIntegrityError(
                         "durable actionability WAIT evidence changed"
                     )
-                detached_existing_payload = existing.to_dict()["payload"]
                 existing_affected_raw = detached_existing_payload.get(
                     "affected_input_ids"
                 )
@@ -4017,7 +4020,9 @@ class PersistentLiveDecisionLoop:
                         "durable actionability WAIT evidence references an "
                         "unaffected input"
                     )
-                existing_health_raw = existing.payload.get("health_boundaries")
+                existing_health_raw = detached_existing_payload.get(
+                    "health_boundaries"
+                )
                 if existing_health_raw is None:
                     existing_health_boundaries = None
                 else:
@@ -5909,7 +5914,7 @@ class PersistentLiveDecisionLoop:
                     ]
                 )
                 if (
-                    existing.payload.get("health_boundaries")
+                    detached_payload.get("health_boundaries")
                     != expected_health_boundaries
                 ):
                     raise DecisionLedgerIntegrityError(
@@ -5972,8 +5977,8 @@ class PersistentLiveDecisionLoop:
             != progress.market_state_sha256
             or existing.payload.get("decision_context_sha256")
             != progress.decision_context_sha256
-            or existing.payload.get("affected_input_ids")
-            != progress.affected_input_ids
+            or detached_payload.get("affected_input_ids")
+            != list(progress.affected_input_ids)
             or existing.payload.get("plan_sha256") != progress.plan_sha256
             or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
             != progress.decision_id

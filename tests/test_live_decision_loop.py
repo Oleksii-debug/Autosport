@@ -1024,6 +1024,54 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+    def test_health_aware_committed_decision_restarts_from_detached_ledger_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            first = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=_EmptyProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertIsNotNone(record.payload["health_boundaries"])
+            first.close()
+
+            resumed = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=_EmptyProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            self.assertEqual(resumed.dependencies.input_ids, ("input-a",))
+            resumed.close()
+
     def test_committed_health_horizon_tamper_conflicts_with_decision_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

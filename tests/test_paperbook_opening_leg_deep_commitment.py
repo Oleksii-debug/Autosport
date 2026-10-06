@@ -937,6 +937,66 @@ def test_inexact_settlement_fails_before_economic_mutation() -> None:
     assert ticket.payout == Decimal("0")
 
 
+def _closure_callable_by_qualname(root, suffix: str):
+    seen: set[int] = set()
+    pending = [root]
+    while pending:
+        candidate = pending.pop()
+        identity = id(candidate)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        qualname = getattr(candidate, "__qualname__", "")
+        if qualname.endswith(suffix):
+            return candidate
+        for cell in getattr(candidate, "__closure__", None) or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if callable(value):
+                pending.append(value)
+    raise AssertionError(f"closure callable not found: {suffix}")
+
+
+def test_extracted_hidden_writer_wrappers_cannot_mint_authority() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    lifecycle_before = tuple(book._lifecycle)
+
+    record_opening = _closure_callable_by_qualname(
+        PaperBook.open_ticket,
+        "_seal_paperbook_open_transition_authority.<locals>.record_opening",
+    )
+    advance_open = _closure_callable_by_qualname(
+        PaperBook.open_ticket,
+        "_seal_paperbook_open_transition_authority.<locals>.advance_open",
+    )
+    advance_settle = _closure_callable_by_qualname(
+        PaperBook.settle,
+        "_seal_paperbook_settle_transition_authority.<locals>.advance_settle",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="opening writer wrapper requires trusted open_ticket",
+    ):
+        record_opening(book, ticket)
+    with pytest.raises(
+        ValueError,
+        match="causal-open writer wrapper requires trusted open_ticket",
+    ):
+        advance_open(book, ticket.ticket_id)
+    with pytest.raises(
+        ValueError,
+        match="causal-settle writer wrapper requires trusted settle",
+    ):
+        advance_settle(book, ticket.ticket_id, (), (), _TS)
+
+    assert tuple(book._lifecycle) == lifecycle_before
+    assert book.committed_stake == Decimal("10")
+
+
 @pytest.mark.parametrize(
     ("registrar_name", "message"),
     (

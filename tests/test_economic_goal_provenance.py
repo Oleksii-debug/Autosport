@@ -332,3 +332,23 @@ def test_public_provenance_operations_ignore_rebound_bound_implementation_aliase
     evidence = provenance_for(goal)
     assert evidence == expected
     verify_provenance(goal, evidence)
+
+
+def test_verification_ignores_rebound_provenance_field_descriptor(monkeypatch) -> None:
+    goal = _goal()
+    evidence = provenance_for(goal)
+    expected_sha = evidence.contract_sha256
+    object.__setattr__(evidence, "contract_sha256", "0" * 64)
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return expected_sha
+
+    monkeypatch.setattr(
+        EconomicGoalProvenance,
+        "contract_sha256",
+        ForgedDescriptor(),
+    )
+
+    with pytest.raises(EconomicGoalProvenanceError, match="contract_sha256 mismatch"):
+        verify_provenance(goal, evidence)

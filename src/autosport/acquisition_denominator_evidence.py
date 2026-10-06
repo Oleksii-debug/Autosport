@@ -566,6 +566,10 @@ def _install_acquisition_denominator_authority() -> None:
     raw_cycle_reader = _cycle_evidence
     raw_resolve_reader_code = raw_resolve_reader.__code__
     raw_cycle_reader_code = raw_cycle_reader.__code__
+    raw_classify = _classify_as_of_freeze
+    raw_classify_code = raw_classify.__code__
+    raw_instant = _instant
+    raw_instant_code = raw_instant.__code__
     exact_getattr = getattr
     exact_globals = globals
     exact_id = id
@@ -602,6 +606,10 @@ def _install_acquisition_denominator_authority() -> None:
     )
     dispatch_cycle_marker = "__AUTOSPORT_ACQ_DISPATCH_CYCLE_ANCHOR__"
     dispatch_cycle_code_marker = "__AUTOSPORT_ACQ_DISPATCH_CYCLE_CODE_ANCHOR__"
+    dispatch_classify_marker = "__AUTOSPORT_ACQ_DISPATCH_CLASSIFY_ANCHOR__"
+    dispatch_classify_code_marker = "__AUTOSPORT_ACQ_DISPATCH_CLASSIFY_CODE_ANCHOR__"
+    dispatch_instant_marker = "__AUTOSPORT_ACQ_DISPATCH_INSTANT_ANCHOR__"
+    dispatch_instant_code_marker = "__AUTOSPORT_ACQ_DISPATCH_INSTANT_CODE_ANCHOR__"
     dispatch_getattr_marker = "__AUTOSPORT_ACQ_DISPATCH_GETATTR_ANCHOR__"
     dispatch_globals_marker = "__AUTOSPORT_ACQ_DISPATCH_GLOBALS_ANCHOR__"
 
@@ -617,6 +625,10 @@ def _install_acquisition_denominator_authority() -> None:
         anchored_cycle_reader_code = (
             "__AUTOSPORT_ACQ_DISPATCH_CYCLE_CODE_ANCHOR__"
         )
+        anchored_classify = "__AUTOSPORT_ACQ_DISPATCH_CLASSIFY_ANCHOR__"
+        anchored_classify_code = "__AUTOSPORT_ACQ_DISPATCH_CLASSIFY_CODE_ANCHOR__"
+        anchored_instant = "__AUTOSPORT_ACQ_DISPATCH_INSTANT_ANCHOR__"
+        anchored_instant_code = "__AUTOSPORT_ACQ_DISPATCH_INSTANT_CODE_ANCHOR__"
         anchored_getattr = "__AUTOSPORT_ACQ_DISPATCH_GETATTR_ANCHOR__"
         anchored_globals = "__AUTOSPORT_ACQ_DISPATCH_GLOBALS_ANCHOR__"
 
@@ -627,6 +639,10 @@ def _install_acquisition_denominator_authority() -> None:
             or raw_resolve_reader_code is not anchored_resolve_reader_code
             or raw_cycle_reader is not anchored_cycle_reader
             or raw_cycle_reader_code is not anchored_cycle_reader_code
+            or raw_classify is not anchored_classify
+            or raw_classify_code is not anchored_classify_code
+            or raw_instant is not anchored_instant
+            or raw_instant_code is not anchored_instant_code
             or exact_getattr is not anchored_getattr
             or exact_globals is not anchored_globals
         ):
@@ -646,6 +662,15 @@ def _install_acquisition_denominator_authority() -> None:
             is not anchored_cycle_reader_code
         ):
             raise Error("canonical acquisition reader dispatch changed")
+        if (
+            anchored_globals().get("_classify_as_of_freeze") is not anchored_classify
+            or anchored_getattr(anchored_classify, "__code__", None)
+            is not anchored_classify_code
+            or anchored_globals().get("_instant") is not anchored_instant
+            or anchored_getattr(anchored_instant, "__code__", None)
+            is not anchored_instant_code
+        ):
+            raise Error("canonical acquisition semantic dispatch changed")
 
     anchor_code_constants(
         require_canonical_reader_dispatch,
@@ -657,6 +682,10 @@ def _install_acquisition_denominator_authority() -> None:
             (dispatch_resolve_code_marker, raw_resolve_reader_code),
             (dispatch_cycle_marker, raw_cycle_reader),
             (dispatch_cycle_code_marker, raw_cycle_reader_code),
+            (dispatch_classify_marker, raw_classify),
+            (dispatch_classify_code_marker, raw_classify_code),
+            (dispatch_instant_marker, raw_instant),
+            (dispatch_instant_code_marker, raw_instant_code),
             (dispatch_getattr_marker, exact_getattr),
             (dispatch_globals_marker, exact_globals),
         ),

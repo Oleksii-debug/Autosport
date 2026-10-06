@@ -789,3 +789,39 @@ def test_sidecar_serializer_and_publisher_ignore_runtime_rebinding(monkeypatch) 
         assert payload["schema"] == "autosport.continuous_session.operational_error"
         assert payload["schema_version"] == 2
         assert payload["last_error_code"] == "CANONICAL_FAILURE"
+
+
+def test_invalid_sidecar_success_timestamp_is_normalized_to_domain_error() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+        error_path = root / "continuous_session.json.operational_error.json"
+        payload = json.loads(error_path.read_text(encoding="utf-8"))
+        payload["observed_last_success_at"] = "not-an-instant"
+        error_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "invalid field" in str(exc)
+        else:
+            raise AssertionError("invalid observed_last_success_at escaped validation")
+
+
+def test_invalid_sidecar_error_code_is_normalized_to_domain_error() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+        error_path = root / "continuous_session.json.operational_error.json"
+        payload = json.loads(error_path.read_text(encoding="utf-8"))
+        payload["last_error_code"] = " untrimmed "
+        error_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "invalid field" in str(exc)
+        else:
+            raise AssertionError("invalid last_error_code escaped validation")

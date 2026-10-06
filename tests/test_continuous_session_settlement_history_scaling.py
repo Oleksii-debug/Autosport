@@ -2601,3 +2601,76 @@ def test_bootstrap_rejects_runtime_path_exists_rebinding(monkeypatch) -> None:
             assert "bootstrap authority changed" in str(exc)
         else:
             raise AssertionError("runtime-rebound Path.exists was accepted")
+
+
+def test_source_projection_accepts_exact_expected_predecessor() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        state.record_source_projection(
+            deltas=(_projection_delta(1),),
+            backlog=False,
+            expected_after_delta_id=None,
+        )
+        assert state.snapshot().source_state_delta_id == "delta-1"
+
+        state.record_source_projection(
+            deltas=(_projection_delta(2),),
+            backlog=False,
+            expected_after_delta_id="delta-1",
+        )
+        assert state.snapshot().source_state_delta_id == "delta-2"
+
+
+def test_source_projection_rejects_stale_expected_predecessor_without_write() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        first = _state_with_history(root, _SMALL_HISTORY)
+        second = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        first.record_source_projection(
+            deltas=(_projection_delta(1),),
+            backlog=False,
+            expected_after_delta_id=None,
+        )
+        before = (root / "continuous_session.json").read_bytes()
+
+        try:
+            second.record_source_projection(
+                deltas=(_projection_delta(2),),
+                backlog=False,
+                expected_after_delta_id=None,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "predecessor changed" in str(exc)
+        else:
+            raise AssertionError("stale source projection predecessor was accepted")
+
+        assert (root / "continuous_session.json").read_bytes() == before
+        assert first.snapshot().source_state_delta_id == "delta-1"
+
+
+def test_source_projection_rejects_invalid_expected_predecessor_identity() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        before = (root / "continuous_session.json").read_bytes()
+
+        try:
+            state.record_source_projection(
+                deltas=(_projection_delta(1),),
+                backlog=False,
+                expected_after_delta_id=" bad-id ",
+            )
+        except ValueError as exc:
+            assert "expected_after_delta_id" in str(exc)
+        else:
+            raise AssertionError("invalid projection predecessor identity was accepted")
+
+        assert (root / "continuous_session.json").read_bytes() == before

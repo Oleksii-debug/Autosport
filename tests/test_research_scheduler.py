@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from datetime import datetime, timezone
 
 from tests.test_research_curriculum import _candidate, _workspace
@@ -66,6 +67,30 @@ class FakeTriggerSink:
         return receipt
 
 
+class BlockingTriggerSink(FakeTriggerSink):
+    """Expose whether duplicate scheduler instances enter the sink concurrently."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._entry_lock = threading.Lock()
+        self.entry_count = 0
+        self.first_entered = threading.Event()
+        self.duplicate_entered = threading.Event()
+        self.release_first = threading.Event()
+
+    def accept(self, event):
+        with self._entry_lock:
+            self.entry_count += 1
+            entry_number = self.entry_count
+        if entry_number == 1:
+            self.first_entered.set()
+            if not self.release_first.wait(timeout=5):
+                raise RuntimeError("timed out waiting to release first trigger delivery")
+        else:
+            self.duplicate_entered.set()
+        return super().accept(event)
+
+
 def _schedule(
     *,
     schedule_id: str = "drift-main",
@@ -106,6 +131,46 @@ def test_exact_fire_persists_acceptance_and_restart_does_not_duplicate(tmp_path)
     reopened = ResearchScheduler(path, sink)
     assert reopened.tick(now="2026-09-19T10:00:00Z").action is TickAction.IDLE
     assert len(sink.calls) == 1
+
+
+def test_duplicate_scheduler_instances_serialize_pending_occurrence_delivery(tmp_path):
+    path = tmp_path / "research-scheduler.json"
+    sink = BlockingTriggerSink()
+    primary = ResearchScheduler.initialize_pristine(path, sink)
+    primary.add_schedule(_schedule())
+    duplicate = ResearchScheduler(path, sink)
+    results = []
+    errors = []
+
+    def run_tick(scheduler):
+        try:
+            results.append(scheduler.tick(now="2026-09-19T10:00:00Z"))
+        except BaseException as exc:  # keep worker failure observable to the test thread
+            errors.append(exc)
+
+    first = threading.Thread(target=run_tick, args=(primary,))
+    second = threading.Thread(target=run_tick, args=(duplicate,))
+    first.start()
+    assert sink.first_entered.wait(timeout=5)
+
+    second.start()
+    duplicate_entered_while_first_is_blocked = sink.duplicate_entered.wait(
+        timeout=0.5
+    )
+    sink.release_first.set()
+
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert duplicate_entered_while_first_is_blocked is False
+    assert sink.entry_count == 1
+    assert len(sink.calls) == 1
+    assert sorted(result.action.value for result in results) == [
+        TickAction.DELIVERED.value,
+        TickAction.IDLE.value,
+    ]
 
 
 def test_crash_after_acceptance_replays_identical_pending_event(tmp_path):
@@ -529,6 +594,21 @@ def test_curriculum_wake_freezes_population_and_dispatches_once(tmp_path):
         remaining_budget_units=8,
     )
     assert again.action is TickAction.IDLE
+    assert len(supervisor.list_runs()) == 1
+
+    with pytest.raises(ResearchSchedulerError, match="curriculum wake identity conflict"):
+        reopened.queue_curriculum_wake(
+            curriculum,
+            candidates,
+            purpose=CurriculumPurpose.CURRICULUM,
+            selector_policy_version="night-v1",
+            as_of="2026-09-19T03:20:00Z",
+            seed=17,
+            budget_units=2,
+            max_concurrency=1,
+            active_concurrency=0,
+            remaining_budget_units=8,
+        )
     assert len(supervisor.list_runs()) == 1
 
 

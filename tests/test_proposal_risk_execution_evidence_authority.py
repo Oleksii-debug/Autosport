@@ -4630,83 +4630,82 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
         finally:
             cash_floor_authority._HELPER_WITNESSES_EXPECTED = original
 
+def test_cash_floor_rejects_risk_portfolio_hash_helper_substitution(self) -> None:
+    bindings = self._bindings()
+    self._issue(bindings)
+    original = cash_floor_authority._risk_module._sha256_payload
+    try:
+        cash_floor_authority._risk_module._sha256_payload = (
+            lambda payload: "0" * 64
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "dispatch root changed",
+        ):
+            self._resolve(bindings)
+    finally:
+        cash_floor_authority._risk_module._sha256_payload = original
+
+def test_cash_floor_rejects_paperbook_state_validator_substitution(self) -> None:
+    bindings = self._bindings()
+    self._issue(bindings)
+    original = PaperBook.__dict__["_validate_loaded_state"]
+    try:
+        PaperBook._validate_loaded_state = classmethod(
+            lambda cls, book: None
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "dispatch root changed",
+        ):
+            self._resolve(bindings)
+    finally:
+        setattr(PaperBook, "_validate_loaded_state", original)
+
+def test_cash_floor_rejects_lifecycle_validator_substitution(self) -> None:
+    bindings = self._bindings()
+    self._issue(bindings)
+    original = PaperBook.__dict__["_validate_lifecycle_entry"]
+    try:
+        PaperBook._validate_lifecycle_entry = classmethod(
+            lambda cls, entry: entry
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "dispatch root changed",
+        ):
+            self._resolve(bindings)
+    finally:
+        setattr(PaperBook, "_validate_lifecycle_entry", original)
+
+def test_cash_floor_rejects_risk_module_paperbook_rebinding(self) -> None:
+    bindings = self._bindings()
+    self._issue(bindings)
+    original = cash_floor_authority._risk_module.PaperBook
+    try:
+        cash_floor_authority._risk_module.PaperBook = object
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "dispatch root changed",
+        ):
+            self._resolve(bindings)
+    finally:
+        cash_floor_authority._risk_module.PaperBook = original
+
+
+def test_cash_floor_rejects_json_encoder_substitution(self) -> None:
+    bindings = self._bindings()
+    self._issue(bindings)
+    original = cash_floor_authority.json.JSONEncoder
+    try:
+        cash_floor_authority.json.JSONEncoder = object
+        with self.assertRaisesRegex(
+            ProductProposalRiskCounterfactualCashFloorError,
+            "dispatch root changed",
+        ):
+            self._resolve(bindings)
+    finally:
+        cash_floor_authority.json.JSONEncoder = original
+
 if __name__ == "__main__":
     unittest.main()
-
-
-    def test_cash_floor_rejects_risk_portfolio_hash_helper_substitution(self) -> None:
-        bindings = self._bindings()
-        self._issue(bindings)
-        original = cash_floor_authority._risk_module._sha256_payload
-        try:
-            cash_floor_authority._risk_module._sha256_payload = (
-                lambda payload: "0" * 64
-            )
-            with self.assertRaisesRegex(
-                ProductProposalRiskCounterfactualCashFloorError,
-                "dispatch root changed",
-            ):
-                self._resolve(bindings)
-        finally:
-            cash_floor_authority._risk_module._sha256_payload = original
-
-    def test_cash_floor_rejects_paperbook_state_validator_substitution(self) -> None:
-        bindings = self._bindings()
-        self._issue(bindings)
-        original = PaperBook.__dict__["_validate_loaded_state"]
-        try:
-            PaperBook._validate_loaded_state = classmethod(
-                lambda cls, book: None
-            )
-            with self.assertRaisesRegex(
-                ProductProposalRiskCounterfactualCashFloorError,
-                "dispatch root changed",
-            ):
-                self._resolve(bindings)
-        finally:
-            setattr(PaperBook, "_validate_loaded_state", original)
-
-    def test_cash_floor_rejects_lifecycle_validator_substitution(self) -> None:
-        bindings = self._bindings()
-        self._issue(bindings)
-        original = PaperBook.__dict__["_validate_lifecycle_entry"]
-        try:
-            PaperBook._validate_lifecycle_entry = classmethod(
-                lambda cls, entry: entry
-            )
-            with self.assertRaisesRegex(
-                ProductProposalRiskCounterfactualCashFloorError,
-                "dispatch root changed",
-            ):
-                self._resolve(bindings)
-        finally:
-            setattr(PaperBook, "_validate_lifecycle_entry", original)
-
-    def test_cash_floor_rejects_risk_module_paperbook_rebinding(self) -> None:
-        bindings = self._bindings()
-        self._issue(bindings)
-        original = cash_floor_authority._risk_module.PaperBook
-        try:
-            cash_floor_authority._risk_module.PaperBook = object
-            with self.assertRaisesRegex(
-                ProductProposalRiskCounterfactualCashFloorError,
-                "dispatch root changed",
-            ):
-                self._resolve(bindings)
-        finally:
-            cash_floor_authority._risk_module.PaperBook = original
-
-
-    def test_cash_floor_rejects_json_encoder_substitution(self) -> None:
-        bindings = self._bindings()
-        self._issue(bindings)
-        original = cash_floor_authority.json.JSONEncoder
-        try:
-            cash_floor_authority.json.JSONEncoder = object
-            with self.assertRaisesRegex(
-                ProductProposalRiskCounterfactualCashFloorError,
-                "dispatch root changed",
-            ):
-                self._resolve(bindings)
-        finally:
-            cash_floor_authority.json.JSONEncoder = original

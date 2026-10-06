@@ -2360,7 +2360,7 @@ def _place_action_with_final_durable_authority(
                 or durable_attempt.action != action
                 or durable_attempt.provider_order_ref != provider_ref
                 or durable_attempt.submitted_at != send_at
-                or durable_attempt.request_sha256 != request_sha256
+                or durable_attempt.submitted_request_sha256 != request_sha256
             ):
                 raise BetfairFinalConfirmationDenied(
                     "durable Betfair submission identity changed before provider send"

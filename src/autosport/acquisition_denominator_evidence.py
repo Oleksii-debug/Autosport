@@ -570,6 +570,16 @@ def _install_acquisition_denominator_authority() -> None:
     raw_classify_code = raw_classify.__code__
     raw_instant = _instant
     raw_instant_code = raw_instant.__code__
+    raw_digest = _digest
+    raw_digest_code = raw_digest.__code__
+    raw_canonical_json = _canonical_json
+    raw_canonical_json_code = raw_canonical_json.__code__
+    evidence_type = AcquisitionDenominatorEvidence
+    evidence_issue_descriptor = inspect.getattr_static(evidence_type, "_issue")
+    evidence_issue_code = evidence_issue_descriptor.__func__.__code__
+    evidence_payload_descriptor = inspect.getattr_static(evidence_type, "to_payload")
+    evidence_payload_code = evidence_payload_descriptor.__code__
+    exact_static_getattr = inspect.getattr_static
     exact_getattr = getattr
     exact_globals = globals
     exact_id = id
@@ -610,6 +620,16 @@ def _install_acquisition_denominator_authority() -> None:
     dispatch_classify_code_marker = "__AUTOSPORT_ACQ_DISPATCH_CLASSIFY_CODE_ANCHOR__"
     dispatch_instant_marker = "__AUTOSPORT_ACQ_DISPATCH_INSTANT_ANCHOR__"
     dispatch_instant_code_marker = "__AUTOSPORT_ACQ_DISPATCH_INSTANT_CODE_ANCHOR__"
+    dispatch_digest_marker = "__AUTOSPORT_ACQ_DISPATCH_DIGEST_ANCHOR__"
+    dispatch_digest_code_marker = "__AUTOSPORT_ACQ_DISPATCH_DIGEST_CODE_ANCHOR__"
+    dispatch_json_marker = "__AUTOSPORT_ACQ_DISPATCH_JSON_ANCHOR__"
+    dispatch_json_code_marker = "__AUTOSPORT_ACQ_DISPATCH_JSON_CODE_ANCHOR__"
+    dispatch_evidence_type_marker = "__AUTOSPORT_ACQ_DISPATCH_EVIDENCE_TYPE_ANCHOR__"
+    dispatch_issue_descriptor_marker = "__AUTOSPORT_ACQ_DISPATCH_ISSUE_DESCRIPTOR_ANCHOR__"
+    dispatch_issue_code_marker = "__AUTOSPORT_ACQ_DISPATCH_ISSUE_CODE_ANCHOR__"
+    dispatch_payload_descriptor_marker = "__AUTOSPORT_ACQ_DISPATCH_PAYLOAD_DESCRIPTOR_ANCHOR__"
+    dispatch_payload_code_marker = "__AUTOSPORT_ACQ_DISPATCH_PAYLOAD_CODE_ANCHOR__"
+    dispatch_static_getattr_marker = "__AUTOSPORT_ACQ_DISPATCH_STATIC_GETATTR_ANCHOR__"
     dispatch_getattr_marker = "__AUTOSPORT_ACQ_DISPATCH_GETATTR_ANCHOR__"
     dispatch_globals_marker = "__AUTOSPORT_ACQ_DISPATCH_GLOBALS_ANCHOR__"
 
@@ -629,6 +649,16 @@ def _install_acquisition_denominator_authority() -> None:
         anchored_classify_code = "__AUTOSPORT_ACQ_DISPATCH_CLASSIFY_CODE_ANCHOR__"
         anchored_instant = "__AUTOSPORT_ACQ_DISPATCH_INSTANT_ANCHOR__"
         anchored_instant_code = "__AUTOSPORT_ACQ_DISPATCH_INSTANT_CODE_ANCHOR__"
+        anchored_digest = "__AUTOSPORT_ACQ_DISPATCH_DIGEST_ANCHOR__"
+        anchored_digest_code = "__AUTOSPORT_ACQ_DISPATCH_DIGEST_CODE_ANCHOR__"
+        anchored_json = "__AUTOSPORT_ACQ_DISPATCH_JSON_ANCHOR__"
+        anchored_json_code = "__AUTOSPORT_ACQ_DISPATCH_JSON_CODE_ANCHOR__"
+        anchored_evidence_type = "__AUTOSPORT_ACQ_DISPATCH_EVIDENCE_TYPE_ANCHOR__"
+        anchored_issue_descriptor = "__AUTOSPORT_ACQ_DISPATCH_ISSUE_DESCRIPTOR_ANCHOR__"
+        anchored_issue_code = "__AUTOSPORT_ACQ_DISPATCH_ISSUE_CODE_ANCHOR__"
+        anchored_payload_descriptor = "__AUTOSPORT_ACQ_DISPATCH_PAYLOAD_DESCRIPTOR_ANCHOR__"
+        anchored_payload_code = "__AUTOSPORT_ACQ_DISPATCH_PAYLOAD_CODE_ANCHOR__"
+        anchored_static_getattr = "__AUTOSPORT_ACQ_DISPATCH_STATIC_GETATTR_ANCHOR__"
         anchored_getattr = "__AUTOSPORT_ACQ_DISPATCH_GETATTR_ANCHOR__"
         anchored_globals = "__AUTOSPORT_ACQ_DISPATCH_GLOBALS_ANCHOR__"
 
@@ -643,6 +673,16 @@ def _install_acquisition_denominator_authority() -> None:
             or raw_classify_code is not anchored_classify_code
             or raw_instant is not anchored_instant
             or raw_instant_code is not anchored_instant_code
+            or raw_digest is not anchored_digest
+            or raw_digest_code is not anchored_digest_code
+            or raw_canonical_json is not anchored_json
+            or raw_canonical_json_code is not anchored_json_code
+            or evidence_type is not anchored_evidence_type
+            or evidence_issue_descriptor is not anchored_issue_descriptor
+            or evidence_issue_code is not anchored_issue_code
+            or evidence_payload_descriptor is not anchored_payload_descriptor
+            or evidence_payload_code is not anchored_payload_code
+            or exact_static_getattr is not anchored_static_getattr
             or exact_getattr is not anchored_getattr
             or exact_globals is not anchored_globals
         ):
@@ -669,6 +709,22 @@ def _install_acquisition_denominator_authority() -> None:
             or anchored_globals().get("_instant") is not anchored_instant
             or anchored_getattr(anchored_instant, "__code__", None)
             is not anchored_instant_code
+            or anchored_globals().get("_digest") is not anchored_digest
+            or anchored_getattr(anchored_digest, "__code__", None)
+            is not anchored_digest_code
+            or anchored_globals().get("_canonical_json") is not anchored_json
+            or anchored_getattr(anchored_json, "__code__", None)
+            is not anchored_json_code
+            or anchored_globals().get("AcquisitionDenominatorEvidence")
+            is not anchored_evidence_type
+            or anchored_static_getattr(anchored_evidence_type, "_issue")
+            is not anchored_issue_descriptor
+            or anchored_getattr(anchored_issue_descriptor, "__func__", None).__code__
+            is not anchored_issue_code
+            or anchored_static_getattr(anchored_evidence_type, "to_payload")
+            is not anchored_payload_descriptor
+            or anchored_getattr(anchored_payload_descriptor, "__code__", None)
+            is not anchored_payload_code
         ):
             raise Error("canonical acquisition semantic dispatch changed")
 
@@ -686,6 +742,16 @@ def _install_acquisition_denominator_authority() -> None:
             (dispatch_classify_code_marker, raw_classify_code),
             (dispatch_instant_marker, raw_instant),
             (dispatch_instant_code_marker, raw_instant_code),
+            (dispatch_digest_marker, raw_digest),
+            (dispatch_digest_code_marker, raw_digest_code),
+            (dispatch_json_marker, raw_canonical_json),
+            (dispatch_json_code_marker, raw_canonical_json_code),
+            (dispatch_evidence_type_marker, evidence_type),
+            (dispatch_issue_descriptor_marker, evidence_issue_descriptor),
+            (dispatch_issue_code_marker, evidence_issue_code),
+            (dispatch_payload_descriptor_marker, evidence_payload_descriptor),
+            (dispatch_payload_code_marker, evidence_payload_code),
+            (dispatch_static_getattr_marker, exact_static_getattr),
             (dispatch_getattr_marker, exact_getattr),
             (dispatch_globals_marker, exact_globals),
         ),
@@ -780,6 +846,8 @@ def _install_acquisition_denominator_authority() -> None:
     require_error_marker = "__AUTOSPORT_ACQ_REQUIRE_ERROR_ANCHOR__"
     require_raw_marker = "__AUTOSPORT_ACQ_REQUIRE_RAW_ANCHOR__"
     require_raw_code_marker = "__AUTOSPORT_ACQ_REQUIRE_RAW_CODE_ANCHOR__"
+    require_dispatch_marker = "__AUTOSPORT_ACQ_REQUIRE_DISPATCH_ANCHOR__"
+    require_dispatch_code_marker = "__AUTOSPORT_ACQ_REQUIRE_DISPATCH_CODE_ANCHOR__"
     require_issued_marker = "__AUTOSPORT_ACQ_REQUIRE_ISSUED_ANCHOR__"
     require_lock_marker = "__AUTOSPORT_ACQ_REQUIRE_LOCK_ANCHOR__"
     require_id_marker = "__AUTOSPORT_ACQ_REQUIRE_ID_ANCHOR__"
@@ -792,6 +860,8 @@ def _install_acquisition_denominator_authority() -> None:
         Error = "__AUTOSPORT_ACQ_REQUIRE_ERROR_ANCHOR__"  # noqa: N806
         anchored_raw_require = "__AUTOSPORT_ACQ_REQUIRE_RAW_ANCHOR__"
         anchored_raw_require_code = "__AUTOSPORT_ACQ_REQUIRE_RAW_CODE_ANCHOR__"
+        anchored_dispatch = "__AUTOSPORT_ACQ_REQUIRE_DISPATCH_ANCHOR__"
+        anchored_dispatch_code = "__AUTOSPORT_ACQ_REQUIRE_DISPATCH_CODE_ANCHOR__"
         anchored_issued = "__AUTOSPORT_ACQ_REQUIRE_ISSUED_ANCHOR__"
         anchored_lock = "__AUTOSPORT_ACQ_REQUIRE_LOCK_ANCHOR__"
         anchored_id = "__AUTOSPORT_ACQ_REQUIRE_ID_ANCHOR__"
@@ -801,6 +871,8 @@ def _install_acquisition_denominator_authority() -> None:
         if (
             raw_require is not anchored_raw_require
             or raw_require_code is not anchored_raw_require_code
+            or require_canonical_reader_dispatch is not anchored_dispatch
+            or dispatcher_code is not anchored_dispatch_code
             or issued is not anchored_issued
             or lock is not anchored_lock
             or exact_id is not anchored_id
@@ -811,8 +883,11 @@ def _install_acquisition_denominator_authority() -> None:
         if (
             anchored_getattr(anchored_raw_require, "__code__", None)
             is not anchored_raw_require_code
+            or anchored_getattr(anchored_dispatch, "__code__", None)
+            is not anchored_dispatch_code
         ):
             raise Error("canonical acquisition requirement executable changed")
+        anchored_dispatch()
         if anchored_type(evidence) is not AcquisitionDenominatorEvidence:
             raise TypeError(
                 "evidence must be exact AcquisitionDenominatorEvidence"
@@ -834,9 +909,12 @@ def _install_acquisition_denominator_authority() -> None:
                 "acquisition denominator evidence is not current product-issued authority"
             )
         result = anchored_raw_require(evidence)
+        anchored_dispatch()
         if (
             anchored_getattr(anchored_raw_require, "__code__", None)
             is not anchored_raw_require_code
+            or anchored_getattr(anchored_dispatch, "__code__", None)
+            is not anchored_dispatch_code
         ):
             raise Error("canonical acquisition requirement executable changed")
         return result
@@ -847,6 +925,8 @@ def _install_acquisition_denominator_authority() -> None:
             (require_error_marker, AcquisitionDenominatorEvidenceError),
             (require_raw_marker, raw_require),
             (require_raw_code_marker, raw_require_code),
+            (require_dispatch_marker, require_canonical_reader_dispatch),
+            (require_dispatch_code_marker, dispatcher_code),
             (require_issued_marker, issued),
             (require_lock_marker, lock),
             (require_id_marker, exact_id),

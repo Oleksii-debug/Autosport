@@ -24,9 +24,12 @@ def _from_coefficient(
     exponent: int,
     _decimal_type=Decimal,
 ) -> Decimal:
-    sign = 1 if coefficient < 0 else 0
-    digits = tuple(int(ch) for ch in str(abs(coefficient)))
-    return _decimal_type((sign, digits, exponent))
+    # Decimal(int) is exact and bypasses Python's process-global int-to-string
+    # digit limit; the product-owned resource validator remains authoritative.
+    coefficient_parts = _decimal_type(coefficient).as_tuple()
+    return _decimal_type(
+        (coefficient_parts.sign, coefficient_parts.digits, exponent)
+    )
 
 
 def _subtract_exact(

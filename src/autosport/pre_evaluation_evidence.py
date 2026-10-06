@@ -490,12 +490,21 @@ class PreEvaluationEvidenceStore:
         return self._path
 
     def save(self, evidence: PreEvaluationSessionEvidence) -> None:
+        if type(evidence) is not PreEvaluationSessionEvidence:
+            raise TypeError("evidence must be exact PreEvaluationSessionEvidence")
+        # Reconstruct the complete authority object before opening a publication
+        # temporary. Frozen dataclasses are not a trust boundary: low-level mutation
+        # or a stale caller reference must fail before replacing last-good evidence.
+        payload = evidence.to_payload()
+        replayed = self._from_payload(payload)
+        if _canonical_json(replayed.to_payload()) != _canonical_json(payload):
+            raise ValueError("pre-evaluation evidence failed pre-publication replay")
         envelope = {
             "schema_version": SCHEMA_VERSION,
             "authority_family": AUTHORITY_FAMILY,
-            "authority_id": evidence.authority_id,
-            "authority_digest": evidence.authority_digest,
-            "payload": evidence.to_payload(),
+            "authority_id": replayed.authority_id,
+            "authority_digest": replayed.authority_digest,
+            "payload": replayed.to_payload(),
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = _canonical_json(envelope) + b"\n"

@@ -454,3 +454,87 @@ def test_store_rejects_duplicate_json_keys_at_any_depth(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="invalid pre-evaluation evidence file"):
         store.load()
 
+class _DerivedSessionEvidence(PreEvaluationSessionEvidence):
+    pass
+
+
+def test_store_rejects_session_subclass_before_publication(tmp_path: Path) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    canonical = authority.evaluate_session(
+        session_id="s1",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    derived = _DerivedSessionEvidence(
+        session_id=canonical.session_id,
+        evaluated_at_ns=canonical.evaluated_at_ns,
+        policy_max_age_ns=canonical.policy_max_age_ns,
+        policy_digest=canonical.policy_digest,
+        slots=canonical.slots,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+
+    with pytest.raises(TypeError, match="exact PreEvaluationSessionEvidence"):
+        store.save(derived)
+
+    assert not store.path.exists()
+
+
+def test_mutated_session_fails_before_replacing_last_good_evidence(
+    tmp_path: Path,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    last_good = authority.evaluate_session(
+        session_id="good",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    candidate = authority.evaluate_session(
+        session_id="candidate",
+        candidate_ids=["c2"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    store.save(last_good)
+    object.__setattr__(candidate, "session_id", "mutated-after-validation")
+
+    with pytest.raises(ValueError, match="slot session_id mismatch"):
+        store.save(candidate)
+
+    assert store.load() == last_good
+
+
+def test_save_uses_detached_replayed_snapshot_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    candidate = authority.evaluate_session(
+        session_id="canonical",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    expected = candidate
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    canonical_named_temporary = pre_evaluation_evidence.tempfile.NamedTemporaryFile
+
+    def mutate_caller_then_open(*args, **kwargs):
+        object.__setattr__(candidate, "session_id", "mutated-after-replay")
+        return canonical_named_temporary(*args, **kwargs)
+
+    monkeypatch.setattr(
+        pre_evaluation_evidence.tempfile,
+        "NamedTemporaryFile",
+        mutate_caller_then_open,
+    )
+    store.save(candidate)
+
+    loaded = store.load()
+    assert candidate.session_id == "mutated-after-replay"
+    assert loaded == expected
+    assert loaded.session_id == "canonical"
+

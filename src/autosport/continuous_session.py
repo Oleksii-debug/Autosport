@@ -352,12 +352,16 @@ class _ContinuousSessionState:
         _atomic_write_json_code: object = atomic_write_json.__code__,
         _durable_path_lock: Callable[..., Any] = durable_path_lock,
         _durable_path_lock_code: object = durable_path_lock.__code__,
+        _path_exists: Callable[[Path], bool] = Path.exists,
+        _path_exists_code: object = Path.exists.__code__,
     ) -> None:
         if (
             getattr(_atomic_write_json, "__code__", None) is not _atomic_write_json_code
             or durable_path_lock is not _durable_path_lock
             or getattr(_durable_path_lock, "__code__", None)
             is not _durable_path_lock_code
+            or Path.exists is not _path_exists
+            or getattr(_path_exists, "__code__", None) is not _path_exists_code
         ):
             raise ContinuousSessionError(
                 "canonical session bootstrap authority changed"
@@ -372,7 +376,7 @@ class _ContinuousSessionState:
         # publish different session identities; the losing constructor could
         # then silently adopt the winner's identity.
         with _durable_path_lock(self.path):
-            if self.path.exists():
+            if _path_exists(self.path):
                 raw = self._read()
             else:
                 resolved_id = _text(

@@ -2945,3 +2945,43 @@ def test_interrupted_child_stop_failure_preserves_live_spool(tmp_path, monkeypat
     finally:
         spool_path.unlink(missing_ok=True)
 
+def test_spool_aware_normal_stop_interrupt_preserves_live_spool(
+    tmp_path, monkeypatch
+):
+    spool_path = tmp_path / "handler-result.json"
+    spool_path.write_text("", encoding="utf-8")
+    stop_calls = []
+    cleanup_calls = []
+
+    def fake_stop(_process, *, suppress_base_exceptions=False):
+        stop_calls.append(suppress_base_exceptions)
+        if not suppress_base_exceptions:
+            raise KeyboardInterrupt("cleanup interrupt")
+        return "STOP_FAILED"
+
+    def fake_remove(path, *, suppress_base_exceptions=False):
+        cleanup_calls.append((path, suppress_base_exceptions))
+        path.unlink(missing_ok=True)
+        return True
+
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_stop_process_bounded",
+        fake_stop,
+    )
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_remove_handler_result_spool",
+        fake_remove,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="cleanup interrupt"):
+        skill_registry_module._stop_spooled_process_bounded(
+            object(),
+            spool_path,
+        )
+
+    assert stop_calls == [False, True]
+    assert cleanup_calls == []
+    assert spool_path.exists()
+

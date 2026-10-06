@@ -447,6 +447,16 @@ def _cleanup_interrupted_handler_process(process: Any, spool_path: Path) -> None
         )
 
 
+def _stop_spooled_process_bounded(process: Any, spool_path: Path) -> str | None:
+    """Stop normally, but complete spool policy before re-raising an interrupt."""
+
+    try:
+        return _stop_process_bounded(process)
+    except BaseException:
+        _cleanup_interrupted_handler_process(process, spool_path)
+        raise
+
+
 def _decode_handler_result_spool(
     path: Path,
 ) -> tuple[SkillExecutionResult | None, str | None]:
@@ -598,7 +608,7 @@ def _execute_handler_spooled_bounded(
     try:
         process.start()
     except Exception as exc:
-        stop_error = _stop_process_bounded(process)
+        stop_error = _stop_spooled_process_bounded(process, spool_path)
         if stop_error == "HANDLE_CLOSE_FAILED":
             return finish(None, "HANDLER_START_HANDLE_CLOSE_FAILED")
         if stop_error == "STOP_FAILED":
@@ -611,7 +621,7 @@ def _execute_handler_spooled_bounded(
     try:
         process.join(timeout_seconds)
     except Exception:
-        stop_error = _stop_process_bounded(process)
+        stop_error = _stop_spooled_process_bounded(process, spool_path)
         if stop_error == "HANDLE_CLOSE_FAILED":
             return finish(None, "HANDLER_PROCESS_HANDLE_CLOSE_FAILED")
         if stop_error == "STOP_FAILED":
@@ -624,7 +634,7 @@ def _execute_handler_spooled_bounded(
     try:
         alive = process.is_alive()
     except Exception:
-        stop_error = _stop_process_bounded(process)
+        stop_error = _stop_spooled_process_bounded(process, spool_path)
         if stop_error == "HANDLE_CLOSE_FAILED":
             return finish(None, "HANDLER_PROCESS_HANDLE_CLOSE_FAILED")
         if stop_error == "STOP_FAILED":
@@ -635,7 +645,7 @@ def _execute_handler_spooled_bounded(
         raise
 
     if alive:
-        stop_error = _stop_process_bounded(process)
+        stop_error = _stop_spooled_process_bounded(process, spool_path)
         if stop_error == "HANDLE_CLOSE_FAILED":
             return finish(None, "HANDLER_TIMEOUT_HANDLE_CLOSE_FAILED")
         if stop_error == "STOP_FAILED":

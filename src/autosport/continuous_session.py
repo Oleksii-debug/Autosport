@@ -278,6 +278,18 @@ class ContinuousSessionStatus:
     invalidation_full_refresh_required: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _ContinuousSessionFailurePublication:
+    """Bounded publication receipt returned by the operational failure checkpoint."""
+
+    session_id: str
+    state: SessionState
+    generation: int
+    cycles_completed: int
+    last_success_at: str | None
+    last_error_code: str
+
+
 def _text(value: object, field: str) -> str:
     if type(value) is not str or not value or value.strip() != value:
         raise ValueError(f"{field} must be a non-empty trimmed string")
@@ -1101,7 +1113,10 @@ class _ContinuousSessionState:
 
     @property
     def session_id(self) -> str:
-        return self._read()["session_id"]
+        # Session identity is fixed by the serialized bootstrap transaction and
+        # cached immutably for the lifetime of this state object. Reading it does
+        # not require reparsing retained settlement history.
+        return self._session_id
 
     def _update(
         self,
@@ -1508,7 +1523,7 @@ class _ContinuousSessionState:
             ["_ContinuousSessionState"], dict[str, Any]
         ] = _read_error_checkpoint,
         _read_error_checkpoint_code: object = _read_error_checkpoint.__code__,
-    ) -> None:
+    ) -> _ContinuousSessionFailurePublication:
         code = _text(code, "code")
         if (
             durable_path_lock is not _durable_path_lock
@@ -1546,6 +1561,14 @@ class _ContinuousSessionState:
                         "conflict with cached canonical session state"
                     )
             self._write_error_checkpoint(code)
+            return _ContinuousSessionFailurePublication(
+                session_id=self._session_id,
+                state=SessionState(self._state),
+                generation=self._generation,
+                cycles_completed=self._cycles_completed,
+                last_success_at=self._last_success_at,
+                last_error_code=code,
+            )
 
 
 class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
@@ -2065,11 +2088,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             cycle = self.collector.run_cycle()
             source_snapshot = self._refresh_source_state_projection()
             if cycle.provider_unavailable:
-                self._state.record_failure(code="ProviderUnavailableError")
-                snapshot = self._state.snapshot()
+                failure = self._state.record_failure(
+                    code="ProviderUnavailableError"
+                )
                 return ContinuousTickResult(
-                    session_id=self.session_id,
-                    cycle_index=snapshot.cycles_completed,
+                    session_id=failure.session_id,
+                    cycle_index=failure.cycles_completed,
                     source_id=cycle.source_id,
                     source_provider_unavailable=True,
                     source_gap_states=(
@@ -2096,7 +2120,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     ),
                     settled_ticket_ids=(),
                     settlement_evidence_ids=(),
-                    last_success_at=snapshot.last_success_at,
+                    last_success_at=failure.last_success_at,
                 )
 
             source_gap_states = (

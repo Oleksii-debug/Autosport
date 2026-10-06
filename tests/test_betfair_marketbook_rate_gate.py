@@ -587,6 +587,11 @@ def test_rate_gate_runtime_authority_is_closure_bound(monkeypatch) -> None:
         lambda value: ("forged-market",),
     )
     monkeypatch.setattr(_rate_gate_module, "_utc_microseconds", lambda value: 0)
+    monkeypatch.setattr(
+        _rate_gate_module,
+        "_datetime_from_utc_microseconds",
+        lambda value: datetime(1999, 1, 1, tzinfo=timezone.utc),
+    )
     monkeypatch.setattr(_rate_gate_module, "_MAX_CALLS_PER_WINDOW", 999)
     monkeypatch.setattr(_rate_gate_module, "_WINDOW_MICROSECONDS", 1)
     monkeypatch.setattr(_rate_gate_module, "BETFAIR_MARKETBOOK_RATE_POLICY_VERSION", "forged")
@@ -623,6 +628,7 @@ def test_rate_gate_runtime_authority_is_closure_bound(monkeypatch) -> None:
     state = value.snapshot()
 
     assert all(type(decision) is decision_type and decision.allowed for decision in decisions)
+    assert decisions[0].scheduled_at == T0
     assert type(denied) is decision_type
     assert denied.allowed is False
     assert denied.blocked_market_ids == ("1.234",)

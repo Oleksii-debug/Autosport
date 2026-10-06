@@ -191,6 +191,7 @@ def _install_rate_gate_authority() -> None:
     decision_type = MarketBookRateDecision
     lock_type = RLock
     datetime_type = datetime
+    timedelta_type = timedelta
     utc_timezone = timezone.utc
     epoch = datetime_type(1970, 1, 1, tzinfo=utc_timezone)
     policy_version = BETFAIR_MARKETBOOK_RATE_POLICY_VERSION
@@ -226,6 +227,11 @@ def _install_rate_gate_authority() -> None:
             + delta.seconds * 1_000_000
             + delta.microseconds
         )
+
+    def datetime_from_utc_microseconds(value: int) -> datetime:
+        if type(value) is not int:
+            raise TypeError("UTC microsecond timestamp must be a non-boolean int")
+        return epoch + timedelta_type(microseconds=value)
 
     def validate_window(value: object) -> None:
         if type(value) is not window_type:
@@ -491,11 +497,23 @@ def _install_rate_gate_authority() -> None:
                         )
             raise
 
+    def scheduled_at_property(self: MarketBookRateDecision) -> datetime:
+        return datetime_from_utc_microseconds(self.scheduled_at_utc_us)
+
+    def next_eligible_at_property(
+        self: MarketBookRateDecision,
+    ) -> datetime | None:
+        if self.next_eligible_at_utc_us is None:
+            return None
+        return datetime_from_utc_microseconds(self.next_eligible_at_utc_us)
+
     def policy_version_property(
         self: BetfairMarketBookPerMarketRateGate,
     ) -> str:
         return policy_version
 
+    decision_type.scheduled_at = property(scheduled_at_property)
+    decision_type.next_eligible_at = property(next_eligible_at_property)
     gate_type.__init__ = gate_init
     gate_type.snapshot = snapshot
     gate_type.reserve = reserve

@@ -148,6 +148,7 @@ class MarketBookRetryBatchState:
     next_eligible_at_utc_us: int | None
     automatic_retry_exhausted: bool
     provider_recovery_required: bool
+    provider_failure_observed_at_utc_us: int | None
     terminal_failure: bool
     last_outcome: MarketBookAttemptOutcome
     last_provider_error_code: str | None = None
@@ -167,6 +168,13 @@ class MarketBookRetryBatchState:
         ):
             raise MarketBookRetryBackoffError(
                 "next_eligible_at_utc_us must be an exact integer or None"
+            )
+        if (
+            self.provider_failure_observed_at_utc_us is not None
+            and type(self.provider_failure_observed_at_utc_us) is not int
+        ):
+            raise MarketBookRetryBackoffError(
+                "provider_failure_observed_at_utc_us must be an exact integer or None"
             )
         for value, name in (
             (self.automatic_retry_exhausted, "automatic_retry_exhausted"),
@@ -198,6 +206,7 @@ class MarketBookRetryBatchState:
                 or code not in _TRANSIENT_PROVIDER_CODES
                 or self.next_eligible_at_utc_us is not None
                 or self.consecutive_incomplete_failures != 0
+                or type(self.provider_failure_observed_at_utc_us) is not int
             ):
                 raise MarketBookRetryBackoffError(
                     "provider recovery projection state is contradictory"
@@ -209,14 +218,18 @@ class MarketBookRetryBatchState:
                 <= MARKETBOOK_MAX_INCOMPLETE_AUTOMATIC_RETRIES
                 or self.next_eligible_at_utc_us is not None
                 or code is not None
+                or self.provider_failure_observed_at_utc_us is not None
             ):
                 raise MarketBookRetryBackoffError(
                     "exhausted incomplete retry state is contradictory"
                 )
         elif self.terminal_failure:
-            if self.next_eligible_at_utc_us is not None:
+            if (
+                self.next_eligible_at_utc_us is not None
+                or self.provider_failure_observed_at_utc_us is not None
+            ):
                 raise MarketBookRetryBackoffError(
-                    "terminal retry state cannot carry next eligibility"
+                    "terminal retry state cannot carry retry eligibility/failure instant"
                 )
         else:
             if (
@@ -225,6 +238,7 @@ class MarketBookRetryBatchState:
                 or self.consecutive_incomplete_failures < 1
                 or type(self.next_eligible_at_utc_us) is not int
                 or code is not None
+                or self.provider_failure_observed_at_utc_us is not None
             ):
                 raise MarketBookRetryBackoffError(
                     "active incomplete-response backoff state is contradictory"
@@ -245,6 +259,9 @@ def _copy_batch_state(
         next_eligible_at_utc_us=batch.next_eligible_at_utc_us,
         automatic_retry_exhausted=batch.automatic_retry_exhausted,
         provider_recovery_required=batch.provider_recovery_required,
+        provider_failure_observed_at_utc_us=(
+            batch.provider_failure_observed_at_utc_us
+        ),
         terminal_failure=batch.terminal_failure,
         last_outcome=batch.last_outcome,
         last_provider_error_code=batch.last_provider_error_code,
@@ -308,6 +325,9 @@ class MarketBookRetryBackoffState:
                     "next_eligible_at_utc_us": batch.next_eligible_at_utc_us,
                     "automatic_retry_exhausted": batch.automatic_retry_exhausted,
                     "provider_recovery_required": batch.provider_recovery_required,
+                    "provider_failure_observed_at_utc_us": (
+                        batch.provider_failure_observed_at_utc_us
+                    ),
                     "terminal_failure": batch.terminal_failure,
                     "last_outcome": batch.last_outcome.value,
                     "last_provider_error_code": batch.last_provider_error_code,
@@ -411,6 +431,7 @@ class MarketBookRetryBackoffState:
             "next_eligible_at_utc_us",
             "automatic_retry_exhausted",
             "provider_recovery_required",
+            "provider_failure_observed_at_utc_us",
             "terminal_failure",
             "last_outcome",
             "last_provider_error_code",
@@ -438,6 +459,9 @@ class MarketBookRetryBackoffState:
                     ],
                     provider_recovery_required=raw[
                         "provider_recovery_required"
+                    ],
+                    provider_failure_observed_at_utc_us=raw[
+                        "provider_failure_observed_at_utc_us"
                     ],
                     terminal_failure=raw["terminal_failure"],
                     last_outcome=outcome,
@@ -710,14 +734,19 @@ class MarketBookRetryBackoffGate:
         observed_at: datetime,
         health: SourceHealthState,
         config: ContinuousObservationConfig,
+        health_type: type[SourceHealthState] = SourceHealthState,
+        config_type: type[ContinuousObservationConfig] = ContinuousObservationConfig,
+        validate_health=SourceHealthState.validate,
+        parse_health_timestamp=parse_source_timestamp,
+        provider_backoff_seconds=_provider_backoff_seconds,
     ) -> MarketBookRetryDecision:
         batch = self._batch_id(batch_id)
-        if type(health) is not SourceHealthState:
+        if type(health) is not health_type:
             raise MarketBookRetryBackoffError(
                 "health must be an exact SourceHealthState"
             )
-        health.validate()
-        if type(config) is not ContinuousObservationConfig:
+        validate_health(health)
+        if type(config) is not config_type:
             raise MarketBookRetryBackoffError(
                 "config must be an exact ContinuousObservationConfig"
             )
@@ -736,14 +765,26 @@ class MarketBookRetryBackoffGate:
             )
 
         with self._lock:
-            observed_us = self._observe(observed_at)
             state = self._entries.get(batch)
             if state is None or not state.provider_recovery_required:
                 raise MarketBookRetryBackoffError(
                     "batch is not awaiting provider recovery authority"
                 )
-            failure_at = parse_source_timestamp(health.last_error_at)
-            backoff_seconds = _provider_backoff_seconds(
+            failure_at = parse_health_timestamp(health.last_error_at)
+            failure_at_us = _utc_microseconds(
+                failure_at,
+                "provider_health_failure_at",
+            )
+            if (
+                state.provider_failure_observed_at_utc_us is None
+                or failure_at_us
+                < state.provider_failure_observed_at_utc_us
+            ):
+                raise MarketBookRetryBackoffError(
+                    "provider health predates current MarketBook failure"
+                )
+            observed_us = self._observe(observed_at)
+            backoff_seconds = provider_backoff_seconds(
                 health.consecutive_failure_kind_count,
                 config,
             )
@@ -822,6 +863,7 @@ class MarketBookRetryBackoffGate:
                         next_eligible_at_utc_us=None,
                         automatic_retry_exhausted=True,
                         provider_recovery_required=False,
+                        provider_failure_observed_at_utc_us=None,
                         terminal_failure=False,
                         last_outcome=outcome,
                     )
@@ -835,6 +877,7 @@ class MarketBookRetryBackoffGate:
                         ),
                         automatic_retry_exhausted=False,
                         provider_recovery_required=False,
+                        provider_failure_observed_at_utc_us=None,
                         terminal_failure=False,
                         last_outcome=outcome,
                     )
@@ -851,6 +894,7 @@ class MarketBookRetryBackoffGate:
                     next_eligible_at_utc_us=None,
                     automatic_retry_exhausted=False,
                     provider_recovery_required=True,
+                    provider_failure_observed_at_utc_us=observed_us,
                     terminal_failure=False,
                     last_outcome=outcome,
                     last_provider_error_code=code,
@@ -870,6 +914,7 @@ class MarketBookRetryBackoffGate:
                 next_eligible_at_utc_us=None,
                 automatic_retry_exhausted=False,
                 provider_recovery_required=False,
+                provider_failure_observed_at_utc_us=None,
                 terminal_failure=True,
                 last_outcome=outcome,
                 last_provider_error_code=code,

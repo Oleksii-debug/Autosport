@@ -1957,6 +1957,211 @@ def test_register_rejects_callback_matching_keys_verifier_rebinding(monkeypatch)
         )
 
 
+def test_tick_rejects_dependency_register_code_mutation_after_provider_io(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            calls = 0
+
+            def register_eligible(self, *_args, **_kwargs):
+                self.calls += 1
+                return ()
+
+        lifecycle = Lifecycle()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = lifecycle
+        register_method = continuous_session.FocusedMirrorDependencyIndex.register
+
+        def hostile_register(self, input_id, **selectors):
+            raise AssertionError("mutated dependency register executed")
+
+        def mutate() -> None:
+            monkeypatch.setattr(
+                register_method,
+                "__code__",
+                hostile_register.__code__,
+            )
+
+        coordinator.collector = _Collector(callback=mutate)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical dependency lifecycle dispatch authority changed",
+        ):
+            coordinator.tick()
+
+        assert lifecycle.calls == 0
+
+
+def test_tick_rejects_dependency_unregister_code_mutation_before_retire(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("old", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        unregister_method = continuous_session.FocusedMirrorDependencyIndex.unregister
+
+        def hostile_unregister(self, input_id):
+            raise AssertionError("mutated dependency unregister executed")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, retire_input, **_kwargs):
+                monkeypatch.setattr(
+                    unregister_method,
+                    "__code__",
+                    hostile_unregister.__code__,
+                )
+                retire_input("old")
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical dependency lifecycle dispatch authority changed",
+        ):
+            coordinator.tick()
+
+        assert "old" in index.input_ids
+
+
+def test_tick_rejects_affected_inputs_code_mutation_before_drain(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        coordinator.dependency_index = index
+        affected_method = continuous_session.FocusedMirrorDependencyIndex.affected_inputs
+
+        def hostile_affected(self, batch):
+            raise AssertionError("mutated affected-input routing executed")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                monkeypatch.setattr(
+                    affected_method,
+                    "__code__",
+                    hostile_affected.__code__,
+                )
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical dependency lifecycle dispatch authority changed",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_input_ids_descriptor_rebinding_after_provider_io(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        coordinator.dependency_index = index
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            calls = 0
+
+            def register_eligible(self, *_args, **_kwargs):
+                self.calls += 1
+                return ()
+
+        lifecycle = Lifecycle()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = lifecycle
+
+        def mutate() -> None:
+            monkeypatch.setattr(
+                continuous_session.FocusedMirrorDependencyIndex,
+                "input_ids",
+                property(lambda _self: ()),
+            )
+
+        coordinator.collector = _Collector(callback=mutate)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical dependency lifecycle dispatch authority changed",
+        ):
+            coordinator.tick()
+
+        assert lifecycle.calls == 0
+
+
+def test_tick_rejects_canonical_lifecycle_code_mutation_after_provider_io(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        )
+        lifecycle = continuous_session.ContinuousEventLifecycle(
+            root / "event_lifecycle.json"
+        )
+        coordinator.lifecycle = lifecycle
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        coordinator.desktop_consumer = Desktop()
+        register_eligible = continuous_session.ContinuousEventLifecycle.register_eligible
+
+        def hostile_register_eligible(self, *args, **kwargs):
+            raise AssertionError("mutated canonical lifecycle executed")
+
+        def mutate() -> None:
+            monkeypatch.setattr(
+                register_eligible,
+                "__code__",
+                hostile_register_eligible.__code__,
+            )
+
+        coordinator.collector = _Collector(callback=mutate)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical event lifecycle dispatch authority changed",
+        ):
+            coordinator.tick()
+
+
 @pytest.mark.parametrize("input_id", ("", " input-old", "input-old ", 1, True))
 def test_retire_rejects_malformed_input_ids(input_id: object) -> None:
     coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)

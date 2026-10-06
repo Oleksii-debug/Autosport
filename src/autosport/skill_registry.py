@@ -547,6 +547,14 @@ def _execute_handler_spooled_bounded(
         error: str | None,
     ) -> tuple[SkillExecutionResult | None, str | None]:
         if not _remove_handler_result_spool(spool_path):
+            # A surviving child or unclosed process handle is stronger recovery
+            # truth than a secondary temp-spool cleanup failure. Preserve the
+            # same stop/handle precedence already used by the pipe transport.
+            if error is not None and (
+                error.endswith("_STOP_FAILED")
+                or error.endswith("_HANDLE_CLOSE_FAILED")
+            ):
+                return None, error
             return None, "HANDLER_RESULT_SPOOL_CLEANUP_FAILED"
         return result, error
 

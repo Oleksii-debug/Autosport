@@ -181,7 +181,10 @@ _CANONICAL_WORKSPACE_LOCK_ACQUIRE: Final = WorkspaceEconomicLock.acquire
 _CANONICAL_WORKSPACE_LOCK_RELEASE: Final = WorkspaceEconomicLock.release
 _CANONICAL_WORKSPACE_LOCK_NEW: Final = WorkspaceEconomicLock.__new__
 _CANONICAL_WORKSPACE_LOCK_INIT: Final = WorkspaceEconomicLock.__init__
-_CANONICAL_PATH_TYPE: Final = Path
+_CANONICAL_PATH_CONSTRUCTOR: Final = Path
+_CANONICAL_PATH_TYPE: Final = type(Path("."))
+_CANONICAL_PATH_RESOLVE: Final = Path.resolve
+_CANONICAL_PATH_JOIN: Final = Path.__truediv__
 _CANONICAL_STORE_FILE_NAME: Final = "economic_goal_contract.json"
 _CANONICAL_OPEN_READ_ONLY_DESCRIPTOR: Final = _open_read_only_descriptor
 _CANONICAL_OS_FSTAT: Final = os.fstat
@@ -585,14 +588,31 @@ class EconomicGoalStore:
     def __init__(
         self,
         workspace: str | Path,
+        _path_constructor=_CANONICAL_PATH_CONSTRUCTOR,
         _path_type=_CANONICAL_PATH_TYPE,
+        _path_resolve=_CANONICAL_PATH_RESOLVE,
+        _path_join=_CANONICAL_PATH_JOIN,
         _bindings=_STORE_BINDINGS_BY_ID,
         _weakref_ref=weakref.ref,
         _file_name=_CANONICAL_STORE_FILE_NAME,
         _error_type=EconomicGoalContractError,
     ) -> None:
-        workspace_path = _path_type(workspace)
-        path = workspace_path / _file_name
+        if type(self) is not __class__:
+            raise TypeError("EconomicGoalStore authority requires the exact store type")
+        if type(workspace) not in {str, _path_type}:
+            raise TypeError(
+                "EconomicGoalStore workspace must be exact str or exact Path"
+            )
+        try:
+            workspace_path = _path_resolve(
+                _path_constructor(workspace),
+                strict=False,
+            )
+        except (OSError, RuntimeError) as exc:
+            raise _error_type(
+                "EconomicGoalStore workspace cannot be canonically resolved"
+            ) from exc
+        path = _path_join(workspace_path, _file_name)
         self.workspace = workspace_path
         self.path = path
         store_id = id(self)
@@ -633,6 +653,8 @@ class EconomicGoalStore:
         _binding_resolver=_resolve_store_binding,
         _text_reader=_CANONICAL_GOAL_TEXT_READER,
     ) -> EconomicGoalContract:
+        if type(self) is not __class__:
+            raise TypeError("EconomicGoalStore authority requires the exact store type")
         _, path, _, _ = _binding_resolver(self)
         return _json_decoder(_text_reader(path))
 
@@ -648,6 +670,8 @@ class EconomicGoalStore:
     ) -> None:
         """Create the first owner contract while holding the economic writer lock."""
 
+        if type(self) is not __class__:
+            raise TypeError("EconomicGoalStore authority requires the exact store type")
         workspace, path, path_exists, _ = _binding_resolver(self)
         with _lock_scope(workspace, _lock_type):
             if path_exists():
@@ -671,6 +695,8 @@ class EconomicGoalStore:
     ) -> None:
         """Publish one machine revision only when durable authority cannot expand."""
 
+        if type(self) is not __class__:
+            raise TypeError("EconomicGoalStore authority requires the exact store type")
         workspace, path, _, _ = _binding_resolver(self)
         with _lock_scope(workspace, _lock_type):
             previous = _json_decoder(_text_reader(path))

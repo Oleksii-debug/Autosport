@@ -1084,6 +1084,34 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                 finally:
                     setattr(PaperBook, name, original)
 
+    def test_constructor_rejects_preexisting_paperbook_classmethod_rebinding(self) -> None:
+        for name in ("load_bytes", "_validate_loaded_state"):
+            with self.subTest(name=name):
+                original = PaperBook.__dict__[name]
+                calls = 0
+
+                def hostile(_cls, *_args, **_kwargs):
+                    nonlocal calls
+                    calls += 1
+                    raise AssertionError(
+                        f"preexisting rebound PaperBook classmethod {name} executed"
+                    )
+
+                setattr(PaperBook, name, classmethod(hostile))
+                try:
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "PaperBook classmethod authority changed",
+                    ):
+                        ProductEconomicSessionStore(
+                            self.workspace,
+                            authority_root=self.authority_root,
+                            _test_clock=self.clock,
+                        )
+                    self.assertEqual(calls, 0)
+                finally:
+                    setattr(PaperBook, name, original)
+
     def test_paperbook_classmethod_underlying_code_mutation_fails_before_execution(self) -> None:
         store = self._store()
         store.current()

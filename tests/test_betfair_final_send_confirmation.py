@@ -6,6 +6,10 @@ import tempfile
 
 import pytest
 
+from supervised_clock_test_support import install_trusted_clock, set_trusted_times
+
+install_trusted_clock()
+
 import autosport.betfair_execution_confirmation as confirmation_runtime
 import autosport.betfair_supervised_execution as betfair_execution_runtime
 import autosport.supervised_confirmation as confirmation_store_runtime
@@ -42,21 +46,8 @@ _CONFIRMATION_AT = datetime.fromisoformat(
 
 
 def _set_trusted_times(monkeypatch, *values: str) -> None:
-    assert values
-    sequence = iter(values)
-    final = values[-1]
-
-    def trusted_now() -> str:
-        try:
-            return next(sequence)
-        except StopIteration:
-            return final
-
-    monkeypatch.setattr(
-        supervised_execution,
-        "_trusted_now",
-        trusted_now,
-    )
+    del monkeypatch
+    set_trusted_times(*values)
 
 
 def _issue_confirmation(

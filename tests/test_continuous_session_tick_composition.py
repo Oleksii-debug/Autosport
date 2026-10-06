@@ -5382,7 +5382,7 @@ def test_successful_invalidation_routing_does_not_force_recovery_refresh() -> No
 @pytest.mark.parametrize(
     "mutate",
     (
-        lambda buffer: setattr(buffer, "_dirty", {("provider-a", "quote-a"): object()}),
+        lambda buffer: setattr(buffer, "_dirty", []),
         lambda buffer: setattr(buffer, "_max_dirty_keys", 0),
         lambda buffer: (
             setattr(buffer, "_dirty", {("provider-a", "quote-a"): None}),

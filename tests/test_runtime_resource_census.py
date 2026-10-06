@@ -349,5 +349,55 @@ class RuntimeResourceWorkspaceProbeTests(unittest.TestCase):
         json.dumps(first, allow_nan=False)
 
 
+class RuntimeResourceCoverageTruthTests(unittest.TestCase):
+    def _runner_namespace(self) -> dict[str, object]:
+        return runpy.run_path(
+            str(
+                Path(__file__).resolve().parents[1]
+                / "scripts"
+                / "run_runtime_resource_endurance.py"
+            )
+        )
+
+    def test_required_resource_classes_exceed_current_observed_subset(self) -> None:
+        namespace = self._runner_namespace()
+        required = tuple(namespace["_REQUIRED_RESOURCE_CLASSES"])
+        observed = tuple(namespace["_OBSERVED_RESOURCE_CLASSES"])
+
+        self.assertIn("owned_threads", observed)
+        self.assertIn("workspace_handles", observed)
+        self.assertIn("provider_transports", required)
+        self.assertIn("timers_scheduled_jobs", required)
+        self.assertIn("subscriptions_listeners", required)
+        self.assertIn("internal_queues", required)
+        self.assertIn("persistence_handles", required)
+        self.assertTrue(set(observed).issubset(required))
+        self.assertTrue(set(required) - set(observed))
+
+    def test_missing_required_resource_instrumentation_is_inconclusive(self) -> None:
+        namespace = self._runner_namespace()
+        verdict = namespace["_qualification_status"]
+
+        status = verdict([], ("provider_transports",))
+
+        self.assertEqual(status, "INCONCLUSIVE")
+
+    def test_failures_outrank_missing_resource_instrumentation(self) -> None:
+        namespace = self._runner_namespace()
+        verdict = namespace["_qualification_status"]
+
+        status = verdict(["owned thread leaked"], ("provider_transports",))
+
+        self.assertEqual(status, "FAIL")
+
+    def test_complete_clean_resource_coverage_is_pass(self) -> None:
+        namespace = self._runner_namespace()
+        verdict = namespace["_qualification_status"]
+
+        status = verdict([], ())
+
+        self.assertEqual(status, "PASS")
+
+
 if __name__ == "__main__":
     unittest.main()

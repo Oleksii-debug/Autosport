@@ -36,9 +36,9 @@ class EconomicGoalProvenance:
     contract_sha256: str
 
     def __post_init__(self) -> None:
-        if self.schema != PROVENANCE_SCHEMA:
+        if type(self.schema) is not str or self.schema != PROVENANCE_SCHEMA:
             raise EconomicGoalProvenanceError("unsupported provenance schema")
-        if self.schema_version != PROVENANCE_SCHEMA_VERSION:
+        if type(self.schema_version) is not int or self.schema_version != PROVENANCE_SCHEMA_VERSION:
             raise EconomicGoalProvenanceError("unsupported provenance schema version")
         if type(self.goal_id) is not str or not self.goal_id:
             raise EconomicGoalProvenanceError("goal_id must be a non-empty string")
@@ -77,6 +77,7 @@ def contract_sha256(contract: EconomicGoalContract) -> str:
 
     if type(contract) is not EconomicGoalContract:
         raise EconomicGoalContractError("provenance hashing requires an EconomicGoalContract")
+    EconomicGoalContract.__post_init__(contract)
     return hashlib.sha256(_canonical_json(economic_goal_to_payload(contract))).hexdigest()
 
 
@@ -85,6 +86,7 @@ def provenance_for(contract: EconomicGoalContract) -> EconomicGoalProvenance:
 
     if type(contract) is not EconomicGoalContract:
         raise EconomicGoalContractError("provenance requires an EconomicGoalContract")
+    EconomicGoalContract.__post_init__(contract)
     return EconomicGoalProvenance(
         schema=PROVENANCE_SCHEMA,
         schema_version=PROVENANCE_SCHEMA_VERSION,
@@ -101,8 +103,12 @@ def verify_provenance(
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
+    if type(contract) is not EconomicGoalContract:
+        raise EconomicGoalContractError("provenance verification requires an EconomicGoalContract")
     if type(provenance) is not EconomicGoalProvenance:
         raise EconomicGoalProvenanceError("provenance must be EconomicGoalProvenance")
+    EconomicGoalContract.__post_init__(contract)
+    EconomicGoalProvenance.__post_init__(provenance)
     if provenance.goal_id != contract.goal_id:
         raise EconomicGoalProvenanceError("provenance goal_id mismatch")
     if provenance.revision != contract.revision:

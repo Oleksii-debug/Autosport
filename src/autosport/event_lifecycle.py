@@ -841,6 +841,19 @@ class ContinuousEventLifecycle:
             if record is None:
                 raise CatalogLifecycleError(f"unknown catalog event {identity!r}")
             input_id = f"catalog:{record.identity}"
+            legacy_input_id = (
+                "catalog:"
+                + _legacy_event_identity(
+                    source_id=record.source_id,
+                    event_id=record.event_id,
+                )
+            )
+            # Schema-v1 used the provider-scoped event identity as the dependency
+            # input key.  After the v2 sport-scoped migration, retire that legacy
+            # routing key before evaluating/registering the new identity so a
+            # restart cannot leave both aliases active in the live dependency index.
+            if retire_input is not None and legacy_input_id != input_id:
+                retire_input(legacy_input_id)
             assessment = self.assess_evidence(
                 identity,
                 store,

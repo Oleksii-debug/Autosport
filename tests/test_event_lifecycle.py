@@ -490,6 +490,40 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_register_eligible_retires_schema_v1_dependency_while_v2_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lifecycle = ContinuousEventLifecycle(root / "catalog.json")
+            event = self._catalog_event(
+                sport="table_tennis",
+                event_id="event-1",
+                available_offset=1,
+            )
+            lifecycle.apply_page(
+                self._page(1, event),
+                discovered_at=(self.START + timedelta(seconds=1)).isoformat(),
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                registered: list[str] = []
+                retired: list[str] = []
+                result = lifecycle.register_eligible(
+                    store,
+                    as_of=(self.START + timedelta(seconds=5)).isoformat(),
+                    required_history=timedelta(0),
+                    register_input=lambda input_id, **_: registered.append(input_id),
+                    retire_input=retired.append,
+                )
+                self.assertEqual(result, ())
+                self.assertEqual(registered, [])
+                self.assertEqual(retired, ["catalog:provider-a:event-1"])
+                self.assertNotEqual(
+                    retired[0],
+                    f"catalog:{event.identity}",
+                )
+            finally:
+                store.close()
+
     def test_register_eligible_uses_existing_sport_aware_live_dependency_seam(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

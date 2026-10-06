@@ -66,6 +66,34 @@ class _EconomicGoalProvenanceMeta(type):
 
 
 
+def _build_provenance_class_guard(name: str):
+    """Block direct base-metaclass mutation of sealed provenance authority names."""
+
+    class _ProvenanceClassGuard:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            binding = instance.__dict__[name]
+            descriptor_get = getattr(binding, "__get__", None)
+            if descriptor_get is None:
+                return binding
+            return descriptor_get(None, instance)
+
+        def __set__(self, _instance, _value) -> None:
+            raise TypeError(
+                "economic-goal provenance public authority binding is immutable"
+            )
+
+        def __delete__(self, _instance) -> None:
+            raise TypeError(
+                "economic-goal provenance public authority binding is immutable"
+            )
+
+    return _ProvenanceClassGuard()
+
+
 class EconomicGoalProvenanceError(ValueError):
     """Raised when economic-goal provenance evidence is malformed or mismatched."""
 
@@ -690,3 +718,11 @@ EconomicGoalProvenance.decision_identity = property(_decision_identity_authority
 
 # Freeze the public identity property after its closure has captured canonical authority.
 EconomicGoalProvenance._authority_operations_sealed = True
+
+for _sealed_provenance_name in _EconomicGoalProvenanceMeta._AUTHORITY_NAMES:
+    setattr(
+        _EconomicGoalProvenanceMeta,
+        _sealed_provenance_name,
+        _build_provenance_class_guard(_sealed_provenance_name),
+    )
+del _sealed_provenance_name

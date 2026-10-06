@@ -5,6 +5,7 @@ from threading import Barrier, Thread
 
 import pytest
 
+import autosport.betfair_marketbook_rate_gate as _rate_gate_module
 from autosport.betfair_marketbook_rate_gate import (
     BETFAIR_MARKETBOOK_RATE_POLICY_VERSION,
     BetfairMarketBookPerMarketRateGate,
@@ -566,3 +567,91 @@ def test_restart_revalidates_tampered_rate_policy_identity() -> None:
     with pytest.raises(ValueError, match="unsupported Betfair MarketBook rate policy"):
         BetfairMarketBookPerMarketRateGate(state=state)
 
+
+
+def test_rate_gate_runtime_authority_is_closure_bound(monkeypatch) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    state_type = MarketBookRateGateState
+    window_type = MarketBookRateWindowState
+    decision_type = _rate_gate_module.MarketBookRateDecision
+    original_policy = BETFAIR_MARKETBOOK_RATE_POLICY_VERSION
+
+    monkeypatch.setattr(
+        _rate_gate_module,
+        "_validate_market_id",
+        lambda value: "forged-market",
+    )
+    monkeypatch.setattr(
+        _rate_gate_module,
+        "_normalize_market_ids",
+        lambda value: ("forged-market",),
+    )
+    monkeypatch.setattr(_rate_gate_module, "_utc_microseconds", lambda value: 0)
+    monkeypatch.setattr(_rate_gate_module, "_MAX_CALLS_PER_WINDOW", 999)
+    monkeypatch.setattr(_rate_gate_module, "_WINDOW_MICROSECONDS", 1)
+    monkeypatch.setattr(_rate_gate_module, "BETFAIR_MARKETBOOK_RATE_POLICY_VERSION", "forged")
+    monkeypatch.setattr(_rate_gate_module, "MarketBookRateDecision", object)
+    monkeypatch.setattr(_rate_gate_module, "MarketBookRateWindowState", object)
+    monkeypatch.setattr(_rate_gate_module, "MarketBookRateGateState", object)
+    monkeypatch.setattr(
+        decision_type,
+        "__init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable decision constructor must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        decision_type,
+        "__post_init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("mutable decision validator must not run")
+        ),
+    )
+
+    value = gate_type()
+    decisions = [
+        value.reserve(
+            ("1.234",),
+            scheduled_at=T0 + timedelta(milliseconds=100 * index),
+        )
+        for index in range(5)
+    ]
+    denied = value.reserve(
+        ("1.234",),
+        scheduled_at=T0 + timedelta(milliseconds=500),
+    )
+    state = value.snapshot()
+
+    assert all(type(decision) is decision_type and decision.allowed for decision in decisions)
+    assert type(denied) is decision_type
+    assert denied.allowed is False
+    assert denied.blocked_market_ids == ("1.234",)
+    assert denied.next_eligible_at == T0 + timedelta(seconds=1)
+    assert type(state) is state_type
+    assert len(state.markets) == 1
+    assert type(state.markets[0]) is window_type
+    assert state.policy_version == original_policy
+    assert value.policy_version == original_policy
+
+
+def test_rate_gate_restart_validation_ignores_rebound_dto_validators(monkeypatch) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    original = gate_type()
+    assert original.reserve(("1.234",), scheduled_at=T0).allowed
+    state = original.snapshot()
+    window = state.markets[0]
+
+    monkeypatch.setattr(
+        MarketBookRateGateState,
+        "__post_init__",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        MarketBookRateWindowState,
+        "__post_init__",
+        lambda self: None,
+    )
+    object.__setattr__(window, "accepted_at_utc_us", ("forged",))
+
+    with pytest.raises(TypeError, match="accepted rate timestamp"):
+        gate_type(state=state)

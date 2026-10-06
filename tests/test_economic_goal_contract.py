@@ -850,6 +850,9 @@ def test_transition_snapshot_helper_ignores_rebound_contract_descriptors(monkeyp
         def __get__(self, instance, owner=None):
             return Decimal("0.02")
 
+        def __set__(self, instance, value):
+            raise AssertionError("rebound transition descriptor setter executed")
+
     monkeypatch.setattr(
         EconomicGoalContract,
         "max_stake_fraction",

@@ -834,10 +834,10 @@ def _snapshot_transition_contract(
     _contract_type=_CANONICAL_CONTRACT_TYPE,
     _contract_validator=_CANONICAL_CONTRACT_VALIDATOR,
     _object_new=object.__new__,
-    _object_setattr=object.__setattr__,
     _error_type=EconomicGoalContractError,
     _snapshot=_canonical_contract_snapshot,
-    _field_names=_CONTRACT_FIELD_NAMES,
+    _field_setters=_CANONICAL_CONTRACT_FIELD_SETTERS,
+    _zip=zip,
 ) -> EconomicGoalContract:
     if type(contract) is not _contract_type:
         raise _error_type(
@@ -845,8 +845,8 @@ def _snapshot_transition_contract(
         )
     snapshot = _object_new(_contract_type)
     values = _snapshot(contract)
-    for name, value in zip(_field_names, values):
-        _object_setattr(snapshot, name, value)
+    for setter, value in _zip(_field_setters, values):
+        setter(snapshot, value)
     _contract_validator(snapshot)
     return snapshot
 

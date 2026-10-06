@@ -959,3 +959,57 @@ def test_economic_goal_field_order_is_shared_across_contract_store_and_provenanc
     assert economic_goal_store_module._CONTRACT_KEYS_ORDERED == (
         economic_goal_module._CONTRACT_FIELD_NAMES
     )
+
+def test_provenance_authority_graph_ignores_rebound_introspection_builtins(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    def forged(name: str):
+        def operation(*_args, **_kwargs):
+            calls.append(name)
+            raise AssertionError(f"rebound {name} executed")
+        return operation
+
+    for name in ("getattr", "tuple", "enumerate"):
+        monkeypatch.setattr(
+            economic_goal_provenance_module,
+            name,
+            forged(name),
+            raising=False,
+        )
+
+    goal = _goal()
+    proof = provenance_for(goal)
+
+    assert proof.decision_identity == (
+        f"{goal.goal_id}@{goal.revision}:{proof.contract_sha256}"
+    )
+    verify_provenance(goal, proof)
+    assert callable(EconomicGoalProvenance.__init__)
+    assert calls == []
+
+
+def test_provenance_class_guard_ignores_rebound_getattr(monkeypatch) -> None:
+    executed = False
+
+    def forged_getattr(*_args, **_kwargs):
+        nonlocal executed
+        executed = True
+        raise AssertionError("rebound getattr executed")
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "getattr",
+        forged_getattr,
+        raising=False,
+    )
+
+    assert callable(EconomicGoalProvenance.__init__)
+    with pytest.raises(TypeError, match="immutable"):
+        type.__setattr__(
+            EconomicGoalProvenance,
+            "__init__",
+            lambda *_args, **_kwargs: None,
+        )
+    assert executed is False

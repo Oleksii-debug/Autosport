@@ -3349,3 +3349,33 @@ def test_interrupted_legacy_adoption_cannot_abort_into_pristine_pool(
         )
     assert not state_path.exists()
 
+def test_state_hash_binds_exact_persisted_newline_bytes(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    assert admission.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+
+    canonical_bytes = lifecycle.state_path.read_bytes()
+    assert b"\r\n" not in canonical_bytes
+    crlf_bytes = canonical_bytes.replace(b"\n", b"\r\n")
+    assert crlf_bytes != canonical_bytes
+    lifecycle.state_path.write_bytes(crlf_bytes)
+
+    local = lifecycle._load_state_local()
+    assert local is not None
+    snapshot, observed_sha256 = local
+    assert snapshot == admission.snapshot
+    assert observed_sha256 == sha256(crlf_bytes).hexdigest()
+    assert observed_sha256 != sha256(canonical_bytes).hexdigest()
+
+
+def test_session_state_writer_persists_canonical_lf_bytes(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    lifecycle.begin_login(now=NOW, access_token_available=False)
+
+    raw = lifecycle.state_path.read_bytes()
+    assert raw.endswith(b"\n")
+    assert b"\r\n" not in raw
+    local = lifecycle._load_state_local()
+    assert local is not None
+    assert local[1] == sha256(raw).hexdigest()
+

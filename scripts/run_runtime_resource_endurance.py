@@ -248,6 +248,28 @@ def _exercise_subscription_lifecycle(
             restored.close()
 
 
+def _linux_workspace_open_handles(root: Path) -> tuple[str, ...]:
+    if not sys.platform.startswith("linux"):
+        return ()
+    fd_root = Path("/proc/self/fd")
+    try:
+        root_resolved = root.resolve(strict=False)
+    except OSError as exc:
+        raise RuntimeError("cannot resolve endurance workspace for fd census") from exc
+    residuals: list[str] = []
+    for fd_path in fd_root.iterdir():
+        try:
+            target = Path(os.path.realpath(fd_path))
+        except OSError:
+            continue
+        try:
+            target.relative_to(root_resolved)
+        except ValueError:
+            continue
+        residuals.append(f"{fd_path.name}:{target}")
+    return tuple(sorted(residuals))
+
+
 def _runtime_temp_artifacts(root: Path) -> tuple[str, ...]:
     if not root.exists():
         return ()
@@ -358,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     move_delete_passes = 0
     temporary_artifact_checks = 0
     subscription_lifecycle_checked = False
+    linux_persistence_handle_checks = 0
     source = _IdleProductSource()
     clock = _DeterministicClock()
 
@@ -428,6 +451,15 @@ def main(argv: list[str] | None = None) -> int:
                     + ",".join(residual_temp_artifacts)
                 )
 
+            if sys.platform.startswith("linux"):
+                residual_workspace_handles = _linux_workspace_open_handles(root)
+                linux_persistence_handle_checks += 1
+                if residual_workspace_handles:
+                    failures.append(
+                        "workspace persistence handles remained after quiescence:"
+                        + ",".join(residual_workspace_handles)
+                    )
+
             current = capture_owned_thread_snapshot()
             max_owned_threads = max(max_owned_threads, current.owned_thread_count)
             comparison = compare_owned_thread_snapshots(baseline, current)
@@ -492,6 +524,15 @@ def main(argv: list[str] | None = None) -> int:
     if windows_probe_status == "PASS":
         observed_resource_classes.append("workspace_handles")
         observed_resource_classes.append("persistence_handles")
+    elif (
+        sys.platform.startswith("linux")
+        and linux_persistence_handle_checks == move_round_trip_passes
+        and not any(
+            failure.startswith("workspace persistence handles remained")
+            for failure in failures
+        )
+    ):
+        observed_resource_classes.append("persistence_handles")
     observed_resource_classes = tuple(sorted(observed_resource_classes))
     applicable_required_resource_classes = tuple(
         resource_class
@@ -551,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
         "internal_queue_owners_checked_per_cycle": 3,
         "subscription_lifecycle_checked": subscription_lifecycle_checked,
         "temporary_artifact_checks": temporary_artifact_checks,
+        "linux_persistence_handle_checks": linux_persistence_handle_checks,
         "workspace_move_round_trip_passes": move_round_trip_passes,
         "workspace_move_delete_passes": move_delete_passes,
         "windows_workspace_handle_semantics": windows_probe_status,

@@ -829,6 +829,51 @@ def _build_canonical_place_action_dispatch():
     canonical_workspace_lock_exit = canonical_workspace_lock_type.__dict__.get(
         "__exit__"
     )
+    canonical_profile_require_code = getattr(
+        canonical_profile_require,
+        "__code__",
+        None,
+    )
+    canonical_profile_id_getter_code = getattr(
+        canonical_profile_id_getter,
+        "__code__",
+        None,
+    )
+    canonical_action_to_dict_code = getattr(
+        canonical_action_to_dict,
+        "__code__",
+        None,
+    )
+    canonical_instruction_post_init_code = getattr(
+        canonical_instruction_post_init,
+        "__code__",
+        None,
+    )
+    canonical_execution_report_post_init_code = getattr(
+        canonical_execution_report_post_init,
+        "__code__",
+        None,
+    )
+    canonical_evidence_id_getter_code = getattr(
+        canonical_evidence_id_getter,
+        "__code__",
+        None,
+    )
+    canonical_trusted_now_code = getattr(
+        canonical_trusted_now,
+        "__code__",
+        None,
+    )
+    canonical_workspace_lock_enter_code = getattr(
+        canonical_workspace_lock_enter,
+        "__code__",
+        None,
+    )
+    canonical_workspace_lock_exit_code = getattr(
+        canonical_workspace_lock_exit,
+        "__code__",
+        None,
+    )
     bound_method_names = ("action_for", "profile_for", "constraint_for")
     bound_methods = tuple(
         (
@@ -860,23 +905,23 @@ def _build_canonical_place_action_dispatch():
     )
     if (
         not callable(canonical_profile_require)
-        or getattr(canonical_profile_require, "__code__", None) is None
+        or canonical_profile_require_code is None
         or not callable(canonical_profile_id_getter)
-        or getattr(canonical_profile_id_getter, "__code__", None) is None
+        or canonical_profile_id_getter_code is None
         or not callable(canonical_action_to_dict)
-        or getattr(canonical_action_to_dict, "__code__", None) is None
+        or canonical_action_to_dict_code is None
         or not callable(canonical_instruction_post_init)
-        or getattr(canonical_instruction_post_init, "__code__", None) is None
+        or canonical_instruction_post_init_code is None
         or not callable(canonical_execution_report_post_init)
-        or getattr(canonical_execution_report_post_init, "__code__", None) is None
+        or canonical_execution_report_post_init_code is None
         or not callable(canonical_evidence_id_getter)
-        or getattr(canonical_evidence_id_getter, "__code__", None) is None
+        or canonical_evidence_id_getter_code is None
         or not callable(canonical_trusted_now)
-        or getattr(canonical_trusted_now, "__code__", None) is None
+        or canonical_trusted_now_code is None
         or not callable(canonical_workspace_lock_enter)
-        or getattr(canonical_workspace_lock_enter, "__code__", None) is None
+        or canonical_workspace_lock_enter_code is None
         or not callable(canonical_workspace_lock_exit)
-        or getattr(canonical_workspace_lock_exit, "__code__", None) is None
+        or canonical_workspace_lock_exit_code is None
         or any(method is None or code is None for _, method, code in bound_methods)
         or any(method is None or code is None for _, method, code in ledger_methods)
     ):
@@ -1036,38 +1081,42 @@ def _build_canonical_place_action_dispatch():
             and canonical_profile_type.__dict__.get("require")
             is canonical_profile_require
             and getattr(canonical_profile_require, "__code__", None)
-            is canonical_profile_require.__code__
+            is canonical_profile_require_code
             and canonical_profile_type.__dict__.get("profile_id")
             is canonical_profile_id_descriptor
             and getattr(canonical_profile_id_descriptor, "fget", None)
             is canonical_profile_id_getter
+            and getattr(canonical_profile_id_getter, "__code__", None)
+            is canonical_profile_id_getter_code
             and canonical_action_type.__dict__.get("to_dict")
             is canonical_action_to_dict
             and getattr(canonical_action_to_dict, "__code__", None)
-            is canonical_action_to_dict.__code__
+            is canonical_action_to_dict_code
             and canonical_instruction_report_type.__dict__.get("__post_init__")
             is canonical_instruction_post_init
             and getattr(canonical_instruction_post_init, "__code__", None)
-            is canonical_instruction_post_init.__code__
+            is canonical_instruction_post_init_code
             and canonical_execution_report_type.__dict__.get("__post_init__")
             is canonical_execution_report_post_init
             and getattr(canonical_execution_report_post_init, "__code__", None)
-            is canonical_execution_report_post_init.__code__
+            is canonical_execution_report_post_init_code
             and canonical_execution_report_type.__dict__.get("evidence_id")
             is canonical_evidence_id_descriptor
             and getattr(canonical_evidence_id_descriptor, "fget", None)
             is canonical_evidence_id_getter
+            and getattr(canonical_evidence_id_getter, "__code__", None)
+            is canonical_evidence_id_getter_code
             and _supervised_execution_runtime._trusted_now is canonical_trusted_now
             and getattr(canonical_trusted_now, "__code__", None)
-            is canonical_trusted_now.__code__
+            is canonical_trusted_now_code
             and canonical_workspace_lock_type.__dict__.get("__enter__")
             is canonical_workspace_lock_enter
             and getattr(canonical_workspace_lock_enter, "__code__", None)
-            is canonical_workspace_lock_enter.__code__
+            is canonical_workspace_lock_enter_code
             and canonical_workspace_lock_type.__dict__.get("__exit__")
             is canonical_workspace_lock_exit
             and getattr(canonical_workspace_lock_exit, "__code__", None)
-            is canonical_workspace_lock_exit.__code__
+            is canonical_workspace_lock_exit_code
             and all(
                 canonical_bound_type.__dict__.get(name) is method
                 and getattr(method, "__code__", None) is code

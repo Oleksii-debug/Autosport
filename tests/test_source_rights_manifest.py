@@ -313,7 +313,7 @@ class SourceRightsManifestTests(unittest.TestCase):
             manifest = load_source_rights_manifest(self._write(Path(tmp)))
             with self.assertRaisesRegex(
                 SourceRightsManifestError,
-                "authorization check time must be timezone-aware",
+                "authorization check time must be a built-in UTC datetime",
             ):
                 authorize_source_use(
                     manifest,

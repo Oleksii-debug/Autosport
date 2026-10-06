@@ -100,7 +100,10 @@ _MARKET_EVENT_TYPE = MarketEvent
 _TICKET_LEG_TYPE = TicketLeg
 _DECISION_RECORD_TYPE = DecisionRecord
 _JSON_DUMPS = json.dumps
+_JSON_DUMPS_EXPECTED = _JSON_DUMPS
+_JSON_DUMPS_CODE = getattr(_JSON_DUMPS, "__code__", None)
 _HASHLIB_SHA256 = hashlib.sha256
+_HASHLIB_SHA256_EXPECTED = _HASHLIB_SHA256
 _MARKET_EVENT_METHOD_WITNESSES = tuple(
     (
         name,
@@ -272,7 +275,7 @@ class ProductProposalRiskTarget:
     economic_goal_contract_sha256: str
     risk_policy_sha256: str
     candidate_sha256s: tuple[str, ...]
-    candidate_contexts: tuple[ProposedTicketRiskContext, ...]
+    candidate_context_json: tuple[str, ...]
     candidate_vector_sha256: str
     signal_strengths: tuple[Decimal, ...]
     evaluated_stakes: tuple[Decimal, ...]
@@ -323,7 +326,7 @@ _TARGET_FIELDS = (
     "economic_goal_contract_sha256",
     "risk_policy_sha256",
     "candidate_sha256s",
-    "candidate_contexts",
+    "candidate_context_json",
     "candidate_vector_sha256",
     "signal_strengths",
     "evaluated_stakes",
@@ -417,8 +420,16 @@ def _signal(value: object, index: int) -> Decimal:
 
 
 def _canonical_json(value: object) -> bytes:
+    if (
+        _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
+        or json.dumps is not _JSON_DUMPS_EXPECTED
+        or getattr(_JSON_DUMPS_EXPECTED, "__code__", None) is not _JSON_DUMPS_CODE
+    ):
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target dispatch authority changed: canonical JSON serializer"
+        )
     try:
-        return json.dumps(
+        return _JSON_DUMPS(
             value,
             ensure_ascii=False,
             sort_keys=True,
@@ -432,7 +443,14 @@ def _canonical_json(value: object) -> bytes:
 
 
 def _digest(value: object) -> str:
-    return hashlib.sha256(_canonical_json(value)).hexdigest()
+    if (
+        _HASHLIB_SHA256 is not _HASHLIB_SHA256_EXPECTED
+        or hashlib.sha256 is not _HASHLIB_SHA256_EXPECTED
+    ):
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target dispatch authority changed: target SHA-256 implementation"
+        )
+    return _HASHLIB_SHA256(_canonical_json(value)).hexdigest()
 
 
 def _workspace_path(workspace: object) -> Path:
@@ -470,8 +488,17 @@ def _require_dispatch() -> None:
         (_MARKET_EVENT_TYPE is MarketEvent, "MarketEvent type"),
         (_TICKET_LEG_TYPE is TicketLeg, "TicketLeg type"),
         (_DECISION_RECORD_TYPE is DecisionRecord, "DecisionRecord type"),
-        (_JSON_DUMPS is json.dumps, "canonical JSON serializer"),
-        (_HASHLIB_SHA256 is hashlib.sha256, "target SHA-256 implementation"),
+        (
+            _JSON_DUMPS is _JSON_DUMPS_EXPECTED
+            and json.dumps is _JSON_DUMPS_EXPECTED
+            and getattr(_JSON_DUMPS_EXPECTED, "__code__", None) is _JSON_DUMPS_CODE,
+            "canonical JSON serializer",
+        ),
+        (
+            _HASHLIB_SHA256 is _HASHLIB_SHA256_EXPECTED
+            and hashlib.sha256 is _HASHLIB_SHA256_EXPECTED,
+            "target SHA-256 implementation",
+        ),
         (_REPLACE is replace, "dataclasses.replace helper"),
         (_PROVENANCE_FOR is provenance_for, "economic-goal provenance helper"),
         (_ENSURE_DURABLE_FILE is ensure_durable_file, "durable-file helper"),
@@ -1523,7 +1550,10 @@ def _build_target(
         "economic_goal_contract_sha256": goal_sha,
         "risk_policy_sha256": policy.provenance_sha256,
         "candidate_sha256s": candidate_sha256s,
-        "candidate_contexts": contexts,
+        "candidate_context_json": tuple(
+            _canonical_json(_context_payload(context)).decode("utf-8")
+            for context in contexts
+        ),
         "candidate_vector_sha256": candidate_vector_sha256,
         "signal_strengths": signals,
         "evaluated_stakes": stakes,

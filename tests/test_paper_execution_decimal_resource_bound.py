@@ -839,6 +839,26 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_durable_evidence_rejects_numeric_decimal_representation(self) -> None:
+        payload = evidence().to_dict()
+        payload["accepted_odds"] = 2
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "evidence decimal fields must use canonical text",
+        ):
+            PaperExecutionEvidenceRecord.from_dict(payload)
+
+    def test_durable_attempt_rejects_numeric_decimal_representation(self) -> None:
+        payload = self._attempt_payload()
+        payload["decision_odds"] = 2
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "attempt decimal fields must use canonical text",
+        ):
+            PaperLegAttempt.from_dict(payload)
+
     def test_reload_rejects_oversized_evidence_under_same_resource_law(self) -> None:
         payload = evidence().to_dict()
         payload["accepted_stake"] = "1E+8192"

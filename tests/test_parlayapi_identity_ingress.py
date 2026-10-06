@@ -148,6 +148,44 @@ class ParlayApiIdentityIngressTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderPayloadError, "market key must be a string"):
             self._read(event)
 
+    def test_event_id_str_subclass_is_rejected_before_strip(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["id"] = _ExplosiveString("tt-100")
+        with self.assertRaisesRegex(ProviderPayloadError, "event id must be a string"):
+            self._read(event)
+
+    def test_bookmaker_key_str_subclass_is_rejected_before_strip(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["bookmakers"][0]["key"] = _ExplosiveString("book-a")
+        with self.assertRaisesRegex(ProviderPayloadError, "bookmaker key must be a string"):
+            self._read(event)
+
+    def test_market_key_str_subclass_is_rejected_before_strip(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["bookmakers"][0]["markets"][0]["key"] = _ExplosiveString("h2h")
+        with self.assertRaisesRegex(ProviderPayloadError, "market key must be a string"):
+            self._read(event)
+
+    def test_selection_str_subclass_is_rejected_before_strip(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["bookmakers"][0]["markets"][0]["outcomes"][0]["name"] = _ExplosiveString("Player A")
+        with self.assertRaisesRegex(ProviderPayloadError, "outcome name must be a string"):
+            self._read(event)
+
+    def test_market_identity_point_rejects_arbitrary_stringification(self):
+        class _ExplosivePoint:
+            def __str__(self) -> str:
+                raise AssertionError("identity guard must reject point before __str__")
+
+        event = copy.deepcopy(_BASE_EVENT)
+        event["bookmakers"][0]["markets"][0]["key"] = "spreads"
+        event["bookmakers"][0]["markets"][0]["outcomes"][0]["point"] = _ExplosivePoint()
+        with self.assertRaisesRegex(
+            ProviderPayloadError,
+            "outcome point must be a canonical JSON scalar",
+        ):
+            self._read(event)
+
     def test_non_string_selection_name_is_not_stringified_into_identity(self):
         event = copy.deepcopy(_BASE_EVENT)
         event["bookmakers"][0]["markets"][0]["outcomes"][0]["name"] = 7

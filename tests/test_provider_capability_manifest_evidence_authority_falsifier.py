@@ -1078,3 +1078,77 @@ def test_dependency_identity_descriptor_rebinding_fails_closed(
             source_payload_sha256=_HASH_C,
         )
 
+def test_profile_state_projection_ignores_module_enum_rebinding(
+    monkeypatch,
+) -> None:
+    class FakeBookmakerCapabilityState:
+        UNKNOWN = BookmakerCapabilityState.SUPPORTED
+        SUPPORTED = BookmakerCapabilityState.SUPPORTED
+        UNSUPPORTED = BookmakerCapabilityState.UNSUPPORTED
+
+    monkeypatch.setattr(
+        provider_manifest_module,
+        "BookmakerCapabilityState",
+        FakeBookmakerCapabilityState,
+    )
+
+    manifest = build_provider_capability_manifest(
+        _profile(),
+        bind_bookmaker_integration(
+            _profile(),
+            integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+            observed_at=_T1,
+            source_ref="integration-manifest",
+            source_payload_sha256=_HASH_B,
+        ),
+        manifest_ref="provider-capability-manifest",
+        manifest_version=31,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+
+    assert manifest.state_of(ProviderManifestCapability.PREMATCH_QUOTES) is (
+        ProviderManifestState.NOT_PROVEN
+    )
+
+
+def test_manifest_digest_ignores_module_hash_helper_rebinding(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=32,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    baseline = manifest.manifest_id
+
+    monkeypatch.setattr(
+        provider_manifest_module,
+        "_canonical_json",
+        lambda payload: '{"forged":true}',
+    )
+    monkeypatch.setattr(
+        provider_manifest_module,
+        "sha256",
+        lambda payload=b"": type(
+            "ForgedDigest",
+            (),
+            {"hexdigest": lambda self: "f" * 64},
+        )(),
+    )
+
+    assert manifest.manifest_id == baseline
+

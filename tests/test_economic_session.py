@@ -252,6 +252,36 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             ProductEconomicSession.__eq__ = original_eq
 
 
+    def test_transition_rejects_rebound_product_session_field_descriptors(self) -> None:
+        store = self._store()
+        first = store.current()
+        import autosport.economic_session as economic_session
+
+        original_fields = {
+            name: ProductEconomicSession.__dict__[name]
+            for name in economic_session._PRODUCT_ECONOMIC_SESSION_FIELD_NAMES
+        }
+
+        class HostileDescriptor:
+            def __get__(self, instance, owner=None):
+                raise AssertionError("rebound ProductEconomicSession field executed")
+
+            def __set__(self, instance, value):
+                raise AssertionError("rebound ProductEconomicSession field setter executed")
+
+        for name, original in original_fields.items():
+            with self.subTest(field=name):
+                setattr(ProductEconomicSession, name, HostileDescriptor())
+                try:
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.transition_to_current_goal(first)
+                finally:
+                    setattr(ProductEconomicSession, name, original)
+
+
     def test_transition_rejects_rebound_product_session_constructor_and_validator(self) -> None:
         store = self._store()
         first = store.current()

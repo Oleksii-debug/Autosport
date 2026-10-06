@@ -82,6 +82,48 @@ def _verify(*, evidence, ledger, store, bound, action_id):
     )
 
 
+def test_verifier_ignores_rebound_builtin_and_object_dispatch(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound verifier builtin must never execute")
+
+    class HostileObject:
+        @staticmethod
+        def __getattribute__(*_args, **_kwargs):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("rebound verifier object.__getattribute__ must never execute")
+
+    monkeypatch.setattr(verifier_module, "type", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "object", HostileObject)
+    monkeypatch.setattr(verifier_module, "str", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "tuple", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "getattr", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "hasattr", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "any", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "vars", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "len", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "AttributeError", RuntimeError, raising=False)
+    monkeypatch.setattr(verifier_module, "TypeError", RuntimeError, raising=False)
+    monkeypatch.setattr(verifier_module, "KeyError", RuntimeError, raising=False)
+
+    result = _verify(
+        evidence=evidence,
+        ledger=ledger,
+        store=store,
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    assert attacker_called is False
+    assert result.execution_plan_id == evidence.execution_plan_id
+    assert result.action_id == evidence.action_id
+
+
 def test_object_new_forge_with_changed_price_is_not_accepted() -> None:
     bound, action, evidence, ledger, store = _product_issued_evidence()
     forged = _forge_clone(evidence)

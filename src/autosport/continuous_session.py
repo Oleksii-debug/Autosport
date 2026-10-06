@@ -2238,7 +2238,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         dependency_index: FocusedMirrorDependencyIndex | None = None,
         register_input: Callable[..., object] | None = None,
         **selectors: object,
-    ) -> None:
+    ) -> bool:
         dependency_index = (
             self.dependency_index if dependency_index is None else dependency_index
         )
@@ -2248,12 +2248,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             else register_input
         )
         if input_id in dependency_index.input_ids:
-            return
+            return False
         if not callable(register_input):
             raise ContinuousSessionError(
                 "dependency index registration authority is unavailable"
             )
         register_input(input_id, **selectors)
+        if input_id not in dependency_index.input_ids:
+            raise ContinuousSessionError(
+                "dependency index registration did not publish the input"
+            )
+        return True
 
     def _retire_input(
         self,
@@ -2261,7 +2266,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         *,
         dependency_index: FocusedMirrorDependencyIndex | None = None,
         unregister_input: Callable[[str], object] | None = None,
-    ) -> None:
+    ) -> bool:
         dependency_index = (
             self.dependency_index if dependency_index is None else dependency_index
         )
@@ -2274,7 +2279,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index retirement authority is unavailable"
             )
-        unregister_input(input_id)
+        removed = unregister_input(input_id)
+        if type(removed) is not bool:
+            raise ContinuousSessionError(
+                "dependency index retirement receipt is invalid"
+            )
+        if removed and input_id in dependency_index.input_ids:
+            raise ContinuousSessionError(
+                "dependency index retirement did not remove the input"
+            )
+        return removed
 
     def _drain_invalidations(
         self,
@@ -2848,9 +2862,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             tuple[tuple[str, ...], bool, bool],
         ] = _drain_invalidations,
         _drain_invalidations_method_code: object = _drain_invalidations.__code__,
-        _register_input_method: Callable[..., None] = _register_input,
+        _register_input_method: Callable[..., bool] = _register_input,
         _register_input_method_code: object = _register_input.__code__,
-        _retire_input_method: Callable[..., None] = _retire_input,
+        _retire_input_method: Callable[..., bool] = _retire_input,
         _retire_input_method_code: object = _retire_input.__code__,
         _detached_settlement_resolutions_method: Callable[
             [tuple[SettlementResolution, ...]],
@@ -3118,26 +3132,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 retired: list[str] = []
 
                 def register(input_id: str, **selectors: object) -> None:
-                    before = input_id in dependency_index.input_ids
-                    _register_input_method(
+                    if _register_input_method(
                         self,
                         input_id,
                         dependency_index=dependency_index,
                         register_input=dependency_register,
                         **selectors,
-                    )
-                    if not before:
+                    ):
                         newly_registered.append(input_id)
 
                 def retire(input_id: str) -> None:
-                    before = input_id in dependency_index.input_ids
-                    _retire_input_method(
+                    if _retire_input_method(
                         self,
                         input_id,
                         dependency_index=dependency_index,
                         unregister_input=dependency_unregister,
-                    )
-                    if before:
+                    ):
                         retired.append(input_id)
 
                 registered = lifecycle_register_eligible(

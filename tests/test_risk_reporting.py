@@ -57,7 +57,7 @@ class RiskOfRuinEvidenceCanonicalityTests(unittest.TestCase):
         ):
             RiskOfRuinVectorEvidence(
                 **self._kwargs(
-                    candidate_sha256="e" * 64,
+                    candidate_vector_sha256="e" * 64,
                     evaluated_stakes=(Decimal("-0"), Decimal("10")),
                 )
             )
@@ -68,7 +68,7 @@ class RiskOfRuinEvidenceCanonicalityTests(unittest.TestCase):
         ):
             RiskOfRuinVectorEvidence(
                 **self._kwargs(
-                    candidate_sha256="f" * 64,
+                    candidate_vector_sha256="f" * 64,
                     evaluated_stakes=(Decimal("10"),),
                     upper_bound=Decimal("-0"),
                 )

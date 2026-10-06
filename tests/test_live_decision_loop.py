@@ -8019,6 +8019,31 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                         (row,)
                     )
 
+        canonical_provider_wait = (
+            PersistentLiveDecisionLoop._validated_actionability_wait_evidence(
+                (
+                    evidence_row(
+                        reasons=["provider_health:failed"],
+                        triggers=["provider_health_transition"],
+                        provider_health=[provider_failure],
+                    ),
+                )
+            )
+        )
+        exact_boundary = ProviderHealthReplayBoundary("provider-a", None, 0)
+        PersistentLiveDecisionLoop._require_actionability_wait_health_boundaries(
+            canonical_provider_wait,
+            (exact_boundary,),
+        )
+        with self.assertRaisesRegex(
+            LiveDecisionProgressError,
+            "outside the exact decision health boundaries",
+        ):
+            PersistentLiveDecisionLoop._require_actionability_wait_health_boundaries(
+                canonical_provider_wait,
+                (),
+            )
+
     def test_wait_reason_transition_at_same_cut_gets_new_decision_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

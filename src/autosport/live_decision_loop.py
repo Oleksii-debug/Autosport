@@ -2844,6 +2844,46 @@ class PersistentLiveDecisionLoop:
             )
         return tuple(canonical)
 
+    @staticmethod
+    def _require_actionability_wait_health_boundaries(
+        wait_evidence: tuple[dict[str, object], ...],
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None,
+    ) -> None:
+        if type(wait_evidence) is not tuple:
+            raise TypeError("canonical actionability WAIT evidence must be an exact tuple")
+        available: dict[str, ProviderHealthReplayBoundary] = {}
+        if health_boundaries is not None:
+            if type(health_boundaries) is not tuple:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT health boundaries must be an exact tuple"
+                )
+            for boundary in health_boundaries:
+                if type(boundary) is not ProviderHealthReplayBoundary:
+                    raise LiveDecisionProgressError(
+                        "actionability WAIT health boundary is noncanonical"
+                    )
+                if boundary.source_id in available:
+                    raise LiveDecisionProgressError(
+                        "actionability WAIT health boundaries contain duplicate source"
+                    )
+                available[boundary.source_id] = boundary
+
+        for item in wait_evidence:
+            for health in item["provider_health"]:
+                try:
+                    boundary = ProviderHealthReplayBoundary.from_dict(
+                        health["replay_boundary"]
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise LiveDecisionProgressError(
+                        "actionability WAIT provider-health horizon is invalid"
+                    ) from exc
+                if available.get(boundary.source_id) != boundary:
+                    raise LiveDecisionProgressError(
+                        "actionability WAIT provider-health evidence is outside "
+                        "the exact decision health boundaries"
+                    )
+
     def _derive_actionability_wait_evidence(
         self,
         input_ids: tuple[str, ...],
@@ -3541,6 +3581,11 @@ class PersistentLiveDecisionLoop:
             if self._progress is not None
             else self._health_boundaries_for_progress()
         )
+        if canonical_actionability_wait is not None:
+            self._require_actionability_wait_health_boundaries(
+                canonical_actionability_wait,
+                decision_health_boundaries,
+            )
         bind_actionability_wait_evidence = True
         if (
             canonical_actionability_wait is not None
@@ -5708,6 +5753,10 @@ class PersistentLiveDecisionLoop:
             try:
                 wait_evidence = self._validated_actionability_wait_evidence(
                     detached_payload.get("actionability_wait_evidence")
+                )
+                self._require_actionability_wait_health_boundaries(
+                    wait_evidence,
+                    progress.health_boundaries,
                 )
             except (LiveDecisionProgressError, TypeError, ValueError) as exc:
                 raise DecisionLedgerIntegrityError(

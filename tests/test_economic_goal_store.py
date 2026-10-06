@@ -869,6 +869,50 @@ def test_store_load_normalizes_invalid_utf8_to_contract_error(tmp_path) -> None:
         store.load()
 
 
+
+def test_verified_reader_surfaces_descriptor_close_failure(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    def forged_close(fd):
+        raise OSError("close failure")
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="cannot close persisted economic goal read descriptor",
+    ):
+        economic_goal_store_module._read_economic_goal_text(
+            store.path,
+            _close=forged_close,
+        )
+
+
+def test_verified_reader_preserves_primary_failure_when_cleanup_also_fails(
+    monkeypatch, tmp_path
+) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    original_open = economic_goal_store_module._open_read_only_descriptor
+
+    def forged_open(path):
+        raise OSError("primary open failure")
+
+    def forged_close(fd):
+        raise OSError("secondary close failure")
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="cannot safely read persisted economic goal",
+    ):
+        economic_goal_store_module._read_economic_goal_text(
+            store.path,
+            _open_descriptor=forged_open,
+            _close=forged_close,
+        )
+
+
+
 def test_verified_read_rejects_in_place_mutation_between_byte_images(tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
     store.initialize_owner(_goal())

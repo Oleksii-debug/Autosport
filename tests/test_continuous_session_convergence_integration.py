@@ -858,6 +858,73 @@ def test_tick_rejects_false_retirement_receipt_from_lifecycle() -> None:
         )
 
 
+@pytest.mark.parametrize("phase", ("before", "after"))
+@pytest.mark.parametrize("mutation", ("add", "remove", "reorder"))
+def test_tick_rejects_dependency_index_mutation_outside_lifecycle_callbacks(
+    phase: str,
+    mutation: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        coordinator = _coordinator(Path(directory))
+
+        class Index:
+            def __init__(self) -> None:
+                self.input_ids = ("existing-a", "existing-b")
+
+            def affected_inputs(self, _batch):
+                return ()
+
+            def register(self, input_id: str, **_selectors: object) -> None:
+                self.input_ids = (*self.input_ids, input_id)
+
+            def unregister(self, input_id: str) -> bool:
+                if input_id not in self.input_ids:
+                    return False
+                self.input_ids = tuple(
+                    value for value in self.input_ids if value != input_id
+                )
+                return True
+
+        index = Index()
+
+        def mutate_index() -> None:
+            if mutation == "add":
+                index.register("rogue")
+            elif mutation == "remove":
+                index.unregister("existing-a")
+            else:
+                index.input_ids = tuple(reversed(index.input_ids))
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                register_input,
+                **_kwargs,
+            ):
+                if phase == "before":
+                    mutate_index()
+                register_input("input-new")
+                if phase == "after":
+                    mutate_index()
+                return ("input-new",)
+
+        coordinator.dependency_index = index
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="outside coordinator callbacks",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
 def test_tick_accepts_exact_dependency_registration_transition() -> None:
     with tempfile.TemporaryDirectory() as directory:
         coordinator = _coordinator(Path(directory))

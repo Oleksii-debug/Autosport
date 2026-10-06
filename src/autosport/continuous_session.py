@@ -3391,6 +3391,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
                 require_state_identity()
 
+                lifecycle_index_before = dependency_index.input_ids
+                if (
+                    type(lifecycle_index_before) is not tuple
+                    or any(
+                        type(value) is not str
+                        or not value
+                        or value.strip() != value
+                        for value in lifecycle_index_before
+                    )
+                    or len(set(lifecycle_index_before))
+                    != len(lifecycle_index_before)
+                ):
+                    raise ContinuousSessionError(
+                        "dependency index input identity state is invalid"
+                    )
+                expected_lifecycle_index_ids = list(lifecycle_index_before)
                 newly_registered: list[str] = []
                 retired: list[str] = []
 
@@ -3402,7 +3418,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         register_input=dependency_register,
                         **selectors,
                     ):
+                        if input_id in expected_lifecycle_index_ids:
+                            raise ContinuousSessionError(
+                                "lifecycle changed dependency index outside "
+                                "coordinator callbacks"
+                            )
                         newly_registered.append(input_id)
+                        expected_lifecycle_index_ids.append(input_id)
 
                 def retire(input_id: str) -> None:
                     if _retire_input_method(
@@ -3411,7 +3433,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         dependency_index=dependency_index,
                         unregister_input=dependency_unregister,
                     ):
+                        if input_id not in expected_lifecycle_index_ids:
+                            raise ContinuousSessionError(
+                                "lifecycle changed dependency index outside "
+                                "coordinator callbacks"
+                            )
                         retired.append(input_id)
+                        expected_lifecycle_index_ids.remove(input_id)
 
                 registered = lifecycle_register_eligible(
                     market_store,
@@ -3450,6 +3478,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 ):
                     raise ContinuousSessionError(
                         "dependency index input identity state is invalid"
+                    )
+                if indexed_input_ids != tuple(expected_lifecycle_index_ids):
+                    raise ContinuousSessionError(
+                        "lifecycle changed dependency index outside coordinator callbacks"
                     )
                 for input_id in registered:
                     if input_id not in indexed_input_ids:

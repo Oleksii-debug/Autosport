@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -112,6 +113,39 @@ class SportSeasonIdentityTests(unittest.TestCase):
             ),
             (lineage,),
         )
+
+    def test_restart_rejects_missing_identity_collection(self) -> None:
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(identity("sport:football", EntityKind.SPORT, "canonical:football"))
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        del raw["aliases"]
+        self.path.write_text(json.dumps(raw), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            ParticipantIdentityError,
+            "unsupported identity registry schema",
+        ):
+            ParticipantIdentityRegistry(self.path)
+
+    def test_restart_rejects_extra_or_non_list_schema_fields(self) -> None:
+        ParticipantIdentityRegistry.initialize_pristine(self.path)
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        raw["unexpected"] = []
+        self.path.write_text(json.dumps(raw), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ParticipantIdentityError,
+            "unsupported identity registry schema",
+        ):
+            ParticipantIdentityRegistry(self.path)
+
+        raw.pop("unexpected")
+        raw["lineages"] = {}
+        self.path.write_text(json.dumps(raw), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ParticipantIdentityError,
+            "unsupported identity registry schema",
+        ):
+            ParticipantIdentityRegistry(self.path)
 
     def test_alias_correction_cannot_cross_entity_kind(self) -> None:
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)

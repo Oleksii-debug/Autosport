@@ -488,11 +488,11 @@ def _target_capital_vector(
 
 def _open_target_stakes(
     base_balance: Decimal,
-    stakes: tuple[Decimal, ...],
+    capital_at_risk: tuple[Decimal, ...],
 ) -> tuple[tuple[Decimal, ...], Decimal]:
-    if type(stakes) is not tuple or not stakes:
+    if type(capital_at_risk) is not tuple or not capital_at_risk:
         raise ProductProposalRiskCounterfactualCashFloorError(
-            "evaluated stake vector must be a non-empty exact tuple"
+            "capital-at-risk vector must be a non-empty exact tuple"
         )
     balance = _decimal(base_balance, "base cash balance")
     if balance < 0:
@@ -500,17 +500,24 @@ def _open_target_stakes(
             "base cash balance cannot be negative"
         )
     balances: list[Decimal] = []
-    for index, stake_raw in enumerate(stakes):
-        stake = _decimal(stake_raw, f"evaluated_stakes[{index}]")
-        if stake < 0:
+    for index, capital_raw in enumerate(capital_at_risk):
+        capital = _decimal(
+            capital_raw,
+            f"evaluated_capital_at_risk[{index}]",
+        )
+        if capital < 0:
             raise ProductProposalRiskCounterfactualCashFloorError(
-                "evaluated target stake cannot be negative"
+                "evaluated target capital at risk cannot be negative"
             )
-        if stake.is_zero():
+        if capital.is_zero():
             next_balance = balance
         else:
             try:
-                next_balance = _BOOK_DEBIT_FUNCTION(_BOOK_TYPE, balance, stake)
+                next_balance = _BOOK_DEBIT_FUNCTION(
+                    _BOOK_TYPE,
+                    balance,
+                    capital,
+                )
             except (ArithmeticError, TypeError, ValueError) as exc:
                 raise ProductProposalRiskCounterfactualCashFloorError(
                     "target stake vector is not cash-fundable from the base PaperBook"
@@ -524,16 +531,16 @@ def _member_cash_path(
     *,
     base_balance: Decimal,
     post_open_balance: Decimal,
-    stakes: tuple[Decimal, ...],
+    capital_at_risk: tuple[Decimal, ...],
     candidate_profits: tuple[Decimal, ...],
     total_profit: Decimal,
     member_index: int,
 ) -> tuple[tuple[Decimal, ...], Decimal, Decimal]:
     if (
-        type(stakes) is not tuple
-        or not stakes
+        type(capital_at_risk) is not tuple
+        or not capital_at_risk
         or type(candidate_profits) is not tuple
-        or len(candidate_profits) != len(stakes)
+        or len(candidate_profits) != len(capital_at_risk)
     ):
         raise ProductProposalRiskCounterfactualCashFloorError(
             "member candidate payoff vector lost target cardinality"
@@ -555,20 +562,23 @@ def _member_cash_path(
     payouts: list[Decimal] = []
     balance = post_open
     minimum = post_open
-    for candidate_index, (stake_raw, profit_raw) in enumerate(
-        zip(stakes, candidate_profits)
+    for candidate_index, (capital_raw, profit_raw) in enumerate(
+        zip(capital_at_risk, candidate_profits)
     ):
-        stake = _decimal(stake_raw, f"member[{member_index}].stake")
-        if stake < 0:
+        capital = _decimal(
+            capital_raw,
+            f"member[{member_index}].capital_at_risk",
+        )
+        if capital < 0:
             raise ProductProposalRiskCounterfactualCashFloorError(
-                "member target stake cannot be negative"
+                "member target capital at risk cannot be negative"
             )
         profit = _decimal(
             profit_raw,
             f"member[{member_index}].candidate_profit[{candidate_index}]",
         )
         payout = _exact_add(
-            stake,
+            capital,
             profit,
             f"member[{member_index}].candidate_payout[{candidate_index}]",
         )

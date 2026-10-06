@@ -345,11 +345,18 @@ def _read_stable_store_text(path: Path) -> str:
 
         os.lseek(descriptor, 0, os.SEEK_SET)
         chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+        remaining = _MAX_STORE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
             if not chunk:
                 break
             chunks.append(chunk)
+            remaining -= len(chunk)
+        encoded = b"".join(chunks)
+        if len(encoded) > _MAX_STORE_BYTES:
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk store exceeds resource limit"
+            )
         opened_after = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened_after.st_mode)
@@ -375,7 +382,7 @@ def _read_stable_store_text(path: Path) -> str:
                 "durable incident/model-risk store path changed during read"
             )
         try:
-            return b"".join(chunks).decode("utf-8")
+            return encoded.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise IncidentRiskStoreError(
                 "durable incident/model-risk store is not valid UTF-8"

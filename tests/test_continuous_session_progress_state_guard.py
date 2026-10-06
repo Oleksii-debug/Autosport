@@ -572,3 +572,38 @@ def test_source_projection_rejects_runtime_validation_rebinding(
 
         assert path.read_bytes() == before
 
+def test_settlement_evidence_validation_ignores_instance_shadowed_history_reader() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+
+        def attacker_read() -> dict[str, object]:
+            raise AssertionError("instance-shadowed settlement history reader executed")
+
+        state._read = attacker_read  # type: ignore[method-assign]
+        state.validate_settlement_evidence(settlement_evidence=())
+
+
+def test_settlement_evidence_validation_rejects_class_rebound_history_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        before = path.read_bytes()
+
+        def attacker_read(_self: object) -> dict[str, object]:
+            raise AssertionError("class-rebound settlement history reader executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_read",
+            attacker_read,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical settlement evidence history authority changed",
+        ):
+            state.validate_settlement_evidence(settlement_evidence=())
+
+        assert path.read_bytes() == before
+

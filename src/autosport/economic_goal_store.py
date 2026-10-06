@@ -1108,13 +1108,7 @@ EconomicGoalStore._authority_operations_sealed = True
 # type.__setattr__/type.__delattr__ on the class. Install data descriptors on the
 # metaclass after the canonical class bindings are final so even those base-type
 # operations must cross the immutable authority guard.
-for _sealed_store_name in (
-    "__init__",
-    "load",
-    "initialize_owner",
-    "persist_automatic_successor",
-    "_authority_operations_sealed",
-):
+for _sealed_store_name in _EconomicGoalStoreMeta._AUTHORITY_NAMES:
     setattr(
         _EconomicGoalStoreMeta,
         _sealed_store_name,

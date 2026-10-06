@@ -2,6 +2,7 @@ import json
 import signal
 import tempfile
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 from autosport.causal_collector import (
     CollectorDelta,
     CollectorDeltaStore,
+    CollectorStorageBackpressureError,
     CursorRegressionError,
     GapState,
     SyncState,
@@ -24,6 +26,7 @@ from autosport.collector_service import (
     HeadlessCollectorService,
     ReadOnlyCollectorDeltaFeed,
     _SignalStopRequest,
+    main as collector_service_main,
 )
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import CatalogEvent, CatalogPage, EventPhase
@@ -49,6 +52,23 @@ class FakeCollectorSource:
         index = min(self.delta_calls, len(self.batches) - 1)
         self.delta_calls += 1
         return self.batches[index]
+
+
+class ArchivingCollectorSource(FakeCollectorSource):
+    def __init__(self, pages, batches):
+        super().__init__(pages, batches)
+        self.bound_store = None
+
+    def bind_collector_store(self, store):
+        self.bound_store = store
+
+    def resolve_event(self, delta):
+        return MarketEvent.from_dict(
+            market_payload(
+                delta.event_id,
+                sequence=max(delta.cursor_position, 1),
+            )
+        )
 
 
 class UnavailableCatalogSource(FakeCollectorSource):
@@ -200,6 +220,59 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             stop_requested=stop_requested,
             stop_reason=stop_reason,
         )
+
+    def test_source_binding_maps_storage_backpressure_to_retention_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+
+            class BackpressuredBindingSource(FakeCollectorSource):
+                def bind_collector_store(self, store):
+                    raise CollectorStorageBackpressureError(
+                        "RETENTION_REQUIRED: simulated migration budget exhaustion"
+                    )
+
+            source = BackpressuredBindingSource([page], [()])
+            with self.assertRaisesRegex(
+                CollectorRetentionRequiredError,
+                "RETENTION_REQUIRED",
+            ):
+                self.make_service(tmp, source)
+
+            self.assertEqual(source.catalog_calls, 0)
+            self.assertEqual(source.delta_calls, 0)
+
+    def test_cli_returns_retention_exit_when_source_binding_exhausts_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+
+            class BackpressuredBindingSource(FakeCollectorSource):
+                def bind_collector_store(self, store):
+                    raise CollectorStorageBackpressureError(
+                        "RETENTION_REQUIRED: simulated migration budget exhaustion"
+                    )
+
+            source = BackpressuredBindingSource([page], [()])
+            with patch(
+                "autosport.collector_service._load_source_factory",
+                return_value=lambda: source,
+            ), patch("builtins.print") as output:
+                code = collector_service_main(
+                    [
+                        "--workspace",
+                        tmp,
+                        "--source-factory",
+                        "ignored:factory",
+                        "--run-id",
+                        "run-1",
+                    ]
+                )
+
+            self.assertEqual(code, 4)
+            self.assertEqual(source.catalog_calls, 0)
+            self.assertEqual(source.delta_calls, 0)
+            payload = json.loads(output.call_args.args[0])
+            self.assertEqual(payload["error_code"], "RETENTION_REQUIRED")
+            self.assertEqual(payload["source_id"], "source-x")
 
     def test_runtime_epoch_activation_is_durable_and_revalidated_each_cycle(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -726,6 +799,99 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
                 service.run_cycle()
             self.assertEqual(service.status()["cycles_succeeded"], 0)
             self.assertIsNone(service.delta_store.get("d1"))
+
+    def test_catalog_read_cannot_rebind_delta_reader_mid_cycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "source-x:event-1")
+            expected = make_delta(delta_id="d1", position=1)
+
+            class MutatingSource(FakeCollectorSource):
+                def fetch_catalog_page(self, checkpoint):
+                    result = super().fetch_catalog_page(checkpoint)
+
+                    def hostile_fetch_deltas(*_args, **_kwargs):
+                        raise AssertionError("rebound delta reader must not execute")
+
+                    self.fetch_deltas = hostile_fetch_deltas
+                    return result
+
+            source = MutatingSource([page], [(expected,)])
+            service = self.make_service(tmp, source)
+
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "source.fetch_deltas authority changed",
+            ):
+                service.run_cycle()
+
+            self.assertEqual(service.status()["cycles_succeeded"], 0)
+            self.assertIsNone(service.delta_store.get("d1"))
+
+    def test_delta_read_cannot_rebind_archival_resolver_mid_cycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "source-x:event-1")
+            delta = make_delta(delta_id="d1", position=1)
+
+            class MutatingArchiveSource(ArchivingCollectorSource):
+                def fetch_deltas(self, checkpoint, records, max_items):
+                    result = super().fetch_deltas(checkpoint, records, max_items)
+
+                    def hostile_resolve_event(*_args, **_kwargs):
+                        raise AssertionError("rebound event resolver must not execute")
+
+                    self.resolve_event = hostile_resolve_event
+                    return result
+
+            source = MutatingArchiveSource([page], [(delta,)])
+            service = self.make_service(tmp, source)
+
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "source.resolve_event authority changed",
+            ):
+                service.run_cycle()
+
+            self.assertEqual(service.status()["cycles_succeeded"], 0)
+            self.assertIsNone(service.delta_store.get("d1"))
+
+    def test_archival_resolver_cannot_mutate_source_identity_before_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "source-x:event-1")
+            delta = make_delta(delta_id="d1", position=1)
+
+            class IdentityMutatingArchiveSource(ArchivingCollectorSource):
+                def resolve_event(self, target):
+                    event = super().resolve_event(target)
+                    self.source_id = "source-y"
+                    return event
+
+            source = IdentityMutatingArchiveSource([page], [(delta,)])
+            service = self.make_service(tmp, source)
+
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "source.source_id changed after collector service construction",
+            ):
+                service.run_cycle()
+
+            self.assertEqual(service.status()["cycles_succeeded"], 0)
+            self.assertIsNone(service.delta_store.get("d1"))
+
+    def test_bound_source_event_is_archived_with_committed_delta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "source-x:event-1")
+            delta = make_delta(delta_id="d1", position=1)
+            source = ArchivingCollectorSource([page], [(delta,)])
+            service = self.make_service(tmp, source)
+
+            result = service.run_cycle()
+
+            self.assertEqual(result.committed_delta_ids, ("d1",))
+            self.assertIs(source.bound_store, service.delta_store)
+            self.assertEqual(
+                service.delta_store.resolve_event(delta),
+                source.resolve_event(delta),
+            )
 
     def test_delta_for_undiscovered_event_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

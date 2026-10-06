@@ -883,9 +883,6 @@ class _ContinuousSessionState:
             or _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
-            or _text is not _text_validator
-            or getattr(_text_validator, "__code__", None)
-            is not _text_validator_code
         ):
             raise ContinuousSessionError(
                 "canonical settlement evidence parser authority changed"

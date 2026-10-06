@@ -1570,6 +1570,261 @@ def test_retire_rejects_dependency_mirror_rebinding() -> None:
         )
 
 
+def test_register_rejects_preentry_selector_verifier_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    callback_called = False
+
+    def hostile_selector(*_args, **_kwargs):
+        raise AssertionError("rebound selector verifier executed")
+
+    def register_input(*_args, **_kwargs):
+        nonlocal callback_called
+        callback_called = True
+
+    monkeypatch.setattr(
+        continuous_session.FocusedMirrorDependencyIndex,
+        "_selector",
+        staticmethod(hostile_selector),
+    )
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=register_input,
+            source_ids="provider-a",
+        )
+    assert not callback_called
+
+
+def test_register_rejects_callback_dependency_verifier_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+
+    def hostile_dependency(*_args, **_kwargs):
+        raise AssertionError("rebound dependency verifier executed")
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        index.register(input_id, **selectors)
+        monkeypatch.setattr(
+            continuous_session.FocusedMirrorDependencyIndex,
+            "_dependency",
+            hostile_dependency,
+        )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
+def test_register_rejects_callback_input_id_verifier_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+
+    def hostile_input_id(*_args, **_kwargs):
+        raise AssertionError("rebound input-id verifier executed")
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        index.register(input_id, **selectors)
+        monkeypatch.setattr(
+            continuous_session.FocusedMirrorDependencyIndex,
+            "_input_id",
+            staticmethod(hostile_input_id),
+        )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
+def test_retire_rejects_callback_dependency_verifier_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("old", source_ids="provider-a")
+
+    def hostile_dependency(*_args, **_kwargs):
+        raise AssertionError("rebound dependency verifier executed")
+
+    def malicious_unregister(input_id: str) -> bool:
+        removed = index.unregister(input_id)
+        monkeypatch.setattr(
+            continuous_session.FocusedMirrorDependencyIndex,
+            "_dependency",
+            hostile_dependency,
+        )
+        return removed
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._retire_input(
+            "old",
+            dependency_index=index,
+            unregister_input=malicious_unregister,
+        )
+
+
+def test_retire_rejects_callback_input_id_verifier_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("old", source_ids="provider-a")
+
+    def hostile_input_id(*_args, **_kwargs):
+        raise AssertionError("rebound input-id verifier executed")
+
+    def malicious_unregister(input_id: str) -> bool:
+        removed = index.unregister(input_id)
+        monkeypatch.setattr(
+            continuous_session.FocusedMirrorDependencyIndex,
+            "_input_id",
+            staticmethod(hostile_input_id),
+        )
+        return removed
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._retire_input(
+            "old",
+            dependency_index=index,
+            unregister_input=malicious_unregister,
+        )
+
+
+def test_register_rejects_preentry_dependency_index_class_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    canonical_index_type = continuous_session.FocusedMirrorDependencyIndex
+    index = canonical_index_type(MarketMirror())
+    callback_called = False
+
+    class AliasIndex:
+        _selector = staticmethod(canonical_index_type._selector)
+        _input_id = staticmethod(canonical_index_type._input_id)
+        _dependency = canonical_index_type._dependency
+
+    def register_input(*_args, **_kwargs):
+        nonlocal callback_called
+        callback_called = True
+
+    monkeypatch.setattr(
+        continuous_session,
+        "FocusedMirrorDependencyIndex",
+        AliasIndex,
+    )
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=register_input,
+            source_ids="provider-a",
+        )
+    assert not callback_called
+
+
+def test_register_rejects_callback_dependency_model_rebinding(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+
+    class AliasDependency:
+        pass
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        index.register(input_id, **selectors)
+        monkeypatch.setattr(
+            continuous_session,
+            "FocusedMirrorDependency",
+            AliasDependency,
+        )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
+def test_register_rejects_callback_dependency_code_mutation(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    dependency_reader = continuous_session.FocusedMirrorDependencyIndex._dependency
+
+    def hostile_dependency(self, input_id):
+        raise AssertionError("mutated dependency verifier executed")
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        index.register(input_id, **selectors)
+        monkeypatch.setattr(
+            dependency_reader,
+            "__code__",
+            hostile_dependency.__code__,
+        )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
+def test_register_rejects_preentry_selector_code_mutation(monkeypatch) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    selector = continuous_session.FocusedMirrorDependencyIndex._selector
+    callback_called = False
+
+    def hostile_selector(values, *, name):
+        raise AssertionError("mutated selector verifier executed")
+
+    def register_input(*_args, **_kwargs):
+        nonlocal callback_called
+        callback_called = True
+
+    monkeypatch.setattr(selector, "__code__", hostile_selector.__code__)
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency lifecycle verification authority changed",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=register_input,
+            source_ids="provider-a",
+        )
+    assert not callback_called
+
+
 @pytest.mark.parametrize("input_id", ("", " input-old", "input-old ", 1, True))
 def test_retire_rejects_malformed_input_ids(input_id: object) -> None:
     coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)

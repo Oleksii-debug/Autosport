@@ -783,7 +783,10 @@ def test_store_rejects_oversized_durable_text_before_json_decoder(tmp_path) -> N
         raise AssertionError("JSON decoder executed for oversized durable text")
 
     with pytest.raises(EconomicGoalContractError, match="JSON text exceeds"):
-        store.load(_json_decoder=forged_decoder)
+        economic_goal_store_module._BOUND_STORE_LOAD(
+            store,
+            _json_decoder=forged_decoder,
+        )
 
     assert calls == 0
 

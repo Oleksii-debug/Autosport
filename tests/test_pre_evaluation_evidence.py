@@ -13,6 +13,7 @@ from autosport.pre_evaluation_evidence import (
     PreEvaluationEvidenceAuthority,
     PreEvaluationEvidenceStore,
     PreEvaluationPolicy,
+    PreEvaluationSessionEvidence,
 )
 
 

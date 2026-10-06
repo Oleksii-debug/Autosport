@@ -4296,10 +4296,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
                 tick_matched_keys_storage.clear()
                 for input_id, matched_set, keys in tick_matching_key_sets:
-                    if (
-                        tuple(sorted(matched_set)) != keys
-                        or dependency_index._matched_keys.get(input_id) is not matched_set
-                    ):
+                    if matched_set != set(keys):
                         changed = True
                     matched_set.clear()
                     matched_set.update(keys)

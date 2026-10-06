@@ -21,6 +21,7 @@ from .scenario_search import (
     ScenarioSearchEngine,
     ScenarioSearchReport,
     _scenario_conservative_bounds,
+    _snapshot_scenario_groups,
 )
 
 
@@ -137,7 +138,7 @@ class PortfolioAwareCandidateOptimizer:
             raise ValueError("stake must be positive")
 
         candidate_snapshot = tuple(candidates)
-        scenario_groups = list(groups)
+        scenario_groups = list(_snapshot_scenario_groups(groups))
         if not scenario_groups:
             raise ValueError("scenario groups required for portfolio-aware candidate evaluation")
 

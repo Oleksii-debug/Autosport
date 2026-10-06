@@ -1573,6 +1573,40 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         finally:
             public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR = original
 
+    def test_public_decimal_reconstruction_rejects_huge_coefficient_before_decimal_materialization(self) -> None:
+        huge_coefficient = 1 << 1_000_000
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal coefficient exceeds resource limit",
+        ):
+            public_paper._decimal_from_coefficient(huge_coefficient, 0)
+
+    def test_public_decimal_reconstruction_rejects_huge_exponent_before_decimal_tuple_conversion(self) -> None:
+        huge_exponent = 10 ** 100
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal exponent exceeds resource limit",
+        ):
+            public_paper._decimal_from_coefficient(1, huge_exponent)
+
+    def test_public_decimal_reconstruction_rejects_nonexact_integer_inputs(self) -> None:
+        class IntSubclass(int):
+            pass
+
+        for coefficient, exponent in (
+            (True, 0),
+            (1, False),
+            (IntSubclass(1), 0),
+            (1, IntSubclass(0)),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal coefficient and exponent must be exact ints",
+            ):
+                public_paper._decimal_from_coefficient(coefficient, exponent)
+
 
 if __name__ == "__main__":
     unittest.main()

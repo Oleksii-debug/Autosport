@@ -458,18 +458,18 @@ def test_payload_encoder_rejects_bound_default_rebinding() -> None:
         operation.__defaults__ = original_defaults
 
 
-def test_payload_encoder_rejects_nested_snapshotter_default_rebinding() -> None:
+def test_payload_encoder_rejects_nested_snapshot_default_rebinding() -> None:
     contract = _goal()
     operation = economic_goal_store_module._BOUND_ECONOMIC_GOAL_TO_PAYLOAD
     original_defaults = operation.__defaults__
     assert original_defaults is not None
-    snapshotter = original_defaults[1]
+    snapshotter = original_defaults[-2]
     snapshot_defaults = snapshotter.__defaults__
     assert snapshot_defaults is not None
 
     snapshotter.__defaults__ = (
-        object,
-        *snapshot_defaults[1:],
+        (),
+        snapshot_defaults[1],
     )
     try:
         with pytest.raises(
@@ -1770,25 +1770,17 @@ def test_owner_initialization_rejects_dangling_symlink_entry(tmp_path) -> None:
     assert store.path.is_symlink()
 
 
-def test_payload_encoder_serializes_isolated_snapshot_after_source_mutation() -> None:
+def test_persistence_snapshot_isolated_from_later_source_mutation() -> None:
     goal = _goal()
-    canonical_snapshotter = economic_goal_store_module._snapshot_economic_goal_contract
+    snapshot = economic_goal_store_module._snapshot_economic_goal_contract(goal)
 
-    def snapshot_then_mutate(contract):
-        snapshot = canonical_snapshotter(contract)
-        object.__setattr__(goal, "max_stake_fraction", Decimal("0.99"))
-        object.__setattr__(goal, "blocked_sports", frozenset())
-        return snapshot
+    object.__setattr__(goal, "max_stake_fraction", Decimal("0.99"))
+    object.__setattr__(goal, "blocked_sports", frozenset())
 
-    payload = economic_goal_store_module._BOUND_ECONOMIC_GOAL_TO_PAYLOAD(
-        goal,
-        _snapshotter=snapshot_then_mutate,
-    )
-    body = payload["contract"]
-    assert type(body) is dict
-    assert body["max_stake_fraction"] == "0.02"
-    assert body["blocked_sports"] == ["football"]
+    assert snapshot.max_stake_fraction == Decimal("0.02")
+    assert snapshot.blocked_sports == frozenset({"football"})
     assert goal.max_stake_fraction == Decimal("0.99")
+    assert goal.blocked_sports == frozenset()
 
 
 def test_payload_encoder_rejects_source_mutation_between_canonical_snapshots() -> None:

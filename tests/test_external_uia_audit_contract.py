@@ -486,3 +486,39 @@ def test_windows_candidate_requires_packaged_durable_emergency_stop_evidence() -
     assert "External UIA evidence did not prove packaged durable emergency STOP activation" in step
     assert "extracted_external_uia_emergency_stop_activation_status" in step
     assert "extracted_external_uia_emergency_stop_status_text" in step
+
+
+def test_external_uia_observes_live_region_changed_for_packaged_emergency_stop() -> None:
+    audit = _audit()
+
+    assert "AutosportExternalLiveRegionProbe" in audit
+    assert "AutomationElementIdentifiers.LiveRegionChangedEvent" in audit
+    assert "Automation.AddAutomationEventHandler" in audit
+    assert "Automation.RemoveAutomationEventHandler" in audit
+    assert "live_region_event_status = 'NOT_RUN'" in audit
+    assert "live_region_event_count = 0" in audit
+    assert "live_region_event_automation_id = $null" in audit
+    assert "live_region_event_text = $null" in audit
+    assert "-AutomationId 'emergency-stop-status'" in audit
+    assert "$liveRegionProbe = [AutosportExternalLiveRegionProbe]::new($stopStatusBefore)" in audit
+    assert "$liveRegionProbe.Count -lt 1" in audit
+    assert "[string]$liveRegionProbe.LastAutomationId -ne 'emergency-stop-status'" in audit
+    assert "[string]$liveRegionProbe.LastName -ne $confirmedStopText" in audit
+    assert "$report.live_region_event_status = 'PASS'" in audit
+    assert "$liveRegionProbe.Dispose()" in audit
+
+
+def test_windows_candidate_requires_external_live_region_event_evidence() -> None:
+    workflow = _windows_workflow()
+    step_start = workflow.index("- name: External UIA fresh-extraction gate")
+    step_end = workflow.index("- name: Upload external UIA failure evidence", step_start)
+    step = workflow[step_start:step_end]
+
+    assert "$external.live_region_event_status -ne 'PASS'" in step
+    assert "[int]$external.live_region_event_count -lt 1" in step
+    assert "[string]$external.live_region_event_automation_id -ne 'emergency-stop-status'" in step
+    assert "External UIA evidence did not prove packaged LiveRegionChanged observation" in step
+    assert "extracted_external_uia_live_region_event_status" in step
+    assert "extracted_external_uia_live_region_event_count" in step
+    assert "extracted_external_uia_live_region_event_automation_id" in step
+    assert "extracted_external_uia_live_region_event_text" in step

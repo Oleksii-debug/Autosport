@@ -142,7 +142,7 @@ class ReplayCutoffTimeMonotonicityTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_new_forward_cutoff_cannot_move_backward_in_decision_time(self) -> None:
+    def test_older_cutoff_cannot_retroactively_advance_append_generation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
@@ -173,7 +173,7 @@ class ReplayCutoffTimeMonotonicityTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "issuance regresses decision time",
+                    "issuance retroactively advances append generation",
                 ):
                     self.replay(
                         store,
@@ -188,7 +188,7 @@ class ReplayCutoffTimeMonotonicityTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_committed_cutoff_chain_rejects_retrograde_decision_time(self) -> None:
+    def test_committed_cutoff_chain_rejects_retroactive_generation_advance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
@@ -225,7 +225,7 @@ class ReplayCutoffTimeMonotonicityTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "commit regresses decision time",
+                    "commit retroactively advances append generation",
                 ):
                     self.replay(store, as_of=later)
             finally:
@@ -268,7 +268,7 @@ class ReplayCutoffTimeMonotonicityTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "PREPARE regresses decision time",
+                    "PREPARE retroactively advances append generation",
                 ):
                     self.replay(store, as_of=later)
 
@@ -278,6 +278,35 @@ class ReplayCutoffTimeMonotonicityTests(unittest.TestCase):
             finally:
                 store.close()
 
+
+    def test_unseen_earlier_cutoff_can_reuse_same_append_frontier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+
+                far_future = self.CUTOFF + timedelta(days=365)
+                future_snapshot = self.replay(store, as_of=far_future)
+                self.assertEqual(
+                    tuple(event.to_dict() for event in future_snapshot.events),
+                    (first.to_dict(),),
+                )
+
+                earlier_snapshot = self.replay(store, as_of=self.CUTOFF)
+                self.assertEqual(
+                    tuple(event.to_dict() for event in earlier_snapshot.events),
+                    (first.to_dict(),),
+                )
+                rows = store._validated_replay_cutoff_rows()
+                self.assertEqual(len(rows), 2)
+                self.assertEqual({row[2] for row in rows}, {1})
+            finally:
+                store.close()
 
     def test_previously_issued_earlier_cutoff_remains_readable_after_frontier_advances(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

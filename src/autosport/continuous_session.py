@@ -2111,6 +2111,27 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             HeadlessCollectorService.status
         ),
         _collector_status_method_code: object = HeadlessCollectorService.status.__code__,
+        _invalidation_buffer_type: type[BoundedMirrorInvalidationBuffer] = (
+            BoundedMirrorInvalidationBuffer
+        ),
+        _pending_count_descriptor: object = (
+            BoundedMirrorInvalidationBuffer.__dict__["pending_count"]
+        ),
+        _pending_count_getter: Callable[[BoundedMirrorInvalidationBuffer], int] = (
+            BoundedMirrorInvalidationBuffer.pending_count.fget
+        ),
+        _pending_count_getter_code: object = (
+            BoundedMirrorInvalidationBuffer.pending_count.fget.__code__
+        ),
+        _full_refresh_descriptor: object = (
+            BoundedMirrorInvalidationBuffer.__dict__["full_refresh_required"]
+        ),
+        _full_refresh_getter: Callable[[BoundedMirrorInvalidationBuffer], bool] = (
+            BoundedMirrorInvalidationBuffer.full_refresh_required.fget
+        ),
+        _full_refresh_getter_code: object = (
+            BoundedMirrorInvalidationBuffer.full_refresh_required.fget.__code__
+        ),
         _replace: Callable[..., ContinuousSessionStatus] = replace,
         _replace_code: object = replace.__code__,
     ) -> ContinuousSessionStatus:
@@ -2128,6 +2149,49 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "canonical coordinator status authority changed"
             )
         snapshot = _snapshot_method(self._state)
+        invalidation_buffer = self.invalidation_buffer
+        if type(invalidation_buffer) is _invalidation_buffer_type:
+            pending_descriptor = _invalidation_buffer_type.__dict__.get(
+                "pending_count"
+            )
+            full_refresh_descriptor = _invalidation_buffer_type.__dict__.get(
+                "full_refresh_required"
+            )
+            if (
+                BoundedMirrorInvalidationBuffer is not _invalidation_buffer_type
+                or pending_descriptor is not _pending_count_descriptor
+                or getattr(pending_descriptor, "fget", None)
+                is not _pending_count_getter
+                or getattr(_pending_count_getter, "__code__", None)
+                is not _pending_count_getter_code
+                or full_refresh_descriptor is not _full_refresh_descriptor
+                or getattr(full_refresh_descriptor, "fget", None)
+                is not _full_refresh_getter
+                or getattr(_full_refresh_getter, "__code__", None)
+                is not _full_refresh_getter_code
+            ):
+                raise ContinuousSessionError(
+                    "canonical invalidation status authority changed"
+                )
+            invalidation_pending_count = _pending_count_getter(
+                invalidation_buffer
+            )
+            invalidation_full_refresh_required = _full_refresh_getter(
+                invalidation_buffer
+            )
+        else:
+            invalidation_pending_count = invalidation_buffer.pending_count
+            invalidation_full_refresh_required = (
+                invalidation_buffer.full_refresh_required
+            )
+        if (
+            type(invalidation_pending_count) is not int
+            or invalidation_pending_count < 0
+            or type(invalidation_full_refresh_required) is not bool
+        ):
+            raise ContinuousSessionError(
+                "invalidation buffer status state is invalid"
+            )
         source_status = _collector_status_method(self.collector)
         if type(source_status) is not dict:
             raise ContinuousSessionError(
@@ -2150,10 +2214,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             source_unresolved_gap_delta_ids=snapshot.source_unresolved_gap_delta_ids,
             source_projection_stream_epoch=snapshot.source_projection_stream_epoch,
             source_state_projection_backlog=snapshot.source_state_projection_backlog,
-            invalidation_pending_count=self.invalidation_buffer.pending_count,
-            invalidation_full_refresh_required=bool(
-                self.invalidation_buffer.full_refresh_required
-            ),
+            invalidation_pending_count=invalidation_pending_count,
+            invalidation_full_refresh_required=invalidation_full_refresh_required,
         )
 
     def pause(

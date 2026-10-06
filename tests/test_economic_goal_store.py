@@ -1003,3 +1003,57 @@ def test_verified_read_rejects_path_replacement_after_final_byte_read(
             store.path,
             _open_descriptor=racing_open,
         )
+
+
+def _maximally_escaped_restrictions() -> frozenset[str]:
+    return frozenset(
+        ('"' * 500) + f"{index:012d}"
+        for index in range(1024)
+    )
+
+
+def test_payload_encoder_rejects_json_escape_expansion_beyond_restart_envelope() -> None:
+    restrictions = _maximally_escaped_restrictions()
+    goal = _goal(
+        blocked_sports=restrictions,
+        blocked_providers=restrictions,
+    )
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="persistence text-size limit",
+    ):
+        economic_goal_to_payload(goal)
+
+
+def test_owner_initialization_does_not_publish_oversize_persisted_image(tmp_path) -> None:
+    restrictions = _maximally_escaped_restrictions()
+    goal = _goal(
+        blocked_sports=restrictions,
+        blocked_providers=restrictions,
+    )
+    store = EconomicGoalStore(tmp_path)
+    calls = []
+
+    def forged_writer(path, payload):
+        calls.append((path, payload))
+        raise AssertionError("writer executed for payload outside restart envelope")
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="persistence text-size limit",
+    ):
+        store.initialize_owner(goal, _writer=forged_writer)
+
+    assert calls == []
+    assert not store.path.exists()
+
+
+def test_payload_encoder_enforces_utf8_byte_envelope() -> None:
+    goal = _goal()
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="persistence byte-size limit",
+    ):
+        economic_goal_to_payload(goal, _max_json_bytes=1)

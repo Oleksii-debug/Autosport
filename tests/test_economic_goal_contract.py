@@ -326,6 +326,8 @@ def test_automatic_transition_rejects_contract_subclasses() -> None:
     class ContractSubclass(EconomicGoalContract):
         pass
 
+    assert callable(ContractSubclass.validate_automatic_successor)
+
     previous = _goal()
     candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
     subclass = ContractSubclass(

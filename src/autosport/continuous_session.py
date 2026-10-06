@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Final, Protocol
 
 from .causal_collector import (
     CollectorDelta,
@@ -282,14 +282,14 @@ def _sha256(value: object, field: str) -> str:
     return value
 
 
-class _ContinuousSessionState:
-    _SCHEMA = "autosport.continuous_session"
-    _VERSION = 2
-    _ERROR_SCHEMA = "autosport.continuous_session.operational_error"
-    _ERROR_VERSION = 1
-    _MAX_ERROR_CHECKPOINT_BYTES = 16 * 1024
-    _MAX_ERROR_CODE_CHARS = 512
-    _ERROR_FIELDS = {
+_CONTINUOUS_SESSION_SCHEMA: Final = "autosport.continuous_session"
+_CONTINUOUS_SESSION_VERSION: Final = 2
+_CONTINUOUS_SESSION_ERROR_SCHEMA: Final = "autosport.continuous_session.operational_error"
+_CONTINUOUS_SESSION_ERROR_VERSION: Final = 1
+_CONTINUOUS_SESSION_ERROR_MAX_BYTES: Final = 16 * 1024
+_CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS: Final = 512
+_CONTINUOUS_SESSION_ERROR_FIELDS: Final = frozenset(
+    {
         "schema",
         "schema_version",
         "session_id",
@@ -298,6 +298,17 @@ class _ContinuousSessionState:
         "observed_last_success_at",
         "last_error_code",
     }
+)
+
+
+class _ContinuousSessionState:
+    _SCHEMA = _CONTINUOUS_SESSION_SCHEMA
+    _VERSION = _CONTINUOUS_SESSION_VERSION
+    _ERROR_SCHEMA = _CONTINUOUS_SESSION_ERROR_SCHEMA
+    _ERROR_VERSION = _CONTINUOUS_SESSION_ERROR_VERSION
+    _MAX_ERROR_CHECKPOINT_BYTES = _CONTINUOUS_SESSION_ERROR_MAX_BYTES
+    _MAX_ERROR_CODE_CHARS = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS
+    _ERROR_FIELDS = _CONTINUOUS_SESSION_ERROR_FIELDS
     _FIELDS = {
         "schema",
         "schema_version",
@@ -441,7 +452,7 @@ class _ContinuousSessionState:
                     "was replaced before verification"
                 )
 
-            read_limit = self._MAX_ERROR_CHECKPOINT_BYTES + 1
+            read_limit = _CONTINUOUS_SESSION_ERROR_MAX_BYTES + 1
             os.lseek(descriptor, 0, os.SEEK_SET)
             first_image = self._bounded_descriptor_read(descriptor, read_limit)
             os.lseek(descriptor, 0, os.SEEK_SET)
@@ -479,7 +490,7 @@ class _ContinuousSessionState:
     def _read_error_checkpoint(self) -> dict[str, Any]:
         try:
             encoded = self._read_error_checkpoint_bytes()
-            if len(encoded) > self._MAX_ERROR_CHECKPOINT_BYTES:
+            if len(encoded) > _CONTINUOUS_SESSION_ERROR_MAX_BYTES:
                 raise ContinuousSessionError(
                     "continuous session operational error checkpoint "
                     "exceeds resource limit"
@@ -499,10 +510,10 @@ class _ContinuousSessionState:
             ) from exc
         if (
             type(raw) is not dict
-            or set(raw) != self._ERROR_FIELDS
-            or raw["schema"] != self._ERROR_SCHEMA
+            or set(raw) != _CONTINUOUS_SESSION_ERROR_FIELDS
+            or raw["schema"] != _CONTINUOUS_SESSION_ERROR_SCHEMA
             or type(raw["schema_version"]) is not int
-            or raw["schema_version"] != self._ERROR_VERSION
+            or raw["schema_version"] != _CONTINUOUS_SESSION_ERROR_VERSION
             or raw["session_id"] != self._session_id
             or raw["source_id"] != self.source_id
         ):
@@ -528,7 +539,7 @@ class _ContinuousSessionState:
                 raw["last_error_code"],
                 "operational error last_error_code",
             )
-            if len(error_code) > self._MAX_ERROR_CODE_CHARS:
+            if len(error_code) > _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS:
                 raise ContinuousSessionError(
                     "operational error last_error_code exceeds resource limit"
                 )
@@ -537,11 +548,11 @@ class _ContinuousSessionState:
     def _write_error_checkpoint(self, code: str | None) -> None:
         if code is not None:
             code = _text(code, "code")
-            if len(code) > self._MAX_ERROR_CODE_CHARS:
+            if len(code) > _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS:
                 raise ValueError("code exceeds operational error resource limit")
         payload = {
-            "schema": self._ERROR_SCHEMA,
-            "schema_version": self._ERROR_VERSION,
+            "schema": _CONTINUOUS_SESSION_ERROR_SCHEMA,
+            "schema_version": _CONTINUOUS_SESSION_ERROR_VERSION,
             "session_id": self._session_id,
             "source_id": self.source_id,
             "observed_cycles_completed": self._cycles_completed,
@@ -558,7 +569,7 @@ class _ContinuousSessionState:
             )
             + "\n"
         ).encode("utf-8")
-        if len(encoded) > self._MAX_ERROR_CHECKPOINT_BYTES:
+        if len(encoded) > _CONTINUOUS_SESSION_ERROR_MAX_BYTES:
             raise ContinuousSessionError(
                 "continuous session operational error checkpoint exceeds resource limit"
             )

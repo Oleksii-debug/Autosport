@@ -228,10 +228,6 @@ class RiskOfRuinEvidence:
             raise ValueError(
                 "risk-of-ruin upper_bound must be an exact Decimal between 0 and 1"
             )
-        _reject_signed_zero_decimal(
-            self.upper_bound,
-            "vector risk-of-ruin upper_bound",
-        )
         _reject_signed_zero_decimal(self.upper_bound, "risk-of-ruin upper_bound")
 
 
@@ -336,6 +332,10 @@ class RiskOfRuinVectorEvidence:
             raise ValueError(
                 "vector risk-of-ruin upper_bound must be an exact Decimal between 0 and 1"
             )
+        _reject_signed_zero_decimal(
+            self.upper_bound,
+            "vector risk-of-ruin upper_bound",
+        )
 
 
 @dataclass(frozen=True, slots=True)

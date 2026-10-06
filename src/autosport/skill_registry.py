@@ -452,10 +452,16 @@ class SkillRegistry:
                     process.terminate()
             except (OSError, ValueError):
                 # A concurrent process exit can race the stop request.  Reap
-                # whatever state remains below; the invocation is terminally
-                # classified as timed out either way.
+                # whatever state remains below before deciding whether a
+                # terminate fallback is still required.
                 pass
             process.join(_HANDLER_TIMEOUT_REAP_GRACE_SECONDS)
+            if process.is_alive() and hasattr(process, "terminate"):
+                try:
+                    process.terminate()
+                except (OSError, ValueError):
+                    pass
+                process.join(_HANDLER_TIMEOUT_REAP_GRACE_SECONDS)
             receiver.close()
             return None,"HANDLER_TIMEOUT"
         if not receiver.poll():

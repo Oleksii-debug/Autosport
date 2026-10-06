@@ -48,7 +48,7 @@ _ONE: Final = Decimal("1")
 
 
 def _canonical_text(name: str, value: object) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise EconomicGoalContractError(f"{name} must be a string")
     if not value or value != value.strip():
         raise EconomicGoalContractError(
@@ -64,7 +64,7 @@ def _canonical_text(name: str, value: object) -> str:
 
 
 def _decimal(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal):
+    if type(value) is not Decimal:
         raise EconomicGoalContractError(f"{name} must be an exact Decimal")
     if not value.is_finite():
         raise EconomicGoalContractError(f"{name} must be finite")
@@ -92,7 +92,7 @@ def _optional_nonnegative_decimal(name: str, value: object) -> Decimal | None:
 
 
 def _nonnegative_int(name: str, value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
+    if type(value) is not int:
         raise EconomicGoalContractError(f"{name} must be a non-boolean integer")
     if value < 0:
         raise EconomicGoalContractError(f"{name} must be non-negative")
@@ -107,7 +107,7 @@ def _positive_int(name: str, value: object) -> int:
 
 
 def _canonical_restrictions(name: str, value: object) -> frozenset[str]:
-    if not isinstance(value, frozenset):
+    if type(value) is not frozenset:
         raise EconomicGoalContractError(f"{name} must be a frozenset of strings")
     normalized: set[str] = set()
     for item in value:
@@ -182,7 +182,7 @@ class EconomicGoalContract:
                 "currency must be a three-letter uppercase ASCII code"
             )
 
-        if not isinstance(self.objective, EconomicObjective):
+        if type(self.objective) is not EconomicObjective:
             raise EconomicGoalContractError("objective must be an EconomicObjective")
 
         _fraction("max_stake_fraction", self.max_stake_fraction)
@@ -217,11 +217,11 @@ class EconomicGoalContract:
 
         _nonnegative_int("max_concurrent_positions", self.max_concurrent_positions)
         _positive_int("max_parlay_legs", self.max_parlay_legs)
-        if not isinstance(self.automation_level, AutomationLevel):
+        if type(self.automation_level) is not AutomationLevel:
             raise EconomicGoalContractError(
                 "automation_level must be an AutomationLevel"
             )
-        if not isinstance(self.emergency_stop, bool):
+        if type(self.emergency_stop) is not bool:
             raise EconomicGoalContractError("emergency_stop must be a bool")
 
         _canonical_restrictions("blocked_sports", self.blocked_sports)
@@ -305,12 +305,13 @@ def validate_automatic_transition(
     *non-expansion*, not that every revision necessarily tightens a limit.
     """
 
-    if not isinstance(previous, EconomicGoalContract) or not isinstance(
-        candidate, EconomicGoalContract
-    ):
+    if type(previous) is not EconomicGoalContract or type(candidate) is not EconomicGoalContract:
         raise EconomicGoalContractError(
             "automatic transition requires EconomicGoalContract instances"
         )
+
+    EconomicGoalContract.__post_init__(previous)
+    EconomicGoalContract.__post_init__(candidate)
 
     _require_same("goal_id", previous.goal_id, candidate.goal_id)
     _require_same("bankroll_id", previous.bankroll_id, candidate.bankroll_id)

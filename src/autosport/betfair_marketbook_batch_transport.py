@@ -91,13 +91,29 @@ def _sha256_token(value: object, field: str) -> str:
     return token
 
 
-def _dispatch_instant(value: object) -> datetime:
+def _dispatch_instant(
+    client: _base.BetfairReadOnlyClient,
+    value: object,
+) -> datetime:
+    if type(client) is not _base.BetfairReadOnlyClient:
+        raise TypeError("client must be an exact BetfairReadOnlyClient")
     if type(value) is not datetime:
         raise TypeError("scheduled_at must be an exact datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("scheduled_at must be timezone-aware")
     normalized = value.astimezone(timezone.utc)
-    dispatch_now = datetime.now(timezone.utc)
+
+    # Mirror the canonical physical MarketBook transport's time-origin rule.
+    # The unmodified production network transport is always measured by real
+    # UTC; injected transports use the client's validated clock so replay and
+    # deterministic tests do not acquire a second wall-clock authority.
+    if _transport._canonical_network_transport(client):
+        dispatch_now = datetime.now(timezone.utc)
+    else:
+        dispatch_now = datetime.fromisoformat(client._observed_at()).astimezone(
+            timezone.utc
+        )
+
     if normalized > dispatch_now:
         raise ValueError("scheduled_at must not be in the future")
     # Provider pressure is enforced against the physical immediate-dispatch
@@ -524,7 +540,7 @@ def _install_transport_result_authority() -> None:
                 "concurrency_gate must be exact BetfairMarketBookProjectionConcurrencyGate"
             )
         request = _token(request_id, "request_id")
-        instant = _dispatch_instant(scheduled_at)
+        instant = _dispatch_instant(client, scheduled_at)
 
         batch = _canonical_batch(plan, batch_id)
         params = _params_for_batch(plan, batch)

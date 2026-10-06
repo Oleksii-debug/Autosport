@@ -540,7 +540,7 @@ def test_rate_denial_releases_projection_lease_without_transport():
     client, transport = _client(_payload(batch.market_ids))
     rate_gate = BetfairMarketBookPerMarketRateGate()
     concurrency_gate = BetfairMarketBookProjectionConcurrencyGate()
-    admission_now = datetime.now(timezone.utc)
+    admission_now = NOW
     for _ in range(5):
         assert rate_gate.reserve(
             ("1.001",),
@@ -568,7 +568,7 @@ def test_historical_scheduled_at_cannot_bypass_physical_rate_window():
     batch = plan.batches[0]
     client, transport = _client(_payload(batch.market_ids))
     rate_gate, concurrency_gate = _gates()
-    admission_now = datetime.now(timezone.utc)
+    admission_now = NOW
     for _ in range(5):
         assert rate_gate.reserve(
             ("1.001",),
@@ -588,6 +588,30 @@ def test_historical_scheduled_at_cannot_bypass_physical_rate_window():
 
     assert exc_info.value.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
     assert transport.calls == []
+
+
+def test_injected_transport_rate_gate_uses_canonical_client_clock():
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="controlled-clock",
+        scheduled_at=NOW - timedelta(days=30),
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+    assert len(transport.calls) == 1
+    state = rate_gate.snapshot()
+    expected_us = int(NOW.timestamp() * 1_000_000)
+    assert state.last_scheduled_at_utc_us == expected_us
+    assert state.markets[0].accepted_at_utc_us == (expected_us,)
 
 
 def test_successful_projection_read_releases_local_concurrency_lease():
@@ -717,7 +741,7 @@ def test_attempt_executor_records_rate_denial_as_required_gap():
     batch = plan.batches[0]
     client, transport = _client(_payload(batch.market_ids))
     rate_gate, concurrency_gate = _gates()
-    admission_now = datetime.now(timezone.utc)
+    admission_now = NOW
     for _ in range(5):
         assert rate_gate.reserve(
             ("1.001",),
@@ -929,7 +953,7 @@ def test_immediate_dispatch_rejects_future_causal_instant_before_any_gate_mutati
     batch = plan.batches[0]
     client, transport = _client(_payload(batch.market_ids))
     rate_gate, concurrency_gate = _gates()
-    future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+    future = NOW + timedelta(microseconds=1)
 
     with pytest.raises(ValueError, match="must not be in the future"):
         read_market_book_batch(

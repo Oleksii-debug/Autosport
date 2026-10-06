@@ -60,6 +60,12 @@ class CandidateLeg:
         """
 
         if (
+            type(self.quote_key) is not str
+            or not self.quote_key
+            or self.quote_key.strip() != self.quote_key
+        ):
+            raise ValueError("candidate leg quote_key must be a non-empty canonical string")
+        if (
             type(self.event_id) is not str
             or not self.event_id
             or self.event_id.strip() != self.event_id

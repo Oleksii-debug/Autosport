@@ -279,5 +279,53 @@ class ReplayCutoffTimeMonotonicityTests(unittest.TestCase):
                 store.close()
 
 
+    def test_previously_issued_earlier_cutoff_remains_readable_after_frontier_advances(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+                earlier = self.replay(store, as_of=self.CUTOFF)
+                self.assertEqual(
+                    tuple(event.to_dict() for event in earlier.events),
+                    (first.to_dict(),),
+                )
+
+                second = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:02+00:00",
+                )
+                self.assertTrue(store.append(second))
+                later_cutoff = self.CUTOFF + timedelta(seconds=2)
+                later = self.replay(store, as_of=later_cutoff)
+                self.assertEqual(
+                    tuple(event.sequence for event in later.events),
+                    (2,),
+                )
+                rows_after_later = store._validated_replay_cutoff_rows()
+                history_after_later = store._replay_cutoff_authority().read_history()
+
+                earlier_again = self.replay(store, as_of=self.CUTOFF)
+                self.assertEqual(
+                    tuple(event.to_dict() for event in earlier_again.events),
+                    (first.to_dict(),),
+                )
+                self.assertEqual(
+                    store._validated_replay_cutoff_rows(),
+                    rows_after_later,
+                )
+                self.assertEqual(
+                    store._replay_cutoff_authority().read_history(),
+                    history_after_later,
+                )
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

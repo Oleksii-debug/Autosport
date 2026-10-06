@@ -273,6 +273,48 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(attempt.execution_odds, Decimal("2.40"))
         self.assertEqual(attempt.execution_stake, Decimal("10.00"))
 
+    def test_identity_helpers_ignore_rebound_module_runtime_globals(self) -> None:
+        expected_record = evidence()
+        expected_digest = expected_record.evidence_sha256
+        expected_bucket = legacy._deterministic_int("seed", "label", 97)
+        names = (
+            "_text",
+            "_timestamp",
+            "_timestamp_text",
+            "_digest",
+            "_canonical",
+            "json",
+            "hashlib",
+            "datetime",
+            "timezone",
+        )
+        sentinel = object()
+        previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+
+        def forged(*args, **kwargs):
+            raise AssertionError("rebound identity helper executed")
+
+        try:
+            for name in names:
+                legacy.__dict__[name] = forged
+
+            record = evidence()
+            self.assertEqual(record.evidence_sha256, expected_digest)
+            self.assertEqual(
+                legacy._deterministic_int("seed", "label", 97),
+                expected_bucket,
+            )
+            self.assertEqual(
+                legacy._parse_json_object('{"value":1}', what="test"),
+                {"value": 1},
+            )
+        finally:
+            for name, value in previous.items():
+                if value is sentinel:
+                    legacy.__dict__.pop(name, None)
+                else:
+                    legacy.__dict__[name] = value
+
     def test_authority_dataclasses_ignore_rebound_module_enum_globals(self) -> None:
         names = ("EvidenceGrade", "PaperAttemptOutcome", "RecoveryDecision")
         sentinel = object()

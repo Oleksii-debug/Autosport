@@ -82,6 +82,7 @@ class EconomicGoalProvenance:
 _CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
 _CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
 _CANONICAL_PROVENANCE_RAW_POST_INIT: Final = EconomicGoalProvenance.__post_init__
+_PROVENANCE_OBJECT_SETATTR: Final = object.__setattr__
 
 
 def _make_provenance_post_init_authority(operation):
@@ -149,7 +150,7 @@ def _provenance_init_authority(
         ("bankroll_id", bankroll_id),
         ("contract_sha256", contract_sha256),
     ):
-        object.__setattr__(self, name, value)
+        _PROVENANCE_OBJECT_SETATTR(self, name, value)
     _CANONICAL_PROVENANCE_VALIDATOR(self)
 
 

@@ -833,6 +833,100 @@ def test_tick_rejects_unregistered_affected_input_id() -> None:
         )
 
 
+def test_tick_rejects_invalidation_drain_selector_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                assert index.unregister("input-a")
+                index.register("input-a", source_ids="provider-b")
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.invalidation_buffer = Buffer()
+        coordinator.dependency_index = index
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="routing authority changed during invalidation drain",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
+def test_tick_rejects_invalidation_drain_mirror_rebinding() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        replacement_mirror = MarketMirror()
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                index._mirror = replacement_mirror
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.invalidation_buffer = Buffer()
+        coordinator.dependency_index = index
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="routing authority changed during invalidation drain",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
 def test_tick_rejects_invalidation_drain_identity_mutation() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

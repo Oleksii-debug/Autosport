@@ -136,6 +136,45 @@ def test_each_canonical_leg_identity_mutation_is_rejected(
         _ = book.committed_stake
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("stake", Decimal("11")),
+        ("placed_at", "2026-10-05T00:01:00+00:00"),
+        ("strategy_reason", "tampered"),
+        ("provider_source_ids", ("another-provider",)),
+        ("provider_accounts", (("betfair", "another-account"),)),
+        ("bankroll_id", "another-bankroll"),
+        ("currency", "EUR"),
+    ),
+)
+def test_each_ticket_opening_economic_identity_mutation_is_rejected(
+    field: str,
+    replacement: object,
+) -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_leg()],
+        "10",
+        reason="safe",
+        placed_at=_TS,
+        provider_source_ids=("betfair",),
+        provider_accounts=(("betfair", "account-1"),),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+    object.__setattr__(ticket, field, replacement)
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        _ = book.committed_stake
+
+    assert book.balance == Decimal("90")
+    assert ticket.status.value == "open"
+
+
 def test_leg_tuple_reordering_cannot_move_opening_authority() -> None:
     book = PaperBook("100")
     first = _leg()
@@ -2557,4 +2596,3 @@ def test_save_rejects_in_place_snapshot_path_property_getter_code_mutation_befor
         getter.__code__ = original_code
 
     assert not (tmp_path / "paper-book.json").exists()
-

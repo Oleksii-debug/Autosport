@@ -4066,7 +4066,7 @@ def test_provider_unavailable_backlog_failure_restores_coordinator_authority(
 
         assert coordinator._state is canonical_state
         assert coordinator.dependency_index is canonical_index
-        assert canonical_state.snapshot().last_error_code is None
+        assert canonical_state.snapshot().last_error_code == expected_error.__name__
         assert replacement_state.snapshot().last_error_code is None
 
 @pytest.mark.parametrize(
@@ -7001,4 +7001,69 @@ def test_tick_exception_restores_economic_context(
         assert coordinator.workspace == original_workspace
         assert coordinator.paper_book_path == original_book
         assert coordinator.initial_bankroll == original_bankroll
+
+@pytest.mark.parametrize(
+    ("late_failure", "expected_error", "expected_match"),
+    (
+        ("raises", RuntimeError, "late provider backlog accessor failed"),
+        (
+            "malformed",
+            continuous_session.ContinuousSessionError,
+            "invalidation buffer backlog state is invalid",
+        ),
+    ),
+)
+def test_provider_unavailable_late_backlog_failure_replaces_provider_receipt(
+    late_failure: str,
+    expected_error: type[Exception],
+    expected_match: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class ProviderUnavailableCollector(_Collector):
+            def run_cycle(self):
+                return type(
+                    "ProviderUnavailableCycle",
+                    (),
+                    {
+                        "provider_unavailable": True,
+                        "source_id": "provider-a",
+                        "committed_delta_ids": (),
+                    },
+                )()
+
+        class Buffer:
+            full_refresh_required = False
+
+            def __init__(self) -> None:
+                self.pending_reads = 0
+
+            @property
+            def pending_count(self):
+                self.pending_reads += 1
+                if self.pending_reads == 1:
+                    return 0
+                if late_failure == "raises":
+                    raise RuntimeError("late provider backlog accessor failed")
+                return True
+
+            def drain(self, **_kwargs):
+                raise AssertionError(
+                    "provider-unavailable tick must not drain invalidations"
+                )
+
+        buffer = Buffer()
+        coordinator.collector = ProviderUnavailableCollector()
+        coordinator.invalidation_buffer = buffer
+
+        with pytest.raises(expected_error, match=expected_match):
+            coordinator.tick()
+
+        assert buffer.pending_reads == 2
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == expected_error.__name__
+        )
 

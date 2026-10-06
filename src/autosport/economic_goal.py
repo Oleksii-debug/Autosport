@@ -307,8 +307,127 @@ class EconomicGoalContract:
 
         _CANONICAL_TRANSITION_VALIDATOR(self, candidate)
 
+_CONTRACT_FIELD_NAMES: Final = (
+    "goal_id",
+    "revision",
+    "bankroll_id",
+    "currency",
+    "objective",
+    "max_stake_fraction",
+    "max_stake_amount",
+    "max_session_loss_fraction",
+    "max_day_loss_fraction",
+    "max_drawdown_fraction",
+    "max_capital_at_risk_fraction",
+    "max_event_concentration_fraction",
+    "max_market_concentration_fraction",
+    "max_provider_concentration_fraction",
+    "max_sport_concentration_fraction",
+    "max_turnover_fraction",
+    "max_risk_of_ruin",
+    "max_execution_slippage_fraction",
+    "max_quote_age_seconds",
+    "minimum_data_quality",
+    "max_concurrent_positions",
+    "max_parlay_legs",
+    "automation_level",
+    "emergency_stop",
+    "blocked_sports",
+    "blocked_providers",
+    "blocked_markets",
+)
+
+# Capture the original slot descriptors once so class-level rebinding cannot
+# redirect economic-goal validation or identity reads to a forged descriptor.
+_CANONICAL_CONTRACT_FIELD_GETTERS: Final = tuple(
+    (name, EconomicGoalContract.__dict__[name].__get__)
+    for name in _CONTRACT_FIELD_NAMES
+)
+
+def _canonical_contract_snapshot(
+    contract: EconomicGoalContract,
+    _field_getters=_CANONICAL_CONTRACT_FIELD_GETTERS,
+) -> tuple[object, ...]:
+    return tuple(
+        getter(contract, EconomicGoalContract)
+        for _, getter in _field_getters
+    )
+
+
+def _validate_contract_bound(
+    self: EconomicGoalContract,
+    _field_getters=_CANONICAL_CONTRACT_FIELD_GETTERS,
+    _text_validator=_canonical_text,
+    _positive_int_validator=_positive_int,
+    _fraction_validator=_fraction,
+    _optional_nonnegative_decimal_validator=_optional_nonnegative_decimal,
+    _nonnegative_decimal_validator=_nonnegative_decimal,
+    _nonnegative_int_validator=_nonnegative_int,
+    _restrictions_validator=_canonical_restrictions,
+    _objective_type=EconomicObjective,
+    _automation_type=AutomationLevel,
+    _error_type=EconomicGoalContractError,
+) -> None:
+    """Validate through captured slot descriptors rather than class attributes."""
+
+    if type(self) is not EconomicGoalContract:
+        raise _error_type("economic goal must use the exact contract type")
+    values = _canonical_contract_snapshot(self, _field_getters)
+    (
+        goal_id, revision, bankroll_id, currency, objective,
+        max_stake_fraction, max_stake_amount, max_session_loss_fraction,
+        max_day_loss_fraction, max_drawdown_fraction, max_capital_at_risk_fraction,
+        max_event_concentration_fraction, max_market_concentration_fraction,
+        max_provider_concentration_fraction, max_sport_concentration_fraction,
+        max_turnover_fraction, max_risk_of_ruin, max_execution_slippage_fraction,
+        max_quote_age_seconds, minimum_data_quality, max_concurrent_positions,
+        max_parlay_legs, automation_level, emergency_stop,
+        blocked_sports, blocked_providers, blocked_markets,
+    ) = values
+
+    _text_validator("goal_id", goal_id)
+    _positive_int_validator("revision", revision)
+    _text_validator("bankroll_id", bankroll_id)
+    currency = _text_validator("currency", currency)
+    if len(currency) != 3 or not currency.isascii() or not currency.isalpha():
+        raise _error_type("currency must be a three-letter uppercase ASCII code")
+    if currency != currency.upper():
+        raise _error_type("currency must be a three-letter uppercase ASCII code")
+    if type(objective) is not _objective_type:
+        raise _error_type("objective must be an EconomicObjective")
+
+    _fraction_validator("max_stake_fraction", max_stake_fraction)
+    _optional_nonnegative_decimal_validator("max_stake_amount", max_stake_amount)
+    _fraction_validator("max_session_loss_fraction", max_session_loss_fraction)
+    _fraction_validator("max_day_loss_fraction", max_day_loss_fraction)
+    _fraction_validator("max_drawdown_fraction", max_drawdown_fraction)
+    _fraction_validator("max_capital_at_risk_fraction", max_capital_at_risk_fraction)
+    _fraction_validator("max_event_concentration_fraction", max_event_concentration_fraction)
+    _fraction_validator("max_market_concentration_fraction", max_market_concentration_fraction)
+    _fraction_validator("max_provider_concentration_fraction", max_provider_concentration_fraction)
+    _fraction_validator("max_sport_concentration_fraction", max_sport_concentration_fraction)
+    _nonnegative_decimal_validator("max_turnover_fraction", max_turnover_fraction)
+    _fraction_validator("max_risk_of_ruin", max_risk_of_ruin)
+    _fraction_validator("max_execution_slippage_fraction", max_execution_slippage_fraction)
+    _nonnegative_decimal_validator("max_quote_age_seconds", max_quote_age_seconds)
+    _fraction_validator("minimum_data_quality", minimum_data_quality)
+
+    _nonnegative_int_validator("max_concurrent_positions", max_concurrent_positions)
+    _positive_int_validator("max_parlay_legs", max_parlay_legs)
+    if type(automation_level) is not _automation_type:
+        raise _error_type("automation_level must be an AutomationLevel")
+    if type(emergency_stop) is not bool:
+        raise _error_type("emergency_stop must be a bool")
+
+    _restrictions_validator("blocked_sports", blocked_sports)
+    _restrictions_validator("blocked_providers", blocked_providers)
+    _restrictions_validator("blocked_markets", blocked_markets)
+
+
+EconomicGoalContract.__post_init__ = _validate_contract_bound
+
 _CANONICAL_CONTRACT_TYPE: Final = EconomicGoalContract
-_CANONICAL_CONTRACT_VALIDATOR: Final = EconomicGoalContract.__post_init__
+_CANONICAL_CONTRACT_VALIDATOR: Final = _validate_contract_bound
 
 
 def _require_same(
@@ -397,6 +516,8 @@ def _validate_automatic_transition_bound(
     _floor_guard=_require_floor_not_decreased,
     _int_cap_guard=_require_int_cap_not_increased,
     _restrictions_guard=_require_restrictions_not_removed,
+    _snapshot=_canonical_contract_snapshot,
+    _field_names=_CONTRACT_FIELD_NAMES,
     _error_type=EconomicGoalContractError,
 ) -> None:
     """Prove that ``candidate`` does not enlarge ``previous`` authority.
@@ -404,127 +525,60 @@ def _validate_automatic_transition_bound(
     Both arguments must already be valid typed contracts.  The successor must be
     the immediately next revision of the same goal/bankroll/currency/objective.
     Equality of authority limits is accepted; this validator establishes
-    *non-expansion*, not that every revision necessarily tightens a limit.
-    """
-
     if (
         type(previous) is not _contract_type
         or type(candidate) is not _contract_type
     ):
-        raise _error_type(
-            "automatic transition requires EconomicGoalContract instances"
-        )
+        raise _error_type("automatic transition requires EconomicGoalContract instances")
 
     _contract_validator(previous)
     _contract_validator(candidate)
+    previous_before = _snapshot(previous)
+    candidate_before = _snapshot(candidate)
+    _contract_validator(previous)
+    _contract_validator(candidate)
+    previous_after = _snapshot(previous)
+    candidate_after = _snapshot(candidate)
+    if previous_before != previous_after or candidate_before != candidate_after:
+        raise _error_type("economic goal changed during automatic transition validation")
 
-    _same_guard("goal_id", previous.goal_id, candidate.goal_id)
-    _same_guard("bankroll_id", previous.bankroll_id, candidate.bankroll_id)
-    _same_guard("currency", previous.currency, candidate.currency)
-    _same_guard("objective", previous.objective, candidate.objective)
+    previous_view = dict(zip(_field_names, previous_after))
+    candidate_view = dict(zip(_field_names, candidate_after))
 
-    if candidate.revision != previous.revision + 1:
-        raise _error_type(
-            "automatic transition must advance revision by exactly one"
-        )
+    _same_guard("goal_id", previous_view["goal_id"], candidate_view["goal_id"])
+    _same_guard("bankroll_id", previous_view["bankroll_id"], candidate_view["bankroll_id"])
+    _same_guard("currency", previous_view["currency"], candidate_view["currency"])
+    _same_guard("objective", previous_view["objective"], candidate_view["objective"])
 
-    _cap_guard(
-        "max_stake_fraction",
-        previous.max_stake_fraction,
-        candidate.max_stake_fraction,
-    )
-    _optional_cap_guard(
-        "max_stake_amount", previous.max_stake_amount, candidate.max_stake_amount
-    )
-    _cap_guard(
-        "max_session_loss_fraction",
-        previous.max_session_loss_fraction,
-        candidate.max_session_loss_fraction,
-    )
-    _cap_guard(
-        "max_day_loss_fraction",
-        previous.max_day_loss_fraction,
-        candidate.max_day_loss_fraction,
-    )
-    _cap_guard(
-        "max_drawdown_fraction",
-        previous.max_drawdown_fraction,
-        candidate.max_drawdown_fraction,
-    )
-    _cap_guard(
-        "max_capital_at_risk_fraction",
-        previous.max_capital_at_risk_fraction,
-        candidate.max_capital_at_risk_fraction,
-    )
-    _cap_guard(
-        "max_event_concentration_fraction",
-        previous.max_event_concentration_fraction,
-        candidate.max_event_concentration_fraction,
-    )
-    _cap_guard(
-        "max_market_concentration_fraction",
-        previous.max_market_concentration_fraction,
-        candidate.max_market_concentration_fraction,
-    )
-    _cap_guard(
-        "max_provider_concentration_fraction",
-        previous.max_provider_concentration_fraction,
-        candidate.max_provider_concentration_fraction,
-    )
-    _cap_guard(
-        "max_sport_concentration_fraction",
-        previous.max_sport_concentration_fraction,
-        candidate.max_sport_concentration_fraction,
-    )
-    _cap_guard(
-        "max_turnover_fraction",
-        previous.max_turnover_fraction,
-        candidate.max_turnover_fraction,
-    )
-    _cap_guard(
-        "max_risk_of_ruin", previous.max_risk_of_ruin, candidate.max_risk_of_ruin
-    )
-    _cap_guard(
-        "max_execution_slippage_fraction",
-        previous.max_execution_slippage_fraction,
-        candidate.max_execution_slippage_fraction,
-    )
-    _cap_guard(
-        "max_quote_age_seconds",
-        previous.max_quote_age_seconds,
-        candidate.max_quote_age_seconds,
-    )
-    _floor_guard(
-        "minimum_data_quality",
-        previous.minimum_data_quality,
-        candidate.minimum_data_quality,
-    )
+    if candidate_view["revision"] != previous_view["revision"] + 1:
+        raise _error_type("automatic transition must advance revision by exactly one")
 
-    _int_cap_guard(
-        "max_concurrent_positions",
-        previous.max_concurrent_positions,
-        candidate.max_concurrent_positions,
-    )
-    _int_cap_guard(
-        "max_parlay_legs", previous.max_parlay_legs, candidate.max_parlay_legs
-    )
-    if candidate.automation_level > previous.automation_level:
-        raise _error_type(
-            "automatic transition must not increase automation_level"
-        )
-    if previous.emergency_stop and not candidate.emergency_stop:
-        raise _error_type(
-            "automatic transition must not clear emergency_stop"
-        )
+    _cap_guard("max_stake_fraction", previous_view["max_stake_fraction"], candidate_view["max_stake_fraction"])
+    _optional_cap_guard("max_stake_amount", previous_view["max_stake_amount"], candidate_view["max_stake_amount"])
+    _cap_guard("max_session_loss_fraction", previous_view["max_session_loss_fraction"], candidate_view["max_session_loss_fraction"])
+    _cap_guard("max_day_loss_fraction", previous_view["max_day_loss_fraction"], candidate_view["max_day_loss_fraction"])
+    _cap_guard("max_drawdown_fraction", previous_view["max_drawdown_fraction"], candidate_view["max_drawdown_fraction"])
+    _cap_guard("max_capital_at_risk_fraction", previous_view["max_capital_at_risk_fraction"], candidate_view["max_capital_at_risk_fraction"])
+    _cap_guard("max_event_concentration_fraction", previous_view["max_event_concentration_fraction"], candidate_view["max_event_concentration_fraction"])
+    _cap_guard("max_market_concentration_fraction", previous_view["max_market_concentration_fraction"], candidate_view["max_market_concentration_fraction"])
+    _cap_guard("max_provider_concentration_fraction", previous_view["max_provider_concentration_fraction"], candidate_view["max_provider_concentration_fraction"])
+    _cap_guard("max_sport_concentration_fraction", previous_view["max_sport_concentration_fraction"], candidate_view["max_sport_concentration_fraction"])
+    _cap_guard("max_turnover_fraction", previous_view["max_turnover_fraction"], candidate_view["max_turnover_fraction"])
+    _cap_guard("max_risk_of_ruin", previous_view["max_risk_of_ruin"], candidate_view["max_risk_of_ruin"])
+    _cap_guard("max_execution_slippage_fraction", previous_view["max_execution_slippage_fraction"], candidate_view["max_execution_slippage_fraction"])
+    _cap_guard("max_quote_age_seconds", previous_view["max_quote_age_seconds"], candidate_view["max_quote_age_seconds"])
+    _floor_guard("minimum_data_quality", previous_view["minimum_data_quality"], candidate_view["minimum_data_quality"])
 
-    _restrictions_guard(
-        "blocked_sports", previous.blocked_sports, candidate.blocked_sports
-    )
-    _restrictions_guard(
-        "blocked_providers", previous.blocked_providers, candidate.blocked_providers
-    )
-    _restrictions_guard(
-        "blocked_markets", previous.blocked_markets, candidate.blocked_markets
+    _int_cap_guard("max_concurrent_positions", previous_view["max_concurrent_positions"], candidate_view["max_concurrent_positions"])
+    _int_cap_guard("max_parlay_legs", previous_view["max_parlay_legs"], candidate_view["max_parlay_legs"])
+    if candidate_view["automation_level"] > previous_view["automation_level"]:
+        raise _error_type("automatic transition must not increase automation_level")
+    if previous_view["emergency_stop"] and not candidate_view["emergency_stop"]:
+        raise _error_type("automatic transition must not clear emergency_stop")
+
+    _restrictions_guard("blocked_sports", previous_view["blocked_sports"], candidate_view["blocked_sports"])
+    _restrictions_guard("blocked_providers", previous_view["blocked_providers"], candidate_view["blocked_providers"])
+    _restrictions_guard("blocked_markets", previous_view["blocked_markets"], candidate_view["blocked_markets"])       "blocked_markets", previous.blocked_markets, candidate.blocked_markets
     )
 
 

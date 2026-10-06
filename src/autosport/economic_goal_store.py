@@ -182,12 +182,10 @@ def _resolve_store_binding(
     if entry is None or entry[0]() is not store:
         raise _error_type("economic goal store binding is unavailable")
     workspace, path, path_exists, path_read_text = entry[1:]
-    if type(getattr(store, "workspace", None)) is not type(workspace):
+    if getattr(store, "workspace", None) is not workspace:
         raise _error_type("economic goal store workspace binding was rebound")
-    if type(getattr(store, "path", None)) is not type(path):
+    if getattr(store, "path", None) is not path:
         raise _error_type("economic goal store path binding was rebound")
-    if store.workspace != workspace or store.path != path:
-        raise _error_type("economic goal store path/workspace binding was rebound")
     return workspace, path, path_exists, path_read_text
 
 

@@ -216,36 +216,39 @@ def _validate_provenance_bound(
     _error_type=EconomicGoalProvenanceError,
     _provenance_type=EconomicGoalProvenance,
     _snapshot=_canonical_provenance_snapshot,
+    _type=type,
+    _len=len,
+    _any=any,
 ) -> None:
     """Validate provenance through captured slot descriptors."""
-    if type(self) is not _provenance_type:
-        raise _error_type("provenance must use the exact evidence type")
+    if _type(self) is not _provenance_type:
+        raise _error__type("provenance must use the exact evidence type")
     schema, schema_version, goal_id, revision, bankroll_id, contract_sha256 = _snapshot(self)
-    if type(schema) is not str or schema != _schema:
-        raise _error_type("unsupported provenance schema")
-    if type(schema_version) is not int or schema_version != _schema_version:
-        raise _error_type("unsupported provenance schema version")
+    if _type(schema) is not str or schema != _schema:
+        raise _error__type("unsupported provenance schema")
+    if _type(schema_version) is not int or schema_version != _schema_version:
+        raise _error__type("unsupported provenance schema version")
     for name, value in (("goal_id", goal_id), ("bankroll_id", bankroll_id)):
-        if type(value) is not str or not value:
-            raise _error_type(f"{name} must be a non-empty string")
+        if _type(value) is not str or not value:
+            raise _error__type(f"{name} must be a non-empty string")
         if value != value.strip():
-            raise _error_type(f"{name} must be canonical text")
-        if len(value) > _max_identity_chars:
-            raise _error_type(f"{name} exceeds the identity size limit")
+            raise _error__type(f"{name} must be canonical text")
+        if _len(value) > _max_identity_chars:
+            raise _error__type(f"{name} exceeds the identity size limit")
         if "\x00" in value:
-            raise _error_type(f"{name} must not contain NUL")
+            raise _error__type(f"{name} must not contain NUL")
         try:
             value.encode("utf-8", errors="strict")
         except UnicodeEncodeError as exc:
-            raise _error_type(f"{name} must be valid UTF-8 text") from exc
-    if type(revision) is not int or revision <= 0:
-        raise _error_type("revision must be a positive integer")
+            raise _error__type(f"{name} must be valid UTF-8 text") from exc
+    if _type(revision) is not int or revision <= 0:
+        raise _error__type("revision must be a positive integer")
     if (
-        type(contract_sha256) is not str
-        or len(contract_sha256) != 64
-        or any(ch not in "0123456789abcdef" for ch in contract_sha256)
+        _type(contract_sha256) is not str
+        or _len(contract_sha256) != 64
+        or _any(ch not in "0123456789abcdef" for ch in contract_sha256)
     ):
-        raise _error_type("contract_sha256 must be lowercase SHA-256 hex")
+        raise _error__type("contract_sha256 must be lowercase SHA-256 hex")
 
 def _capture_callable_authority_graph(
     root,
@@ -493,8 +496,9 @@ def _snapshot_provenance(
     _builder=_build_provenance,
     _error_type=EconomicGoalProvenanceError,
     _snapshot=_canonical_provenance_snapshot,
+    _type=type,
 ) -> EconomicGoalProvenance:
-    if type(provenance) is not _provenance_type:
+    if _type(provenance) is not _provenance_type:
         raise _error_type("provenance must be EconomicGoalProvenance")
     values = _snapshot(provenance)
     return _builder(
@@ -531,10 +535,11 @@ def _contract_sha256_bound(
     _json_encoder=_canonical_json,
     _sha256=hashlib.sha256,
     _goal_error=EconomicGoalContractError,
+    _type=type,
 ) -> str:
     """Hash the exact canonical persisted representation of ``contract``."""
 
-    if type(contract) is not _goal_type:
+    if _type(contract) is not _goal_type:
         raise _goal_error("provenance hashing requires an EconomicGoalContract")
     _goal_validator(contract)
     return _sha256(_json_encoder(_payload_encoder(contract))).hexdigest()
@@ -555,10 +560,13 @@ def _provenance_for_bound(
     _goal_error=EconomicGoalContractError,
     _contract_snapshot=_canonical_contract_snapshot,
     _contract_field_names=_PROVENANCE_CONTRACT_FIELD_NAMES,
+    _type=type,
+    _dict=dict,
+    _zip=zip,
 ) -> EconomicGoalProvenance:
     """Derive immutable provenance identity without introducing another authority."""
 
-    if type(contract) is not _goal_type:
+    if _type(contract) is not _goal_type:
         raise _goal_error("provenance requires an EconomicGoalContract")
     _goal_validator(contract)
     before = _contract_snapshot(contract)
@@ -566,7 +574,7 @@ def _provenance_for_bound(
     after = _contract_snapshot(contract)
     if before != after:
         raise _goal_error("economic goal changed during provenance derivation")
-    values = dict(zip(_contract_field_names, after))
+    values = _dict(_zip(_contract_field_names, after))
     contract_sha256 = _contract_sha256(contract)
     final_snapshot = _contract_snapshot(contract)
     if after != final_snapshot:
@@ -601,12 +609,15 @@ def _verify_provenance_bound(
     _contract_snapshot=_canonical_contract_snapshot,
     _provenance_snapshot=_canonical_provenance_snapshot,
     _contract_field_names=_PROVENANCE_CONTRACT_FIELD_NAMES,
+    _type=type,
+    _dict=dict,
+    _zip=zip,
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
-    if type(contract) is not _goal_type:
+    if _type(contract) is not _goal_type:
         raise _goal_error("provenance verification requires an EconomicGoalContract")
-    if type(provenance) is not _provenance_type:
+    if _type(provenance) is not _provenance_type:
         raise _provenance_error("provenance must be EconomicGoalProvenance")
 
     _goal_validator(contract)
@@ -624,7 +635,7 @@ def _verify_provenance_bound(
     if provenance_before != provenance_after:
         raise _provenance_error("economic-goal provenance changed during verification")
 
-    contract_view = dict(zip(_contract_field_names, contract_after))
+    contract_view = _dict(_zip(_contract_field_names, contract_after))
     goal_id = contract_view["goal_id"]
     revision = contract_view["revision"]
     bankroll_id = contract_view["bankroll_id"]

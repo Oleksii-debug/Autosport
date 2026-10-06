@@ -561,6 +561,7 @@ def _verify_provenance_bound(
     _provenance_error=EconomicGoalProvenanceError,
     _contract_snapshot=_canonical_contract_snapshot,
     _provenance_snapshot=_canonical_provenance_snapshot,
+    _contract_field_names=_PROVENANCE_CONTRACT_FIELD_NAMES,
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
@@ -584,7 +585,10 @@ def _verify_provenance_bound(
     if provenance_before != provenance_after:
         raise _provenance_error("economic-goal provenance changed during verification")
 
-    goal_id, revision, bankroll_id = contract_after[:3]
+    contract_view = dict(zip(_contract_field_names, contract_after))
+    goal_id = contract_view["goal_id"]
+    revision = contract_view["revision"]
+    bankroll_id = contract_view["bankroll_id"]
     proven_goal_id = provenance_after[2]
     proven_revision = provenance_after[3]
     proven_bankroll_id = provenance_after[4]

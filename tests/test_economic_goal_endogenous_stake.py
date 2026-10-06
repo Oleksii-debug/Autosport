@@ -9,6 +9,7 @@ from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent, TicketLeg, TicketStatus
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
+import autosport.risk as risk_module
 from autosport.paper_strategy import Forecast, PaperValueAgent
 from autosport.risk import (
     PaperRiskPolicy,
@@ -386,7 +387,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         assert amount is not None
         self.assertTrue(policy.evaluate(book, amount, context=context).allowed)
 
-    def test_lay_endogenous_stake_fails_closed_when_inverse_is_not_representable(self) -> None:
+    def test_lay_endogenous_stake_rounds_inverse_down_without_exceeding_liability_room(self) -> None:
         goal = self._goal(
             max_stake_fraction=Decimal("1"),
             max_capital_at_risk_fraction=Decimal("0.20"),
@@ -401,7 +402,14 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             context=context,
         )
 
-        self.assertIsNone(amount)
+        self.assertIsNotNone(amount)
+        assert amount is not None
+        liability = risk_module._CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+            amount,
+            context.legs,
+        )
+        self.assertLessEqual(liability, Decimal("20"))
+        self.assertTrue(policy.evaluate(book, amount, context=context).allowed)
 
     def test_lay_stake_vector_reserves_liability_in_shadow_book(self) -> None:
         goal = self._goal(

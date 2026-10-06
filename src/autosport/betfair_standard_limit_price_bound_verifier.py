@@ -181,6 +181,7 @@ def _build_product_verifier():
     issued_plan_init_code = issued_plan_init.__code__
     issuance_error_cls = SupervisedPlanIssuanceError
     ledger_cls = RealExecutionLedger
+    execution_action_cls = ExecutionAction
     bound_cls = BoundSupervisedExecutionPlan
     decimal_cls = Decimal
     evidence_fields = tuple(_EVIDENCE_FIELDS)
@@ -223,11 +224,11 @@ def _build_product_verifier():
 
     captured_place_action = _price_bound_module._CANONICAL_PLACE_ACTION
     captured_place_action_code = captured_place_action.__code__
-    execution_to_dict = ExecutionAction.to_dict
+    execution_to_dict = execution_action_cls.to_dict
     execution_to_dict_code = execution_to_dict.__code__
-    bound_verify = BoundSupervisedExecutionPlan.verify_binding
+    bound_verify = bound_cls.verify_binding
     bound_verify_code = bound_verify.__code__
-    bound_action_for = BoundSupervisedExecutionPlan.action_for
+    bound_action_for = bound_cls.action_for
     bound_action_for_code = bound_action_for.__code__
     bound_binding_helper = _supervised_module._bound_binding_sha256
     bound_binding_helper_code = bound_binding_helper.__code__
@@ -484,11 +485,11 @@ def _build_product_verifier():
                 "canonical Betfair placeOrders writer authority changed"
             )
         if (
-            ExecutionAction.to_dict is not execution_to_dict
+            execution_action_cls.to_dict is not execution_to_dict
             or execution_to_dict.__code__ is not execution_to_dict_code
-            or BoundSupervisedExecutionPlan.verify_binding is not bound_verify
+            or bound_cls.verify_binding is not bound_verify
             or bound_verify.__code__ is not bound_verify_code
-            or BoundSupervisedExecutionPlan.action_for is not bound_action_for
+            or bound_cls.action_for is not bound_action_for
             or bound_action_for.__code__ is not bound_action_for_code
             or _supervised_module._bound_binding_sha256 is not bound_binding_helper
             or bound_binding_helper.__code__ is not bound_binding_helper_code

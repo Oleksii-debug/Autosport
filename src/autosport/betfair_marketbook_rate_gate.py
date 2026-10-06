@@ -194,6 +194,12 @@ class BetfairMarketBookPerMarketRateGate:
         if state is not None:
             if type(state) is not MarketBookRateGateState:
                 raise TypeError("state must be MarketBookRateGateState or None")
+            # Frozen restart DTOs are not a trust boundary: object.__setattr__
+            # can tamper them after construction. Re-run both the aggregate and
+            # nested validators before importing any persisted capacity state.
+            MarketBookRateGateState.__post_init__(state)
+            for market in state.markets:
+                MarketBookRateWindowState.__post_init__(market)
             self._last_scheduled_at_utc_us = state.last_scheduled_at_utc_us
             self._accepted = {
                 market.market_id: [

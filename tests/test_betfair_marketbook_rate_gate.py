@@ -544,3 +544,22 @@ def test_rate_inputs_are_normalized_before_gate_lock() -> None:
     assert probe.entries == 1
     assert probe.depth == 0
 
+def test_restart_revalidates_tampered_frozen_rate_state() -> None:
+    gate = BetfairMarketBookPerMarketRateGate()
+    assert gate.reserve(("1.1",), scheduled_at=T0).allowed
+    state = gate.snapshot()
+    window = state.markets[0]
+
+    object.__setattr__(window, "accepted_at_utc_us", ("forged",))
+
+    with pytest.raises(TypeError, match="accepted rate timestamp"):
+        BetfairMarketBookPerMarketRateGate(state=state)
+
+
+def test_restart_revalidates_tampered_rate_policy_identity() -> None:
+    state = BetfairMarketBookPerMarketRateGate().snapshot()
+    object.__setattr__(state, "policy_version", "forged-policy")
+
+    with pytest.raises(ValueError, match="unsupported Betfair MarketBook rate policy"):
+        BetfairMarketBookPerMarketRateGate(state=state)
+

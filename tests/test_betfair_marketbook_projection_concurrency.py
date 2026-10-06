@@ -572,3 +572,25 @@ def test_projection_gate_rejects_subclassed_authority_inputs_before_mutation() -
             1,
         )
 
+def test_restart_revalidates_tampered_frozen_projection_state() -> None:
+    value = gate()
+    assert begin_projected(value, "r0").allowed
+    state = value.snapshot()
+    lease = state.active[0]
+
+    object.__setattr__(lease, "generation", 0)
+
+    with pytest.raises(ValueError, match="generation must be a positive"):
+        BetfairMarketBookProjectionConcurrencyGate(state=state)
+
+
+def test_restart_revalidates_tampered_projection_policy_identity() -> None:
+    state = gate().snapshot()
+    object.__setattr__(state, "policy_version", "forged-policy")
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported Betfair MarketBook projection concurrency policy",
+    ):
+        BetfairMarketBookProjectionConcurrencyGate(state=state)
+

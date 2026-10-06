@@ -12,10 +12,14 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
+from hmac import compare_digest as _hmac_compare_digest, digest as _hmac_digest
 import json
+import sys
 from pathlib import Path
+from secrets import token_bytes as _token_bytes
 from typing import Callable, Mapping, Sequence
 
+from . import betfair_execution_confirmation as _betfair_confirmation
 from .betfair_account_readonly import (
     BETTING_JSON_RPC_ENDPOINT,
     BetfairExecutionReadbackEnvelope,
@@ -24,26 +28,39 @@ from .betfair_account_readonly import (
     BetfairReadOnlyError,
     BetfairSessionCredentials,
     UrllibBetfairHttpTransport,
+    _execution_provider_network_dispatch_is_current,
 )
 from .bookmaker_capability import (
     BookmakerCapability,
     BookmakerCapabilityError,
     BookmakerCapabilityProfile,
 )
-from .economic_goal import AutomationLevel, EconomicGoalContractError
+from .economic_goal import (
+    AutomationLevel,
+    EconomicGoalContract,
+    EconomicGoalContractError,
+)
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
 from .workspace_lock import WorkspaceEconomicLock
 from .real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
+    EventType,
     ExecutionAction,
+    ExecutionPlan,
+    ExecutionStateError,
     ExternalAcknowledgement,
     RealExecutionLedger,
 )
+from . import supervised_execution as _supervised_execution_runtime
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
+    ExecutionLegConstraint,
+    ProfileBinding,
     SupervisedApproval,
+    _require_approval,
+    _require_durable_approval,
     begin_supervised_attempt,
 )
 
@@ -60,6 +77,271 @@ class BetfairSupervisedExecutionError(RuntimeError):
 class BetfairPlaceOrdersAmbiguous(BetfairSupervisedExecutionError):
     """The provider effect is unknown and requires readback before retry."""
 
+
+class BetfairFinalConfirmationDenied(BetfairSupervisedExecutionError):
+    """Durable operator confirmation denied before the irreversible provider POST."""
+
+
+_BETFAIR_CONFIRMATION_ERROR = _betfair_confirmation.BetfairExecutionConfirmationError
+_CONSUME_BETFAIR_CONFIRMATION = (
+    _betfair_confirmation.consume_betfair_execution_confirmation
+)
+_CONSUME_BETFAIR_CONFIRMATION_CODE = getattr(
+    _CONSUME_BETFAIR_CONFIRMATION,
+    "__code__",
+    None,
+)
+_REQUIRE_CURRENT_BETFAIR_CONFIRMATION = (
+    _betfair_confirmation.require_consumed_betfair_execution_confirmation_current
+)
+_REQUIRE_CURRENT_BETFAIR_CONFIRMATION_CODE = getattr(
+    _REQUIRE_CURRENT_BETFAIR_CONFIRMATION,
+    "__code__",
+    None,
+)
+
+
+def _snapshot_confirmation_callable_graph(namespace: dict[str, object]):
+    return tuple(
+        (name, value, getattr(value, "__code__", None))
+        for name, value in sorted(namespace.items())
+        if callable(value)
+    )
+
+
+def _snapshot_confirmation_class_graph(authority_type: type):
+    return tuple(
+        (
+            name,
+            getattr(authority_type, name),
+            getattr(getattr(authority_type, name), "__code__", None),
+        )
+        for name in sorted(vars(authority_type))
+        if callable(getattr(authority_type, name, None))
+    )
+
+
+_BETFAIR_CONFIRMATION_CALLABLE_GRAPH = _snapshot_confirmation_callable_graph(
+    vars(_betfair_confirmation)
+)
+_GENERIC_CONFIRMATION_MODULE = _betfair_confirmation._confirmation
+_GENERIC_CONFIRMATION_CALLABLE_GRAPH = _snapshot_confirmation_callable_graph(
+    vars(_GENERIC_CONFIRMATION_MODULE)
+)
+_GENERIC_CONFIRMATION_AUTHORITY_TYPE = (
+    _GENERIC_CONFIRMATION_MODULE.SupervisedConfirmationAuthority
+)
+_GENERIC_CONFIRMATION_AUTHORITY_GRAPH = _snapshot_confirmation_class_graph(
+    _GENERIC_CONFIRMATION_AUTHORITY_TYPE
+)
+_GENERIC_CONFIRMATION_MONOTONIC_TYPE = (
+    _GENERIC_CONFIRMATION_MODULE.MonotonicWorkspaceAuthority
+)
+_GENERIC_CONFIRMATION_MONOTONIC_GRAPH = _snapshot_confirmation_class_graph(
+    _GENERIC_CONFIRMATION_MONOTONIC_TYPE
+)
+_BETFAIR_CONFIRMATION_PROJECTION_TYPES = (
+    _betfair_confirmation.BetfairExecutionConfirmationSpec,
+    _betfair_confirmation.BetfairExecutionConfirmationWitness,
+)
+_BETFAIR_CONFIRMATION_PROJECTION_GRAPHS = tuple(
+    (projection_type, _snapshot_confirmation_class_graph(projection_type))
+    for projection_type in _BETFAIR_CONFIRMATION_PROJECTION_TYPES
+)
+_BETFAIR_CONFIRMATION_SLOT_GRAPH = tuple(
+    (projection_type, slot_name, getattr(projection_type, slot_name))
+    for projection_type in _BETFAIR_CONFIRMATION_PROJECTION_TYPES
+    for slot_name in getattr(projection_type, "__slots__", ())
+    if type(slot_name) is str
+)
+_GENERIC_CONFIRMATION_PROJECTION_TYPES = (
+    _GENERIC_CONFIRMATION_MODULE.SupervisedExecutionReview,
+    _GENERIC_CONFIRMATION_MODULE.OperatorConfirmationReceipt,
+    _GENERIC_CONFIRMATION_MODULE.SupervisedConfirmationBinding,
+    _GENERIC_CONFIRMATION_MODULE._Record,
+    _GENERIC_CONFIRMATION_MODULE._State,
+)
+_GENERIC_CONFIRMATION_PROJECTION_GRAPHS = tuple(
+    (projection_type, _snapshot_confirmation_class_graph(projection_type))
+    for projection_type in _GENERIC_CONFIRMATION_PROJECTION_TYPES
+)
+_GENERIC_CONFIRMATION_SLOT_GRAPH = tuple(
+    (projection_type, slot_name, getattr(projection_type, slot_name))
+    for projection_type in _GENERIC_CONFIRMATION_PROJECTION_TYPES
+    for slot_name in getattr(projection_type, "__slots__", ())
+    if type(slot_name) is str
+)
+_BETFAIR_CONFIRMATION_HASHLIB = _betfair_confirmation.hashlib
+_BETFAIR_CONFIRMATION_HASHLIB_SHA256 = _BETFAIR_CONFIRMATION_HASHLIB.sha256
+_BETFAIR_CONFIRMATION_JSON = _betfair_confirmation.json
+_BETFAIR_CONFIRMATION_JSON_DUMPS = _BETFAIR_CONFIRMATION_JSON.dumps
+_BETFAIR_CONFIRMATION_DATETIME = _betfair_confirmation.datetime
+_BETFAIR_CONFIRMATION_PATH = _betfair_confirmation.Path
+_BETFAIR_CONFIRMATION_PATH_RESOLVE = _BETFAIR_CONFIRMATION_PATH.resolve
+_GENERIC_CONFIRMATION_HASHLIB = _GENERIC_CONFIRMATION_MODULE.hashlib
+_GENERIC_CONFIRMATION_HASHLIB_SHA256 = _GENERIC_CONFIRMATION_HASHLIB.sha256
+_GENERIC_CONFIRMATION_JSON = _GENERIC_CONFIRMATION_MODULE.json
+_GENERIC_CONFIRMATION_JSON_DUMPS = _GENERIC_CONFIRMATION_JSON.dumps
+_GENERIC_CONFIRMATION_PATH = _GENERIC_CONFIRMATION_MODULE.Path
+_GENERIC_CONFIRMATION_PATH_RESOLVE = _GENERIC_CONFIRMATION_PATH.resolve
+_BETFAIR_CONFIRMATION_FILENAME = _betfair_confirmation.CONFIRMATION_FILENAME
+_BETFAIR_CONFIRMATION_DOMAINS = (
+    _betfair_confirmation._REVIEW_PAYLOAD_DOMAIN,
+    _betfair_confirmation._DECISION_DOMAIN,
+    _betfair_confirmation._DECISION_ID_DOMAIN,
+    _betfair_confirmation._CONSUMER_DOMAIN,
+    _betfair_confirmation._WITNESS_DOMAIN,
+)
+
+
+def _callable_graph_unchanged(module, graph) -> bool:
+    return all(
+        getattr(module, name, None) is value
+        and getattr(value, "__code__", None) is code
+        for name, value, code in graph
+    )
+
+
+def _class_graph_unchanged(authority_type: type, graph) -> bool:
+    return all(
+        getattr(authority_type, name, None) is value
+        and getattr(value, "__code__", None) is code
+        for name, value, code in graph
+    )
+
+
+def _build_betfair_confirmation_graph_guard():
+    confirmation_module = _betfair_confirmation
+    confirmation_error = _BETFAIR_CONFIRMATION_ERROR
+    consume_confirmation = _CONSUME_BETFAIR_CONFIRMATION
+    consume_confirmation_code = _CONSUME_BETFAIR_CONFIRMATION_CODE
+    require_current_confirmation = _REQUIRE_CURRENT_BETFAIR_CONFIRMATION
+    require_current_confirmation_code = _REQUIRE_CURRENT_BETFAIR_CONFIRMATION_CODE
+    callable_guard = _callable_graph_unchanged
+    callable_guard_code = callable_guard.__code__
+    class_guard = _class_graph_unchanged
+    class_guard_code = class_guard.__code__
+    confirmation_callable_graph = _BETFAIR_CONFIRMATION_CALLABLE_GRAPH
+    confirmation_projection_graphs = _BETFAIR_CONFIRMATION_PROJECTION_GRAPHS
+    confirmation_slot_graph = _BETFAIR_CONFIRMATION_SLOT_GRAPH
+    generic_module = _GENERIC_CONFIRMATION_MODULE
+    generic_callable_graph = _GENERIC_CONFIRMATION_CALLABLE_GRAPH
+    generic_authority_type = _GENERIC_CONFIRMATION_AUTHORITY_TYPE
+    generic_authority_graph = _GENERIC_CONFIRMATION_AUTHORITY_GRAPH
+    generic_monotonic_type = _GENERIC_CONFIRMATION_MONOTONIC_TYPE
+    generic_monotonic_graph = _GENERIC_CONFIRMATION_MONOTONIC_GRAPH
+    generic_projection_graphs = _GENERIC_CONFIRMATION_PROJECTION_GRAPHS
+    generic_slot_graph = _GENERIC_CONFIRMATION_SLOT_GRAPH
+    confirmation_hashlib = _BETFAIR_CONFIRMATION_HASHLIB
+    confirmation_hashlib_sha256 = _BETFAIR_CONFIRMATION_HASHLIB_SHA256
+    confirmation_json = _BETFAIR_CONFIRMATION_JSON
+    confirmation_json_dumps = _BETFAIR_CONFIRMATION_JSON_DUMPS
+    confirmation_datetime = _BETFAIR_CONFIRMATION_DATETIME
+    confirmation_path = _BETFAIR_CONFIRMATION_PATH
+    confirmation_path_resolve = _BETFAIR_CONFIRMATION_PATH_RESOLVE
+    generic_hashlib = _GENERIC_CONFIRMATION_HASHLIB
+    generic_hashlib_sha256 = _GENERIC_CONFIRMATION_HASHLIB_SHA256
+    generic_json = _GENERIC_CONFIRMATION_JSON
+    generic_json_dumps = _GENERIC_CONFIRMATION_JSON_DUMPS
+    generic_path = _GENERIC_CONFIRMATION_PATH
+    generic_path_resolve = _GENERIC_CONFIRMATION_PATH_RESOLVE
+    confirmation_filename = _BETFAIR_CONFIRMATION_FILENAME
+    confirmation_domains = _BETFAIR_CONFIRMATION_DOMAINS
+    inner_authority_guard = confirmation_module._authority_graph_unchanged
+    inner_authority_guard_code = getattr(inner_authority_guard, "__code__", None)
+
+    def guard() -> bool:
+        return (
+            _betfair_confirmation is confirmation_module
+            and _BETFAIR_CONFIRMATION_ERROR is confirmation_error
+            and _CONSUME_BETFAIR_CONFIRMATION is consume_confirmation
+            and getattr(consume_confirmation, "__code__", None)
+            is consume_confirmation_code
+            and _REQUIRE_CURRENT_BETFAIR_CONFIRMATION
+            is require_current_confirmation
+            and getattr(require_current_confirmation, "__code__", None)
+            is require_current_confirmation_code
+            and _callable_graph_unchanged is callable_guard
+            and getattr(callable_guard, "__code__", None) is callable_guard_code
+            and _class_graph_unchanged is class_guard
+            and getattr(class_guard, "__code__", None) is class_guard_code
+            and confirmation_module.BetfairExecutionConfirmationError
+            is confirmation_error
+            and confirmation_module.consume_betfair_execution_confirmation
+            is consume_confirmation
+            and confirmation_module.require_consumed_betfair_execution_confirmation_current
+            is require_current_confirmation
+            and callable_guard(
+                confirmation_module,
+                confirmation_callable_graph,
+            )
+            and confirmation_module._confirmation is generic_module
+            and callable_guard(
+                generic_module,
+                generic_callable_graph,
+            )
+            and all(
+                class_guard(projection_type, graph)
+                for projection_type, graph in confirmation_projection_graphs
+            )
+            and all(
+                getattr(projection_type, slot_name, None) is descriptor
+                for projection_type, slot_name, descriptor in confirmation_slot_graph
+            )
+            and generic_module.SupervisedConfirmationAuthority
+            is generic_authority_type
+            and class_guard(
+                generic_authority_type,
+                generic_authority_graph,
+            )
+            and generic_module.MonotonicWorkspaceAuthority
+            is generic_monotonic_type
+            and class_guard(
+                generic_monotonic_type,
+                generic_monotonic_graph,
+            )
+            and all(
+                class_guard(projection_type, graph)
+                for projection_type, graph in generic_projection_graphs
+            )
+            and all(
+                getattr(projection_type, slot_name, None) is descriptor
+                for projection_type, slot_name, descriptor in generic_slot_graph
+            )
+            and confirmation_module.hashlib is confirmation_hashlib
+            and confirmation_hashlib.sha256 is confirmation_hashlib_sha256
+            and confirmation_module.json is confirmation_json
+            and confirmation_json.dumps is confirmation_json_dumps
+            and confirmation_module.datetime is confirmation_datetime
+            and confirmation_module.Path is confirmation_path
+            and confirmation_path.resolve is confirmation_path_resolve
+            and generic_module.hashlib is generic_hashlib
+            and generic_hashlib.sha256 is generic_hashlib_sha256
+            and generic_module.json is generic_json
+            and generic_json.dumps is generic_json_dumps
+            and generic_module.Path is generic_path
+            and generic_path.resolve is generic_path_resolve
+            and confirmation_module.CONFIRMATION_FILENAME == confirmation_filename
+            and (
+                confirmation_module._REVIEW_PAYLOAD_DOMAIN,
+                confirmation_module._DECISION_DOMAIN,
+                confirmation_module._DECISION_ID_DOMAIN,
+                confirmation_module._CONSUMER_DOMAIN,
+                confirmation_module._WITNESS_DOMAIN,
+            )
+            == confirmation_domains
+            and confirmation_module._authority_graph_unchanged
+            is inner_authority_guard
+            and getattr(inner_authority_guard, "__code__", None)
+            is inner_authority_guard_code
+            and inner_authority_guard()
+        )
+
+    return guard
+
+
+_betfair_confirmation_graph_unchanged = _build_betfair_confirmation_graph_guard()
+del _build_betfair_confirmation_graph_guard
 
 class PlaceOrdersOutcome(str, Enum):
     ACCEPTED = "ACCEPTED"
@@ -435,6 +717,7 @@ class BetfairPlaceExecutionReport:
     status: str
     error_code: str | None
     instruction: BetfairInstructionReport
+    provider_origin_authoritative: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -473,13 +756,18 @@ class BetfairPlaceExecutionReport:
             raise BetfairSupervisedExecutionError(
                 "instruction must be BetfairInstructionReport"
             )
+        if type(self.provider_origin_authoritative) is not bool:
+            raise BetfairSupervisedExecutionError(
+                "provider_origin_authoritative must be bool"
+            )
 
     @property
     def evidence_id(self) -> str:
         return _digest(
             {
                 "schema": "autosport.betfair_place_execution_report",
-                "schema_version": 1,
+                "schema_version": 2,
+                "provider_origin_authoritative": self.provider_origin_authoritative,
                 "bookmaker_id": self.bookmaker_id,
                 "account_id": self.account_id,
                 "action_id": self.action_id,
@@ -598,7 +886,15 @@ class BetfairSupervisedPlaceOrdersClient:
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
         execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None = None,
     ) -> BetfairPlaceExecutionReport:
+        _canonical_place_client_preflight(self)
+        response_parser = _parse_place_orders_response
+        response_parser_code = getattr(response_parser, "__code__", None)
+        if response_parser_code is None:
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair response parser is unavailable"
+            )
         selection_id = _validate_betfair_place_action(action)
         self._gate.require(
             action=action,
@@ -652,13 +948,58 @@ class BetfairSupervisedPlaceOrdersClient:
             "X-Application": self._credentials.application_key,
             "X-Authentication": self._credentials.session_token,
         }
+        transport = self._transport
+        timeout_seconds = self._timeout_seconds
+        observed_clock = self._clock
+        if _before_transport is not None:
+            _before_transport(request_sha256)
+
+        canonical_transport = type(transport) is UrllibBetfairHttpTransport
+        canonical_transport_post = (
+            UrllibBetfairHttpTransport.__dict__.get("post")
+            if canonical_transport
+            else None
+        )
+        transport_namespace = (
+            object.__getattribute__(transport, "__dict__")
+            if canonical_transport
+            else None
+        )
+        origin_candidate = (
+            canonical_transport
+            and type(transport_namespace) is dict
+            and "post" not in transport_namespace
+            and callable(canonical_transport_post)
+            and getattr(canonical_transport_post, "__code__", None) is not None
+            and _execution_provider_network_dispatch_is_current()
+        )
         try:
-            payload = self._transport.post(
-                BETTING_JSON_RPC_ENDPOINT,
-                headers=headers,
-                body=body,
-                timeout_seconds=self._timeout_seconds,
-            )
+            if canonical_transport:
+                if not origin_candidate:
+                    raise BetfairPlaceOrdersAmbiguous(
+                        "canonical placeOrders transport dispatch changed; "
+                        "authoritative readback required"
+                    )
+                # Call the exact class dispatch captured after the durable SUBMITTED
+                # boundary.  Never re-enter instance attribute lookup here: a
+                # same-process interleaving must not install transport.post after
+                # preflight and fabricate provider-origin response authority.
+                payload = canonical_transport_post(
+                    transport,
+                    BETTING_JSON_RPC_ENDPOINT,
+                    headers=headers,
+                    body=body,
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                payload = transport.post(
+                    BETTING_JSON_RPC_ENDPOINT,
+                    headers=headers,
+                    body=body,
+                    timeout_seconds=timeout_seconds,
+                )
+        except BetfairPlaceOrdersAmbiguous:
+            raise
         except (BetfairReadOnlyError, TimeoutError, OSError) as exc:
             raise BetfairPlaceOrdersAmbiguous(
                 "placeOrders transport outcome is ambiguous; "
@@ -668,14 +1009,1110 @@ class BetfairSupervisedPlaceOrdersClient:
             raise BetfairPlaceOrdersAmbiguous(
                 "placeOrders transport returned non-bytes response"
             )
-        return _parse_place_orders_response(
+        # Revalidate the entire client dependency binding after provider return.
+        # A response can only carry provider-origin authority when its local
+        # observation timestamp is also product-owned; caller/test clocks remain
+        # valid for structural responses but cannot mint durable provider truth.
+        _canonical_place_client_preflight(self)
+        if (
+            _parse_place_orders_response is not response_parser
+            or getattr(response_parser, "__code__", None) is not response_parser_code
+        ):
+            raise BetfairPlaceOrdersAmbiguous(
+                "canonical placeOrders response parser changed; "
+                "authoritative readback required"
+            )
+        observation_clock_authoritative = observed_clock is _now
+        provider_origin_authoritative = (
+            origin_candidate
+            and observation_clock_authoritative
+            and type(self._transport) is UrllibBetfairHttpTransport
+            and self._transport is transport
+            and object.__getattribute__(transport, "__dict__")
+            is transport_namespace
+            and "post" not in transport_namespace
+            and UrllibBetfairHttpTransport.__dict__.get("post")
+            is canonical_transport_post
+            and _execution_provider_network_dispatch_is_current()
+        )
+        return response_parser(
             payload,
             request_id=request_id,
             request_sha256=request_sha256,
             action=action,
             provider_order_ref=provider_ref,
-            observed_at=self._clock(),
+            observed_at=observed_clock(),
+            provider_origin_authoritative=provider_origin_authoritative,
         )
+
+
+def _build_canonical_place_action_dispatch(canonical_caller_code, frame_getter):
+    """Capture provider-write dispatch and authenticate each client construction."""
+
+    client_type = BetfairSupervisedPlaceOrdersClient
+    object_getattribute = object.__getattribute__
+    original_init = client_type.__dict__.get("__init__")
+    if not callable(original_init) or getattr(original_init, "__code__", None) is None:
+        raise RuntimeError("canonical Betfair client constructor is unavailable")
+    original_init_code = original_init.__code__
+    original_init_defaults = original_init.__defaults__
+    original_init_kwdefaults = original_init.__kwdefaults__
+    original_init_kwdefault_items = (
+        tuple(original_init_kwdefaults.items())
+        if original_init_kwdefaults is not None
+        else ()
+    )
+
+    canonical_credentials_type = BetfairSessionCredentials
+    canonical_gate_type = BetfairSupervisedExecutionGate
+    canonical_default_transport_type = UrllibBetfairHttpTransport
+    canonical_profile_type = BookmakerCapabilityProfile
+    canonical_bound_type = BoundSupervisedExecutionPlan
+    canonical_approval_type = SupervisedApproval
+    canonical_constraint_type = ExecutionLegConstraint
+    canonical_profile_binding_type = ProfileBinding
+    canonical_action_type = ExecutionAction
+    canonical_plan_type = ExecutionPlan
+    canonical_ledger_type = RealExecutionLedger
+    canonical_workspace_lock_type = WorkspaceEconomicLock
+    canonical_workspace_lock_getattribute = (
+        canonical_workspace_lock_type.__getattribute__
+    )
+    canonical_workspace_lock_setattr = canonical_workspace_lock_type.__setattr__
+    canonical_goal_store_type = EconomicGoalStore
+    canonical_goal_store_getattribute = canonical_goal_store_type.__getattribute__
+    canonical_goal_store_setattr = canonical_goal_store_type.__setattr__
+    canonical_goal_contract_type = EconomicGoalContract
+    canonical_automation_level_type = AutomationLevel
+    canonical_acknowledgement_type = ExternalAcknowledgement
+    canonical_instruction_report_type = BetfairInstructionReport
+    canonical_execution_report_type = BetfairPlaceExecutionReport
+    authority_getattribute_roots = tuple(
+        (
+            authority_type,
+            authority_type.__getattribute__,
+        )
+        for authority_type in (
+            canonical_profile_type,
+            canonical_bound_type,
+            canonical_approval_type,
+            canonical_constraint_type,
+            canonical_profile_binding_type,
+            canonical_action_type,
+            canonical_plan_type,
+            canonical_ledger_type,
+            canonical_goal_contract_type,
+            canonical_acknowledgement_type,
+            canonical_instruction_report_type,
+            canonical_execution_report_type,
+        )
+    )
+    canonical_ledger_setattr = canonical_ledger_type.__setattr__
+
+    canonical_profile_require = canonical_profile_type.__dict__.get("require")
+    canonical_profile_state_of = canonical_profile_type.__dict__.get("state_of")
+    canonical_profile_to_canonical_dict = canonical_profile_type.__dict__.get(
+        "to_canonical_dict"
+    )
+    canonical_profile_id_descriptor = canonical_profile_type.__dict__.get("profile_id")
+    canonical_profile_id_getter = getattr(
+        canonical_profile_id_descriptor,
+        "fget",
+        None,
+    )
+    canonical_action_to_dict = canonical_action_type.__dict__.get("to_dict")
+    canonical_constraint_to_dict = canonical_constraint_type.__dict__.get("to_dict")
+    canonical_next_request_id = client_type.__dict__.get("_next_request_id")
+    canonical_plan_to_dict = canonical_plan_type.__dict__.get("to_dict")
+    canonical_plan_fingerprint_descriptor = canonical_plan_type.__dict__.get(
+        "fingerprint"
+    )
+    canonical_plan_fingerprint_getter = getattr(
+        canonical_plan_fingerprint_descriptor,
+        "fget",
+        None,
+    )
+    canonical_approval_require_active = canonical_approval_type.__dict__.get(
+        "require_active"
+    )
+    canonical_approval_fingerprint_descriptor = canonical_approval_type.__dict__.get(
+        "fingerprint"
+    )
+    canonical_approval_fingerprint_getter = getattr(
+        canonical_approval_fingerprint_descriptor,
+        "fget",
+        None,
+    )
+    canonical_approval_ledger_identity_descriptor = canonical_approval_type.__dict__.get(
+        "ledger_identity"
+    )
+    canonical_approval_ledger_identity_getter = getattr(
+        canonical_approval_ledger_identity_descriptor,
+        "fget",
+        None,
+    )
+    canonical_acknowledgement_post_init = canonical_acknowledgement_type.__dict__.get(
+        "__post_init__"
+    )
+    canonical_acknowledgement_to_dict = canonical_acknowledgement_type.__dict__.get(
+        "to_dict"
+    )
+    canonical_instruction_post_init = canonical_instruction_report_type.__dict__.get(
+        "__post_init__"
+    )
+    canonical_execution_report_post_init = canonical_execution_report_type.__dict__.get(
+        "__post_init__"
+    )
+    canonical_evidence_id_descriptor = canonical_execution_report_type.__dict__.get(
+        "evidence_id"
+    )
+    canonical_evidence_id_getter = getattr(
+        canonical_evidence_id_descriptor,
+        "fget",
+        None,
+    )
+    canonical_goal_store_init = canonical_goal_store_type.__dict__.get("__init__")
+    canonical_goal_store_load = canonical_goal_store_type.__dict__.get("load")
+    canonical_goal_store_file_name = canonical_goal_store_type.__dict__.get("FILE_NAME")
+    canonical_provenance_for = provenance_for
+    canonical_supervised_automation_level = (
+        canonical_automation_level_type.SUPERVISED_EXECUTION
+    )
+    canonical_trusted_now = _supervised_execution_runtime._trusted_now
+    canonical_bound_binding_sha256 = _supervised_execution_runtime._bound_binding_sha256
+    canonical_supervised_digest = _supervised_execution_runtime._digest
+    workspace_lock_method_names = (
+        "__init__",
+        "acquire",
+        "release",
+        "__enter__",
+        "__exit__",
+        "_open_lock_handle",
+        "_open_new_lock_handle",
+        "_validate_existing_lock_path",
+        "_validate_open_handle_identity",
+        "_require_regular_file",
+        "_require_single_link",
+        "_lock_handle",
+        "_unlock_handle",
+    )
+    workspace_lock_methods = tuple(
+        (
+            name,
+            canonical_workspace_lock_type.__dict__.get(name),
+            getattr(canonical_workspace_lock_type.__dict__.get(name), "__code__", None),
+        )
+        for name in workspace_lock_method_names
+    )
+    workspace_lock_init = canonical_workspace_lock_type.__dict__.get("__init__")
+    workspace_lock_init_defaults = getattr(workspace_lock_init, "__defaults__", None)
+    workspace_lock_init_kwdefaults = getattr(workspace_lock_init, "__kwdefaults__", None)
+    workspace_lock_init_kwdefault_items = (
+        tuple(workspace_lock_init_kwdefaults.items())
+        if workspace_lock_init_kwdefaults is not None
+        else ()
+    )
+    canonical_workspace_lock_file_name = canonical_workspace_lock_type.__dict__.get(
+        "FILE_NAME"
+    )
+    canonical_profile_require_code = getattr(
+        canonical_profile_require,
+        "__code__",
+        None,
+    )
+    canonical_profile_state_of_code = getattr(
+        canonical_profile_state_of,
+        "__code__",
+        None,
+    )
+    canonical_profile_to_canonical_dict_code = getattr(
+        canonical_profile_to_canonical_dict,
+        "__code__",
+        None,
+    )
+    canonical_profile_id_getter_code = getattr(
+        canonical_profile_id_getter,
+        "__code__",
+        None,
+    )
+    canonical_action_to_dict_code = getattr(
+        canonical_action_to_dict,
+        "__code__",
+        None,
+    )
+    canonical_constraint_to_dict_code = getattr(
+        canonical_constraint_to_dict,
+        "__code__",
+        None,
+    )
+    canonical_next_request_id_code = getattr(
+        canonical_next_request_id,
+        "__code__",
+        None,
+    )
+    canonical_plan_to_dict_code = getattr(
+        canonical_plan_to_dict,
+        "__code__",
+        None,
+    )
+    canonical_plan_fingerprint_getter_code = getattr(
+        canonical_plan_fingerprint_getter,
+        "__code__",
+        None,
+    )
+    canonical_approval_require_active_code = getattr(
+        canonical_approval_require_active,
+        "__code__",
+        None,
+    )
+    canonical_approval_fingerprint_getter_code = getattr(
+        canonical_approval_fingerprint_getter,
+        "__code__",
+        None,
+    )
+    canonical_approval_ledger_identity_getter_code = getattr(
+        canonical_approval_ledger_identity_getter,
+        "__code__",
+        None,
+    )
+    canonical_acknowledgement_post_init_code = getattr(
+        canonical_acknowledgement_post_init,
+        "__code__",
+        None,
+    )
+    canonical_acknowledgement_to_dict_code = getattr(
+        canonical_acknowledgement_to_dict,
+        "__code__",
+        None,
+    )
+    canonical_instruction_post_init_code = getattr(
+        canonical_instruction_post_init,
+        "__code__",
+        None,
+    )
+    canonical_execution_report_post_init_code = getattr(
+        canonical_execution_report_post_init,
+        "__code__",
+        None,
+    )
+    canonical_evidence_id_getter_code = getattr(
+        canonical_evidence_id_getter,
+        "__code__",
+        None,
+    )
+    canonical_goal_store_init_code = getattr(
+        canonical_goal_store_init,
+        "__code__",
+        None,
+    )
+    canonical_goal_store_load_code = getattr(
+        canonical_goal_store_load,
+        "__code__",
+        None,
+    )
+    canonical_provenance_for_code = getattr(
+        canonical_provenance_for,
+        "__code__",
+        None,
+    )
+    canonical_trusted_now_code = getattr(
+        canonical_trusted_now,
+        "__code__",
+        None,
+    )
+    canonical_bound_binding_sha256_code = getattr(
+        canonical_bound_binding_sha256,
+        "__code__",
+        None,
+    )
+    canonical_supervised_digest_code = getattr(
+        canonical_supervised_digest,
+        "__code__",
+        None,
+    )
+    bound_method_names = (
+        "verify_binding",
+        "action_for",
+        "profile_for",
+        "constraint_for",
+    )
+    bound_methods = tuple(
+        (
+            name,
+            canonical_bound_type.__dict__.get(name),
+            getattr(canonical_bound_type.__dict__.get(name), "__code__", None),
+        )
+        for name in bound_method_names
+    )
+    ledger_method_names = (
+        "_append",
+        "_mutate",
+        "verified_execution_view",
+        "supervised_approval_is_active",
+        "begin_attempt",
+        "bind_provider_order_reference",
+        "provider_order_reference",
+        "bind_provider_evidence",
+        "mark_unknown",
+        "acknowledge",
+        "attempt_state",
+        "saga",
+    )
+    ledger_methods = tuple(
+        (
+            name,
+            canonical_ledger_type.__dict__.get(name),
+            getattr(canonical_ledger_type.__dict__.get(name), "__code__", None),
+        )
+        for name in ledger_method_names
+    )
+    if (
+        not callable(canonical_profile_require)
+        or canonical_profile_require_code is None
+        or not callable(canonical_profile_state_of)
+        or canonical_profile_state_of_code is None
+        or not callable(canonical_profile_to_canonical_dict)
+        or canonical_profile_to_canonical_dict_code is None
+        or not callable(canonical_profile_id_getter)
+        or canonical_profile_id_getter_code is None
+        or not callable(canonical_action_to_dict)
+        or canonical_action_to_dict_code is None
+        or not callable(canonical_constraint_to_dict)
+        or canonical_constraint_to_dict_code is None
+        or not callable(canonical_next_request_id)
+        or canonical_next_request_id_code is None
+        or not callable(canonical_plan_to_dict)
+        or canonical_plan_to_dict_code is None
+        or not callable(canonical_plan_fingerprint_getter)
+        or canonical_plan_fingerprint_getter_code is None
+        or not callable(canonical_approval_require_active)
+        or canonical_approval_require_active_code is None
+        or not callable(canonical_approval_fingerprint_getter)
+        or canonical_approval_fingerprint_getter_code is None
+        or not callable(canonical_approval_ledger_identity_getter)
+        or canonical_approval_ledger_identity_getter_code is None
+        or not callable(canonical_acknowledgement_post_init)
+        or canonical_acknowledgement_post_init_code is None
+        or not callable(canonical_acknowledgement_to_dict)
+        or canonical_acknowledgement_to_dict_code is None
+        or not callable(canonical_instruction_post_init)
+        or canonical_instruction_post_init_code is None
+        or not callable(canonical_execution_report_post_init)
+        or canonical_execution_report_post_init_code is None
+        or not callable(canonical_evidence_id_getter)
+        or canonical_evidence_id_getter_code is None
+        or not callable(canonical_goal_store_init)
+        or canonical_goal_store_init_code is None
+        or not callable(canonical_goal_store_load)
+        or canonical_goal_store_load_code is None
+        or type(canonical_goal_store_file_name) is not str
+        or not canonical_goal_store_file_name
+        or not callable(canonical_provenance_for)
+        or canonical_provenance_for_code is None
+        or any(method is None or code is None for _, method, code in workspace_lock_methods)
+        or type(canonical_workspace_lock_file_name) is not str
+        or not canonical_workspace_lock_file_name
+        or (
+            workspace_lock_init_kwdefaults is not None
+            and type(workspace_lock_init_kwdefaults) is not dict
+        )
+        or not callable(canonical_trusted_now)
+        or canonical_trusted_now_code is None
+        or not callable(canonical_bound_binding_sha256)
+        or canonical_bound_binding_sha256_code is None
+        or not callable(canonical_supervised_digest)
+        or canonical_supervised_digest_code is None
+        or any(method is None or code is None for _, method, code in bound_methods)
+        or any(method is None or code is None for _, method, code in ledger_methods)
+    ):
+        raise RuntimeError("canonical Betfair execution class authority is unavailable")
+
+    profile_field_names = (
+        "venue_id",
+        "account_id",
+        "adapter_id",
+        "adapter_version",
+        "profile_version",
+        "facts",
+        "observed_at",
+        "source_ref",
+        "source_payload_sha256",
+    )
+    profile_field_descriptors = tuple(
+        (name, canonical_profile_type.__dict__.get(name))
+        for name in profile_field_names
+    )
+    action_field_names = (
+        "action_id",
+        "bookmaker_id",
+        "account_id",
+        "event_id",
+        "market_id",
+        "selection_id",
+        "side",
+        "requested_odds",
+        "requested_stake",
+        "quote_id",
+        "quote_observed_at",
+        "expires_at",
+    )
+    action_field_descriptors = tuple(
+        (name, canonical_action_type.__dict__.get(name))
+        for name in action_field_names
+    )
+    plan_field_names = (
+        "plan_id",
+        "bookmaker_profile_version",
+        "decision_id",
+        "approval_id",
+        "created_at",
+        "actions",
+        "schema_version",
+    )
+    plan_field_descriptors = tuple(
+        (name, canonical_plan_type.__dict__.get(name))
+        for name in plan_field_names
+    )
+    bound_field_names = (
+        "execution_plan",
+        "portfolio_plan_sha256",
+        "economic_goal_contract_sha256",
+        "intent_id",
+        "intent_sha256",
+        "approval_fingerprint",
+        "profile_bindings",
+        "constraints",
+    )
+    bound_field_descriptors = tuple(
+        (name, canonical_bound_type.__dict__.get(name))
+        for name in bound_field_names
+    )
+    approval_field_names = (
+        "approval_id",
+        "portfolio_plan_sha256",
+        "intent_id",
+        "routing_request_id",
+        "execution_terms_sha256",
+        "approved_at",
+        "expires_at",
+        "evidence_sha256",
+        "state",
+    )
+    approval_field_descriptors = tuple(
+        (name, canonical_approval_type.__dict__.get(name))
+        for name in approval_field_names
+    )
+    constraint_field_names = (
+        "leg_id",
+        "side",
+        "quote_expires_at",
+        "max_slippage_fraction",
+    )
+    constraint_field_descriptors = tuple(
+        (name, canonical_constraint_type.__dict__.get(name))
+        for name in constraint_field_names
+    )
+    profile_binding_field_names = (
+        "venue_id",
+        "account_id",
+        "adapter_id",
+        "adapter_version",
+        "profile_version",
+        "profile_sha256",
+    )
+    profile_binding_field_descriptors = tuple(
+        (name, canonical_profile_binding_type.__dict__.get(name))
+        for name in profile_binding_field_names
+    )
+    goal_field_names = (
+        "goal_id",
+        "revision",
+        "automation_level",
+        "emergency_stop",
+        "blocked_providers",
+        "blocked_markets",
+        "max_execution_slippage_fraction",
+    )
+    goal_field_descriptors = tuple(
+        (name, canonical_goal_contract_type.__dict__.get(name))
+        for name in goal_field_names
+    )
+    acknowledgement_field_names = (
+        "attempt_id",
+        "external_receipt_id",
+        "status",
+        "acknowledged_at",
+        "accepted_odds",
+        "accepted_stake",
+        "reconciliation_evidence_id",
+    )
+    acknowledgement_field_descriptors = tuple(
+        (name, canonical_acknowledgement_type.__dict__.get(name))
+        for name in acknowledgement_field_names
+    )
+    instruction_field_names = (
+        "status",
+        "error_code",
+        "bet_id",
+        "placed_date",
+        "average_price_matched",
+        "size_matched",
+    )
+    instruction_field_descriptors = tuple(
+        (name, canonical_instruction_report_type.__dict__.get(name))
+        for name in instruction_field_names
+    )
+    execution_report_field_names = (
+        "bookmaker_id",
+        "account_id",
+        "action_id",
+        "provider_order_ref",
+        "market_id",
+        "request_id",
+        "request_sha256",
+        "response_sha256",
+        "observed_at",
+        "status",
+        "error_code",
+        "instruction",
+        "provider_origin_authoritative",
+    )
+    execution_report_field_descriptors = tuple(
+        (name, canonical_execution_report_type.__dict__.get(name))
+        for name in execution_report_field_names
+    )
+    canonical_default_clock = _now
+    canonical_default_clock_code = getattr(canonical_default_clock, "__code__", None)
+    canonical_client_getattribute = client_type.__getattribute__
+    canonical_credentials_getattribute = canonical_credentials_type.__getattribute__
+    canonical_gate_getattribute = canonical_gate_type.__getattribute__
+    canonical_gate_method = canonical_gate_type.__dict__.get("require")
+    gate_owner_authority_method = canonical_gate_type.__dict__.get(
+        "_require_current_owner_authority"
+    )
+    if (
+        not callable(canonical_gate_method)
+        or getattr(canonical_gate_method, "__code__", None) is None
+        or not callable(gate_owner_authority_method)
+        or getattr(gate_owner_authority_method, "__code__", None) is None
+    ):
+        raise RuntimeError("canonical Betfair gate authority is unavailable")
+    canonical_gate_method_code = canonical_gate_method.__code__
+    gate_owner_authority_code = gate_owner_authority_method.__code__
+    gate_field_names = (
+        "enabled",
+        "bookmaker_id",
+        "account_id",
+        "profile_sha256",
+        "authority_ref",
+        "authority_sha256",
+        "economic_goal_store",
+        "economic_goal_workspace",
+    )
+    gate_field_descriptors = tuple(
+        (name, canonical_gate_type.__dict__.get(name))
+        for name in gate_field_names
+    )
+    credential_field_names = ("application_key", "session_token")
+    credential_field_descriptors = tuple(
+        (name, canonical_credentials_type.__dict__.get(name))
+        for name in credential_field_names
+    )
+
+    canonical_bytes = _canonical_bytes
+    canonical_bytes_code = canonical_bytes.__code__
+    canonical_response_parser = _parse_place_orders_response
+    canonical_response_parser_code = getattr(
+        canonical_response_parser,
+        "__code__",
+        None,
+    )
+    if canonical_response_parser_code is None:
+        raise RuntimeError("canonical Betfair response parser is unavailable")
+    binding_digest = _hmac_digest
+    binding_compare_digest = _hmac_compare_digest
+    binding_key = _token_bytes(32)
+    if type(binding_key) is not bytes or len(binding_key) != 32:
+        raise RuntimeError("Betfair client binding key is unavailable")
+    binding_field = "_autosport_provider_write_dependency_proof"
+
+    def init_metadata_current() -> bool:
+        current_kwdefaults = original_init.__kwdefaults__
+        return (
+            original_init.__code__ is original_init_code
+            and original_init.__defaults__ is original_init_defaults
+            and current_kwdefaults is original_init_kwdefaults
+            and (
+                current_kwdefaults is None
+                or (
+                    len(current_kwdefaults) == len(original_init_kwdefault_items)
+                    and all(
+                        key in current_kwdefaults
+                        and current_kwdefaults[key] is value
+                        for key, value in original_init_kwdefault_items
+                    )
+                )
+            )
+        )
+
+    def static_authority_current() -> bool:
+        return (
+            init_metadata_current()
+            and BetfairSessionCredentials is canonical_credentials_type
+            and BetfairSupervisedExecutionGate is canonical_gate_type
+            and UrllibBetfairHttpTransport is canonical_default_transport_type
+            and BookmakerCapabilityProfile is canonical_profile_type
+            and BoundSupervisedExecutionPlan is canonical_bound_type
+            and SupervisedApproval is canonical_approval_type
+            and ExecutionLegConstraint is canonical_constraint_type
+            and ProfileBinding is canonical_profile_binding_type
+            and ExecutionAction is canonical_action_type
+            and ExecutionPlan is canonical_plan_type
+            and RealExecutionLedger is canonical_ledger_type
+            and WorkspaceEconomicLock is canonical_workspace_lock_type
+            and canonical_workspace_lock_type.__getattribute__
+            is canonical_workspace_lock_getattribute
+            and canonical_workspace_lock_type.__setattr__
+            is canonical_workspace_lock_setattr
+            and type(canonical_workspace_lock_type.__dict__.get("FILE_NAME"))
+            is str
+            and canonical_workspace_lock_type.__dict__.get("FILE_NAME")
+            == canonical_workspace_lock_file_name
+            and workspace_lock_init.__defaults__ is workspace_lock_init_defaults
+            and workspace_lock_init.__kwdefaults__ is workspace_lock_init_kwdefaults
+            and (
+                workspace_lock_init_kwdefaults is None
+                or (
+                    len(workspace_lock_init_kwdefaults)
+                    == len(workspace_lock_init_kwdefault_items)
+                    and all(
+                        key in workspace_lock_init_kwdefaults
+                        and workspace_lock_init_kwdefaults[key] is value
+                        for key, value in workspace_lock_init_kwdefault_items
+                    )
+                )
+            )
+            and EconomicGoalStore is canonical_goal_store_type
+            and canonical_goal_store_type.__getattribute__
+            is canonical_goal_store_getattribute
+            and canonical_goal_store_type.__setattr__
+            is canonical_goal_store_setattr
+            and type(canonical_goal_store_type.__dict__.get("FILE_NAME")) is str
+            and canonical_goal_store_type.__dict__.get("FILE_NAME")
+            == canonical_goal_store_file_name
+            and EconomicGoalContract is canonical_goal_contract_type
+            and AutomationLevel is canonical_automation_level_type
+            and canonical_automation_level_type.SUPERVISED_EXECUTION
+            is canonical_supervised_automation_level
+            and ExternalAcknowledgement is canonical_acknowledgement_type
+            and BetfairInstructionReport is canonical_instruction_report_type
+            and BetfairPlaceExecutionReport is canonical_execution_report_type
+            and all(
+                authority_type.__getattribute__ is getattribute
+                for authority_type, getattribute in authority_getattribute_roots
+            )
+            and canonical_ledger_type.__setattr__ is canonical_ledger_setattr
+            and canonical_profile_type.__dict__.get("require")
+            is canonical_profile_require
+            and getattr(canonical_profile_require, "__code__", None)
+            is canonical_profile_require_code
+            and canonical_profile_type.__dict__.get("state_of")
+            is canonical_profile_state_of
+            and getattr(canonical_profile_state_of, "__code__", None)
+            is canonical_profile_state_of_code
+            and canonical_profile_type.__dict__.get("to_canonical_dict")
+            is canonical_profile_to_canonical_dict
+            and getattr(canonical_profile_to_canonical_dict, "__code__", None)
+            is canonical_profile_to_canonical_dict_code
+            and canonical_profile_type.__dict__.get("profile_id")
+            is canonical_profile_id_descriptor
+            and getattr(canonical_profile_id_descriptor, "fget", None)
+            is canonical_profile_id_getter
+            and getattr(canonical_profile_id_getter, "__code__", None)
+            is canonical_profile_id_getter_code
+            and canonical_action_type.__dict__.get("to_dict")
+            is canonical_action_to_dict
+            and getattr(canonical_action_to_dict, "__code__", None)
+            is canonical_action_to_dict_code
+            and canonical_constraint_type.__dict__.get("to_dict")
+            is canonical_constraint_to_dict
+            and getattr(canonical_constraint_to_dict, "__code__", None)
+            is canonical_constraint_to_dict_code
+            and client_type.__dict__.get("_next_request_id")
+            is canonical_next_request_id
+            and getattr(canonical_next_request_id, "__code__", None)
+            is canonical_next_request_id_code
+            and canonical_plan_type.__dict__.get("to_dict")
+            is canonical_plan_to_dict
+            and getattr(canonical_plan_to_dict, "__code__", None)
+            is canonical_plan_to_dict_code
+            and canonical_plan_type.__dict__.get("fingerprint")
+            is canonical_plan_fingerprint_descriptor
+            and getattr(canonical_plan_fingerprint_descriptor, "fget", None)
+            is canonical_plan_fingerprint_getter
+            and getattr(canonical_plan_fingerprint_getter, "__code__", None)
+            is canonical_plan_fingerprint_getter_code
+            and canonical_approval_type.__dict__.get("require_active")
+            is canonical_approval_require_active
+            and getattr(canonical_approval_require_active, "__code__", None)
+            is canonical_approval_require_active_code
+            and canonical_approval_type.__dict__.get("fingerprint")
+            is canonical_approval_fingerprint_descriptor
+            and getattr(canonical_approval_fingerprint_descriptor, "fget", None)
+            is canonical_approval_fingerprint_getter
+            and getattr(canonical_approval_fingerprint_getter, "__code__", None)
+            is canonical_approval_fingerprint_getter_code
+            and canonical_approval_type.__dict__.get("ledger_identity")
+            is canonical_approval_ledger_identity_descriptor
+            and getattr(canonical_approval_ledger_identity_descriptor, "fget", None)
+            is canonical_approval_ledger_identity_getter
+            and getattr(canonical_approval_ledger_identity_getter, "__code__", None)
+            is canonical_approval_ledger_identity_getter_code
+            and canonical_acknowledgement_type.__dict__.get("__post_init__")
+            is canonical_acknowledgement_post_init
+            and getattr(canonical_acknowledgement_post_init, "__code__", None)
+            is canonical_acknowledgement_post_init_code
+            and canonical_acknowledgement_type.__dict__.get("to_dict")
+            is canonical_acknowledgement_to_dict
+            and getattr(canonical_acknowledgement_to_dict, "__code__", None)
+            is canonical_acknowledgement_to_dict_code
+            and canonical_instruction_report_type.__dict__.get("__post_init__")
+            is canonical_instruction_post_init
+            and getattr(canonical_instruction_post_init, "__code__", None)
+            is canonical_instruction_post_init_code
+            and canonical_execution_report_type.__dict__.get("__post_init__")
+            is canonical_execution_report_post_init
+            and getattr(canonical_execution_report_post_init, "__code__", None)
+            is canonical_execution_report_post_init_code
+            and canonical_execution_report_type.__dict__.get("evidence_id")
+            is canonical_evidence_id_descriptor
+            and getattr(canonical_evidence_id_descriptor, "fget", None)
+            is canonical_evidence_id_getter
+            and getattr(canonical_evidence_id_getter, "__code__", None)
+            is canonical_evidence_id_getter_code
+            and canonical_goal_store_type.__dict__.get("__init__")
+            is canonical_goal_store_init
+            and getattr(canonical_goal_store_init, "__code__", None)
+            is canonical_goal_store_init_code
+            and canonical_goal_store_type.__dict__.get("load")
+            is canonical_goal_store_load
+            and getattr(canonical_goal_store_load, "__code__", None)
+            is canonical_goal_store_load_code
+            and provenance_for is canonical_provenance_for
+            and getattr(canonical_provenance_for, "__code__", None)
+            is canonical_provenance_for_code
+            and all(
+                canonical_workspace_lock_type.__dict__.get(name) is method
+                and getattr(method, "__code__", None) is code
+                for name, method, code in workspace_lock_methods
+            )
+            and _supervised_execution_runtime._trusted_now is canonical_trusted_now
+            and getattr(canonical_trusted_now, "__code__", None)
+            is canonical_trusted_now_code
+            and _supervised_execution_runtime._bound_binding_sha256
+            is canonical_bound_binding_sha256
+            and getattr(canonical_bound_binding_sha256, "__code__", None)
+            is canonical_bound_binding_sha256_code
+            and _supervised_execution_runtime._digest is canonical_supervised_digest
+            and getattr(canonical_supervised_digest, "__code__", None)
+            is canonical_supervised_digest_code
+            and all(
+                canonical_bound_type.__dict__.get(name) is method
+                and getattr(method, "__code__", None) is code
+                for name, method, code in bound_methods
+            )
+            and all(
+                canonical_ledger_type.__dict__.get(name) is method
+                and getattr(method, "__code__", None) is code
+                for name, method, code in ledger_methods
+            )
+            and all(
+                canonical_profile_type.__dict__.get(name) is descriptor
+                for name, descriptor in profile_field_descriptors
+            )
+            and all(
+                canonical_action_type.__dict__.get(name) is descriptor
+                for name, descriptor in action_field_descriptors
+            )
+            and all(
+                canonical_plan_type.__dict__.get(name) is descriptor
+                for name, descriptor in plan_field_descriptors
+            )
+            and all(
+                canonical_bound_type.__dict__.get(name) is descriptor
+                for name, descriptor in bound_field_descriptors
+            )
+            and all(
+                canonical_approval_type.__dict__.get(name) is descriptor
+                for name, descriptor in approval_field_descriptors
+            )
+            and all(
+                canonical_constraint_type.__dict__.get(name) is descriptor
+                for name, descriptor in constraint_field_descriptors
+            )
+            and all(
+                canonical_profile_binding_type.__dict__.get(name) is descriptor
+                for name, descriptor in profile_binding_field_descriptors
+            )
+            and all(
+                canonical_goal_contract_type.__dict__.get(name) is descriptor
+                for name, descriptor in goal_field_descriptors
+            )
+            and all(
+                canonical_acknowledgement_type.__dict__.get(name) is descriptor
+                for name, descriptor in acknowledgement_field_descriptors
+            )
+            and all(
+                canonical_instruction_report_type.__dict__.get(name) is descriptor
+                for name, descriptor in instruction_field_descriptors
+            )
+            and all(
+                canonical_execution_report_type.__dict__.get(name) is descriptor
+                for name, descriptor in execution_report_field_descriptors
+            )
+            and _now is canonical_default_clock
+            and getattr(canonical_default_clock, "__code__", None)
+            is canonical_default_clock_code
+            and client_type.__getattribute__ is canonical_client_getattribute
+            and canonical_credentials_type.__getattribute__
+            is canonical_credentials_getattribute
+            and canonical_gate_type.__getattribute__ is canonical_gate_getattribute
+            and canonical_gate_type.__dict__.get("require") is canonical_gate_method
+            and getattr(canonical_gate_method, "__code__", None)
+            is canonical_gate_method_code
+            and canonical_gate_type.__dict__.get("_require_current_owner_authority")
+            is gate_owner_authority_method
+            and getattr(gate_owner_authority_method, "__code__", None)
+            is gate_owner_authority_code
+            and all(
+                canonical_gate_type.__dict__.get(name) is descriptor
+                for name, descriptor in gate_field_descriptors
+            )
+            and all(
+                canonical_credentials_type.__dict__.get(name) is descriptor
+                for name, descriptor in credential_field_descriptors
+            )
+            and _canonical_bytes is canonical_bytes
+            and canonical_bytes.__code__ is canonical_bytes_code
+            and _parse_place_orders_response is canonical_response_parser
+            and getattr(canonical_response_parser, "__code__", None)
+            is canonical_response_parser_code
+        )
+
+    def instance_dict(value: object) -> dict[str, object] | None:
+        try:
+            namespace = object_getattribute(value, "__dict__")
+        except AttributeError:
+            return None
+        return namespace if type(namespace) is dict else None
+
+    def dependency_payload(
+        client: BetfairSupervisedPlaceOrdersClient,
+        namespace: dict[str, object],
+    ) -> bytes:
+        gate = namespace.get("_gate")
+        transport = namespace.get("_transport")
+        credentials = namespace.get("_credentials")
+        clock = namespace.get("_clock")
+        timeout_seconds = namespace.get("_timeout_seconds")
+        if (
+            type(gate) is not canonical_gate_type
+            or type(credentials) is not canonical_credentials_type
+            or transport is None
+            or not callable(clock)
+            or type(timeout_seconds) is not float
+            or timeout_seconds <= 0
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependencies were not initialized canonically"
+            )
+        transport_type = type(transport)
+        transport_method = transport_type.__dict__.get("post")
+        transport_getattribute = transport_type.__getattribute__
+        if (
+            not callable(transport_method)
+            or getattr(transport_method, "__code__", None) is None
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency dispatch is unavailable"
+            )
+        gate_namespace = instance_dict(gate)
+        transport_namespace = instance_dict(transport)
+        if (
+            gate_namespace is not None
+            and "require" in gate_namespace
+        ) or (
+            transport_namespace is not None
+            and "post" in transport_namespace
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency dispatch is shadowed"
+            )
+        gate_state = [
+            object_getattribute(gate, name)
+            for name in gate_field_names
+        ]
+        store = gate_state[6]
+        workspace = gate_state[7]
+        canonical_gate_state = [
+            gate_state[0],
+            gate_state[1],
+            gate_state[2],
+            gate_state[3],
+            gate_state[4],
+            gate_state[5],
+            0 if store is None else id(store),
+            None if workspace is None else str(workspace),
+        ]
+        credential_state = [
+            object_getattribute(credentials, name)
+            for name in credential_field_names
+        ]
+        clock_code = getattr(clock, "__code__", None)
+        payload = {
+            "schema": "autosport.betfair_provider_write_client_binding",
+            "schema_version": 1,
+            "client_identity": id(client),
+            "gate_identity": id(gate),
+            "gate_state": canonical_gate_state,
+            "gate_method_identity": id(canonical_gate_method),
+            "gate_method_code_identity": id(canonical_gate_method_code),
+            "gate_owner_method_identity": id(gate_owner_authority_method),
+            "gate_owner_method_code_identity": id(gate_owner_authority_code),
+            "credentials_identity": id(credentials),
+            "credential_state": credential_state,
+            "transport_identity": id(transport),
+            "transport_type_identity": id(transport_type),
+            "transport_method_identity": id(transport_method),
+            "transport_method_code_identity": id(transport_method.__code__),
+            "transport_getattribute_identity": id(transport_getattribute),
+            "clock_identity": id(clock),
+            "clock_code_identity": 0 if clock_code is None else id(clock_code),
+            "timeout_seconds": timeout_seconds,
+        }
+        return canonical_bytes(payload)
+
+    def dependency_proof(
+        client: BetfairSupervisedPlaceOrdersClient,
+        namespace: dict[str, object],
+    ) -> bytes:
+        return binding_digest(
+            binding_key,
+            dependency_payload(client, namespace),
+            "sha256",
+        )
+
+    def sealed_init(self, *args, **kwargs):
+        if (
+            client_type.__dict__.get("__init__") is not sealed_init
+            or not static_authority_current()
+        ):
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair client constructor authority changed"
+            )
+        original_init(self, *args, **kwargs)
+        if not static_authority_current():
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair client constructor authority changed"
+            )
+        namespace = object_getattribute(self, "__dict__")
+        if type(namespace) is not dict:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client instance state is unavailable"
+            )
+        if type(namespace.get("_credentials")) is not canonical_credentials_type:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client credentials must be exact canonical credentials"
+            )
+        if type(namespace.get("_gate")) is not canonical_gate_type:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client gate must be exact canonical gate"
+            )
+        proof = dependency_proof(self, namespace)
+        namespace[binding_field] = proof
+
+    client_type.__init__ = sealed_init
+
+    place_action = client_type.__dict__.get("place_action")
+    if not callable(place_action) or getattr(place_action, "__code__", None) is None:
+        raise RuntimeError("canonical Betfair place_action dispatch is unavailable")
+    place_action_code = place_action.__code__
+    sealed_init_code = sealed_init.__code__
+
+    def public_place_action_disabled(self, *args, **kwargs):
+        raise BetfairSupervisedExecutionError(
+            "direct public Betfair provider write is disabled; "
+            "use execute_betfair_supervised_action"
+        )
+
+    public_place_action_disabled_code = public_place_action_disabled.__code__
+    client_type.place_action = public_place_action_disabled
+
+    def preflight(client: BetfairSupervisedPlaceOrdersClient) -> None:
+        if (
+            type(client) is not client_type
+            or client_type.__getattribute__ is not canonical_client_getattribute
+            or client_type.__dict__.get("__init__") is not sealed_init
+            or sealed_init.__code__ is not sealed_init_code
+            or client_type.__dict__.get("place_action") is not public_place_action_disabled
+            or public_place_action_disabled.__code__ is not public_place_action_disabled_code
+            or place_action.__code__ is not place_action_code
+            or not static_authority_current()
+        ):
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair client dispatch changed"
+            )
+        namespace = object_getattribute(client, "__dict__")
+        if (
+            type(namespace) is not dict
+            or "place_action" in namespace
+            or "_next_request_id" in namespace
+            or binding_field not in namespace
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client has no canonical dependency binding"
+            )
+        proof = namespace.get(binding_field)
+        if type(proof) is not bytes or len(proof) != 32:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency binding changed"
+            )
+        expected = dependency_proof(client, namespace)
+        if not binding_compare_digest(proof, expected):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client dependency binding changed"
+            )
+
+    def dispatch(
+        client: BetfairSupervisedPlaceOrdersClient,
+        action: ExecutionAction,
+        *,
+        profile: BookmakerCapabilityProfile,
+        bound: BoundSupervisedExecutionPlan,
+        provider_order_ref: str,
+        execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None,
+    ) -> BetfairPlaceExecutionReport:
+        try:
+            caller_code = frame_getter(1).f_code
+        except (AttributeError, ValueError):
+            caller_code = None
+        if caller_code is not canonical_caller_code:
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair provider dispatch is private to final-send authority"
+            )
+        preflight(client)
+        return place_action(
+            client,
+            action,
+            profile=profile,
+            bound=bound,
+            provider_order_ref=provider_order_ref,
+            execution_workspace=execution_workspace,
+            _before_transport=_before_transport,
+        )
+
+    return dispatch, preflight
 
 
 def _mapping(
@@ -724,6 +2161,7 @@ def _parse_place_orders_response(
     action: ExecutionAction,
     provider_order_ref: str,
     observed_at: str,
+    provider_origin_authoritative: bool = False,
 ) -> BetfairPlaceExecutionReport:
     decoded = _decode_provider_json(payload)
     if isinstance(decoded, list):
@@ -895,7 +2333,10 @@ def _parse_place_orders_response(
             "execution errorCode",
         ),
         instruction=instruction,
+        provider_origin_authoritative=provider_origin_authoritative,
     )
+
+
 
 
 def _report_outcome(
@@ -923,8 +2364,8 @@ def read_betfair_supervised_action_readback(
 ) -> BetfairExecutionReadbackEnvelope:
     """Query the exact durable provider order reference used by placeOrders."""
 
-    if not isinstance(client, BetfairReadOnlyClient):
-        raise TypeError("client must be BetfairReadOnlyClient")
+    if type(client) is not BetfairReadOnlyClient:
+        raise TypeError("client must be exact BetfairReadOnlyClient")
     saga = ledger.saga(bound.execution_plan.plan_id)
     action_id = saga.attempt_action_ids.get(attempt_id)
     if action_id is None:
@@ -940,16 +2381,290 @@ def read_betfair_supervised_action_readback(
         raise BetfairSupervisedExecutionError(
             "attempt lacks durable provider order reference"
         )
-    return client.read_execution_readback(
+    capture = client.read_execution_readback(
         action_id=action.action_id,
         provider_order_ref=provider_order_ref,
         market_id=action.market_id,
         page_size=page_size,
         max_pages=max_pages,
     )
+    try:
+        capture.assert_authoritative()
+    except BetfairReadOnlyError as exc:
+        raise BetfairSupervisedExecutionError(
+            "supervised Betfair readback lacks authenticated product origin"
+        ) from exc
+    return capture
 
 
-def execute_betfair_supervised_action(
+
+def _place_action_with_final_durable_authority(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    *,
+    action: ExecutionAction,
+    attempt_id: str,
+    profile: BookmakerCapabilityProfile,
+    client: BetfairSupervisedPlaceOrdersClient,
+    provider_order_ref: str,
+    execution_workspace: Path,
+    confirmation_receipt_id: str | None,
+    confirmation_review_sha256: str | None,
+    _canonical_dispatch,
+    _confirmation_guard,
+    _trusted_now,
+    _require_live_approval,
+    _require_live_durable_approval,
+    _parse_time,
+) -> BetfairPlaceExecutionReport:
+    """Hold durable approval + exact operator confirmation through the provider boundary."""
+
+    if confirmation_receipt_id is None or confirmation_review_sha256 is None:
+        raise BetfairSupervisedExecutionError(
+            "final Betfair provider send requires durable operator confirmation"
+        )
+    confirmation_receipt_id = _sha(
+        confirmation_receipt_id,
+        "confirmation_receipt_id",
+    )
+    confirmation_review_sha256 = _sha(
+        confirmation_review_sha256,
+        "confirmation_review_sha256",
+    )
+    if not _confirmation_guard():
+        raise BetfairSupervisedExecutionError(
+            "durable Betfair confirmation authority changed"
+        )
+
+    def operation() -> BetfairPlaceExecutionReport:
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        if view.plan_fingerprint != bound.execution_plan.fingerprint:
+            raise ExecutionStateError(
+                "durable execution-plan fingerprint changed before final send"
+            )
+        attempts = [
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id == attempt_id
+        ]
+        if len(attempts) != 1:
+            raise ExecutionStateError(
+                "final supervised send requires one durable attempt"
+            )
+        attempt = attempts[0]
+        if (
+            attempt.state is not AttemptState.RESERVED
+            or attempt.attempt.action_id != action.action_id
+            or attempt.action != action
+        ):
+            raise ExecutionStateError(
+                "final supervised send requires the exact RESERVED action"
+            )
+        if attempt.provider_order_ref != provider_order_ref:
+            raise ExecutionStateError(
+                "final supervised send provider order reference drifted"
+            )
+
+        _require_live_durable_approval(ledger, bound, approval)
+        _validate_betfair_place_action(action)
+        _canonical_place_client_preflight(client)
+        client._gate.require(
+            action=action,
+            profile=profile,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
+        provider_ref = _text(provider_order_ref, "provider_order_ref")
+        if len(provider_ref) > 32 or any(
+            character not in "0123456789abcdef"
+            for character in provider_ref
+        ):
+            raise BetfairSupervisedExecutionError(
+                "provider_order_ref must be <=32 lowercase hex characters"
+            )
+
+        submitted = False
+        submitted_request_sha256: str | None = None
+
+        def authorize_and_submit(request_sha256: str) -> None:
+            nonlocal submitted, submitted_request_sha256
+            _sha(request_sha256, "submitted_request_sha256")
+            send_at = _trusted_now()
+            _require_live_approval(bound, approval, send_at)
+            _require_live_durable_approval(ledger, bound, approval)
+            if _parse_time(send_at, "final send time") < _parse_time(
+                attempt.attempt.reserved_at,
+                "attempt reserved_at",
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "final send time precedes attempt reservation"
+                )
+            if _parse_time(send_at, "final send time") >= _parse_time(
+                action.expires_at,
+                "action expires_at",
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "placeOrders final send is at/after quote expiry"
+                )
+            ledger._append(
+                EventType.ATTEMPT_SUBMITTED,
+                bound.execution_plan.plan_id,
+                action.action_id,
+                attempt_id,
+                {
+                    "submitted_at": send_at,
+                    "request_sha256": request_sha256,
+                },
+            )
+            submitted_request_sha256 = request_sha256
+            submitted = True
+
+            if not _confirmation_guard():
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair confirmation authority changed before consumption"
+                )
+            try:
+                _CONSUME_BETFAIR_CONFIRMATION(
+                    execution_workspace,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id=attempt_id,
+                    receipt_id=confirmation_receipt_id,
+                    expected_review_sha256=confirmation_review_sha256,
+                    request_sha256=request_sha256,
+                    submitted_at=send_at,
+                )
+            except _BETFAIR_CONFIRMATION_ERROR as exc:
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair operator confirmation denied final provider send"
+                ) from exc
+
+            final_send_at = _trusted_now()
+            if not _confirmation_guard():
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair confirmation authority changed after consumption"
+                )
+            try:
+                review_expires_at = _REQUIRE_CURRENT_BETFAIR_CONFIRMATION(
+                    execution_workspace,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id=attempt_id,
+                    receipt_id=confirmation_receipt_id,
+                    expected_review_sha256=confirmation_review_sha256,
+                    request_sha256=request_sha256,
+                    submitted_at=send_at,
+                    current_at=final_send_at,
+                )
+            except _BETFAIR_CONFIRMATION_ERROR as exc:
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair operator confirmation changed before provider send"
+                ) from exc
+
+            _require_live_approval(bound, approval, final_send_at)
+            _require_live_durable_approval(ledger, bound, approval)
+            final_send_instant = _parse_time(final_send_at, "final send time")
+            submitted_instant = _parse_time(send_at, "submitted_at")
+            if final_send_instant < submitted_instant:
+                raise BetfairFinalConfirmationDenied(
+                    "trusted Betfair final-send clock moved backwards"
+                )
+            if final_send_instant >= _parse_time(
+                action.expires_at,
+                "action expires_at",
+            ):
+                raise BetfairFinalConfirmationDenied(
+                    "Betfair action quote expired after durable confirmation"
+                )
+
+            durable_view = ledger.verified_execution_view(
+                bound.execution_plan.plan_id
+            )
+            durable_attempts = [
+                item
+                for item in durable_view.attempts
+                if item.attempt.attempt_id == attempt_id
+            ]
+            if len(durable_attempts) != 1:
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair submission identity disappeared before provider send"
+                )
+            durable_attempt = durable_attempts[0]
+            if (
+                durable_attempt.state is not AttemptState.SUBMITTED
+                or durable_attempt.action != action
+                or durable_attempt.provider_order_ref != provider_ref
+                or durable_attempt.submitted_at != send_at
+                or durable_attempt.submitted_request_sha256 != request_sha256
+            ):
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair submission identity changed before provider send"
+                )
+
+            # Last clock sample is immediately adjacent to the irreversible POST.
+            # All durable I/O is complete; only pure in-memory expiry checks follow.
+            provider_send_at = _trusted_now()
+            provider_send_instant = _parse_time(provider_send_at, "provider send time")
+            if provider_send_instant < final_send_instant:
+                raise BetfairFinalConfirmationDenied(
+                    "trusted Betfair final-send clock moved backwards at provider seam"
+                )
+            if provider_send_instant >= _parse_time(
+                review_expires_at,
+                "confirmation review expires_at",
+            ):
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair operator confirmation expired before provider send"
+                )
+            _require_live_approval(bound, approval, provider_send_at)
+            if provider_send_instant >= _parse_time(
+                action.expires_at,
+                "action expires_at",
+            ):
+                raise BetfairFinalConfirmationDenied(
+                    "Betfair action quote expired at provider send seam"
+                )
+            if not _confirmation_guard():
+                raise BetfairFinalConfirmationDenied(
+                    "durable Betfair confirmation authority changed at provider seam"
+                )
+
+        try:
+            report = _canonical_dispatch(
+                client,
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref=provider_ref,
+                execution_workspace=execution_workspace,
+                _before_transport=authorize_and_submit,
+            )
+            if (
+                submitted_request_sha256 is None
+                or report.request_sha256 != submitted_request_sha256
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "placeOrders report request digest mismatches durable submission"
+                )
+            return report
+        except BetfairFinalConfirmationDenied:
+            raise
+        except BetfairPlaceOrdersAmbiguous:
+            raise
+        except Exception as exc:
+            if not submitted:
+                raise
+            raise BetfairPlaceOrdersAmbiguous(
+                "placeOrders dispatch failed after durable submission; "
+                "authoritative readback required"
+            ) from exc
+
+    return ledger._mutate(operation)
+
+def _execute_betfair_supervised_action_core(
     ledger: RealExecutionLedger,
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
@@ -959,21 +2674,34 @@ def execute_betfair_supervised_action(
     profile: BookmakerCapabilityProfile,
     client: BetfairSupervisedPlaceOrdersClient,
     clock: Callable[[], str] | None = None,
+    confirmation_receipt_id: str | None = None,
+    confirmation_review_sha256: str | None = None,
+    _final_helper=None,
 ) -> BetfairSupervisedExecutionResult:
     """Reserve -> submit -> placeOrders -> report -> canonical ledger transition."""
 
-    if not isinstance(ledger, RealExecutionLedger):
-        raise TypeError("ledger must be RealExecutionLedger")
-    if not isinstance(
-        client,
-        BetfairSupervisedPlaceOrdersClient,
-    ):
-        raise TypeError(
-            "client must be BetfairSupervisedPlaceOrdersClient"
+    if _final_helper is None:
+        raise BetfairSupervisedExecutionError(
+            "canonical Betfair final-send helper is unavailable"
         )
+    if type(ledger) is not RealExecutionLedger:
+        raise TypeError("ledger must be exact RealExecutionLedger")
+    if type(bound) is not BoundSupervisedExecutionPlan:
+        raise TypeError("bound must be exact BoundSupervisedExecutionPlan")
+    if type(approval) is not SupervisedApproval:
+        raise TypeError("approval must be exact SupervisedApproval")
+    if type(profile) is not BookmakerCapabilityProfile:
+        raise TypeError("profile must be exact BookmakerCapabilityProfile")
+    if type(client) is not BetfairSupervisedPlaceOrdersClient:
+        raise TypeError(
+            "client must be exact BetfairSupervisedPlaceOrdersClient"
+        )
+    _canonical_place_client_preflight(client)
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
-    now = clock or _now
+    # API compatibility only: execution-authority time is product-owned.
+    _ = clock
+    trusted_now = _supervised_execution_runtime._trusted_now
     execution_workspace = ledger.path.parent.resolve()
 
     # Serialize the current owner authority through the actual provider-write
@@ -986,6 +2714,7 @@ def execute_betfair_supervised_action(
     # held. This prevents a known local authority denial from being mislabeled
     # as provider-effect uncertainty.
     with WorkspaceEconomicLock(execution_workspace):
+        _canonical_place_client_preflight(client)
         client._gate.require(
             action=action,
             profile=profile,
@@ -1003,29 +2732,28 @@ def execute_betfair_supervised_action(
             attempt_id=attempt_id,
             provider_id=action.bookmaker_id,
         )
-        ledger.mark_submitted(
-            attempt_id,
-            submitted_at=now(),
-        )
         try:
-            report = client.place_action(
-                action,
+            report = _final_helper(
+                ledger,
+                bound,
+                approval,
+                action=action,
+                attempt_id=attempt_id,
                 profile=profile,
-                bound=bound,
+                client=client,
                 provider_order_ref=provider_order_ref,
                 execution_workspace=execution_workspace,
+                confirmation_receipt_id=confirmation_receipt_id,
+                confirmation_review_sha256=confirmation_review_sha256,
             )
-        except (
-            BetfairPlaceOrdersAmbiguous,
-            BetfairSupervisedExecutionError,
-        ):
+        except BetfairPlaceOrdersAmbiguous:
             ledger.mark_unknown(
                 attempt_id,
                 reason=(
                     "betfair_placeOrders_ambiguous_effect_"
                     "requires_readback"
                 ),
-                observed_at=now(),
+                observed_at=trusted_now(),
             )
             return BetfairSupervisedExecutionResult(
                 PlaceOrdersOutcome.UNKNOWN,
@@ -1035,12 +2763,30 @@ def execute_betfair_supervised_action(
                 None,
             )
 
+    if not report.provider_origin_authoritative:
+        ledger.mark_unknown(
+            attempt_id,
+            reason=(
+                "betfair_placeOrders_non_authoritative_response_"
+                "requires_authenticated_readback"
+            ),
+            observed_at=trusted_now(),
+        )
+        return BetfairSupervisedExecutionResult(
+            PlaceOrdersOutcome.UNKNOWN,
+            attempt_id,
+            ledger.attempt_state(attempt_id),
+            None,
+            None,
+        )
+
     evidence_id = report.evidence_id
     ledger.bind_provider_evidence(
         attempt_id=attempt_id,
         evidence_id=evidence_id,
         observed_at=report.observed_at,
         source=f"betfair:placeOrders:{report.response_sha256}",
+        request_sha256=report.request_sha256,
     )
     outcome = _report_outcome(report, action)
     receipt = report.instruction.bet_id
@@ -1104,3 +2850,212 @@ def execute_betfair_supervised_action(
         evidence_id,
         receipt,
     )
+
+# Compose the irreversible provider boundary only after both the raw final-send helper
+# and canonical executor code exist. The only callable provider dispatch is then
+# closure-owned beneath the public executor; module-level private helper names are
+# removed so callers cannot bypass confirmation/workspace authority by importing an
+# underscored implementation detail.
+_FINAL_HELPER_OPERATION_CODES = tuple(
+    code
+    for code in _place_action_with_final_durable_authority.__code__.co_consts
+    if getattr(code, "co_name", None) == "operation"
+)
+if len(_FINAL_HELPER_OPERATION_CODES) != 1:
+    raise RuntimeError("canonical Betfair final-send operation code is unavailable")
+_FINAL_HELPER_OPERATION_CODE = _FINAL_HELPER_OPERATION_CODES[0]
+del _FINAL_HELPER_OPERATION_CODES
+
+_canonical_place_action_dispatch, _canonical_place_client_preflight = (
+    _build_canonical_place_action_dispatch(
+        _FINAL_HELPER_OPERATION_CODE,
+        sys._getframe,
+    )
+)
+del _build_canonical_place_action_dispatch
+
+_RAW_FINAL_SEND_HELPER = _place_action_with_final_durable_authority
+_RAW_FINAL_SEND_HELPER_CODE = _RAW_FINAL_SEND_HELPER.__code__
+_CANONICAL_EXECUTE_CORE = _execute_betfair_supervised_action_core
+_CANONICAL_EXECUTE_CORE_CODE = _CANONICAL_EXECUTE_CORE.__code__
+_CANONICAL_PROVIDER_DISPATCH = _canonical_place_action_dispatch
+del _place_action_with_final_durable_authority
+del _canonical_place_action_dispatch
+del _execute_betfair_supervised_action_core
+
+
+def _build_final_send_helper_boundary(
+    raw_helper,
+    raw_helper_code,
+    canonical_execute_code,
+    canonical_dispatch,
+    confirmation_guard,
+    confirmation_guard_code,
+    trusted_now,
+    trusted_now_code,
+    require_live_approval,
+    require_live_approval_code,
+    require_live_durable_approval,
+    require_live_durable_approval_code,
+    parse_time,
+    parse_time_code,
+    frame_getter,
+):
+    def sealed_call(function, function_code, label):
+        def call(*args, **kwargs):
+            if getattr(function, "__code__", None) is not function_code:
+                raise BetfairSupervisedExecutionError(
+                    f"canonical Betfair {label} authority changed"
+                )
+            return function(*args, **kwargs)
+
+        return call
+
+    sealed_trusted_now = sealed_call(trusted_now, trusted_now_code, "clock")
+    sealed_require_live_approval = sealed_call(
+        require_live_approval,
+        require_live_approval_code,
+        "approval",
+    )
+    sealed_require_live_durable_approval = sealed_call(
+        require_live_durable_approval,
+        require_live_durable_approval_code,
+        "durable approval",
+    )
+    sealed_parse_time = sealed_call(parse_time, parse_time_code, "time parser")
+
+    def protected_final_send_helper(
+        ledger: RealExecutionLedger,
+        bound: BoundSupervisedExecutionPlan,
+        approval: SupervisedApproval,
+        *,
+        action: ExecutionAction,
+        attempt_id: str,
+        profile: BookmakerCapabilityProfile,
+        client: BetfairSupervisedPlaceOrdersClient,
+        provider_order_ref: str,
+        execution_workspace: Path,
+        confirmation_receipt_id: str | None,
+        confirmation_review_sha256: str | None,
+    ) -> BetfairPlaceExecutionReport:
+        try:
+            caller_code = frame_getter(1).f_code
+        except (AttributeError, ValueError):
+            caller_code = None
+        if caller_code is not canonical_execute_code:
+            raise BetfairSupervisedExecutionError(
+                "Betfair final-send helper is private to canonical execution"
+            )
+        if getattr(raw_helper, "__code__", None) is not raw_helper_code:
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair final-send helper authority changed"
+            )
+        if getattr(confirmation_guard, "__code__", None) is not confirmation_guard_code:
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair confirmation guard authority changed"
+            )
+        if (
+            _supervised_execution_runtime._trusted_now is not trusted_now
+            or _require_approval is not require_live_approval
+            or _require_durable_approval is not require_live_durable_approval
+            or _time is not parse_time
+        ):
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair final-send functional authority changed"
+            )
+        return raw_helper(
+            ledger,
+            bound,
+            approval,
+            action=action,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            provider_order_ref=provider_order_ref,
+            execution_workspace=execution_workspace,
+            confirmation_receipt_id=confirmation_receipt_id,
+            confirmation_review_sha256=confirmation_review_sha256,
+            _canonical_dispatch=canonical_dispatch,
+            _confirmation_guard=confirmation_guard,
+            _trusted_now=sealed_trusted_now,
+            _require_live_approval=sealed_require_live_approval,
+            _require_live_durable_approval=sealed_require_live_durable_approval,
+            _parse_time=sealed_parse_time,
+        )
+
+    return protected_final_send_helper
+
+
+_PROTECTED_FINAL_SEND_HELPER = _build_final_send_helper_boundary(
+    _RAW_FINAL_SEND_HELPER,
+    _RAW_FINAL_SEND_HELPER_CODE,
+    _CANONICAL_EXECUTE_CORE_CODE,
+    _CANONICAL_PROVIDER_DISPATCH,
+    _betfair_confirmation_graph_unchanged,
+    _betfair_confirmation_graph_unchanged.__code__,
+    _supervised_execution_runtime._trusted_now,
+    _supervised_execution_runtime._trusted_now.__code__,
+    _require_approval,
+    _require_approval.__code__,
+    _require_durable_approval,
+    _require_durable_approval.__code__,
+    _time,
+    _time.__code__,
+    sys._getframe,
+)
+del _build_final_send_helper_boundary
+
+
+def _build_public_betfair_executor(
+    canonical_core,
+    canonical_core_code,
+    final_helper,
+):
+    def public_execute_betfair_supervised_action(
+        ledger: RealExecutionLedger,
+        bound: BoundSupervisedExecutionPlan,
+        approval: SupervisedApproval,
+        *,
+        action_id: str,
+        attempt_id: str,
+        profile: BookmakerCapabilityProfile,
+        client: BetfairSupervisedPlaceOrdersClient,
+        clock: Callable[[], str] | None = None,
+        confirmation_receipt_id: str | None = None,
+        confirmation_review_sha256: str | None = None,
+    ) -> BetfairSupervisedExecutionResult:
+        if getattr(canonical_core, "__code__", None) is not canonical_core_code:
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair execution authority changed"
+            )
+        return canonical_core(
+            ledger,
+            bound,
+            approval,
+            action_id=action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=clock,
+            confirmation_receipt_id=confirmation_receipt_id,
+            confirmation_review_sha256=confirmation_review_sha256,
+            _final_helper=final_helper,
+        )
+
+    return public_execute_betfair_supervised_action
+
+
+execute_betfair_supervised_action = _build_public_betfair_executor(
+    _CANONICAL_EXECUTE_CORE,
+    _CANONICAL_EXECUTE_CORE_CODE,
+    _PROTECTED_FINAL_SEND_HELPER,
+)
+execute_betfair_supervised_action.__name__ = "execute_betfair_supervised_action"
+execute_betfair_supervised_action.__qualname__ = "execute_betfair_supervised_action"
+execute_betfair_supervised_action.__module__ = __name__
+del _build_public_betfair_executor
+del _RAW_FINAL_SEND_HELPER
+del _CANONICAL_EXECUTE_CORE
+del _CANONICAL_PROVIDER_DISPATCH
+del _PROTECTED_FINAL_SEND_HELPER
+

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import timedelta
+from datetime import datetime, timedelta
 from itertools import count
 import os
 import sys
@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from supervised_clock_test_support import install_trusted_clock, reset_trusted_time
 
 # Root-selection production now correctly treats post-composition replacement of the
 # OS account-location resolver as an authority violation. Tests that need a sandbox
@@ -56,6 +58,19 @@ else:
         return SimpleNamespace(pw_dir=str(_ROOT_SELECTION_TEST_HOME))
 
     _root_selection_pwd.getpwuid = _pytest_root_selection_getpwuid
+
+# Install the stable supervised-execution test clock only after the OS account
+# resolver shim is composed, but still before test collection can import the Betfair
+# provider-write module that seals the trusted-clock function identity.
+install_trusted_clock()
+
+
+@pytest.fixture(autouse=True)
+def _reset_supervised_execution_test_clock():
+    reset_trusted_time()
+    yield
+    reset_trusted_time()
+
 
 from autosport import monotonic_authority_root_binding as _root_selection
 from autosport._provider_evaluation_semantic_gate import (
@@ -243,6 +258,108 @@ def _legacy_provider_semantic_fixture_bridge(request):
     finally:
         _set_legacy_provider_semantic_bypass_for_tests(False)
 
+
+
+# Existing provider-write suites predate the exact final-send confirmation gate.
+# Supply only those legacy suites with a deterministic durable review+receipt.
+# Dedicated confirmation tests are intentionally excluded.
+_BETFAIR_OPERATOR_CONFIRMATION_BRIDGE_MODULES = frozenset(
+    {
+        "test_betfair_supervised_execution",
+        "test_betfair_final_durable_approval_fence",
+        "test_betfair_placeorders_customer_order_ref_echo_falsifier",
+        "test_betfair_placeorders_executable_authority_code_seal",
+        "test_betfair_placeorders_execution_errorcode_coherence",
+        "test_betfair_placeorders_network_origin_authority",
+        "test_betfair_placeorders_response_truth",
+        "test_betfair_placeorders_single_instruction_status",
+        "test_betfair_placeorders_terminal_identity",
+        "test_betfair_placeorders_urllib_opener_origin",
+        "test_betfair_stop_ledger_boundary",
+        "test_betfair_trusted_runtime_write_boundary",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _bind_betfair_operator_confirmation(request, monkeypatch):
+    module = request.module
+    if module is None:
+        return
+    module_name = module.__name__.rsplit(".", 1)[-1]
+    if module_name not in _BETFAIR_OPERATOR_CONFIRMATION_BRIDGE_MODULES:
+        return
+    original_execute = getattr(module, "execute_betfair_supervised_action", None)
+    if not callable(original_execute):
+        return
+
+    from autosport.betfair_execution_confirmation import (
+        CONFIRMATION_FILENAME,
+        betfair_execution_confirmation_spec,
+    )
+    from autosport.supervised_confirmation import SupervisedConfirmationAuthority
+
+    receipt_cache: dict[tuple[str, str, str, str], tuple[str, str]] = {}
+    confirmation_now = datetime.fromisoformat("2026-09-19T08:00:02.200000+00:00")
+
+    def execute_with_confirmation(ledger, bound, approval, *args, **kwargs):
+        if (
+            kwargs.get("confirmation_receipt_id") is None
+            and kwargs.get("confirmation_review_sha256") is None
+        ):
+            action_id = kwargs.get("action_id")
+            attempt_id = kwargs.get("attempt_id")
+            if type(action_id) is str and type(attempt_id) is str:
+                workspace = Path(ledger.path).parent.resolve()
+                key = (
+                    str(workspace),
+                    bound.execution_plan.plan_id,
+                    action_id,
+                    attempt_id,
+                )
+                receipt_identity = receipt_cache.get(key)
+                if receipt_identity is None:
+                    spec = betfair_execution_confirmation_spec(
+                        bound,
+                        approval,
+                        action_id=action_id,
+                        attempt_id=attempt_id,
+                        review_id=f"pytest-final-send-review-{attempt_id}",
+                        risk_evidence_sha256="f" * 64,
+                    )
+                    authority = SupervisedConfirmationAuthority(
+                        workspace / CONFIRMATION_FILENAME,
+                        clock=lambda: confirmation_now,
+                    )
+                    review = authority.prepare_review(
+                        review_id=spec.review_id,
+                        decision_id=spec.decision_id,
+                        bookmaker_id=spec.bookmaker_id,
+                        account_id=spec.account_id,
+                        decision_sha256=spec.decision_sha256,
+                        approval_evidence_sha256=spec.approval_evidence_sha256,
+                        risk_evidence_sha256=spec.risk_evidence_sha256,
+                        review_payload=spec.review_payload,
+                        ttl_seconds=120,
+                    )
+                    receipt = authority.confirm_review(
+                        review_id=review.review_id,
+                        expected_review_sha256=review.review_sha256,
+                    )
+                    receipt_identity = (
+                        receipt.receipt_id,
+                        review.review_sha256,
+                    )
+                    receipt_cache[key] = receipt_identity
+                kwargs["confirmation_receipt_id"] = receipt_identity[0]
+                kwargs["confirmation_review_sha256"] = receipt_identity[1]
+        return original_execute(ledger, bound, approval, *args, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "execute_betfair_supervised_action",
+        execute_with_confirmation,
+    )
 
 @pytest.fixture(autouse=True)
 def _deterministic_betfair_mid_frame_reconnect_clock(request, monkeypatch):

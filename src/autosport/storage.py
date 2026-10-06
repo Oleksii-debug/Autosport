@@ -2038,27 +2038,27 @@ class SQLiteMarketStore:
                 _canonical_as_of,
                 "as_of",
             ).astimezone(timezone.utc)
-            previous_cutoff_instant = (
-                _timezone_aware_instant(
-                    issued[-1][1],
-                    "as_of",
-                ).astimezone(timezone.utc)
-                if issued
-                else None
-            )
             if issued and max_generation < previous_max_generation:
                 raise MonotonicAuthorityRollbackError(
                     "causal replay cutoff commit regresses append generation"
                 )
-            if (
-                previous_cutoff_instant is not None
-                and cutoff_instant < previous_cutoff_instant
-                and max_generation > previous_max_generation
-            ):
-                raise MonotonicAuthorityRollbackError(
-                    "causal replay cutoff commit retroactively advances "
-                    "append generation"
-                )
+            for (
+                _prior_cutoff_id,
+                prior_as_of,
+                prior_generation,
+            ) in issued:
+                prior_instant = _timezone_aware_instant(
+                    prior_as_of,
+                    "as_of",
+                ).astimezone(timezone.utc)
+                if (
+                    cutoff_instant < prior_instant
+                    and max_generation > prior_generation
+                ):
+                    raise MonotonicAuthorityRollbackError(
+                        "causal replay cutoff commit retroactively advances "
+                        "append generation"
+                    )
 
             if max_generation not in append_boundaries:
                 raise MonotonicAuthorityRollbackError(

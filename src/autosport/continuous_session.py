@@ -4484,8 +4484,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "continuous-session clock authority is unavailable"
             )
 
+        missing_coordinator_authority = object()
+
         def restore_state_identity() -> bool:
-            if self._state is state:
+            if getattr(self, "_state", missing_coordinator_authority) is state:
                 return False
             self._state = state
             return True
@@ -4543,7 +4545,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         def restore_dependency_index_identity() -> bool:
             type_changed = restore_dependency_index_type_authority()
-            if self.dependency_index is dependency_index:
+            if (
+                getattr(self, "dependency_index", missing_coordinator_authority)
+                is dependency_index
+            ):
                 return type_changed
             self.dependency_index = dependency_index
             return True
@@ -4556,7 +4561,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         def restore_invalidation_buffer_identity() -> bool:
             type_changed = restore_invalidation_buffer_type_authority()
-            if self.invalidation_buffer is invalidation_buffer:
+            if (
+                getattr(self, "invalidation_buffer", missing_coordinator_authority)
+                is invalidation_buffer
+            ):
                 return type_changed
             self.invalidation_buffer = invalidation_buffer
             return True
@@ -4571,11 +4579,34 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             type_changed = restore_invalidation_buffer_type_authority()
             if type(invalidation_buffer) is not _invalidation_buffer_type:
                 return type_changed
+            current_max_dirty_keys = getattr(
+                invalidation_buffer,
+                "_max_dirty_keys",
+                missing_coordinator_authority,
+            )
             changed = type_changed or (
-                invalidation_buffer._mirror is not invalidation_buffer_mirror
-                or invalidation_buffer._dirty is not invalidation_dirty_storage
-                or invalidation_buffer._lock is not invalidation_buffer_lock
-                or invalidation_buffer._max_dirty_keys != invalidation_max_dirty_keys
+                getattr(
+                    invalidation_buffer,
+                    "_mirror",
+                    missing_coordinator_authority,
+                )
+                is not invalidation_buffer_mirror
+                or getattr(
+                    invalidation_buffer,
+                    "_dirty",
+                    missing_coordinator_authority,
+                )
+                is not invalidation_dirty_storage
+                or getattr(
+                    invalidation_buffer,
+                    "_lock",
+                    missing_coordinator_authority,
+                )
+                is not invalidation_buffer_lock
+                or current_max_dirty_keys is missing_coordinator_authority
+                or type(current_max_dirty_keys)
+                is not type(invalidation_max_dirty_keys)
+                or current_max_dirty_keys != invalidation_max_dirty_keys
             )
             object.__setattr__(
                 invalidation_buffer,

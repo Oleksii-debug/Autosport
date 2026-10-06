@@ -712,6 +712,75 @@ def test_module_rebound_physical_post_cannot_replace_canonical_transport(monkeyp
     assert len(transport.calls) == 1
 
 
+def test_module_rebound_result_factory_cannot_replace_canonical_evidence(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    called = False
+
+    class ForgedResult:
+        def __init__(self, *args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("rebound result factory must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookBatchTransportResult",
+        ForgedResult,
+    )
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="sealed-result-factory",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    result.assert_issued()
+    assert called is False
+    assert type(result) is MarketBookBatchTransportResult
+    assert len(transport.calls) == 1
+
+
+def test_class_rebound_receipt_factory_cannot_replace_structural_evidence(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    called = False
+
+    def forged_receipt(cls, *args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("rebound receipt factory must not run")
+
+    monkeypatch.setattr(
+        MarketBookBatchReceipt,
+        "from_response",
+        classmethod(forged_receipt),
+    )
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="sealed-receipt-factory",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    result.assert_issued()
+    assert called is False
+    assert result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+    assert len(transport.calls) == 1
+
+
 def test_module_rebound_canonical_batch_cannot_replace_plan_binding(monkeypatch):
     plan = _plan(market_ids=("1.001",))
     batch = plan.batches[0]

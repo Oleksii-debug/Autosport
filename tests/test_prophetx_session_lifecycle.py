@@ -3180,3 +3180,98 @@ def test_state_file_nonstandard_json_constant_fails_closed(tmp_path, constant):
         match="non-standard JSON constant",
     ):
         lifecycle.read_snapshot()
+
+def test_committed_session_state_deletion_cannot_rebootstrap_provider_pool(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(
+        now=NOW,
+        access_token_available=False,
+    )
+    assert admission.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+    state_path = lifecycle.state_path
+    assert state_path.exists()
+
+    state_path.unlink()
+    restarted = _lifecycle(tmp_path)
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="monotonic session-state authority rejected local state",
+    ):
+        restarted.begin_login(
+            now=NOW + timedelta(seconds=1),
+            access_token_available=False,
+        )
+
+    assert not state_path.exists()
+
+
+def test_valid_old_session_state_rollback_is_rejected_after_newer_commit(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(
+        now=NOW,
+        access_token_available=False,
+    )
+    assert admission.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+    state_path = lifecycle.state_path
+    old_bytes = state_path.read_bytes()
+
+    _dispatch(
+        lifecycle,
+        admission,
+        at=NOW + timedelta(seconds=1),
+    )
+    current_bytes = state_path.read_bytes()
+    assert current_bytes != old_bytes
+
+    state_path.write_bytes(old_bytes)
+    restarted = _lifecycle(tmp_path)
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="monotonic session-state authority rejected local state",
+    ):
+        restarted.read_snapshot()
+
+    assert state_path.read_bytes() == old_bytes
+
+
+def test_valid_legacy_state_is_adopted_once_then_deletion_fails_closed(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    state_path = lifecycle.state_path
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    legacy = ProphetXSessionSnapshot(
+        state=ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+        generation=7,
+        credential_revision=lifecycle.scope.credential_revision,
+        integration_role=lifecycle.scope.integration_role,
+        last_transition_at=NOW,
+        slot_hold_started_at=NOW,
+        slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+        transient_failures=1,
+        last_failure_class=ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+    )
+    payload = legacy.to_json_dict(
+        environment=lifecycle.scope.environment,
+        access_key_identity_sha256=lifecycle.scope.access_key_identity_sha256,
+    )
+    state_path.write_text(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert lifecycle.read_snapshot() == legacy
+
+    state_path.unlink()
+    restarted = _lifecycle(tmp_path)
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="monotonic session-state authority rejected local state",
+    ):
+        restarted.read_snapshot()
+

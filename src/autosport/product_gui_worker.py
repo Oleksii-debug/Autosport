@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import queue
-import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ from .operator_source_registry import (
 )
 from .product_entrypoint import ProductEntrypointError, _validated_source
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
+from .secret_redaction import _safe_exception_type_label
 from .trusted_runtime_code_profile import (
     TrustedRuntimeCodeProfile,
     TrustedRuntimeCodeProfileError,
@@ -243,18 +243,9 @@ _CANONICAL_RUNTIME_BUILDER = _PROFILED_RUNTIME_BUILDER
 
 
 def _safe_error_type(exc: BaseException) -> str:
-    """Return a bounded identifier only; exception detail never crosses to the UI."""
+    """Project only canonical built-in exception categories into operator UI."""
 
-    try:
-        name = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        return "BaseException"
-    if (
-        type(name) is not str
-        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) is None
-    ):
-        return "BaseException"
-    return name
+    return _safe_exception_type_label(exc)
 
 
 @dataclass(frozen=True, slots=True)

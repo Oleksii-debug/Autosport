@@ -616,3 +616,96 @@ def test_restart_recovery_promotes_confirmation_denial_to_unknown_without_retry(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         )
+
+
+
+def test_rebound_outer_confirmation_guard_cannot_mask_transitive_drift(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-confirmation-outer-guard-rebound"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        _authority, review, receipt = _issue_confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        _set_trusted_times(monkeypatch, RESERVED_AT)
+
+        monkeypatch.setattr(
+            betfair_execution_runtime,
+            "_betfair_confirmation_graph_unchanged",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            confirmation_runtime,
+            "_require_confirmation_binding",
+            lambda *args, **kwargs: None,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="confirmation authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+
+
+def test_in_place_confirmation_guard_code_swap_fails_before_provider_io(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-confirmation-guard-code-swap"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        _authority, review, receipt = _issue_confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        _set_trusted_times(monkeypatch, RESERVED_AT)
+
+        guard = betfair_execution_runtime._betfair_confirmation_graph_unchanged
+
+        def forged_guard() -> bool:
+            return True
+
+        monkeypatch.setattr(guard, "__code__", forged_guard.__code__)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="confirmation guard authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED

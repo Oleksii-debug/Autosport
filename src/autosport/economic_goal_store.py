@@ -328,7 +328,8 @@ def _snapshot_economic_goal_contract(
 
 def economic_goal_to_payload(
     contract: EconomicGoalContract,
-    _snapshotter=_snapshot_economic_goal_contract,
+    _goal_type=EconomicGoalContract,
+    _goal_validator=EconomicGoalContract.__post_init__,
     _schema=ECONOMIC_GOAL_SCHEMA,
     _schema_version=ECONOMIC_GOAL_SCHEMA_VERSION,
     _error_type=EconomicGoalContractError,

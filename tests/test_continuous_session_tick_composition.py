@@ -3846,3 +3846,119 @@ def test_provider_unavailable_backlog_failure_restores_coordinator_authority(
         assert canonical_state.snapshot().last_error_code is None
         assert replacement_state.snapshot().last_error_code is None
 
+@pytest.mark.parametrize(
+    "storage_field",
+    ("_dependencies", "_matched_keys", "_lock"),
+)
+@pytest.mark.parametrize("mutation_phase", ("drain", "backlog"))
+def test_tick_rejects_invalidation_routing_storage_rebinding(
+    storage_field: str,
+    mutation_phase: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        def rebind_storage() -> None:
+            if storage_field == "_dependencies":
+                index._dependencies = dict(index._dependencies)
+            elif storage_field == "_matched_keys":
+                index._matched_keys = {
+                    input_id: set(keys)
+                    for input_id, keys in index._matched_keys.items()
+                }
+            else:
+                index._lock = type(index._lock)()
+
+        class Buffer:
+            full_refresh_required = False
+
+            @property
+            def pending_count(self):
+                if mutation_phase == "backlog":
+                    rebind_storage()
+                return 0
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                if mutation_phase == "drain":
+                    rebind_storage()
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.invalidation_buffer = Buffer()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        expected = (
+            "routing authority changed during invalidation drain"
+            if mutation_phase == "drain"
+            else "routing authority changed during invalidation backlog inspection"
+        )
+        with pytest.raises(continuous_session.ContinuousSessionError, match=expected):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_backlog_accessor_selector_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+
+        class Buffer:
+            full_refresh_required = False
+
+            @property
+            def pending_count(self):
+                assert index.unregister("input-a")
+                index.register("input-a", source_ids="provider-b")
+                return 0
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.invalidation_buffer = Buffer()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="routing authority changed during invalidation backlog inspection",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+

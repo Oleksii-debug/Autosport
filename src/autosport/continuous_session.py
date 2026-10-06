@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import json
 import os
 import stat
+import sys
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -683,13 +684,22 @@ class _ContinuousSessionState:
                 "cannot verify continuous session operational error checkpoint file"
             ) from exc
         finally:
+            pending_error = sys.exception()
             if descriptor is not None:
                 try:
                     _os_close(descriptor)
                 except OSError as exc:
-                    raise ContinuousSessionError(
-                        "cannot close continuous session operational error checkpoint"
-                    ) from exc
+                    if pending_error is None:
+                        raise ContinuousSessionError(
+                            "cannot close continuous session operational error checkpoint"
+                        ) from exc
+                    try:
+                        pending_error.add_note(
+                            "continuous session operational error checkpoint "
+                            f"descriptor close also failed: {type(exc).__name__}: {exc}"
+                        )
+                    except BaseException:
+                        pass
 
     def _read_error_checkpoint(
         self,

@@ -3778,3 +3778,71 @@ def test_tick_restores_dependency_index_when_callback_forges_control_exception(
         assert coordinator.dependency_index is canonical_index
         assert coordinator._state.snapshot().last_error_code == error_type.__name__
 
+@pytest.mark.parametrize("authority_target", ("state", "dependency_index"))
+@pytest.mark.parametrize("accessor_failure", ("malformed", "raises"))
+def test_provider_unavailable_backlog_failure_restores_coordinator_authority(
+    authority_target: str,
+    accessor_failure: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical_state = coordinator._state
+        canonical_index = coordinator.dependency_index
+        replacement_state = continuous_session._ContinuousSessionState(
+            root / "replacement_provider_unavailable_session.json",
+            session_id="replacement-provider-unavailable-session",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        replacement_index = _DependencyIndex()
+
+        class Cycle:
+            source_id = "provider-a"
+            provider_unavailable = True
+            committed_delta_ids = ()
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = _DeltaStore()
+
+            def run_cycle(self):
+                return Cycle()
+
+        class Buffer:
+            full_refresh_required = False
+
+            @property
+            def pending_count(self):
+                if authority_target == "state":
+                    coordinator._state = replacement_state
+                else:
+                    coordinator.dependency_index = replacement_index
+                if accessor_failure == "raises":
+                    raise RuntimeError("provider backlog accessor failed")
+                return True
+
+            def drain(self, **_kwargs):
+                raise AssertionError(
+                    "provider-unavailable tick must not drain invalidations"
+                )
+
+        coordinator.collector = Collector()
+        coordinator.invalidation_buffer = Buffer()
+
+        if accessor_failure == "raises":
+            expected_error = RuntimeError
+            expected_match = "provider backlog accessor failed"
+        else:
+            expected_error = continuous_session.ContinuousSessionError
+            expected_match = "invalidation buffer backlog state is invalid"
+
+        with pytest.raises(expected_error, match=expected_match):
+            coordinator.tick()
+
+        assert coordinator._state is canonical_state
+        assert coordinator.dependency_index is canonical_index
+        assert canonical_state.snapshot().last_error_code is None
+        assert replacement_state.snapshot().last_error_code is None
+

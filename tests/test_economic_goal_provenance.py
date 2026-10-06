@@ -299,10 +299,36 @@ def test_provenance_validation_ignores_rebound_schema_bounds_and_error(monkeypat
         )
 
 
-def test_provenance_for_revalidates_when_class_post_init_is_rebound(monkeypatch) -> None:
+def test_public_provenance_authority_operations_reject_helper_injection() -> None:
     goal = _goal()
+    evidence = provenance_for(goal)
 
-    monkeypatch.setattr(EconomicGoalProvenance, "__post_init__", lambda self: None)
+    with pytest.raises(TypeError):
+        contract_sha256(goal, _goal_validator=lambda contract: None)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        provenance_for(goal, _contract_sha256=lambda contract: "0" * 64)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        verify_provenance(
+            goal,
+            evidence,
+            _provenance_validator=lambda provenance: None,
+        )  # type: ignore[call-arg]
 
-    with pytest.raises(EconomicGoalProvenanceError, match="SHA-256 hex"):
-        provenance_for(goal, _contract_sha256=lambda contract: "not-a-digest")
+
+def test_public_provenance_operations_ignore_rebound_bound_implementation_aliases(
+    monkeypatch,
+) -> None:
+    goal = _goal()
+    expected = provenance_for(goal)
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound bound implementation alias executed")
+
+    monkeypatch.setattr(economic_goal_provenance_module, "_contract_sha256_bound", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_provenance_for_bound", forged)
+    monkeypatch.setattr(economic_goal_provenance_module, "_verify_provenance_bound", forged)
+
+    assert contract_sha256(goal) == expected.contract_sha256
+    evidence = provenance_for(goal)
+    assert evidence == expected
+    verify_provenance(goal, evidence)

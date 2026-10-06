@@ -61,10 +61,46 @@ def _make_paperbook_market_semantics_authority():
 def _make_paperbook_locked_capital_authority():
     calculator = locked_capital_for_exchange_side
     calculator_code = calculator.__code__
+    calculator_defaults = calculator.__defaults__
+    calculator_kwdefaults = calculator.__kwdefaults__
+    calculator_globals = calculator.__globals__
+    calculator_builtins = calculator.__builtins__
+    calculator_closure = calculator.__closure__
+    calculator_closure_values = (
+        None
+        if calculator_closure is None
+        else tuple(
+            cell.cell_contents
+            for cell in calculator_closure
+        )
+    )
+
+    def require_calculator_authority() -> None:
+        if (
+            calculator.__code__ is not calculator_code
+            or calculator.__defaults__ is not calculator_defaults
+            or calculator.__kwdefaults__ is not calculator_kwdefaults
+            or calculator.__globals__ is not calculator_globals
+            or calculator.__builtins__ is not calculator_builtins
+            or calculator.__closure__ is not calculator_closure
+        ):
+            raise ValueError("PaperBook exchange exposure authority changed")
+        if calculator_closure_values is not None:
+            if (
+                calculator.__closure__ is None
+                or len(calculator.__closure__) != len(calculator_closure_values)
+                or any(
+                    cell.cell_contents is not expected
+                    for cell, expected in zip(
+                        calculator.__closure__,
+                        calculator_closure_values,
+                    )
+                )
+            ):
+                raise ValueError("PaperBook exchange exposure authority changed")
 
     def calculate(stake: Decimal, leg: TicketLeg) -> Decimal:
-        if calculator.__code__ is not calculator_code:
-            raise ValueError("PaperBook exchange exposure authority changed")
+        require_calculator_authority()
         if type(stake) is not Decimal:
             raise ValueError("PaperBook locked-capital stake must be an exact Decimal")
         if type(leg) is not TicketLeg:
@@ -79,8 +115,7 @@ def _make_paperbook_locked_capital_authority():
             odds=leg.locked_odds,
             exchange_side=side,
         )
-        if calculator.__code__ is not calculator_code:
-            raise ValueError("PaperBook exchange exposure authority changed")
+        require_calculator_authority()
         return result
 
     return calculate

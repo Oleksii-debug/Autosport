@@ -2836,6 +2836,68 @@ def test_lay_capital_root_rejects_underlying_calculator_code_mutation() -> None:
         calculator.__code__ = original_code
 
 
+def test_paperbook_locked_capital_authority_rejects_outer_closure_retarget_before_execution() -> None:
+    authority = paper_module._CANONICAL_LOCKED_CAPITAL_FOR_TICKET
+    target_cell = next(
+        cell
+        for cell in authority.__closure__ or ()
+        if cell.cell_contents is paper_module.locked_capital_for_exchange_side
+    )
+    original_value = target_cell.cell_contents
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("retargeted PaperBook locked-capital authority executed")
+
+    try:
+        target_cell.cell_contents = hostile
+        book = PaperBook("100")
+        with pytest.raises(
+            ValueError,
+            match=r"runtime module dependency closure changed: _CANONICAL_LOCKED_CAPITAL_FOR_TICKET",
+        ):
+            book.open_ticket([_lay_leg()], "10", placed_at=_TS)
+    finally:
+        target_cell.cell_contents = original_value
+
+    assert attacker_calls == 0
+
+
+def test_paperbook_market_semantics_authority_rejects_outer_closure_retarget_before_execution() -> None:
+    authority = paper_module._CANONICAL_MARKET_SEMANTICS_IDENTITY
+    target_cell = next(
+        cell
+        for cell in authority.__closure__ or ()
+        if cell.cell_contents is paper_module._canonical_semantic_identity
+    )
+    original_value = target_cell.cell_contents
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("retargeted market semantics authority executed")
+
+    try:
+        target_cell.cell_contents = hostile
+        book = PaperBook("100")
+        with pytest.raises(
+            ValueError,
+            match=r"runtime module dependency closure changed: _CANONICAL_MARKET_SEMANTICS_IDENTITY",
+        ):
+            book.open_ticket(
+                [_lay_leg(semantics="exchange.match.odds.v2")],
+                "10",
+                placed_at=_TS,
+            )
+    finally:
+        target_cell.cell_contents = original_value
+
+    assert attacker_calls == 0
+
+
 def test_lay_capital_root_rejects_underlying_calculator_closure_mutation() -> None:
     calculator = paper_module.locked_capital_for_exchange_side
     target_cell = next(

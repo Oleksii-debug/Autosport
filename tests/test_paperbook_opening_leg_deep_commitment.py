@@ -2852,6 +2852,96 @@ def test_decimal_helper_rejects_module_dependency_rebinding_before_execution(
     assert attacker_calls == 0
 
 
+@pytest.mark.parametrize(
+    "dependency_name",
+    (
+        "DecimalException",
+        "Inexact",
+        "_paper_decimal_context",
+        "localcontext",
+        "ValueError",
+    ),
+)
+def test_debit_helper_rejects_module_dependency_rebinding_before_execution(
+    monkeypatch,
+    dependency_name: str,
+) -> None:
+    attacker_calls = 0
+
+    def hostile_dependency(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound debit dependency executed")
+
+    monkeypatch.setattr(
+        paper_module,
+        dependency_name,
+        hostile_dependency,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"debit helper dependency changed: {dependency_name}",
+    ):
+        paper_module._canonical_paperbook_debit_balance(
+            PaperBook,
+            Decimal("100"),
+            Decimal("10"),
+        )
+
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize(
+    "dependency_name",
+    (
+        "Decimal",
+        "DecimalException",
+        "Inexact",
+        "TicketStatus",
+        "_paper_decimal_context",
+        "_CANONICAL_LOCKED_CAPITAL_FOR_TICKET",
+        "localcontext",
+        "any",
+        "len",
+        "tuple",
+        "ValueError",
+    ),
+)
+def test_settlement_helper_rejects_module_dependency_rebinding_before_execution(
+    monkeypatch,
+    dependency_name: str,
+) -> None:
+    attacker_calls = 0
+
+    def hostile_dependency(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound settlement dependency executed")
+
+    monkeypatch.setattr(
+        paper_module,
+        dependency_name,
+        hostile_dependency,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"settlement helper dependency changed: {dependency_name}",
+    ):
+        paper_module._canonical_paperbook_settlement_result(
+            PaperBook,
+            object(),
+            Decimal("100"),
+            set(),
+            set(),
+        )
+
+    assert attacker_calls == 0
+
+
 def test_open_ticket_rejects_rebound_decimal_helper_before_execution(
     monkeypatch,
 ) -> None:

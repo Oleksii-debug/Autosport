@@ -899,7 +899,7 @@ class PaperExecutionLedger:
         if not self._anchor_path.exists():
             return None
         try:
-            raw = self._anchor_path.read_CANONICAL_TEXT_VALIDATOR(encoding="utf-8")
+            raw = self._anchor_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise PaperExecutionIntegrityError("cannot read PAPER execution anchor") from exc
         anchor = _parse_json_object(raw, what="ledger anchor")
@@ -950,7 +950,7 @@ class PaperExecutionLedger:
                     raise PaperExecutionIntegrityError("ledger is missing but anchor claims history")
             return []
         try:
-            lines = self.path.read_CANONICAL_TEXT_VALIDATOR(encoding="utf-8").splitlines()
+            lines = self.path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeError) as exc:
             raise PaperExecutionIntegrityError("cannot read PAPER execution ledger") from exc
 

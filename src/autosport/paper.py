@@ -1576,6 +1576,26 @@ def _make_paperbook_economic_helper_dispatch_authority():
     settlement_descriptor = None
     settlement_function = None
     settlement_code = None
+    module_globals = globals()
+    error_type = ValueError
+    decimal_dependencies = {
+        "Decimal": Decimal,
+        "DecimalException": DecimalException,
+        "_MAX_PAPER_DECIMAL_TEXT_CHARS": _MAX_PAPER_DECIMAL_TEXT_CHARS,
+        "str": str,
+        "int": int,
+        "float": float,
+        "type": type,
+        "len": len,
+        "ValueError": ValueError,
+    }
+
+    def require_decimal_dependencies() -> None:
+        for name, expected in decimal_dependencies.items():
+            if module_globals.get(name, expected) is not expected:
+                raise error_type(
+                    f"PaperBook decimal helper dependency changed: {name}"
+                )
 
     def install(canonical_type: type) -> None:
         nonlocal decimal_descriptor, decimal_function, decimal_code
@@ -1606,7 +1626,9 @@ def _make_paperbook_economic_helper_dispatch_authority():
             raise ValueError("PaperBook decimal helper dispatch changed")
         if decimal_function.__code__ is not decimal_code:
             raise ValueError("PaperBook decimal helper authority changed")
+        require_decimal_dependencies()
         result = decimal_function(canonical_type, value, label)
+        require_decimal_dependencies()
         if decimal_function.__code__ is not decimal_code:
             raise ValueError("PaperBook decimal helper authority changed")
         return result

@@ -274,6 +274,15 @@ def test_zero_trigger_identity_leaves_current_run_eligible_for_orphan_cleanup(
             "7000",
         ]) == 2
     assert effects == []
+    source = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+    assert "if trigger_pr_number is None and not event_identity_ambiguous:" in source
+    assert "snapshot_trigger_pr_number = snapshot_identity_impl(" in source
+    assert "else sweep_cancelled" in source
+    assert source.index("sweep_cancelled = sweep_impl(") < source.index(
+        "orphan_cancelled = orphan_impl("
+    )
 
 
 def test_zero_trigger_orphan_cleanup_excludes_only_already_swept_runs(
@@ -309,6 +318,12 @@ def test_zero_trigger_orphan_cleanup_excludes_only_already_swept_runs(
             "7000",
         ]) == 2
     assert effects == []
+    source = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+    assert "orphan_excluded_run_ids = (" in source
+    assert "(current_run_id, *sweep_cancelled)" in source
+    assert "else sweep_cancelled" in source
 
 
 def test_zero_trigger_recovers_consistent_snapshot_identity_for_boundary_cancel(
@@ -339,6 +354,15 @@ def test_zero_trigger_recovers_consistent_snapshot_identity_for_boundary_cancel(
             "7000",
         ]) == 2
     assert effects == []
+    source = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+    assert "snapshot_trigger_pr_number = snapshot_identity_impl(" in source
+    assert "if trigger_pr_number is None and snapshot_trigger_pr_number is not None:" in source
+    assert "trigger_pr_number = snapshot_trigger_pr_number" in source
+    assert source.index("snapshot_trigger_pr_number = snapshot_identity_impl(") < source.index(
+        "sweep_cancelled = sweep_impl("
+    )
 
 
 def test_explicit_stale_trigger_is_cancelled_once_after_orphan_exclusion(
@@ -369,6 +393,13 @@ def test_explicit_stale_trigger_is_cancelled_once_after_orphan_exclusion(
             "7005",
         ]) == 2
     assert effects == []
+    source = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+    assert "if trigger_pr_number is not None or event_identity_ambiguous" in source
+    assert source.index("orphan_cancelled = orphan_impl(") < source.index(
+        "trigger_impl("
+    )
 
 
 def test_trigger_initial_qualification_failure_preserves_completed_cleanup(
@@ -404,6 +435,15 @@ def test_trigger_initial_qualification_failure_preserves_completed_cleanup(
             "7005",
         ]) == 2
     assert effects == []
+    source = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+    assert "except CancellationError:" in source
+    assert "trigger_qualification = None" in source
+    assert "if trigger_qualification is not None:" in source
+    assert source.index("orphan_cancelled = orphan_impl(") < source.index(
+        "trigger_qualification = trusted_qualification_impl("
+    )
 
 
 def test_main_reaches_triggering_run_check_after_orphan_authority_race_skip(
@@ -439,6 +479,13 @@ def test_main_reaches_triggering_run_check_after_orphan_authority_race_skip(
             "7005",
         ]) == 2
     assert effects == []
+    source = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+    assert source.index("orphan_cancelled = orphan_impl(") < source.index(
+        "trigger_impl("
+    )
+    assert "Failure proves no cancellation authority" in source
 
 def test_non_pr_source_events_cannot_evict_pending_pr_cleanup_controller() -> None:
     workflow = _text()
@@ -507,6 +554,15 @@ def test_main_captures_sweep_before_snapshot_callback_global_rebind(
             "7000",
         ]) == 2
     assert effects == []
+    source = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+    assert "sweep_code = getattr(sweep_impl, \"__code__\", None)" in source
+    assert 'module_globals.get("cancel_superseded_explicit_pr_runs")' in source
+    assert "is sweep_impl" in source
+    assert source.index("sweep_cancelled = sweep_impl(") < source.index(
+        "trigger_qualification = trusted_qualification_impl("
+    )
 
 def test_main_rejects_orphan_instance_shadow_created_by_snapshot_callback(
     monkeypatch,

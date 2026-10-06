@@ -336,6 +336,53 @@ def test_automatic_transition_rejects_contract_subclasses() -> None:
         validate_automatic_transition(previous, subclass)
 
 
+def test_public_transition_rejects_bound_validator_default_rebinding() -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+    validator = economic_goal_module._validate_automatic_transition_bound
+    original_defaults = validator.__defaults__
+    assert original_defaults is not None
+
+    forged_snapshotter = lambda contract: contract
+    validator.__defaults__ = (
+        forged_snapshotter,
+        *original_defaults[1:],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="automatic transition validator defaults authority changed",
+        ):
+            validate_automatic_transition(previous, candidate)
+    finally:
+        validator.__defaults__ = original_defaults
+
+
+def test_public_transition_rejects_nested_snapshotter_default_rebinding() -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+    snapshotter = economic_goal_module._snapshot_transition_contract
+    original_defaults = snapshotter.__defaults__
+    assert original_defaults is not None
+
+    snapshotter.__defaults__ = (
+        original_defaults[0],
+        original_defaults[1],
+        object.__new__,
+        original_defaults[3],
+        original_defaults[4],
+        original_defaults[5],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="automatic transition nested validator defaults authority changed",
+        ):
+            previous.validate_automatic_successor(candidate)
+    finally:
+        snapshotter.__defaults__ = original_defaults
+
+
 def test_contract_successor_ignores_rebound_public_transition_validator(monkeypatch) -> None:
     previous = _goal()
     candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))

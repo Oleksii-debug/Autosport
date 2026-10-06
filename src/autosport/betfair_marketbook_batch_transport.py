@@ -434,7 +434,10 @@ def append_market_book_transport_attempt(
         raise TypeError("history must be an exact MarketBookAttemptHistory")
     if type(result) is not MarketBookBatchTransportResult:
         raise TypeError("result must be an exact MarketBookBatchTransportResult")
-    result.assert_issued()
+    # Canonical issuance is enforced by the closure-bound public wrapper installed
+    # below. Do not redispatch through the mutable class method here: a rebound
+    # assert_issued implementation could mutate an already-proved result between
+    # the registry check and structural history construction.
     if history.plan.plan_id != result.plan_id:
         raise MarketBookBatchTransportError(
             "transport result is bound to another or mutated MarketBook plan"
@@ -538,7 +541,8 @@ class MarketBookBatchAttemptExecution:
                 raise MarketBookBatchTransportError(
                     "response outcome requires canonical transport result"
                 )
-            self.result.assert_issued()
+            # Canonical issuance is enforced by validate_attempt_execution_bound.
+            # Avoid mutable class redispatch after that closure-local registry proof.
             if (
                 self.result.plan_id != self.history.plan.plan_id
                 or self.result.request_contract_id

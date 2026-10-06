@@ -1527,8 +1527,17 @@ class _ContinuousSessionState:
             ["_ContinuousSessionState", str | None], None
         ] = _write_error_checkpoint,
         _write_error_checkpoint_code: object = _write_error_checkpoint.__code__,
+        _text_validator: Callable[[object, str], str] = _text,
+        _text_validator_code: object = _text.__code__,
     ) -> _ContinuousSessionFailurePublication:
-        code = _text(code, "code")
+        if (
+            _text is not _text_validator
+            or getattr(_text_validator, "__code__", None) is not _text_validator_code
+        ):
+            raise ContinuousSessionError(
+                "canonical failure publication lock authority changed"
+            )
+        code = _text_validator(code, "code")
         if (
             durable_path_lock is not _durable_path_lock
             or getattr(_durable_path_lock, "__code__", None)

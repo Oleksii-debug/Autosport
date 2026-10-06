@@ -386,7 +386,7 @@ def _require_restrictions_not_removed(
         )
 
 
-def validate_automatic_transition(
+def _validate_automatic_transition_bound(
     previous: EconomicGoalContract,
     candidate: EconomicGoalContract,
     _contract_type=_CANONICAL_CONTRACT_TYPE,
@@ -528,7 +528,7 @@ def validate_automatic_transition(
     )
 
 
-_CANONICAL_TRANSITION_VALIDATOR: Final = validate_automatic_transition
+_CANONICAL_TRANSITION_VALIDATOR: Final = _validate_automatic_transition_bound
 
 # Bind the convenience method to the canonical transition function object after
 # its definition.  This avoids resolving a mutable module alias when an owner
@@ -536,9 +536,26 @@ _CANONICAL_TRANSITION_VALIDATOR: Final = validate_automatic_transition
 def _validate_automatic_successor_bound(
     self: EconomicGoalContract,
     candidate: EconomicGoalContract,
-    _validator=validate_automatic_transition,
+    _validator=_validate_automatic_transition_bound,
 ) -> None:
     _validator(self, candidate)
 
 
 EconomicGoalContract.validate_automatic_successor = _validate_automatic_successor_bound
+
+
+# Keep the public transition proof noninjectable while capturing the canonical
+# implementation object against later module rebinding.
+def _bind_transition_operation(operation):
+    def bound(
+        previous: EconomicGoalContract,
+        candidate: EconomicGoalContract,
+    ) -> None:
+        operation(previous, candidate)
+
+    return bound
+
+
+validate_automatic_transition = _bind_transition_operation(
+    _validate_automatic_transition_bound
+)

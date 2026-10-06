@@ -167,66 +167,80 @@ class EconomicGoalContract:
     blocked_providers: frozenset[str] = frozenset()
     blocked_markets: frozenset[str] = frozenset()
 
-    def __post_init__(self) -> None:
-        _canonical_text("goal_id", self.goal_id)
-        _positive_int("revision", self.revision)
-        _canonical_text("bankroll_id", self.bankroll_id)
+    def __post_init__(
+        self,
+        _text_validator=_canonical_text,
+        _positive_int_validator=_positive_int,
+        _fraction_validator=_fraction,
+        _optional_nonnegative_decimal_validator=_optional_nonnegative_decimal,
+        _nonnegative_decimal_validator=_nonnegative_decimal,
+        _nonnegative_int_validator=_nonnegative_int,
+        _restrictions_validator=_canonical_restrictions,
+        _objective_type=EconomicObjective,
+        _automation_type=AutomationLevel,
+        _error_type=EconomicGoalContractError,
+    ) -> None:
+        _text_validator("goal_id", self.goal_id)
+        _positive_int_validator("revision", self.revision)
+        _text_validator("bankroll_id", self.bankroll_id)
 
-        currency = _canonical_text("currency", self.currency)
+        currency = _text_validator("currency", self.currency)
         if len(currency) != 3 or not currency.isascii() or not currency.isalpha():
-            raise EconomicGoalContractError(
+            raise _error_type(
                 "currency must be a three-letter uppercase ASCII code"
             )
         if currency != currency.upper():
-            raise EconomicGoalContractError(
+            raise _error_type(
                 "currency must be a three-letter uppercase ASCII code"
             )
 
-        if type(self.objective) is not EconomicObjective:
-            raise EconomicGoalContractError("objective must be an EconomicObjective")
+        if type(self.objective) is not _objective_type:
+            raise _error_type("objective must be an EconomicObjective")
 
-        _fraction("max_stake_fraction", self.max_stake_fraction)
-        _optional_nonnegative_decimal("max_stake_amount", self.max_stake_amount)
-        _fraction("max_session_loss_fraction", self.max_session_loss_fraction)
-        _fraction("max_day_loss_fraction", self.max_day_loss_fraction)
-        _fraction("max_drawdown_fraction", self.max_drawdown_fraction)
-        _fraction(
+        _fraction_validator("max_stake_fraction", self.max_stake_fraction)
+        _optional_nonnegative_decimal_validator("max_stake_amount", self.max_stake_amount)
+        _fraction_validator("max_session_loss_fraction", self.max_session_loss_fraction)
+        _fraction_validator("max_day_loss_fraction", self.max_day_loss_fraction)
+        _fraction_validator("max_drawdown_fraction", self.max_drawdown_fraction)
+        _fraction_validator(
             "max_capital_at_risk_fraction", self.max_capital_at_risk_fraction
         )
-        _fraction(
+        _fraction_validator(
             "max_event_concentration_fraction", self.max_event_concentration_fraction
         )
-        _fraction(
+        _fraction_validator(
             "max_market_concentration_fraction", self.max_market_concentration_fraction
         )
-        _fraction(
+        _fraction_validator(
             "max_provider_concentration_fraction",
             self.max_provider_concentration_fraction,
         )
-        _fraction(
+        _fraction_validator(
             "max_sport_concentration_fraction", self.max_sport_concentration_fraction
         )
-        _nonnegative_decimal("max_turnover_fraction", self.max_turnover_fraction)
-        _fraction("max_risk_of_ruin", self.max_risk_of_ruin)
-        _fraction(
+        _nonnegative_decimal_validator("max_turnover_fraction", self.max_turnover_fraction)
+        _fraction_validator("max_risk_of_ruin", self.max_risk_of_ruin)
+        _fraction_validator(
             "max_execution_slippage_fraction",
             self.max_execution_slippage_fraction,
         )
-        _nonnegative_decimal("max_quote_age_seconds", self.max_quote_age_seconds)
-        _fraction("minimum_data_quality", self.minimum_data_quality)
+        _nonnegative_decimal_validator("max_quote_age_seconds", self.max_quote_age_seconds)
+        _fraction_validator("minimum_data_quality", self.minimum_data_quality)
 
-        _nonnegative_int("max_concurrent_positions", self.max_concurrent_positions)
-        _positive_int("max_parlay_legs", self.max_parlay_legs)
-        if type(self.automation_level) is not AutomationLevel:
-            raise EconomicGoalContractError(
+        _nonnegative_int_validator(
+            "max_concurrent_positions", self.max_concurrent_positions
+        )
+        _positive_int_validator("max_parlay_legs", self.max_parlay_legs)
+        if type(self.automation_level) is not _automation_type:
+            raise _error_type(
                 "automation_level must be an AutomationLevel"
             )
         if type(self.emergency_stop) is not bool:
-            raise EconomicGoalContractError("emergency_stop must be a bool")
+            raise _error_type("emergency_stop must be a bool")
 
-        _canonical_restrictions("blocked_sports", self.blocked_sports)
-        _canonical_restrictions("blocked_providers", self.blocked_providers)
-        _canonical_restrictions("blocked_markets", self.blocked_markets)
+        _restrictions_validator("blocked_sports", self.blocked_sports)
+        _restrictions_validator("blocked_providers", self.blocked_providers)
+        _restrictions_validator("blocked_markets", self.blocked_markets)
 
     def validate_automatic_successor(self, candidate: "EconomicGoalContract") -> None:
         """Validate a machine-proposed successor without authority expansion.

@@ -534,3 +534,22 @@ def test_store_binding_registry_releases_dead_store_entries(tmp_path) -> None:
     gc.collect()
 
     assert store_id not in economic_goal_store_module._STORE_BINDINGS_BY_ID
+
+
+def test_store_failure_paths_ignore_rebound_error_authority(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    monkeypatch.setattr(economic_goal_store_module, "EconomicGoalContractError", RuntimeError)
+
+    with pytest.raises(EconomicGoalContractError, match="already exists"):
+        store.initialize_owner(_goal())
+
+    store.path.unlink()
+    with pytest.raises(EconomicGoalContractError, match="cannot read persisted economic goal"):
+        store.load()
+
+    with pytest.raises(EconomicGoalContractError, match="cannot read persisted economic goal"):
+        store.persist_automatic_successor(
+            replace(_goal(), revision=2, max_stake_fraction=Decimal("0.01"))
+        )

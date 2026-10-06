@@ -543,6 +543,190 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
                 proposal_ts="2026-09-16T15:00:02+00:00",
             )
 
+    def test_event_concentration_counts_existing_lay_liability_not_raw_stake(self) -> None:
+        goal = self._goal(
+            max_session_loss_fraction=Decimal("1"),
+            max_day_loss_fraction=Decimal("1"),
+            max_drawdown_fraction=Decimal("1"),
+            max_turnover_fraction=Decimal("1000"),
+            max_event_concentration_fraction=Decimal("0.50"),
+        )
+        book = PaperBook("100")
+        book.open_ticket(
+            (
+                TicketLeg(
+                    event_id="event-1",
+                    market_id="market-existing-lay",
+                    selection_id="selection-existing-lay",
+                    locked_odds=Decimal("6"),
+                    exchange_side="lay",
+                ),
+            ),
+            Decimal("10"),
+        )
+
+        decision = self._permissive_policy(goal).evaluate(
+            book,
+            Decimal("10"),
+            context=self._context(),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "owner event concentration limit exceeded",
+        )
+
+    def test_event_concentration_counts_proposed_lay_liability_not_raw_stake(self) -> None:
+        goal = self._goal(
+            max_session_loss_fraction=Decimal("1"),
+            max_day_loss_fraction=Decimal("1"),
+            max_drawdown_fraction=Decimal("1"),
+            max_turnover_fraction=Decimal("1000"),
+            max_event_concentration_fraction=Decimal("0.40"),
+        )
+        book = PaperBook("100")
+        book.open_ticket(
+            (
+                TicketLeg(
+                    event_id="event-other",
+                    market_id="market-other",
+                    selection_id="selection-other",
+                    locked_odds=Decimal("2"),
+                ),
+            ),
+            Decimal("50"),
+        )
+        proposed = TicketLeg(
+            event_id="event-1",
+            market_id="market-lay",
+            selection_id="selection-lay",
+            locked_odds=Decimal("6"),
+            exchange_side="lay",
+        )
+        context = ProposedTicketRiskContext(
+            legs=(proposed,),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+
+        decision = self._permissive_policy(goal).evaluate(
+            book,
+            Decimal("10"),
+            context=context,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "owner event concentration limit exceeded",
+        )
+
+    def test_lay_liability_drives_aggregate_committed_capital_limit(self) -> None:
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("1"),
+            max_committed_fraction=Decimal("0.30"),
+            minimum_cash_reserve_fraction=Decimal("0"),
+        )
+        context = ProposedTicketRiskContext(
+            legs=(
+                TicketLeg(
+                    event_id="event-lay",
+                    market_id="market-lay",
+                    selection_id="selection-lay",
+                    locked_odds=Decimal("5"),
+                    exchange_side="lay",
+                ),
+            ),
+        )
+
+        decision = policy.evaluate(PaperBook("100"), Decimal("10"), context=context)
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "aggregate committed stake limit exceeded")
+
+    def test_lay_liability_drives_minimum_cash_reserve(self) -> None:
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("1"),
+            max_committed_fraction=Decimal("1"),
+            minimum_cash_reserve_fraction=Decimal("0.20"),
+        )
+        context = ProposedTicketRiskContext(
+            legs=(
+                TicketLeg(
+                    event_id="event-lay",
+                    market_id="market-lay",
+                    selection_id="selection-lay",
+                    locked_odds=Decimal("5"),
+                    exchange_side="lay",
+                ),
+            ),
+        )
+
+        decision = policy.evaluate(PaperBook("100"), Decimal("21"), context=context)
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "minimum virtual cash reserve would be violated",
+        )
+
+    def test_lay_liability_drives_owner_session_loss_room(self) -> None:
+        goal = self._goal(
+            max_session_loss_fraction=Decimal("0.50"),
+            max_day_loss_fraction=Decimal("1"),
+            max_drawdown_fraction=Decimal("1"),
+            max_turnover_fraction=Decimal("1000"),
+        )
+        context = ProposedTicketRiskContext(
+            legs=(
+                TicketLeg(
+                    event_id="event-lay",
+                    market_id="market-lay",
+                    selection_id="selection-lay",
+                    locked_odds=Decimal("4"),
+                    exchange_side="lay",
+                ),
+            ),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+
+        decision = self._permissive_policy(goal).evaluate(
+            PaperBook("100"),
+            Decimal("20"),
+            context=context,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "economic goal conservative session loss limit exceeded",
+        )
+
+    def test_lay_ticket_fraction_remains_stake_denominated(self) -> None:
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("0.20"),
+            max_committed_fraction=Decimal("1"),
+            minimum_cash_reserve_fraction=Decimal("0"),
+        )
+        context = ProposedTicketRiskContext(
+            legs=(
+                TicketLeg(
+                    event_id="event-lay",
+                    market_id="market-lay",
+                    selection_id="selection-lay",
+                    locked_odds=Decimal("5"),
+                    exchange_side="lay",
+                ),
+            ),
+        )
+
+        decision = policy.evaluate(PaperBook("100"), Decimal("19"), context=context)
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed")
+
     def test_sport_concentration_remains_fail_closed_without_canonical_identity(self) -> None:
         sport = self._permissive_policy(
             self._goal(max_sport_concentration_fraction=Decimal("0.99"))

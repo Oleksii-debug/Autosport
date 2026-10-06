@@ -180,6 +180,14 @@ def _install_projection_gate_authority() -> None:
     state_last_observed_member = state_type.__dict__["last_observed_at_utc_us"]
     state_active_member = state_type.__dict__["active"]
     state_next_generation_member = state_type.__dict__["next_lease_generation"]
+    decision_request_id_member = decision_type.__dict__["request_id"]
+    decision_observed_at_member = decision_type.__dict__["observed_at_utc_us"]
+    decision_projection_bearing_member = decision_type.__dict__["projection_bearing"]
+    decision_allowed_member = decision_type.__dict__["allowed"]
+    decision_active_requests_member = decision_type.__dict__["active_projection_requests"]
+    decision_lease_generation_member = decision_type.__dict__["lease_generation"]
+    decision_limit_coverage_member = decision_type.__dict__["provider_limit_coverage_complete"]
+    decision_dispatch_authorized_member = decision_type.__dict__["provider_dispatch_authorized"]
 
     def validate_request_id(value: object) -> str:
         if type(value) is not str:
@@ -335,18 +343,14 @@ def _install_projection_gate_authority() -> None:
         if not projection_bearing and not allowed:
             raise ValueError("price-only local decision cannot be denied by projection gate")
         value = object.__new__(decision_type)
-        object.__setattr__(value, "request_id", request_id)
-        object.__setattr__(value, "observed_at_utc_us", observed_at_utc_us)
-        object.__setattr__(value, "projection_bearing", projection_bearing)
-        object.__setattr__(value, "allowed", allowed)
-        object.__setattr__(
-            value,
-            "active_projection_requests",
-            active_projection_requests,
-        )
-        object.__setattr__(value, "lease_generation", lease_generation)
-        object.__setattr__(value, "provider_limit_coverage_complete", False)
-        object.__setattr__(value, "provider_dispatch_authorized", False)
+        decision_request_id_member.__set__(value, request_id)
+        decision_observed_at_member.__set__(value, observed_at_utc_us)
+        decision_projection_bearing_member.__set__(value, projection_bearing)
+        decision_allowed_member.__set__(value, allowed)
+        decision_active_requests_member.__set__(value, active_projection_requests)
+        decision_lease_generation_member.__set__(value, lease_generation)
+        decision_limit_coverage_member.__set__(value, False)
+        decision_dispatch_authorized_member.__set__(value, False)
         return value
 
     def gate_init(

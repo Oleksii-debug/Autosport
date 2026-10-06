@@ -957,3 +957,26 @@ def test_projection_live_release_ignores_rebound_lease_generation_descriptor(
         )
 
     assert value.snapshot().active == ()
+
+
+def test_projection_decision_construction_ignores_rebound_field_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookProjectionConcurrencyGate
+    value = gate_type()
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            _projection_gate_module.MarketBookProjectionConcurrencyDecision,
+            "allowed",
+            property(lambda self: False),
+        )
+        decision = value.begin(
+            "r0",
+            observed_at=T0,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+
+    assert decision.allowed is True
+    assert decision.lease_generation == 1

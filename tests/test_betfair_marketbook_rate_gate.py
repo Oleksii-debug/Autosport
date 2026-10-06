@@ -792,3 +792,36 @@ def test_rate_restart_authority_ignores_rebound_window_slot_descriptor(
         scheduled_at=T0 + timedelta(microseconds=5),
     )
     assert denied.allowed is False
+
+
+def test_rate_decision_construction_ignores_rebound_field_descriptor(
+    monkeypatch,
+) -> None:
+    gate_type = BetfairMarketBookPerMarketRateGate
+    value = gate_type()
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            MarketBookRateDecision,
+            "allowed",
+            property(lambda self: False),
+        )
+        decision = value.reserve(("1.234",), scheduled_at=T0)
+
+    assert decision.allowed is True
+    assert decision.scheduled_at == T0
+
+
+def test_rate_decision_time_property_ignores_rebound_timestamp_descriptor(
+    monkeypatch,
+) -> None:
+    value = BetfairMarketBookPerMarketRateGate()
+    decision = value.reserve(("1.234",), scheduled_at=T0)
+
+    monkeypatch.setattr(
+        MarketBookRateDecision,
+        "scheduled_at_utc_us",
+        property(lambda self: 0),
+    )
+
+    assert decision.scheduled_at == T0

@@ -204,6 +204,13 @@ def _install_rate_gate_authority() -> None:
     state_policy_version_member = state_type.__dict__["policy_version"]
     state_last_scheduled_member = state_type.__dict__["last_scheduled_at_utc_us"]
     state_markets_member = state_type.__dict__["markets"]
+    decision_market_ids_member = decision_type.__dict__["market_ids"]
+    decision_scheduled_at_member = decision_type.__dict__["scheduled_at_utc_us"]
+    decision_allowed_member = decision_type.__dict__["allowed"]
+    decision_blocked_ids_member = decision_type.__dict__["blocked_market_ids"]
+    decision_next_eligible_member = decision_type.__dict__["next_eligible_at_utc_us"]
+    decision_limit_coverage_member = decision_type.__dict__["provider_limit_coverage_complete"]
+    decision_dispatch_authorized_member = decision_type.__dict__["provider_dispatch_authorized"]
 
     def validate_market_id(value: object) -> str:
         if type(value) is not str:
@@ -365,17 +372,13 @@ def _install_rate_gate_authority() -> None:
                     "denied decision requires blocked markets and next-eligible time"
                 )
         value = object.__new__(decision_type)
-        object.__setattr__(value, "market_ids", market_ids)
-        object.__setattr__(value, "scheduled_at_utc_us", scheduled_at_utc_us)
-        object.__setattr__(value, "allowed", allowed)
-        object.__setattr__(value, "blocked_market_ids", blocked_market_ids)
-        object.__setattr__(
-            value,
-            "next_eligible_at_utc_us",
-            next_eligible_at_utc_us,
-        )
-        object.__setattr__(value, "provider_limit_coverage_complete", False)
-        object.__setattr__(value, "provider_dispatch_authorized", False)
+        decision_market_ids_member.__set__(value, market_ids)
+        decision_scheduled_at_member.__set__(value, scheduled_at_utc_us)
+        decision_allowed_member.__set__(value, allowed)
+        decision_blocked_ids_member.__set__(value, blocked_market_ids)
+        decision_next_eligible_member.__set__(value, next_eligible_at_utc_us)
+        decision_limit_coverage_member.__set__(value, False)
+        decision_dispatch_authorized_member.__set__(value, False)
         return value
 
     def gate_init(
@@ -554,14 +557,20 @@ def _install_rate_gate_authority() -> None:
             raise
 
     def scheduled_at_property(self: MarketBookRateDecision) -> datetime:
-        return datetime_from_utc_microseconds(self.scheduled_at_utc_us)
+        return datetime_from_utc_microseconds(
+            decision_scheduled_at_member.__get__(self, decision_type)
+        )
 
     def next_eligible_at_property(
         self: MarketBookRateDecision,
     ) -> datetime | None:
-        if self.next_eligible_at_utc_us is None:
+        next_eligible_at_utc_us = decision_next_eligible_member.__get__(
+            self,
+            decision_type,
+        )
+        if next_eligible_at_utc_us is None:
             return None
-        return datetime_from_utc_microseconds(self.next_eligible_at_utc_us)
+        return datetime_from_utc_microseconds(next_eligible_at_utc_us)
 
     def policy_version_property(
         self: BetfairMarketBookPerMarketRateGate,

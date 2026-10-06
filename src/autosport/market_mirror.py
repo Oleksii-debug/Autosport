@@ -431,17 +431,23 @@ class MarketMirror:
 
     @classmethod
     def from_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
-        """Restore latest source-specific mirror state from authoritative history.
+        """Restore latest source-specific mirror state from validated store startup state.
 
-        The canonical store remains the only writer/owner of durable market history.
-        Replaying ``store.events()`` reconstructs source-local sequence protection after
-        restart without letting this mirror mutate the store's shared current projection.
+        SQLiteMarketStore derives the compact restore snapshot while validating and
+        rebuilding its durable projection, avoiding a second whole-history query and
+        decode pass on ordinary restart. The stored revision is still derived from the
+        exact historical replay order, and same-sequence payload conflicts remain
+        fail-closed before any mirror is published.
         """
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")
+        revision, events = store.market_mirror_restore_snapshot()
         mirror = cls()
-        for event in store.events():
-            mirror.apply(event)
+        with mirror._lock:
+            mirror._latest = {
+                mirror._key(event): mirror._snapshot_event(event) for event in events
+            }
+            mirror._revision = revision
         return mirror
 
     def __len__(self) -> int:

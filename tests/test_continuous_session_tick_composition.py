@@ -2323,6 +2323,29 @@ def test_tick_rejects_input_ids_descriptor_rebinding_after_provider_io(
         assert lifecycle.calls == 0
 
 
+def test_tick_rejects_canonical_lifecycle_subclass_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class DerivedLifecycle(continuous_session.ContinuousEventLifecycle):
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("derived lifecycle authority executed")
+
+        coordinator.lifecycle = DerivedLifecycle(root / "derived_lifecycle.json")
+        coordinator.collector = _Collector(
+            callback=lambda: (_ for _ in ()).throw(
+                AssertionError("collector ran before lifecycle subtype rejection")
+            )
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical event lifecycle subtype is not supported",
+        ):
+            coordinator.tick()
+
+
 def test_tick_rejects_canonical_lifecycle_code_mutation_after_provider_io(
     monkeypatch,
 ) -> None:

@@ -138,6 +138,7 @@ def _release_projection_lease(
     lease_generation: int | None,
     *,
     complete: Callable[..., None],
+    transport_now: Callable[[_base.BetfairReadOnlyClient], datetime] = _transport_now,
 ) -> None:
     if lease_generation is None:
         return
@@ -145,7 +146,7 @@ def _release_projection_lease(
         gate,
         request_id,
         lease_generation=lease_generation,
-        observed_at=_transport_now(client),
+        observed_at=transport_now(client),
     )
 
 
@@ -157,11 +158,12 @@ def _release_projection_lease_after_failure(
     primary: BaseException,
     *,
     complete: Callable[..., None],
+    release: Callable[..., None] = _release_projection_lease,
 ) -> None:
     """Best-effort cleanup without masking the primary dispatch failure."""
 
     try:
-        _release_projection_lease(
+        release(
             client,
             gate,
             request_id,

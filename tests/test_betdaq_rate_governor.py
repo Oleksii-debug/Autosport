@@ -255,7 +255,7 @@ def test_unknown_method_never_inherits_ambiguous_any_row(tmp_path: Path) -> None
     )
 
     with pytest.raises(BetdaqRateDeferred) as denied:
-        governor.admit("GetAccountBalances")
+        governor.admit("GetPrices2")
     assert denied.value.reason == "unmodeled_provider_rate_axis"
     assert denied.value.retry_after_seconds is None
 
@@ -973,3 +973,122 @@ def test_listblacklistinformation_is_explicit_any_other_allowlist_member(
     assert receipt.grants_write_permission is False
     assert receipt.grants_freshness is False
 
+
+
+def test_default_policy_covers_exact_current_provider_service_inventory() -> None:
+    configured = default_betdaq_rate_policy()
+    expected_operations = {
+        "GetCurrentSelectionSequenceNumber",
+        "GetEventSubTreeNoSelections",
+        "GetEventSubTreeWithSelections",
+        "GetMarketInformation",
+        "GetOddsLadder",
+        "GetPrices",
+        "GetSPEnabledMarketsInformation",
+        "ListMarketWithdrawalHistory",
+        "ListSelectionTrades",
+        "ListSelectionsChangedSince",
+        "ListTaggedValues",
+        "ListTopLevelEvents",
+        "CancelAllOrders",
+        "CancelAllOrdersOnMarket",
+        "CancelOrders",
+        "ChangeHeartbeatRegistration",
+        "DeregisterHeartbeat",
+        "GetAccountBalances",
+        "GetOrderDetails",
+        "ListAccountPostings",
+        "ListAccountPostingsById",
+        "ListBlacklistInformation",
+        "ListBootstrapOrders",
+        "ListOrdersChangedSince",
+        "PlaceOrdersNoReceipt",
+        "PlaceOrdersWithReceipt",
+        "Pulse",
+        "RegisterHeartbeat",
+        "SuspendAllOrders",
+        "SuspendAllOrdersOnMarket",
+        "SuspendFromTrading",
+        "SuspendOrders",
+        "UnsuspendFromTrading",
+        "UnsuspendOrders",
+        "UpdateOrdersNoReceipt",
+    }
+
+    assert set(configured.by_method()) == expected_operations
+
+
+def test_extended_any_other_inventory_shares_one_conservative_axis(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, _, _ = make_ready(
+        tmp_path,
+        default_betdaq_rate_policy(),
+    )
+    mixed_operations = (
+        "GetMarketInformation",
+        "GetAccountBalances",
+        "Pulse",
+        "CancelOrders",
+    )
+
+    for _ in range(25):
+        for operation_id in mixed_operations:
+            receipt = governor.admit(operation_id)
+            assert receipt.rate_policy_key == "Any Other"
+            assert receipt.grants_execution_authority is False
+            assert receipt.grants_write_permission is False
+            assert receipt.grants_freshness is False
+
+    with pytest.raises(BetdaqRateDeferred) as denied:
+        governor.admit("ListTopLevelEvents")
+
+    assert denied.value.reason == "provider_rate_capacity_exhausted"
+    assert denied.value.retry_after_seconds == pytest.approx(60.0)
+
+
+def test_extended_any_other_blacklist_fence_remains_operation_scoped(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, _, _ = make_ready(
+        tmp_path,
+        default_betdaq_rate_policy(),
+    )
+
+    observation = governor.observe_blacklist(
+        api_name="CancelOrders",
+        remaining_ms=60_000,
+        provider_observation_sha256=SHA_A,
+    )
+
+    assert observation.operation_id == "CancelOrders"
+    with pytest.raises(BetdaqRateDeferred) as denied:
+        governor.admit(
+            "CancelOrders",
+            priority=BetdaqRatePriority.SAFETY,
+        )
+    assert denied.value.reason == "provider_api_blacklisted"
+
+    sibling = governor.admit("Pulse", priority=BetdaqRatePriority.SAFETY)
+    assert sibling.rate_policy_key == "Any Other"
+    assert sibling.blacklist_status is BetdaqBlacklistStatus.UNKNOWN
+    assert sibling.grants_write_permission is False
+
+
+def test_rate_table_label_still_cannot_be_used_as_transport_operation(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, _, _ = make_ready(
+        tmp_path,
+        default_betdaq_rate_policy(),
+    )
+
+    with pytest.raises(BetdaqRateDeferred) as denied:
+        governor.admit("ChangeOrderNoReceipt")
+
+    assert denied.value.reason == "unmodeled_provider_rate_axis"
+    assert denied.value.retry_after_seconds is None
+
+    update = governor.admit("UpdateOrdersNoReceipt")
+    assert update.rate_policy_key == "ChangeOrderNoReceipt"
+    assert update.grants_write_permission is False

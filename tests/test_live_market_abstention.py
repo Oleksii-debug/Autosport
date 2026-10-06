@@ -108,20 +108,44 @@ def test_manually_constructed_decision_shape_fails_closed() -> None:
         )
 
 
-def test_exact_freshness_boundary_is_conservative_wait() -> None:
-    reason(
-        replace(clean(), quote_observed_at=NOW - timedelta(seconds=5)),
-        AbstentionReason.STALE_QUOTE,
-    )
-
-
-def test_one_microsecond_inside_boundary_reaches_product_origin_gate() -> None:
+def test_exact_freshness_boundary_is_inclusive_and_reaches_product_origin_gate() -> None:
     result = evaluate_live_market_eligibility(
-        replace(clean(), quote_observed_at=NOW - timedelta(seconds=4, microseconds=999999))
+        replace(clean(), quote_observed_at=NOW - timedelta(seconds=5))
     )
     assert result.status is LiveMarketEligibility.WAIT
     assert result.reasons == (AbstentionReason.PRODUCT_ORIGIN_UNPROVEN,)
     assert result.eligible_for_downstream_evaluation is False
+
+
+def test_one_microsecond_beyond_boundary_is_stale() -> None:
+    reason(
+        replace(
+            clean(),
+            quote_observed_at=NOW - timedelta(seconds=5, microseconds=1),
+        ),
+        AbstentionReason.STALE_QUOTE,
+    )
+
+
+def test_zero_max_age_allows_only_exact_decision_instant() -> None:
+    exact = evaluate_live_market_eligibility(
+        replace(
+            clean(),
+            quote_observed_at=NOW,
+            max_quote_age=timedelta(0),
+        )
+    )
+    assert exact.status is LiveMarketEligibility.WAIT
+    assert exact.reasons == (AbstentionReason.PRODUCT_ORIGIN_UNPROVEN,)
+
+    reason(
+        replace(
+            clean(),
+            quote_observed_at=NOW - timedelta(microseconds=1),
+            max_quote_age=timedelta(0),
+        ),
+        AbstentionReason.STALE_QUOTE,
+    )
 
 
 def test_future_quote_waits() -> None:
@@ -253,7 +277,6 @@ def test_heartbeat_time_cannot_refresh_quote_age_because_gate_has_no_liveness_cl
     [
         ("quote_observed_at", datetime(2026, 9, 22, 10, 0)),
         ("decision_observed_at", datetime(2026, 9, 22, 10, 0)),
-        ("max_quote_age", timedelta(0)),
         ("max_quote_age", timedelta(seconds=-1)),
         ("response_coverage_complete", 1),
         ("source_actionability_proven", 1),
@@ -311,7 +334,7 @@ def test_datetime_and_timedelta_subclasses_fail_closed() -> None:
             ),
         )
 
-    with pytest.raises(LiveMarketAbstentionError, match="positive timedelta"):
+    with pytest.raises(LiveMarketAbstentionError, match="non-negative timedelta"):
         replace(clean(), max_quote_age=TimedeltaSubclass(seconds=5))
 
 
@@ -350,7 +373,7 @@ def test_randomized_gate_matches_independent_fail_closed_predicate() -> None:
 
         structural_wait = (
             age_us < 0
-            or age_us >= max_age_us
+            or age_us > max_age_us
             or status is not MarketStatus.OPEN
             or delayed is not False
             or continuity is not ContinuityStatus.COHERENT

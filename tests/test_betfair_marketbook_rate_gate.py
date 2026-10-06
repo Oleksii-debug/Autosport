@@ -227,7 +227,7 @@ def test_mutable_rate_state_reads_are_serialized_by_one_gate_lock() -> None:
 
     probe = LockProbe()
 
-    class GuardedAccepted(dict[str, list[int]]):
+    class GuardedAccepted(dict[str, list[tuple[int, int]]]):
         def _assert_guarded(self) -> None:
             assert probe.depth == 1
 
@@ -235,7 +235,7 @@ def test_mutable_rate_state_reads_are_serialized_by_one_gate_lock() -> None:
             self._assert_guarded()
             return super().__iter__()
 
-        def __getitem__(self, key: str) -> list[int]:
+        def __getitem__(self, key: str) -> list[tuple[int, int]]:
             self._assert_guarded()
             return super().__getitem__(key)
 
@@ -264,6 +264,85 @@ def test_mutable_rate_state_reads_are_serialized_by_one_gate_lock() -> None:
     assert decision.allowed
     assert probe.entries == 2
     assert probe.depth == 0
+
+
+def test_process_control_after_rate_mutation_rolls_back_only_own_capacity() -> None:
+    gate = BetfairMarketBookPerMarketRateGate()
+    interrupt = KeyboardInterrupt("rate reserve interrupted after mutation")
+    original_lock = gate._lock
+
+    class InterruptAfterMutationLock:
+        def __init__(self) -> None:
+            self.raise_once = True
+
+        def __enter__(self):
+            return original_lock.__enter__()
+
+        def __exit__(self, exc_type, exc, tb):
+            result = original_lock.__exit__(exc_type, exc, tb)
+            if self.raise_once and exc_type is None:
+                self.raise_once = False
+                raise interrupt
+            return result
+
+    gate._lock = InterruptAfterMutationLock()
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        gate.reserve(("1.234",), scheduled_at=T0)
+
+    assert exc_info.value is interrupt
+    state = gate.snapshot()
+    assert state.markets == ()
+    assert state.last_scheduled_at_utc_us == int(T0.timestamp() * 1_000_000)
+    assert gate._next_reservation_generation == 2
+
+    successor = gate.reserve(("1.234",), scheduled_at=T0)
+    assert successor.allowed is True
+    assert gate.snapshot().markets[0].accepted_at_utc_us == (
+        int(T0.timestamp() * 1_000_000),
+    )
+
+
+def test_interrupted_rate_cleanup_preserves_concurrent_successor_same_timestamp() -> None:
+    gate = BetfairMarketBookPerMarketRateGate()
+    interrupt = KeyboardInterrupt("rate reserve interrupted after successor")
+    original_lock = gate._lock
+    successor_decisions = []
+
+    class SuccessorThenInterruptLock:
+        def __init__(self) -> None:
+            self.raise_once = True
+
+        def __enter__(self):
+            return original_lock.__enter__()
+
+        def __exit__(self, exc_type, exc, tb):
+            result = original_lock.__exit__(exc_type, exc, tb)
+            if self.raise_once and exc_type is None:
+                self.raise_once = False
+                successor_decisions.append(
+                    BetfairMarketBookPerMarketRateGate.reserve(
+                        gate,
+                        ("1.234",),
+                        scheduled_at=T0,
+                    )
+                )
+                raise interrupt
+            return result
+
+    gate._lock = SuccessorThenInterruptLock()
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        gate.reserve(("1.234",), scheduled_at=T0)
+
+    assert exc_info.value is interrupt
+    assert len(successor_decisions) == 1
+    assert successor_decisions[0].allowed is True
+    state = gate.snapshot()
+    assert state.markets[0].accepted_at_utc_us == (
+        int(T0.timestamp() * 1_000_000),
+    )
+    assert gate._next_reservation_generation == 3
 
 
 def test_competing_fifth_call_reservations_are_serialized() -> None:

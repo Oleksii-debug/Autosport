@@ -483,6 +483,23 @@ def test_codec_ignores_rebound_size_bounds(monkeypatch) -> None:
         economic_goal_from_payload(oversized_member)
 
 
+def test_store_binding_ignores_class_descriptor_rebinding(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    class HostileDescriptor:
+        def __get__(self, instance, owner):
+            raise AssertionError("rebound store descriptor executed")
+
+        def __set__(self, instance, value):
+            raise AssertionError("rebound store descriptor setter executed")
+
+    monkeypatch.setattr(EconomicGoalStore, "workspace", HostileDescriptor(), raising=False)
+    monkeypatch.setattr(EconomicGoalStore, "path", HostileDescriptor(), raising=False)
+
+    assert store.load() == _goal()
+
+
 def test_store_binding_validation_does_not_dispatch_path_equality(monkeypatch, tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
     store.initialize_owner(_goal())

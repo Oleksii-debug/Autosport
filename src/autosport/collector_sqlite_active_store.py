@@ -678,8 +678,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
     def _canonical_event_payload(
         event: MarketEvent,
     ) -> tuple[str, str, str, str]:
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be MarketEvent")
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be exact MarketEvent")
         payload = event.to_dict()
         payload_json = json.dumps(
             payload,

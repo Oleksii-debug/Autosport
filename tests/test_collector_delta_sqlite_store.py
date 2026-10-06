@@ -335,6 +335,49 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
 
             self.assertIsNone(store.get(delta.delta_id))
 
+    def test_event_payload_rejects_market_event_subclass_before_virtual_dispatch(self):
+        calls = []
+
+        class HostileMarketEvent(MarketEvent):
+            def to_dict(self):
+                calls.append("to_dict")
+                raise AssertionError("MarketEvent subclass virtual dispatch executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            canonical = MarketEvent.from_dict(event_payload())
+            hostile = HostileMarketEvent(
+                event_id=canonical.event_id,
+                market_id=canonical.market_id,
+                selection_id=canonical.selection_id,
+                decimal_odds=canonical.decimal_odds,
+                observed_ts=canonical.observed_ts,
+                source_id=canonical.source_id,
+                sequence=canonical.sequence,
+                market_type=canonical.market_type,
+                status=canonical.status,
+                source_ts=canonical.source_ts,
+                ingest_ts=canonical.ingest_ts,
+                score_state=canonical.score_state,
+                metadata=canonical.metadata,
+                sport=canonical.sport,
+                competition_id=canonical.competition_id,
+                market_semantics_id=canonical.market_semantics_id,
+                provider_source_class=canonical.provider_source_class,
+                exchange_side=canonical.exchange_side,
+            )
+            delta = make_delta()
+
+            with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                store._append_with_runtime_stream_epoch(
+                    delta,
+                    activated_at="2026-01-01T00:00:00+00:00",
+                    event=hostile,
+                )
+
+            self.assertEqual(calls, [])
+            self.assertIsNone(store.get(delta.delta_id))
+
     def test_event_payload_rejects_source_relabel_even_when_digest_and_dedupe_match(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CollectorDeltaStore(Path(tmp) / "collector.json")

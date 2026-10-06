@@ -115,6 +115,7 @@ class _ContinuousSessionCoordinatorMeta(type):
     def __new__(mcls, name, bases, namespace, **kwargs):
         protected = {
             "_settle",
+            "_load_book",
             "_open_quote_keys_for_book",
             "_settlement_consumer_bindings_sealed",
         }
@@ -139,6 +140,7 @@ class _ContinuousSessionCoordinatorMeta(type):
         )
         if sealed and name in {
             "_settle",
+            "_load_book",
             "_open_quote_keys_for_book",
             "_settlement_consumer_bindings_sealed",
         }:
@@ -152,6 +154,7 @@ class _ContinuousSessionCoordinatorMeta(type):
         )
         if sealed and name in {
             "_settle",
+            "_load_book",
             "_open_quote_keys_for_book",
             "_settlement_consumer_bindings_sealed",
         }:
@@ -1907,7 +1910,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             unique[resolution.evidence_id] = resolution
 
         with WorkspaceEconomicLock(self.workspace):
-            book = self._load_book()
+            book = ContinuousSessionCoordinator._load_book(self)
             engine = _settlement_engine_type()
             if type(engine) is not _settlement_engine_type:
                 raise ContinuousSessionError(

@@ -246,6 +246,9 @@ def _exercise_subscription_lifecycle(
                 raise RuntimeError("runtime reopen duplicated process-local subscription")
         finally:
             restored.close()
+    # Qualification instrumentation must not retain the two closed runtime graphs
+    # through its tracking registry for the remainder of the endurance process.
+    _TrackingMarketEventBus.instances.clear()
 
 
 def _linux_workspace_open_handles(root: Path) -> tuple[str, ...]:

@@ -441,3 +441,52 @@ def test_progress_publication_rejects_class_rebound_rmw_dispatch(
 
         assert path.read_bytes() == before
 
+def test_session_rmw_ignores_instance_shadowed_reader_and_identity() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        before = path.read_bytes()
+
+        def attacker_read() -> dict[str, object]:
+            raise AssertionError("instance-shadowed canonical reader executed")
+
+        def attacker_identity() -> tuple[int, int, int, int, int]:
+            raise AssertionError("instance-shadowed checkpoint identity executed")
+
+        state._read = attacker_read  # type: ignore[method-assign]
+        state._checkpoint_identity_token = attacker_identity  # type: ignore[method-assign]
+
+        updated = state._update(lambda _raw: False)
+
+        assert updated["generation"] == 0
+        assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ("_read", "_checkpoint_identity_token"),
+)
+def test_session_rmw_rejects_class_rebound_reader_or_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        before = path.read_bytes()
+
+        def attacker(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("class-rebound session RMW dependency executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            method_name,
+            attacker,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical session read-modify-write authority changed",
+        ):
+            state._update(lambda _raw: False)
+
+        assert path.read_bytes() == before
+

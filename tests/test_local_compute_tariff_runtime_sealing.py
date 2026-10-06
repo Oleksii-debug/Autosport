@@ -153,6 +153,7 @@ def test_basis_resolve_dispatch_rebind_fails_closed(tmp_path, monkeypatch):
         store._basis_authority()
     assert calls == []
 
+
 def test_private_first_import_receives_canonical_runtime_seal() -> None:
     source_root = Path(__file__).resolve().parents[1] / "src"
     script = f"""

@@ -1287,9 +1287,33 @@ class _ContinuousSessionState:
                 finalize_under_lock(updated)
         return updated
 
-    def set_state(self, state: SessionState, *, reason: str | None = None) -> None:
+    def set_state(
+        self,
+        state: SessionState,
+        *,
+        reason: str | None = None,
+        _error_checkpoint_present: Callable[["_ContinuousSessionState"], bool] = (
+            _error_checkpoint_present
+        ),
+        _error_checkpoint_present_code: object = _error_checkpoint_present.__code__,
+        _read_error_checkpoint: Callable[
+            ["_ContinuousSessionState"], dict[str, Any]
+        ] = _read_error_checkpoint,
+        _read_error_checkpoint_code: object = _read_error_checkpoint.__code__,
+    ) -> None:
         if not isinstance(state, SessionState):
             raise TypeError("state must be SessionState")
+        if (
+            type(self)._error_checkpoint_present is not _error_checkpoint_present
+            or getattr(_error_checkpoint_present, "__code__", None)
+            is not _error_checkpoint_present_code
+            or type(self)._read_error_checkpoint is not _read_error_checkpoint
+            or getattr(_read_error_checkpoint, "__code__", None)
+            is not _read_error_checkpoint_code
+        ):
+            raise ContinuousSessionError(
+                "canonical state-transition error authority changed"
+            )
 
         def mutate(raw: dict[str, Any]) -> bool:
             normalized_reason = None if reason is None else _text(reason, "reason")
@@ -1301,7 +1325,48 @@ class _ContinuousSessionState:
                 # predecessor generation is no longer an active error.
                 desired_error = None
             else:
+                # Failure publication is intentionally bounded and therefore
+                # lives in the same-generation sidecar rather than rewriting
+                # the potentially history-sized canonical checkpoint.  A
+                # PAUSE/STOP transition without a new operator reason must
+                # preserve that active failure when it advances the canonical
+                # generation; otherwise the tombstone written below would
+                # silently erase the last operational fault.
                 desired_error = raw["last_error_code"]
+                if _error_checkpoint_present(self):
+                    checkpoint = _read_error_checkpoint(self)
+                    if checkpoint["observed_generation"] > raw["generation"]:
+                        raise ContinuousSessionError(
+                            "operational error checkpoint generation is ahead of "
+                            "canonical session state transition"
+                        )
+                    marker_matches = (
+                        checkpoint["observed_generation"] == raw["generation"]
+                        and checkpoint["observed_cycles_completed"]
+                        == raw["cycles_completed"]
+                        and checkpoint["observed_last_success_at"]
+                        == raw["last_success_at"]
+                        and checkpoint["observed_state"] == raw["state"]
+                    )
+                    if (
+                        checkpoint["observed_generation"] == raw["generation"]
+                        and not marker_matches
+                    ):
+                        raise ContinuousSessionError(
+                            "same-generation operational error checkpoint markers "
+                            "conflict with canonical session state transition"
+                        )
+                    if marker_matches and checkpoint["last_error_code"] is not None:
+                        checkpoint_error = checkpoint["last_error_code"]
+                        if (
+                            desired_error is not None
+                            and desired_error != checkpoint_error
+                        ):
+                            raise ContinuousSessionError(
+                                "continuous session error authorities conflict "
+                                "during state transition"
+                            )
+                        desired_error = checkpoint_error
 
             if (
                 raw["state"] == state.value

@@ -1256,11 +1256,6 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
             else:
                 legacy._decimal = previous
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
     def test_public_ledger_complete_run_rejects_rebound_decimal_parser(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
@@ -1503,3 +1498,6 @@ if __name__ == "__main__":
         finally:
             public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR = original
 
+
+if __name__ == "__main__":
+    unittest.main()

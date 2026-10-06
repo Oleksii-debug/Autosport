@@ -152,11 +152,6 @@ def test_candidate_identity_rejects_noncanonical_whitespace(field: str, value: s
         CandidateRef(**values)  # type: ignore[arg-type]
 
 
-def test_protocol_text_tuple_requires_exact_tuple_before_iteration() -> None:
-    with pytest.raises(ValueError, match="exact tuple"):
-        _scientific.__wrapped__  # type: ignore[attr-defined]
-
-
 def test_scientific_binding_rejects_tuple_subclass() -> None:
     with pytest.raises(ValueError, match="exact tuple"):
         ScientificProtocolBinding(

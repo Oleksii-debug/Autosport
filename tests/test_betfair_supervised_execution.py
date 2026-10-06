@@ -1217,8 +1217,9 @@ def test_unmatched_success_is_unknown_until_readback() -> None:
 
         assert result.outcome is PlaceOrdersOutcome.UNKNOWN
         assert result.attempt_state is AttemptState.UNKNOWN
-        assert result.external_receipt_id == "bet-unmatched"
-        assert result.evidence_id is not None
+        assert result.external_receipt_id is None
+        assert result.evidence_id is None
+        assert ledger.provider_evidence_binding("attempt-unmatched") is None
         assert not ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,

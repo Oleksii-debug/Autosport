@@ -274,9 +274,10 @@ _CANONICAL_CONTRACT_FIELD_GETTERS: Final = tuple(
 def _canonical_contract_snapshot(
     contract: EconomicGoalContract,
     _field_getters=_CANONICAL_CONTRACT_FIELD_GETTERS,
+    _contract_type=EconomicGoalContract,
 ) -> tuple[object, ...]:
     return tuple(
-        getter(contract, EconomicGoalContract)
+        getter(contract, _contract_type)
         for _, getter in _field_getters
     )
 
@@ -284,6 +285,7 @@ def _canonical_contract_snapshot(
 def _validate_contract_bound(
     self: EconomicGoalContract,
     _field_getters=_CANONICAL_CONTRACT_FIELD_GETTERS,
+    _contract_type=EconomicGoalContract,
     _text_validator=_canonical_text,
     _positive_int_validator=_positive_int,
     _fraction_validator=_fraction,
@@ -297,7 +299,7 @@ def _validate_contract_bound(
 ) -> None:
     """Validate through captured slot descriptors rather than class attributes."""
 
-    if type(self) is not EconomicGoalContract:
+    if type(self) is not _contract_type:
         raise _error_type("economic goal must use the exact contract type")
     values = _canonical_contract_snapshot(self, _field_getters)
     (

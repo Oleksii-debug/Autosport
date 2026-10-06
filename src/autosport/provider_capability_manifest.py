@@ -158,14 +158,18 @@ def _canonical_json(payload: dict[str, object]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
-def _validate_exact_profile(profile: BookmakerCapabilityProfile) -> None:
-    if type(profile) is not BookmakerCapabilityProfile:
+def _validate_exact_profile(
+    profile: BookmakerCapabilityProfile,
+    _profile_type=BookmakerCapabilityProfile,
+    _fact_type=BookmakerCapabilityFact,
+) -> None:
+    if type(profile) is not _profile_type:
         raise ProviderCapabilityManifestError(
             "profile must be an exact BookmakerCapabilityProfile"
         )
     if type(profile.facts) is not tuple:
         raise ProviderCapabilityManifestError("profile.facts must be an exact tuple")
-    if any(type(fact) is not BookmakerCapabilityFact for fact in profile.facts):
+    if any(type(fact) is not _fact_type for fact in profile.facts):
         raise ProviderCapabilityManifestError(
             "profile facts must be exact BookmakerCapabilityFact values"
         )
@@ -457,20 +461,21 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         _profile_contract_validator_code: object = BookmakerCapabilityProfile.__post_init__.__code__,
         _integration_contract_validator=BookmakerIntegrationEvidence.__post_init__,
         _integration_contract_validator_code: object = BookmakerIntegrationEvidence.__post_init__.__code__,
+        _profile_type=BookmakerCapabilityProfile,
+        _integration_type=BookmakerIntegrationEvidence,
         _verify_profile=BookmakerIntegrationEvidence.verify_profile,
         _verify_profile_code: object = BookmakerIntegrationEvidence.verify_profile.__code__,
         _identity_guard=_manifest_identity_guard,
         _identity_guard_code: object = _manifest_identity_guard.__code__,
     ) -> None:
         if (
-            BookmakerCapabilityProfile.__post_init__ is not _profile_contract_validator
+            _profile_type.__post_init__ is not _profile_contract_validator
             or getattr(_profile_contract_validator, "__code__", None)
             is not _profile_contract_validator_code
-            or BookmakerIntegrationEvidence.__post_init__
-            is not _integration_contract_validator
+            or _integration_type.__post_init__ is not _integration_contract_validator
             or getattr(_integration_contract_validator, "__code__", None)
             is not _integration_contract_validator_code
-            or BookmakerIntegrationEvidence.verify_profile is not _verify_profile
+            or _integration_type.verify_profile is not _verify_profile
             or getattr(_verify_profile, "__code__", None) is not _verify_profile_code
             or getattr(_identity_guard, "__code__", None) is not _identity_guard_code
         ):
@@ -482,7 +487,7 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         _positive_int(self.manifest_version, "manifest_version")
         _validate_exact_profile(self.profile)
         _profile_contract_validator(self.profile)
-        if type(self.integration) is not BookmakerIntegrationEvidence:
+        if type(self.integration) is not _integration_type:
             raise ProviderCapabilityManifestError(
                 "integration must be an exact BookmakerIntegrationEvidence"
             )
@@ -670,6 +675,7 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         _profile_state_code: object = _profile_state.__code__,
         _profile_validator=_validate_exact_profile,
         _profile_validator_code: object = _validate_exact_profile.__code__,
+        _integration_type=BookmakerIntegrationEvidence,
         _verify_profile=BookmakerIntegrationEvidence.verify_profile,
         _verify_profile_code: object = BookmakerIntegrationEvidence.verify_profile.__code__,
         _identity_guard=_manifest_identity_guard,
@@ -688,7 +694,7 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
             or getattr(_profile_state, "__code__", None) is not _profile_state_code
             or getattr(_profile_validator, "__code__", None)
             is not _profile_validator_code
-            or BookmakerIntegrationEvidence.verify_profile is not _verify_profile
+            or _integration_type.verify_profile is not _verify_profile
             or getattr(_verify_profile, "__code__", None) is not _verify_profile_code
             or getattr(_identity_guard, "__code__", None) is not _identity_guard_code
         ):
@@ -697,7 +703,7 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
             )
 
         _profile_validator(self.profile)
-        if type(self.integration) is not BookmakerIntegrationEvidence:
+        if type(self.integration) is not _integration_type:
             raise ProviderCapabilityManifestError(
                 "integration must be an exact BookmakerIntegrationEvidence"
             )
@@ -827,6 +833,8 @@ def _make_provider_capability_manifest_builder(
     _profile_state,
     _manifest_type,
     _manifest_fact_type,
+    _integration_type,
+    _verify_profile,
 ):
     def build_provider_capability_manifest(
         profile: BookmakerCapabilityProfile,
@@ -848,11 +856,11 @@ def _make_provider_capability_manifest_builder(
         """
 
         _validate_exact_profile(profile)
-        if type(integration) is not BookmakerIntegrationEvidence:
+        if type(integration) is not _integration_type:
             raise ProviderCapabilityManifestError(
                 "integration must be an exact BookmakerIntegrationEvidence"
             )
-        integration.verify_profile(profile)
+        _verify_profile(integration, profile)
         if type(extension_facts) is not tuple:
             raise ProviderCapabilityManifestError("extension_facts must be an exact tuple")
         if any(type(fact) is not _manifest_fact_type for fact in extension_facts):
@@ -916,5 +924,7 @@ build_provider_capability_manifest = _make_provider_capability_manifest_builder(
     _profile_state,
     ProviderCapabilityManifest,
     ProviderCapabilityManifestFact,
+    BookmakerIntegrationEvidence,
+    BookmakerIntegrationEvidence.verify_profile,
 )
 del _make_provider_capability_manifest_builder

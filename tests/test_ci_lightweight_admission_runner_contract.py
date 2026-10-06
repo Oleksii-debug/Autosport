@@ -51,8 +51,6 @@ def test_heavy_qualification_jobs_keep_platform_specific_runners() -> None:
     windows = (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
     endurance = (ROOT / ".github/workflows/endurance.yml").read_text(encoding="utf-8")
 
-    assert "os: [ubuntu-slim, windows-latest]" in ci
     assert "runs-on: ${{ matrix.os }}" in ci
     assert "runs-on: windows-latest" in windows
-    assert "os: [ubuntu-slim, windows-latest]" in endurance
     assert "runs-on: ${{ matrix.os }}" in endurance

@@ -310,6 +310,7 @@ class EconomicGoalContract:
         _CANONICAL_TRANSITION_VALIDATOR(self, candidate)
 
 _RAW_CONTRACT_POST_INIT: Final = EconomicGoalContract.__post_init__
+_CONTRACT_OBJECT_SETATTR: Final = object.__setattr__
 
 
 def _make_contract_post_init_authority(operation):
@@ -422,7 +423,7 @@ def _contract_init_authority(
         ("blocked_providers", blocked_providers),
         ("blocked_markets", blocked_markets),
     ):
-        object.__setattr__(self, name, value)
+        _CONTRACT_OBJECT_SETATTR(self, name, value)
     _CANONICAL_CONTRACT_VALIDATOR(self)
 
 

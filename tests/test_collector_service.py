@@ -854,6 +854,29 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             self.assertEqual(service.status()["cycles_succeeded"], 0)
             self.assertIsNone(service.delta_store.get("d1"))
 
+    def test_archival_resolver_cannot_mutate_source_identity_before_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "source-x:event-1")
+            delta = make_delta(delta_id="d1", position=1)
+
+            class IdentityMutatingArchiveSource(ArchivingCollectorSource):
+                def resolve_event(self, target):
+                    event = super().resolve_event(target)
+                    self.source_id = "source-y"
+                    return event
+
+            source = IdentityMutatingArchiveSource([page], [(delta,)])
+            service = self.make_service(tmp, source)
+
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "source.source_id changed after collector service construction",
+            ):
+                service.run_cycle()
+
+            self.assertEqual(service.status()["cycles_succeeded"], 0)
+            self.assertIsNone(service.delta_store.get("d1"))
+
     def test_bound_source_event_is_archived_with_committed_delta(self):
         with tempfile.TemporaryDirectory() as tmp:
             page = catalog_page(1, "source-x:event-1")

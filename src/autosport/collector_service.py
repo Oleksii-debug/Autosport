@@ -689,6 +689,9 @@ class HeadlessCollectorService:
                 "resolve_event",
                 self._source_resolve_event_witness,
             )
+            self._require_source_identity(
+                expected_stream_epoch=delta.stream_epoch
+            )
             if not isinstance(event, MarketEvent):
                 raise CollectorServiceError(
                     "collector-bound source resolve_event must return MarketEvent"

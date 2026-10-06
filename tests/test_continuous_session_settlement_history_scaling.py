@@ -4178,3 +4178,43 @@ def test_source_projection_write_preserves_active_failure_generation() -> None:
         )
         assert canonical["generation"] == 0
         assert sidecar["observed_generation"] == 0
+
+
+def test_cross_instance_source_projection_does_not_stale_active_failure() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        failure_writer = _state_with_history(root, _SMALL_HISTORY)
+        projection_writer = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        failure_writer.record_failure(code="PROVIDER_FAILURE")
+        projection_writer.record_source_projection(
+            deltas=(_projection_delta(1),),
+            backlog=False,
+        )
+
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        snapshot = reopened.snapshot()
+        assert snapshot.last_error_code == "PROVIDER_FAILURE"
+        assert snapshot.source_gap_state == "NONE"
+        assert snapshot.source_sync_state == "READY"
+
+        canonical = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        sidecar = json.loads(
+            (
+                root / "continuous_session.json.operational_error.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert canonical["generation"] == 0
+        assert sidecar["observed_generation"] == 0

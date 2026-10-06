@@ -331,25 +331,6 @@ class _ContinuousSessionState:
     _MAX_ERROR_CODE_CHARS = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS
     _ERROR_FIELDS = _CONTINUOUS_SESSION_ERROR_FIELDS
     _FIELDS = _CONTINUOUS_SESSION_FIELDS
-    _FIELDS = {
-        "schema",
-        "schema_version",
-        "session_id",
-        "source_id",
-        "state",
-        "started_at",
-        "cycles_completed",
-        "last_success_at",
-        "last_error_code",
-        "last_full_refresh_at",
-        "settlement_evidence",
-        "source_gap_state",
-        "source_sync_state",
-        "source_state_delta_id",
-        "source_unresolved_gap_delta_ids",
-        "source_projection_stream_epoch",
-        "source_state_projection_backlog",
-    }
 
     def __init__(
         self,
@@ -358,6 +339,8 @@ class _ContinuousSessionState:
         session_id: str | None,
         source_id: str,
         clock: Callable[[], str],
+        _schema: str = _CONTINUOUS_SESSION_SCHEMA,
+        _version: int = _CONTINUOUS_SESSION_VERSION,
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -387,8 +370,8 @@ class _ContinuousSessionState:
             atomic_write_json(
                 self.path,
                 {
-                    "schema": _CONTINUOUS_SESSION_SCHEMA,
-                    "schema_version": _CONTINUOUS_SESSION_VERSION,
+                    "schema": _schema,
+                    "schema_version": _version,
                     "session_id": resolved_id,
                     "source_id": self.source_id,
                     "state": SessionState.RUNNING.value,
@@ -444,7 +427,11 @@ class _ContinuousSessionState:
             remaining -= len(chunk)
         return b"".join(chunks)
 
-    def _read_error_checkpoint_bytes(self) -> bytes:
+    def _read_error_checkpoint_bytes(
+        self,
+        *,
+        _max_bytes: int = _CONTINUOUS_SESSION_ERROR_MAX_BYTES,
+    ) -> bytes:
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
         descriptor: int | None = None
@@ -474,7 +461,7 @@ class _ContinuousSessionState:
                     "was replaced before verification"
                 )
 
-            read_limit = _CONTINUOUS_SESSION_ERROR_MAX_BYTES + 1
+            read_limit = _max_bytes + 1
             os.lseek(descriptor, 0, os.SEEK_SET)
             first_image = self._bounded_descriptor_read(descriptor, read_limit)
             os.lseek(descriptor, 0, os.SEEK_SET)
@@ -509,10 +496,18 @@ class _ContinuousSessionState:
             if descriptor is not None:
                 os.close(descriptor)
 
-    def _read_error_checkpoint(self) -> dict[str, Any]:
+    def _read_error_checkpoint(
+        self,
+        *,
+        _fields: frozenset[str] = _CONTINUOUS_SESSION_ERROR_FIELDS,
+        _schema: str = _CONTINUOUS_SESSION_ERROR_SCHEMA,
+        _version: int = _CONTINUOUS_SESSION_ERROR_VERSION,
+        _max_bytes: int = _CONTINUOUS_SESSION_ERROR_MAX_BYTES,
+        _max_code_chars: int = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS,
+    ) -> dict[str, Any]:
         try:
-            encoded = self._read_error_checkpoint_bytes()
-            if len(encoded) > _CONTINUOUS_SESSION_ERROR_MAX_BYTES:
+            encoded = self._read_error_checkpoint_bytes(_max_bytes=_max_bytes)
+            if len(encoded) > _max_bytes:
                 raise ContinuousSessionError(
                     "continuous session operational error checkpoint "
                     "exceeds resource limit"
@@ -532,10 +527,10 @@ class _ContinuousSessionState:
             ) from exc
         if (
             type(raw) is not dict
-            or set(raw) != _CONTINUOUS_SESSION_ERROR_FIELDS
-            or raw["schema"] != _CONTINUOUS_SESSION_ERROR_SCHEMA
+            or set(raw) != _fields
+            or raw["schema"] != _schema
             or type(raw["schema_version"]) is not int
-            or raw["schema_version"] != _CONTINUOUS_SESSION_ERROR_VERSION
+            or raw["schema_version"] != _version
             or raw["session_id"] != self._session_id
             or raw["source_id"] != self.source_id
         ):
@@ -561,20 +556,28 @@ class _ContinuousSessionState:
                 raw["last_error_code"],
                 "operational error last_error_code",
             )
-            if len(error_code) > _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS:
+            if len(error_code) > _max_code_chars:
                 raise ContinuousSessionError(
                     "operational error last_error_code exceeds resource limit"
                 )
         return raw
 
-    def _write_error_checkpoint(self, code: str | None) -> None:
+    def _write_error_checkpoint(
+        self,
+        code: str | None,
+        *,
+        _schema: str = _CONTINUOUS_SESSION_ERROR_SCHEMA,
+        _version: int = _CONTINUOUS_SESSION_ERROR_VERSION,
+        _max_bytes: int = _CONTINUOUS_SESSION_ERROR_MAX_BYTES,
+        _max_code_chars: int = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS,
+    ) -> None:
         if code is not None:
             code = _text(code, "code")
-            if len(code) > _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS:
+            if len(code) > _max_code_chars:
                 raise ValueError("code exceeds operational error resource limit")
         payload = {
-            "schema": _CONTINUOUS_SESSION_ERROR_SCHEMA,
-            "schema_version": _CONTINUOUS_SESSION_ERROR_VERSION,
+            "schema": _schema,
+            "schema_version": _version,
             "session_id": self._session_id,
             "source_id": self.source_id,
             "observed_cycles_completed": self._cycles_completed,
@@ -591,7 +594,7 @@ class _ContinuousSessionState:
             )
             + "\n"
         ).encode("utf-8")
-        if len(encoded) > _CONTINUOUS_SESSION_ERROR_MAX_BYTES:
+        if len(encoded) > _max_bytes:
             raise ContinuousSessionError(
                 "continuous session operational error checkpoint exceeds resource limit"
             )
@@ -633,7 +636,13 @@ class _ContinuousSessionState:
             )
         return tuple(values)
 
-    def _read(self) -> dict[str, Any]:
+    def _read(
+        self,
+        *,
+        _fields: frozenset[str] = _CONTINUOUS_SESSION_FIELDS,
+        _schema: str = _CONTINUOUS_SESSION_SCHEMA,
+        _version: int = _CONTINUOUS_SESSION_VERSION,
+    ) -> dict[str, Any]:
         try:
             raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
@@ -642,9 +651,9 @@ class _ContinuousSessionState:
             ) from exc
         if (
             type(raw) is not dict
-            or set(raw) != _CONTINUOUS_SESSION_FIELDS
-            or raw["schema"] != _CONTINUOUS_SESSION_SCHEMA
-            or raw["schema_version"] != _CONTINUOUS_SESSION_VERSION
+            or set(raw) != _fields
+            or raw["schema"] != _schema
+            or raw["schema_version"] != _version
             or raw["source_id"] != self.source_id
         ):
             raise ContinuousSessionError("continuous session state schema/identity mismatch")

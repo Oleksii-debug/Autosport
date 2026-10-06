@@ -486,6 +486,12 @@ class MarketBookBatchAttemptExecution:
     def __post_init__(self) -> None:
         if type(self.history) is not MarketBookAttemptHistory:
             raise TypeError("history must be an exact MarketBookAttemptHistory")
+        try:
+            MarketBookAttemptHistory(self.history.plan, self.history.records)
+        except Exception as exc:
+            raise MarketBookBatchTransportError(
+                "attempt execution history is not canonical"
+            ) from exc
         if not isinstance(self.outcome, MarketBookAttemptOutcome):
             raise TypeError("outcome must be MarketBookAttemptOutcome")
         if not self.history.records:
@@ -507,6 +513,14 @@ class MarketBookBatchAttemptExecution:
                     "response outcome requires canonical transport result"
                 )
             self.result.assert_issued()
+            if (
+                self.result.plan_id != self.history.plan.plan_id
+                or self.result.request_contract_id
+                != self.history.plan.request_contract_id
+            ):
+                raise MarketBookBatchTransportError(
+                    "attempt execution result is bound to another history plan"
+                )
             if latest.batch_id != self.result.batch_id:
                 raise MarketBookBatchTransportError(
                     "attempt execution result is bound to another history batch"

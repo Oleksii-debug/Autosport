@@ -833,6 +833,37 @@ def test_direct_attempt_execution_cannot_claim_unrecorded_or_mismatched_outcome(
         )
 
 
+def test_attempt_execution_revalidates_history_after_adversarial_plan_mutation():
+    plan = _plan()
+    history = MarketBookAttemptHistory(plan, ())
+    batch = plan.batches[0]
+    client, _ = _client(_payload(("1.001",)))
+    result = _read(client, plan, batch_id=batch.batch_id)
+    recorded = append_market_book_transport_attempt(
+        history,
+        result,
+        attempt_id="attempt-incomplete-bound",
+        required=True,
+    )
+    assert recorded.records[-1].outcome is MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
+
+    object.__setattr__(
+        recorded,
+        "plan",
+        _plan(market_ids=("9.999",)),
+    )
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="history is not canonical",
+    ):
+        MarketBookBatchAttemptExecution(
+            recorded,
+            MarketBookAttemptOutcome.INCOMPLETE_RESPONSE,
+            result,
+        )
+
+
 def test_attempt_executor_records_rate_denial_as_required_gap():
     plan = _plan(market_ids=("1.001",))
     history = MarketBookAttemptHistory(plan, ())

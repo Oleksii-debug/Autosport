@@ -108,6 +108,14 @@ def _decimal_scale_bps_exact(value: Decimal, basis_points: int) -> Decimal:
     return _decimal_from_coefficient(coefficient * basis_points, exponent - 4)
 
 
+_CANONICAL_DECIMAL_ADD_EXACT = _decimal_add_exact
+_CANONICAL_DECIMAL_ADD_EXACT_CODE = _decimal_add_exact.__code__
+_CANONICAL_DECIMAL_SUBTRACT_EXACT = _decimal_subtract_exact
+_CANONICAL_DECIMAL_SUBTRACT_EXACT_CODE = _decimal_subtract_exact.__code__
+_CANONICAL_DECIMAL_SCALE_BPS_EXACT = _decimal_scale_bps_exact
+_CANONICAL_DECIMAL_SCALE_BPS_EXACT_CODE = _decimal_scale_bps_exact.__code__
+
+
 @dataclass(frozen=True, slots=True)
 class _DerivedRunEconomics:
     pending_action_ids: tuple[str, ...]
@@ -120,6 +128,14 @@ def _derive_run_economics(
     action_ids: tuple[str, ...],
     attempts: tuple[PaperLegAttempt, ...],
 ) -> _DerivedRunEconomics:
+    decimal_add = _decimal_add_exact
+    if (
+        decimal_add is not _CANONICAL_DECIMAL_ADD_EXACT
+        or decimal_add.__code__ is not _CANONICAL_DECIMAL_ADD_EXACT_CODE
+    ):
+        raise PaperExecutionIntegrityError(
+            "PAPER exact Decimal addition authority changed"
+        )
     if len(attempts) > len(action_ids):
         raise PaperExecutionIntegrityError("durable attempts exceed reserved action list")
 
@@ -139,12 +155,12 @@ def _derive_run_economics(
             _OUTCOME_PARTIAL,
         }:
             assert attempt.execution_stake is not None
-            known_exposure = _decimal_add_exact(known_exposure, attempt.execution_stake)
+            known_exposure = decimal_add(known_exposure, attempt.execution_stake)
             worst_case = max(worst_case, known_exposure)
         elif attempt.outcome is _OUTCOME_UNKNOWN:
             worst_case = max(
                 worst_case,
-                _decimal_add_exact(known_exposure, attempt.requested_stake),
+                decimal_add(known_exposure, attempt.requested_stake),
             )
 
         if attempt.outcome is not _OUTCOME_ACCEPTED:
@@ -180,6 +196,10 @@ def _derive_run_economics(
         worst_case_exposure=worst_case,
         can_complete=can_complete,
     )
+
+
+_CANONICAL_DERIVE_RUN_ECONOMICS = _derive_run_economics
+_CANONICAL_DERIVE_RUN_ECONOMICS_CODE = _derive_run_economics.__code__
 
 
 class PaperExecutionLedger(_impl.PaperExecutionLedger):

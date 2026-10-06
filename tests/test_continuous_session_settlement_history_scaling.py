@@ -4305,8 +4305,11 @@ def test_bounded_running_guard_refreshes_external_pause_state() -> None:
                 "bounded running guard ignored an external durable PAUSE"
             )
 
+        canonical = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
         assert stale._state == continuous_session.SessionState.PAUSED.value
-        assert stale._generation == current.snapshot().cycles_completed * 0 + 1
+        assert stale._generation == canonical["generation"]
 
 
 def test_bounded_running_guard_skips_full_history_when_checkpoint_unchanged() -> None:

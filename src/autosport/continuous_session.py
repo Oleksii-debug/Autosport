@@ -2350,7 +2350,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         affected: list[str] = []
         full_refresh_required = False
-        backlog = False
+        last_has_more = False
 
         for _ in range(max_batches):
             batch = drain_invalidation(max_items=max_items)
@@ -2370,6 +2370,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     )
                     for key in batch.changed_keys
                 )
+                or len(set(batch.changed_keys)) != len(batch.changed_keys)
                 or (
                     batch.full_refresh_required
                     and (bool(batch.changed_keys) or batch.has_more)
@@ -2394,20 +2395,21 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
             affected.extend(routed)
             full_refresh_required = full_refresh_required or batch.full_refresh_required
+            last_has_more = batch.has_more
             if not batch.has_more:
                 break
-        else:
-            pending_count = invalidation_buffer.pending_count
-            pending_full_refresh = invalidation_buffer.full_refresh_required
-            if (
-                type(pending_count) is not int
-                or pending_count < 0
-                or type(pending_full_refresh) is not bool
-            ):
-                raise ContinuousSessionError(
-                    "invalidation buffer backlog state is invalid"
-                )
-            backlog = pending_count > 0 or pending_full_refresh
+
+        pending_count = invalidation_buffer.pending_count
+        pending_full_refresh = invalidation_buffer.full_refresh_required
+        if (
+            type(pending_count) is not int
+            or pending_count < 0
+            or type(pending_full_refresh) is not bool
+        ):
+            raise ContinuousSessionError(
+                "invalidation buffer backlog state is invalid"
+            )
+        backlog = last_has_more or pending_count > 0 or pending_full_refresh
         return tuple(dict.fromkeys(affected)), full_refresh_required, backlog
 
     def _refresh_source_state_projection(
@@ -2746,6 +2748,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self,
         *,
         resolutions: tuple[SettlementResolution, ...],
+        workspace: Path | None = None,
+        paper_book_path: Path | None = None,
+        initial_bankroll: str | None = None,
         _settlement_engine_type: type[SettlementEngine],
         _resolution_validate: Callable[..., None],
         _replace: Callable[..., SettlementResolution],
@@ -2771,9 +2776,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         if type(resolutions) is not tuple:
             raise TypeError("resolutions must be an exact tuple")
-        workspace = self.workspace
-        paper_book_path = self.paper_book_path
-        initial_bankroll = self.initial_bankroll
+        workspace = self.workspace if workspace is None else workspace
+        paper_book_path = (
+            self.paper_book_path if paper_book_path is None else paper_book_path
+        )
+        initial_bankroll = (
+            self.initial_bankroll if initial_bankroll is None else initial_bankroll
+        )
         unique: dict[str, SettlementResolution] = {}
         outcome_by_settlement: dict[tuple[str, str], dict[str, str]] = {}
         for resolution in resolutions:
@@ -2976,8 +2985,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _require_running_method(self)
         observation_token = state._checkpoint_token
         collector = self.collector
-        collector_run_cycle = collector.run_cycle
-        collector_source_id = collector.source_id
+        collector_run_cycle = getattr(collector, "run_cycle", None)
+        collector_source_id = getattr(collector, "source_id", None)
         if (
             type(collector_source_id) is not str
             or not collector_source_id
@@ -2987,19 +2996,28 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "collector source identity does not match continuous session"
             )
-        collector_delta_store = collector.delta_store
-        collector_delta_reader = collector_delta_store.deltas_after_commit
-        collector_max_items = collector.config.max_items
+        collector_delta_store = getattr(collector, "delta_store", None)
+        collector_delta_reader = getattr(
+            collector_delta_store,
+            "deltas_after_commit",
+            None,
+        )
+        collector_config = getattr(collector, "config", None)
+        collector_max_items = getattr(collector_config, "max_items", None)
         lifecycle = self.lifecycle
         lifecycle_register_eligible = getattr(lifecycle, "register_eligible", None)
         lifecycle_records = getattr(lifecycle, "records", None)
         market_store = self.market_store
         desktop_consumer = self.desktop_consumer
-        desktop_drain = desktop_consumer.drain
+        desktop_drain = getattr(desktop_consumer, "drain", None)
         invalidation_buffer = self.invalidation_buffer
-        invalidation_drain = invalidation_buffer.drain
+        invalidation_drain = getattr(invalidation_buffer, "drain", None)
         dependency_index = self.dependency_index
-        dependency_affected_inputs = dependency_index.affected_inputs
+        dependency_affected_inputs = getattr(
+            dependency_index,
+            "affected_inputs",
+            None,
+        )
         dependency_register = getattr(dependency_index, "register", None)
         dependency_unregister = getattr(dependency_index, "unregister", None)
         max_invalidation_batches = self.max_invalidation_batches_per_tick
@@ -3379,7 +3397,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     )
                     require_state_identity()
                     require_economic_context()
-                settled, evidence_ids = self._settle(resolutions=resolutions)
+                settled, evidence_ids = self._settle(
+                    resolutions=resolutions,
+                    workspace=workspace,
+                    paper_book_path=paper_book_path,
+                    initial_bankroll=initial_bankroll,
+                )
                 require_state_identity()
                 require_economic_context()
                 if reconcile_after_settlement is not None:

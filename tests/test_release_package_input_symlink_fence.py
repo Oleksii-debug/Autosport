@@ -286,6 +286,13 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                 '{"unsafe":true}\n',
                 encoding="utf-8",
             )
+            staging = root / "Autosport-V1"
+            staging.mkdir()
+            marker = staging / "keep.txt"
+            marker.write_text(
+                "preserve-on-windows-member-preflight-failure",
+                encoding="utf-8",
+            )
 
             with self.assertRaisesRegex(
                 ValueError,
@@ -293,6 +300,10 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             ):
                 self._build(paths)
 
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"),
+                "preserve-on-windows-member-preflight-failure",
+            )
             self.assertFalse(paths["package"].exists())
 
     def test_windows_member_validator_rejects_console_device_names(self) -> None:
@@ -318,6 +329,13 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                 "must-not-publish-as-file\n",
                 encoding="utf-8",
             )
+            staging = root / "Autosport-V1"
+            staging.mkdir()
+            marker = staging / "keep.txt"
+            marker.write_text(
+                "preserve-on-device-name-preflight-failure",
+                encoding="utf-8",
+            )
 
             with self.assertRaisesRegex(
                 ValueError,
@@ -325,7 +343,36 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             ):
                 self._build(paths)
 
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"),
+                "preserve-on-device-name-preflight-failure",
+            )
             self.assertFalse(paths["package"].exists())
+
+    def test_copy_tree_revalidates_windows_member_before_destination_write(self) -> None:
+        if os.name == "nt":
+            self.skipTest("console device names are not ordinary Windows files")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            unsafe = source / "CONIN$.txt"
+            unsafe.write_text("must-not-stage\n", encoding="utf-8")
+            destination = root / "staged"
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "release package contains reserved Windows device name",
+            ):
+                release_package._copy_regular_source_tree(
+                    source,
+                    destination,
+                    label="release example tree",
+                    windows_member_prefix="Autosport-V1/examples/demo",
+                )
+
+            self.assertFalse((destination / unsafe.name).exists())
 
     def test_builder_rejects_casefolded_windows_member_collision(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -338,6 +385,13 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             observed_names = {entry.name for entry in os.scandir(paths["example"])}
             if not {"Case.txt", "case.TXT"}.issubset(observed_names):
                 self.skipTest("filesystem is case-insensitive")
+            staging = root / "Autosport-V1"
+            staging.mkdir()
+            marker = staging / "keep.txt"
+            marker.write_text(
+                "preserve-on-collision-preflight-failure",
+                encoding="utf-8",
+            )
 
             with self.assertRaisesRegex(
                 ValueError,
@@ -345,6 +399,10 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             ):
                 self._build(paths)
 
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"),
+                "preserve-on-collision-preflight-failure",
+            )
             self.assertFalse(paths["package"].exists())
 
     def test_windows_member_set_rejects_file_directory_prefix_collision(self) -> None:
@@ -377,6 +435,13 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                 "child\n",
                 encoding="utf-8",
             )
+            staging = root / "Autosport-V1"
+            staging.mkdir()
+            marker = staging / "keep.txt"
+            marker.write_text(
+                "preserve-on-prefix-collision-preflight-failure",
+                encoding="utf-8",
+            )
 
             with self.assertRaisesRegex(
                 ValueError,
@@ -384,6 +449,10 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             ):
                 self._build(paths)
 
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"),
+                "preserve-on-prefix-collision-preflight-failure",
+            )
             self.assertFalse(paths["package"].exists())
 
     def test_portable_data_writer_rejects_file_directory_prefix_collision(self) -> None:
@@ -787,7 +856,7 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             with patch.object(Path, "lstat", new=lstat_with_reparse):
                 with self.assertRaisesRegex(
                     ValueError,
-                    "release example tree file market.jsonl must not be a Windows reparse point",
+                    r"release example tree file market\.jsonl must not be a Windows reparse point",
                 ):
                     self._build(paths)
 
@@ -873,9 +942,18 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             injected = False
             secret_read = False
 
-            def validate_then_inject(path: Path, *, label: str) -> None:
+            def validate_then_inject(
+                path: Path,
+                *,
+                label: str,
+                windows_member_prefix: str | None = None,
+            ) -> None:
                 nonlocal injected
-                real_require(path, label=label)
+                real_require(
+                    path,
+                    label=label,
+                    windows_member_prefix=windows_member_prefix,
+                )
                 if path == paths["example"] and not injected:
                     injected = True
                     late.mkdir()

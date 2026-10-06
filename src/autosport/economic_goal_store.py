@@ -303,6 +303,7 @@ def _snapshot_economic_goal_contract(
     _object_setattr=object.__setattr__,
     _error_type=EconomicGoalContractError,
     _snapshot=_canonical_contract_snapshot,
+    _ordered_field_names=_CONTRACT_KEYS_ORDERED,
 ) -> EconomicGoalContract:
     """Capture one validated, non-shared contract image for authority decisions."""
 
@@ -317,7 +318,7 @@ def _snapshot_economic_goal_contract(
     if values != final_values:
         raise _error_type("economic goal changed during persistence snapshot")
     snapshot = _object_new(_goal_type)
-    for name, value in zip(_CONTRACT_KEYS_ORDERED, final_values):
+    for name, value in zip(_ordered_field_names, final_values):
         _object_setattr(snapshot, name, value)
     _goal_validator(snapshot)
     return snapshot
@@ -336,6 +337,7 @@ def economic_goal_to_payload(
     _objective_value_getter=_CANONICAL_ENUM_VALUE_GETTER,
     _automation_value_getter=_CANONICAL_INT_ENUM_VALUE_GETTER,
     _snapshot=_canonical_contract_snapshot,
+    _ordered_field_names=_CONTRACT_KEYS_ORDERED,
 ) -> dict[str, object]:
     """Return the canonical schema-v1 JSON payload for ``contract``."""
 
@@ -350,7 +352,7 @@ def economic_goal_to_payload(
     if first_snapshot != second_snapshot:
         raise _error_type("economic goal changed during payload encoding")
 
-    values = dict(zip(_CONTRACT_KEYS_ORDERED, second_snapshot))
+    values = dict(zip(_ordered_field_names, second_snapshot))
     goal_id = values["goal_id"]
     revision = values["revision"]
     bankroll_id = values["bankroll_id"]

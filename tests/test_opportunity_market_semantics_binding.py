@@ -4,6 +4,8 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.opportunity as opportunity_module
+
 from autosport.domain import MarketEvent
 from autosport.forecasting import ForecastRecord
 from autosport.opportunity import (
@@ -187,3 +189,48 @@ def test_opportunity_rejects_tampered_forecast_semantics() -> None:
             claims_probability_edge=True,
             forecasts=(tampered,),
         )
+
+
+def test_market_semantics_validator_rebinding_cannot_launder_direct_or_serialized_refs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        opportunity_module,
+        "_optional_market_semantics_id",
+        lambda value, *_args, **_kwargs: value,
+    )
+
+    with pytest.raises(OpportunityContractError, match="market_semantics_id"):
+        QuoteRef(
+            event_id="event-rebind",
+            market_id="market-rebind",
+            selection_id="selection-rebind",
+            source_id="provider-rebind",
+            sequence=1,
+            decimal_odds=Decimal("2"),
+            observed_ts="2026-10-06T08:00:00+00:00",
+            source_ts=None,
+            ingest_ts="2026-10-06T08:00:01+00:00",
+            market_event_hash="a" * 64,
+            market_semantics_id="Football:match_odds:v1",
+        )
+
+    quote_payload = QuoteRef.from_market_event(
+        _event(semantics="football:match_odds:v1")
+    ).to_dict()
+    quote_payload["market_semantics_id"] = "Football:match_odds:v1"
+    with pytest.raises(OpportunityContractError, match="market_semantics_id"):
+        QuoteRef.from_dict(quote_payload)
+
+    valid_quote = QuoteRef.from_market_event(
+        _event(semantics="football:match_odds:v1"),
+        market_snapshot_hash="a" * 64,
+    )
+    forecast_ref = ForecastRef.from_forecast(
+        _forecast(valid_quote, semantics="football:match_odds:v1"),
+        valid_quote,
+    )
+    forecast_payload = forecast_ref.to_dict()
+    forecast_payload["market_semantics_id"] = "Football:match_odds:v1"
+    with pytest.raises(OpportunityContractError, match="market_semantics_id"):
+        ForecastRef.from_dict(forecast_payload)

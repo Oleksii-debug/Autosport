@@ -57,8 +57,15 @@ def _fixture_causal_advance():
     return closure[freevars.index("causal_advance")].cell_contents
 
 
-def _add_current_admission(workspace: Path, book: PaperBook, *, stake: str, suffix: str) -> str:
-    placed_at = _timestamp_now()
+def _add_current_admission(
+    workspace: Path,
+    book: PaperBook,
+    *,
+    stake: str,
+    suffix: str,
+    placed_at: str | None = None,
+) -> str:
+    placed_at = _timestamp_now() if placed_at is None else placed_at
     ticket = book.open_ticket(
         [_leg(suffix)],
         Decimal(stake),
@@ -168,3 +175,43 @@ def test_explicit_successor_resets_session_scope_without_erasing_paper_history(t
     assert after.confirmed_turnover == Decimal("0")
     assert after.residual_headroom == Decimal("10")
     assert after.constituent_count == 0
+
+
+
+def test_successor_boundary_equal_admission_fails_closed_without_session_binding(tmp_path):
+    goal_store = EconomicGoalStore(tmp_path)
+    goal_store.initialize_owner(_goal())
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    session_store = ProductEconomicSessionStore(tmp_path)
+    predecessor = session_store.current()
+
+    goal_store.persist_automatic_successor(_goal(revision=2))
+    successor = session_store.transition_to_current_goal(predecessor)
+
+    book = PaperBook.load(tmp_path / "paper_book.json")
+    _add_current_admission(
+        tmp_path,
+        book,
+        stake="1",
+        suffix="boundary-equal",
+        placed_at=successor.started_at,
+    )
+    book.save(tmp_path / "paper_book.json")
+    current = PaperBook.load(tmp_path / "paper_book.json")
+
+    import pytest
+    from autosport.risk_turnover_evidence import (
+        PaperSessionTurnoverEvidenceIncompleteError,
+    )
+
+    with pytest.raises(
+        PaperSessionTurnoverEvidenceIncompleteError,
+        match="boundary-equal",
+    ):
+        PaperSessionTurnoverResolver.resolve(
+            book=current,
+            goal_store=EconomicGoalStore(tmp_path),
+            session_store=session_store,
+            session_evidence=successor,
+        )

@@ -335,7 +335,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         self.assertEqual(amount, Decimal("10"))
         self.assertTrue(policy.evaluate(book, amount, context=context).allowed)
 
-    def test_lay_endogenous_stake_rounds_nonterminating_liability_inverse_down(self) -> None:
+    def test_lay_endogenous_stake_fails_closed_when_inverse_is_not_representable(self) -> None:
         goal = self._goal(
             max_stake_fraction=Decimal("1"),
             max_capital_at_risk_fraction=Decimal("0.20"),
@@ -350,11 +350,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             context=context,
         )
 
-        self.assertEqual(
-            amount,
-            Decimal("66.66666666666666666666666666"),
-        )
-        self.assertTrue(policy.evaluate(book, amount, context=context).allowed)
+        self.assertIsNone(amount)
 
     def test_lay_stake_vector_reserves_liability_in_shadow_book(self) -> None:
         goal = self._goal(

@@ -1588,6 +1588,87 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+    def test_duplicate_adopts_durable_affected_inputs_before_committed_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            provider_a = self._event(selection="selection-a", sequence=1)
+            provider_b = replace(
+                self._event(selection="selection-b", sequence=1),
+                source_id="provider-b",
+            )
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((provider_a, provider_b))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            future_a = self._event(
+                selection="selection-a",
+                sequence=2,
+                odds="2.10",
+                observed=self.START + timedelta(seconds=2),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(), (future_a,)]),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.register_input("input-b", selection_ids="selection-b")
+
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                first.affected_input_ids,
+                ("input-a", "input-b"),
+            )
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(
+                record.to_dict()["payload"]["affected_input_ids"],
+                ["input-a", "input-b"],
+            )
+
+            duplicate = loop.run_cycle()
+            self.assertEqual(
+                duplicate.status,
+                LiveCycleStatus.DUPLICATE_DECISION,
+            )
+            self.assertEqual(duplicate.decision_id, first.decision_id)
+            self.assertEqual(duplicate.affected_input_ids, ("input-a",))
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+            committed = json.loads(
+                loop.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(committed["phase"], "committed")
+            self.assertEqual(
+                committed["affected_input_ids"],
+                ["input-a", "input-b"],
+            )
+            loop.close()
+
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            self.assertEqual(
+                resumed.dependencies.input_ids,
+                ("input-a", "input-b"),
+            )
+            resumed.close()
+
     def test_duplicate_append_pending_restart_tolerates_recovery_frontier_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

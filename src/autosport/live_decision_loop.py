@@ -3973,6 +3973,50 @@ class PersistentLiveDecisionLoop:
                     raise DecisionLedgerIntegrityError(
                         "durable actionability WAIT evidence changed"
                     )
+                detached_existing_payload = existing.to_dict()["payload"]
+                existing_affected_raw = detached_existing_payload.get(
+                    "affected_input_ids"
+                )
+                if (
+                    type(existing_affected_raw) is not list
+                    or any(
+                        type(input_id) is not str
+                        for input_id in existing_affected_raw
+                    )
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "durable live decision affected-input evidence is invalid"
+                    )
+                try:
+                    existing_affected_input_ids = tuple(
+                        _canonical_text(
+                            "durable affected input id",
+                            input_id,
+                        )
+                        for input_id in existing_affected_raw
+                    )
+                except ValueError as exc:
+                    raise DecisionLedgerIntegrityError(
+                        "durable live decision affected-input evidence is invalid"
+                    ) from exc
+                existing_affected_set = frozenset(existing_affected_input_ids)
+                if len(existing_affected_set) != len(existing_affected_input_ids):
+                    raise DecisionLedgerIntegrityError(
+                        "durable live decision affected-input evidence is not unique"
+                    )
+                if not existing_affected_set.issubset(durable_input_ids):
+                    raise LiveDecisionProgressError(
+                        "durable duplicate live decision references retired "
+                        "affected input"
+                    )
+                if canonical_actionability_wait is not None and any(
+                    item["input_id"] not in existing_affected_set
+                    for item in canonical_actionability_wait
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "durable actionability WAIT evidence references an "
+                        "unaffected input"
+                    )
                 existing_health_raw = existing.payload.get("health_boundaries")
                 if existing_health_raw is None:
                     existing_health_boundaries = None
@@ -4005,7 +4049,11 @@ class PersistentLiveDecisionLoop:
                         raise DecisionLedgerIntegrityError(
                             "durable actionability WAIT provider-health horizon changed"
                         ) from exc
-                if existing_health_boundaries != durable_progress.health_boundaries:
+                if (
+                    existing_health_boundaries != durable_progress.health_boundaries
+                    or existing_affected_input_ids
+                    != durable_progress.affected_input_ids
+                ):
                     durable_progress = _Progress(
                         loop_id=durable_progress.loop_id,
                         phase=durable_progress.phase,
@@ -4014,7 +4062,7 @@ class PersistentLiveDecisionLoop:
                         market_append_generation=durable_progress.market_append_generation,
                         health_boundaries=existing_health_boundaries,
                         decision_context_sha256=durable_progress.decision_context_sha256,
-                        affected_input_ids=durable_progress.affected_input_ids,
+                        affected_input_ids=existing_affected_input_ids,
                         registered_input_ids=durable_progress.registered_input_ids,
                         decision_id=durable_progress.decision_id,
                         plan_sha256=durable_progress.plan_sha256,
@@ -4072,7 +4120,7 @@ class PersistentLiveDecisionLoop:
                 market_append_generation=durable_progress.market_append_generation,
                 health_boundaries=durable_progress.health_boundaries,
                 decision_context_sha256=decision_context_sha256,
-                affected_input_ids=affected_input_ids,
+                affected_input_ids=durable_progress.affected_input_ids,
                 registered_input_ids=durable_input_ids,
                 decision_id=decision_id,
                 plan_sha256=plan.plan_sha256,

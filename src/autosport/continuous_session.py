@@ -3509,6 +3509,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             FocusedMirrorDependencyIndex
         ),
         _dependency_type: type[FocusedMirrorDependency] = FocusedMirrorDependency,
+        _dependency_matches: Callable[[FocusedMirrorDependency, object], bool] = (
+            FocusedMirrorDependency.matches
+        ),
+        _dependency_matches_code: object = FocusedMirrorDependency.matches.__code__,
+        _dependency_equals: Callable[[FocusedMirrorDependency, object], object] = (
+            FocusedMirrorDependency.__eq__
+        ),
+        _dependency_equals_code: object = FocusedMirrorDependency.__eq__.__code__,
         _dependency_reader: Callable[
             [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
         ] = FocusedMirrorDependencyIndex._dependency,
@@ -3594,6 +3602,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
             or FocusedMirrorDependencyIndex is not _dependency_index_type
+            or FocusedMirrorDependency is not _dependency_type
+            or _dependency_type.matches is not _dependency_matches
+            or getattr(_dependency_matches, "__code__", None)
+            is not _dependency_matches_code
+            or _dependency_type.__eq__ is not _dependency_equals
+            or getattr(_dependency_equals, "__code__", None)
+            is not _dependency_equals_code
             or _dependency_index_type._dependency is not _dependency_reader
             or getattr(_dependency_reader, "__code__", None)
             is not _dependency_reader_code
@@ -3783,6 +3798,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     is not _dependency_unregister_method
                     or getattr(_dependency_unregister_method, "__code__", None)
                     is not _dependency_unregister_method_code
+                    or _dependency_type.matches is not _dependency_matches
+                    or getattr(_dependency_matches, "__code__", None)
+                    is not _dependency_matches_code
+                    or _dependency_type.__eq__ is not _dependency_equals
+                    or getattr(_dependency_equals, "__code__", None)
+                    is not _dependency_equals_code
+                    or _dependency_index_type._dependency is not _dependency_reader
+                    or getattr(_dependency_reader, "__code__", None)
+                    is not _dependency_reader_code
+                    or _dependency_index_type.matching_keys is not _matching_keys_reader
+                    or getattr(_matching_keys_reader, "__code__", None)
+                    is not _matching_keys_reader_code
                     or getattr(dependency_affected_inputs, "__self__", None)
                     is not dependency_index
                     or getattr(dependency_affected_inputs, "__func__", None)

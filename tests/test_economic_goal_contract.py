@@ -396,3 +396,20 @@ def test_automatic_transition_ignores_rebound_contract_type_and_error_bindings(m
 
     with pytest.raises(EconomicGoalContractError, match="must not increase"):
         validate_automatic_transition(previous, candidate)
+
+
+
+def test_contract_validation_ignores_rebound_scalar_bounds(monkeypatch) -> None:
+    monkeypatch.setattr(economic_goal_module, "_ZERO", Decimal("-999"))
+    monkeypatch.setattr(economic_goal_module, "_ONE", Decimal("999"))
+    monkeypatch.setattr(economic_goal_module, "_MAX_CANONICAL_TEXT_CHARS", 10000)
+    monkeypatch.setattr(economic_goal_module, "_MAX_RESTRICTION_MEMBERS", 10000)
+
+    with pytest.raises(EconomicGoalContractError, match="between 0 and 1"):
+        _goal(max_stake_fraction=Decimal("2"))
+    with pytest.raises(EconomicGoalContractError, match="non-negative"):
+        _goal(max_turnover_fraction=Decimal("-1"))
+    with pytest.raises(EconomicGoalContractError, match="text size limit"):
+        _goal(goal_id="g" * 513)
+    with pytest.raises(EconomicGoalContractError, match="restriction-count limit"):
+        _goal(blocked_sports=frozenset(f"sport:{index}" for index in range(1025)))

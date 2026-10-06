@@ -2508,7 +2508,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         dependency_authority: tuple[FocusedMirrorDependency, ...] | None = None
         dependency_mirror: object | None = None
-        if type(dependency_index) is FocusedMirrorDependencyIndex:
+        if isinstance(dependency_index, FocusedMirrorDependencyIndex):
             if (
                 FocusedMirrorDependencyIndex._dependency is not _dependency_reader
                 or getattr(_dependency_reader, "__code__", None)

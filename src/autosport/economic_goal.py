@@ -513,7 +513,7 @@ def _validate_contract_bound(
     """Validate contract fields through captured slot descriptors."""
 
     if _type(self) is not _contract_type:
-        raise _error__type("economic goal must use the exact contract type")
+        raise _error_type("economic goal must use the exact contract type")
     values = _snapshot(self, _field_getters)
     (
         goal_id, revision, bankroll_id, currency, objective,
@@ -532,14 +532,14 @@ def _validate_contract_bound(
     _text_validator("bankroll_id", bankroll_id)
     currency = _text_validator("currency", currency)
     if _len(currency) != 3 or not currency.isascii() or not currency.isalpha():
-        raise _error__type("currency must be a three-letter uppercase ASCII code")
+        raise _error_type("currency must be a three-letter uppercase ASCII code")
     if currency != currency.upper():
-        raise _error__type("currency must be a three-letter uppercase ASCII code")
+        raise _error_type("currency must be a three-letter uppercase ASCII code")
     if (
         _type(objective) is not _objective_type
         or objective is not _objective_member
     ):
-        raise _error__type("objective must be an EconomicObjective")
+        raise _error_type("objective must be an EconomicObjective")
 
     _fraction_validator("max_stake_fraction", max_stake_fraction)
     _optional_nonnegative_decimal_validator("max_stake_amount", max_stake_amount)
@@ -563,9 +563,9 @@ def _validate_contract_bound(
         _type(automation_level) is not _automation_type
         or not _member_validator(automation_level, _automation_members)
     ):
-        raise _error__type("automation_level must be an AutomationLevel")
+        raise _error_type("automation_level must be an AutomationLevel")
     if _type(emergency_stop) is not bool:
-        raise _error__type("emergency_stop must be a bool")
+        raise _error_type("emergency_stop must be a bool")
 
     _restrictions_validator("blocked_sports", blocked_sports)
     _restrictions_validator("blocked_providers", blocked_providers)
@@ -990,7 +990,7 @@ def _validate_automatic_transition_bound(
         _type(previous) is not _contract_type
         or _type(candidate) is not _contract_type
     ):
-        raise _error__type("automatic transition requires EconomicGoalContract instances")
+        raise _error_type("automatic transition requires EconomicGoalContract instances")
 
     _contract_validator(previous)
     _contract_validator(candidate)
@@ -1001,7 +1001,7 @@ def _validate_automatic_transition_bound(
     previous_after = _snapshot(previous)
     candidate_after = _snapshot(candidate)
     if previous_before != previous_after or candidate_before != candidate_after:
-        raise _error__type("economic goal changed during automatic transition validation")
+        raise _error_type("economic goal changed during automatic transition validation")
 
     previous_view = _dict(_zip(_field_names, previous_after))
     candidate_view = _dict(_zip(_field_names, candidate_after))
@@ -1012,7 +1012,7 @@ def _validate_automatic_transition_bound(
     _same_guard("objective", previous_view["objective"], candidate_view["objective"])
 
     if candidate_view["revision"] != previous_view["revision"] + 1:
-        raise _error__type("automatic transition must advance revision by exactly one")
+        raise _error_type("automatic transition must advance revision by exactly one")
 
     _cap_guard("max_stake_fraction", previous_view["max_stake_fraction"], candidate_view["max_stake_fraction"])
     _optional_cap_guard("max_stake_amount", previous_view["max_stake_amount"], candidate_view["max_stake_amount"])
@@ -1036,9 +1036,9 @@ def _validate_automatic_transition_bound(
         _automation_value(candidate_view["automation_level"])
         > _automation_value(previous_view["automation_level"])
     ):
-        raise _error__type("automatic transition must not increase automation_level")
+        raise _error_type("automatic transition must not increase automation_level")
     if previous_view["emergency_stop"] and not candidate_view["emergency_stop"]:
-        raise _error__type("automatic transition must not clear emergency_stop")
+        raise _error_type("automatic transition must not clear emergency_stop")
 
     _restrictions_guard("blocked_sports", previous_view["blocked_sports"], candidate_view["blocked_sports"])
     _restrictions_guard("blocked_providers", previous_view["blocked_providers"], candidate_view["blocked_providers"])

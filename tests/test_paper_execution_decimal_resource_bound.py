@@ -161,6 +161,17 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
 
         self.assertEqual(result, Decimal("3.50"))
 
+    def test_public_decimal_arithmetic_tcb_exposes_no_mutable_defaults(self) -> None:
+        for operation in (
+            public_paper._decimal_coefficient,
+            public_paper._decimal_from_coefficient,
+            public_paper._decimal_add_exact,
+            public_paper._decimal_subtract_exact,
+            public_paper._decimal_scale_bps_exact,
+        ):
+            self.assertIsNone(operation.__defaults__)
+            self.assertIsNone(operation.__kwdefaults__)
+
     def test_public_decimal_coefficient_boundary_avoids_int_string_limit(self) -> None:
         coefficient = 10 ** 8191
 

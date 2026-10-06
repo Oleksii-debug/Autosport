@@ -1015,7 +1015,14 @@ def _capture_callable_authority_graph(root):
     return tuple(captured)
 
 
-def _make_store_callable_authority(operation, label: str):
+def _make_store_callable_authority(
+    operation,
+    label: str,
+    _enumerate=enumerate,
+    _getattr=getattr,
+    _tuple=tuple,
+    _error_type=EconomicGoalContractError,
+):
     authority_graph = _capture_callable_authority_graph(operation)
 
     def require_authority() -> None:
@@ -1025,23 +1032,23 @@ def _make_store_callable_authority(operation, label: str):
             expected_defaults,
             expected_kwdefaults,
             expected_kwdefault_items,
-        ) in enumerate(authority_graph):
+        ) in _enumerate(authority_graph):
             suffix = "" if index == 0 else " transitive nested"
-            if getattr(callable_object, "__code__", None) is not expected_code:
-                raise EconomicGoalContractError(
+            if _getattr(callable_object, "__code__", None) is not expected_code:
+                raise _error_type(
                     f"{label}{suffix} authority changed"
                 )
-            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
-                raise EconomicGoalContractError(
+            if _getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                raise _error_type(
                     f"{label}{suffix} defaults authority changed"
                 )
-            current_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
+            current_kwdefaults = _getattr(callable_object, "__kwdefaults__", None)
             if (
                 current_kwdefaults is not expected_kwdefaults
-                or tuple((current_kwdefaults or {}).items())
+                or _tuple((current_kwdefaults or {}).items())
                 != expected_kwdefault_items
             ):
-                raise EconomicGoalContractError(
+                raise _error_type(
                     f"{label}{suffix} keyword defaults authority changed"
                 )
 

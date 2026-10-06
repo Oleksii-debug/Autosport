@@ -2016,3 +2016,53 @@ def test_public_payload_encoder_rejects_transitive_contract_validator_mutation()
             economic_goal_to_payload(goal)
     finally:
         nested_validator.__code__ = original_code
+
+def test_store_callable_authority_ignores_rebound_introspection_globals(
+    monkeypatch,
+) -> None:
+    def operation(_value):
+        return "canonical"
+
+    bound = economic_goal_store_module._make_store_callable_authority(
+        operation,
+        "synthetic",
+    )
+    original_code = operation.__code__
+
+    def forged_operation(_value):
+        return "forged"
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "enumerate",
+        lambda *_args, **_kwargs: (),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "getattr",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "tuple",
+        lambda *_args, **_kwargs: (),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "EconomicGoalContractError",
+        RuntimeError,
+    )
+
+    operation.__code__ = forged_operation.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="synthetic authority changed",
+        ):
+            bound(object())
+    finally:
+        operation.__code__ = original_code
+

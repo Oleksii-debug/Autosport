@@ -33,6 +33,7 @@ _TRUST_ROOT_PATHS = frozenset(
         "pyproject.toml",
         "scripts/build_windows.ps1",
         "scripts/build_windows_candidate.ps1",
+        "scripts/windows_build_skip_gate.ps1",
         "scripts/evidence_export_package_smoke.ps1",
         "scripts/external_uia_audit.ps1",
         "scripts/nvda_evidence_package_smoke.ps1",

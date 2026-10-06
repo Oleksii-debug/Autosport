@@ -22,6 +22,7 @@ def policy_payload() -> dict:
             "pyproject.toml",
             "scripts/build_windows.ps1",
             "scripts/build_windows_candidate.ps1",
+            "scripts/windows_build_skip_gate.ps1",
             "scripts/evidence_export_package_smoke.ps1",
             "scripts/external_uia_audit.ps1",
             "scripts/nvda_evidence_package_smoke.ps1",
@@ -52,6 +53,60 @@ class ProtectedTreeGateRunnerTests(unittest.TestCase):
         self.assertTrue(policy.protects(".github/workflows/ci.yml"))
         self.assertTrue(policy.protects("scripts/verify_protected_tree_gate.py"))
         self.assertTrue(policy.protects("scripts/build_windows_candidate.ps1"))
+        self.assertTrue(policy.protects("scripts/windows_build_skip_gate.ps1"))
+
+    def test_policy_cannot_drop_windows_candidate_skip_gate_helper(self) -> None:
+        payload = policy_payload()
+        payload["protected_paths"].remove("scripts/windows_build_skip_gate.ps1")
+        with self.assertRaisesRegex(
+            runner.ProtectedTreeRunnerError,
+            "windows_build_skip_gate.ps1",
+        ):
+            runner._decode_policy_bytes(json.dumps(payload).encode("utf-8"))
+
+    def test_windows_candidate_skip_gate_helper_change_is_rejected(self) -> None:
+        policy = runner._decode_policy_bytes(
+            (json.dumps(policy_payload()) + "\n").encode("utf-8")
+        )
+        base_paths = set(policy.protected_paths)
+        base_paths.add(".github/workflows/ci.yml")
+        base_tree = tuple(
+            runner.GitTreeEntry(
+                path=path,
+                mode="100644",
+                object_type="blob",
+                object_id=A,
+            )
+            for path in sorted(base_paths)
+        )
+        trusted_manifest = tuple(
+            item for item in base_tree if policy.protects(item.path)
+        )
+        candidate_tree = tuple(
+            runner.GitTreeEntry(
+                path=item.path,
+                mode=item.mode,
+                object_type=item.object_type,
+                object_id=(
+                    B
+                    if item.path == "scripts/windows_build_skip_gate.ps1"
+                    else item.object_id
+                ),
+            )
+            for item in base_tree
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "without base-trusted allowlist",
+        ):
+            runner.verify_base_trusted_protected_tree(
+                base_tree=base_tree,
+                candidate_tree=candidate_tree,
+                trusted_base_manifest=trusted_manifest,
+                policy=policy,
+            )
+
         self.assertTrue(policy.protects("scripts/package_windows.py"))
 
     def test_duplicate_policy_key_fails_closed(self) -> None:

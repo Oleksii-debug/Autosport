@@ -352,3 +352,16 @@ def test_verification_ignores_rebound_provenance_field_descriptor(monkeypatch) -
 
     with pytest.raises(EconomicGoalProvenanceError, match="contract_sha256 mismatch"):
         verify_provenance(goal, evidence)
+
+
+def test_provenance_ignores_rebound_module_evidence_type(monkeypatch) -> None:
+    goal = _goal()
+    evidence = provenance_for(goal)
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "EconomicGoalProvenance",
+        object,
+    )
+
+    verify_provenance(goal, evidence)
+    assert evidence.decision_identity

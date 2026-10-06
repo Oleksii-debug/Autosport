@@ -1425,3 +1425,177 @@ def test_late_canonical_transport_shadow_cannot_mint_provider_origin() -> None:
             is None
         )
 
+def test_caller_clock_cannot_mint_provider_origin_authority(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, _approval, _ledger, action, goal_store = _prepared(tmp)
+        gate = betfair_execution.BetfairSupervisedExecutionGate.from_economic_goal_store(
+            goal_store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            profile_sha256=profile.profile_id,
+        )
+        calls: list[dict[str, object]] = []
+
+        def provider_post(
+            self,
+            url: str,
+            *,
+            headers,
+            body: bytes,
+            timeout_seconds: float,
+        ) -> bytes:
+            request = json.loads(body.decode("utf-8"))
+            calls.append(
+                {
+                    "url": url,
+                    "headers": dict(headers),
+                    "request": request,
+                    "timeout_seconds": timeout_seconds,
+                }
+            )
+            return _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+
+        monkeypatch.setattr(
+            betfair_execution.UrllibBetfairHttpTransport,
+            "post",
+            provider_post,
+        )
+        monkeypatch.setattr(
+            betfair_execution,
+            "_execution_provider_network_dispatch_is_current",
+            lambda: True,
+        )
+        client = betfair_execution.BetfairSupervisedPlaceOrdersClient(
+            betfair_execution.BetfairSessionCredentials(
+                "app-key",
+                "session-token",
+            ),
+            gate=gate,
+            clock=lambda: READBACK_AT,
+        )
+
+        report = client.place_action(
+            action,
+            profile=profile,
+            bound=bound,
+            provider_order_ref="a" * 32,
+            execution_workspace=Path(tmp),
+        )
+
+        assert len(calls) == 1
+        assert report.observed_at == READBACK_AT
+        assert report.provider_origin_authoritative is False
+
+
+def test_product_clock_can_retain_provider_origin_authority(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, _approval, _ledger, action, goal_store = _prepared(tmp)
+        gate = betfair_execution.BetfairSupervisedExecutionGate.from_economic_goal_store(
+            goal_store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            profile_sha256=profile.profile_id,
+        )
+
+        def provider_post(
+            self,
+            url: str,
+            *,
+            headers,
+            body: bytes,
+            timeout_seconds: float,
+        ) -> bytes:
+            request = json.loads(body.decode("utf-8"))
+            return _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+
+        monkeypatch.setattr(
+            betfair_execution.UrllibBetfairHttpTransport,
+            "post",
+            provider_post,
+        )
+        monkeypatch.setattr(
+            betfair_execution,
+            "_execution_provider_network_dispatch_is_current",
+            lambda: True,
+        )
+        client = betfair_execution.BetfairSupervisedPlaceOrdersClient(
+            betfair_execution.BetfairSessionCredentials(
+                "app-key",
+                "session-token",
+            ),
+            gate=gate,
+        )
+
+        report = client.place_action(
+            action,
+            profile=profile,
+            bound=bound,
+            provider_order_ref="b" * 32,
+            execution_workspace=Path(tmp),
+        )
+
+        assert report.provider_origin_authoritative is True
+
+
+def test_post_response_dependency_drift_fails_closed_after_submission() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        holder: dict[str, object] = {}
+
+        def mutate_after_response(request):
+            client = holder["client"]
+            assert isinstance(
+                client,
+                betfair_execution.BetfairSupervisedPlaceOrdersClient,
+            )
+            client._clock = lambda: "2030-01-01T00:00:00+00:00"
+            return _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+
+        transport = _Transport(mutate_after_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+        holder["client"] = client
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-post-response-dependency-drift",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert len(transport.calls) == 1
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert (
+            ledger.provider_evidence_binding(
+                "attempt-post-response-dependency-drift"
+            )
+            is None
+        )
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        attempt = next(
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id
+            == "attempt-post-response-dependency-drift"
+        )
+        assert attempt.submitted_at is not None
+        assert attempt.provider_evidence is None
+

@@ -813,3 +813,41 @@ def test_public_transition_ignores_rebound_snapshotter_alias(monkeypatch) -> Non
 
     validate_automatic_transition(previous, candidate)
     previous.validate_automatic_successor(candidate)
+
+
+def test_contract_validator_rejects_transitive_nested_code_mutation() -> None:
+    nested_decimal_validator = economic_goal_module._decimal
+    original_code = nested_decimal_validator.__code__
+
+    def forged_decimal_validator(_name, value, *args, **kwargs):
+        return value
+
+    nested_decimal_validator.__code__ = forged_decimal_validator.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="economic-goal contract nested validator authority changed",
+        ):
+            _goal()
+    finally:
+        nested_decimal_validator.__code__ = original_code
+
+
+def test_transition_validator_rejects_transitive_contract_validation_mutation() -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+    nested_decimal_validator = economic_goal_module._decimal
+    original_code = nested_decimal_validator.__code__
+
+    def forged_decimal_validator(_name, value, *args, **kwargs):
+        return value
+
+    nested_decimal_validator.__code__ = forged_decimal_validator.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="economic-goal contract nested validator authority changed",
+        ):
+            validate_automatic_transition(previous, candidate)
+    finally:
+        nested_decimal_validator.__code__ = original_code

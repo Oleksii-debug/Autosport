@@ -2406,6 +2406,38 @@ def test_exact_paperbook_type_remains_operational_after_type_authority_seal(
     assert restored.tickets[ticket.ticket_id].legs[0].locked_odds == Decimal("2.00")
 
 
+def test_canonical_type_authority_ignores_rebound_type_builtin(monkeypatch) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    def hostile_type(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound type builtin executed")
+
+    monkeypatch.setattr(paper_module, "type", hostile_type, raising=False)
+
+    paper_module._require_paperbook_type_authority(book)
+
+    assert attacker_calls == 0
+
+
+def test_canonical_type_authority_uses_captured_error_type(monkeypatch) -> None:
+    attacker_calls = 0
+
+    def hostile_error(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound ValueError executed")
+
+    monkeypatch.setattr(paper_module, "ValueError", hostile_error, raising=False)
+
+    with pytest.raises(ValueError, match="canonical PaperBook type"):
+        paper_module._require_paperbook_type_authority(object())
+
+    assert attacker_calls == 0
+
+
 def test_constructor_ignores_rebound_canonical_type_authority(monkeypatch) -> None:
     attacker_calls = 0
 
@@ -2552,6 +2584,47 @@ def test_load_rejects_in_place_snapshot_path_helper_code_mutation(tmp_path) -> N
             PaperBook.load(path)
     finally:
         authority.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    "dependency_name",
+    (
+        "Decimal",
+        "DecimalException",
+        "_MAX_PAPER_DECIMAL_TEXT_CHARS",
+        "str",
+        "int",
+        "float",
+        "type",
+        "len",
+        "ValueError",
+    ),
+)
+def test_constructor_rejects_decimal_dependency_rebinding_before_execution(
+    monkeypatch,
+    dependency_name: str,
+) -> None:
+    attacker_calls = 0
+
+    def hostile_dependency(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound constructor dependency executed")
+
+    monkeypatch.setattr(
+        paper_module,
+        dependency_name,
+        hostile_dependency,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"constructor module dependency changed: {dependency_name}",
+    ):
+        PaperBook("100")
+
+    assert attacker_calls == 0
 
 
 def test_constructor_rejects_rebound_canonical_decimal_helper_before_execution(

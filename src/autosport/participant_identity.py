@@ -536,20 +536,37 @@ class ParticipantIdentityRegistry:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ParticipantIdentityError(f"cannot load identity registry: {exc}") from exc
-        if not isinstance(raw, dict) or raw.get("schema") != _SCHEMA or raw.get("version") != _VERSION:
+        expected_fields = {
+            "schema",
+            "version",
+            "entities",
+            "aliases",
+            "rosters",
+            "lineages",
+        }
+        if (
+            type(raw) is not dict
+            or set(raw) != expected_fields
+            or raw.get("schema") != _SCHEMA
+            or raw.get("version") != _VERSION
+            or any(
+                type(raw[field]) is not list
+                for field in ("entities", "aliases", "rosters", "lineages")
+            )
+        ):
             raise ParticipantIdentityError("unsupported identity registry schema")
         self._loading = True
         try:
-            for item in raw.get("entities", []):
+            for item in raw["entities"]:
                 entity = EntityIdentity(item["entity_id"], EntityKind(item["kind"]), item["source_reference"], item["evidence_sha256"], item["first_known_at"], item["available_at"])
                 if entity.entity_id in self._entities:
                     raise ParticipantIdentityError("duplicate entity identity")
                 self._entities[entity.entity_id] = entity
-            for item in raw.get("aliases", []):
+            for item in raw["aliases"]:
                 self.add_alias(AliasRecord(**item))
-            for item in raw.get("rosters", []):
+            for item in raw["rosters"]:
                 self.add_roster_membership(RosterMembership(**item))
-            for item in raw.get("lineages", []):
+            for item in raw["lineages"]:
                 self.add_lineage(EntityLineage(
                     item["predecessor_entity_id"], item["successor_entity_id"],
                     LineageRelation(item["relation"]), item["effective_from"],

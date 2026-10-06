@@ -40,7 +40,11 @@ _RECOVERY_HEDGE_REVIEW_REQUIRED = RecoveryDecision.HEDGE_REVIEW_REQUIRED
 _CANONICAL_DECIMAL_TYPE = Decimal
 _CANONICAL_TEXT_VALIDATOR = _impl._CANONICAL_TEXT_VALIDATOR
 _CANONICAL_DECIMAL_PARSER = _impl._CANONICAL_DECIMAL_PARSER
+_CANONICAL_DECIMAL_PARSER_IDENTITY = _CANONICAL_DECIMAL_PARSER
+_CANONICAL_DECIMAL_PARSER_CODE = _CANONICAL_DECIMAL_PARSER.__code__
 _CANONICAL_DECIMAL_TEXT_FORMATTER = _impl._CANONICAL_DECIMAL_TEXT_FORMATTER
+_CANONICAL_DECIMAL_TEXT_FORMATTER_IDENTITY = _CANONICAL_DECIMAL_TEXT_FORMATTER
+_CANONICAL_DECIMAL_TEXT_FORMATTER_CODE = _CANONICAL_DECIMAL_TEXT_FORMATTER.__code__
 _CANONICAL_CANONICALIZER = _impl._CANONICAL_CANONICALIZER
 _CANONICAL_TIMESTAMP_PARSER = _impl._CANONICAL_TIMESTAMP_PARSER
 _CANONICAL_TIMESTAMP_FORMATTER = _impl._CANONICAL_TIMESTAMP_FORMATTER
@@ -242,7 +246,15 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         run_id = _CANONICAL_TEXT_VALIDATOR(run_id, "run_id")
         if type(recovery_decision) is not _CANONICAL_RECOVERY_DECISION_TYPE:
             raise TypeError("recovery_decision must be exact RecoveryDecision")
-        supplied_exposure = _CANONICAL_DECIMAL_PARSER(
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if (
+            decimal_parser is not _CANONICAL_DECIMAL_PARSER_IDENTITY
+            or decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER Decimal parser authority changed"
+            )
+        supplied_exposure = decimal_parser(
             worst_case_exposure,
             "worst_case_exposure",
             allow_zero=True,
@@ -297,8 +309,23 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             payload = {
                 "pending_action_ids": list(derived.pending_action_ids),
                 "recovery_decision": derived.recovery_decision.value,
-                "worst_case_exposure": _CANONICAL_DECIMAL_TEXT_FORMATTER(
-                    derived.worst_case_exposure
+                "worst_case_exposure": (
+                    (
+                        lambda decimal_formatter: (
+                            decimal_formatter(derived.worst_case_exposure)
+                            if (
+                                decimal_formatter
+                                is _CANONICAL_DECIMAL_TEXT_FORMATTER_IDENTITY
+                                and decimal_formatter.__code__
+                                is _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE
+                            )
+                            else (_ for _ in ()).throw(
+                                PaperExecutionIntegrityError(
+                                    "PAPER Decimal formatter authority changed"
+                                )
+                            )
+                        )
+                    )(_CANONICAL_DECIMAL_TEXT_FORMATTER)
                 ),
             }
             self._append_completion_unlocked(
@@ -390,7 +417,15 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     payload["recovery_decision"]
                 )
                 pending = tuple(pending_raw)
-                exposure = _CANONICAL_DECIMAL_PARSER(
+                decimal_parser = _CANONICAL_DECIMAL_PARSER
+                if (
+                    decimal_parser is not _CANONICAL_DECIMAL_PARSER_IDENTITY
+                    or decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER Decimal parser authority changed"
+                    )
+                exposure = decimal_parser(
                     exposure_raw,
                     "worst_case_exposure",
                     allow_zero=True,

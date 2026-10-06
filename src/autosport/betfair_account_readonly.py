@@ -18,6 +18,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from weakref import ref
 
+from .real_execution_ledger import _validate_decimal_text_resource_bound
+
 ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v1"
 BETTING_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 ADAPTER_ID = "betfair-exchange-jsonrpc-readonly"
@@ -1377,6 +1379,15 @@ def _enum_text(value: object, field: str, allowed: set[str]) -> str:
 def _decimal(value: object, field: str) -> Decimal:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise BetfairReadOnlyError(f"{field} must be a finite Decimal")
+    try:
+        # Reuse the canonical execution Decimal resource law before any
+        # downstream arithmetic. Exponent-form provider numbers can be finite
+        # yet make Decimal addition/formatting allocate or overflow.
+        _validate_decimal_text_resource_bound(value)
+    except ValueError:
+        raise BetfairReadOnlyError(
+            f"{field} exceeds the canonical Decimal resource limit"
+        ) from None
     return value
 
 

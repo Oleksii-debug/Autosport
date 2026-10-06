@@ -524,7 +524,14 @@ def _install_projection_gate_authority() -> None:
         if state is not None:
             validate_state(state)
             self._last_observed_at_utc_us = state.last_observed_at_utc_us
-            self._active = {lease.request_id: lease for lease in state.active}
+            self._active = {
+                lease.request_id: make_lease(
+                    lease.request_id,
+                    lease.acquired_at_utc_us,
+                    lease.generation,
+                )
+                for lease in state.active
+            }
             self._next_lease_generation = state.next_lease_generation
 
     def snapshot(

@@ -62,26 +62,72 @@ class ParlayApiProductSource:
     _STREAM_EPOCH = "parlayapi-table-tennis-product-v1"
     _READ_BATCH_ITEMS = 1000
     _MAX_SNAPSHOT_ITEMS = 50_000
-    _STATE_FIELDS = {
-        "schema",
-        "schema_version",
-        "source_id",
-        "stream_epoch",
-        "workspace_instance_id",
-        "generation",
-        "authority_tx_id",
-        "last_catalog_position",
-        "last_catalog_cursor",
-        "last_catalog_page_sha256",
-        "last_confirmed_delta_position",
-        "last_confirmed_delta_cursor",
-        "last_confirmed_delta_id",
-        "last_committed_quote_digests",
-        "last_committed_dedupe_digests",
-        "pending",
-        "event_cache",
-        "state_sha256",
-    }
+    _AUTHORITY_FIELDS = frozenset(
+        {
+            "_authority_fields_sealed",
+            "provider",
+            "source_id",
+            "stream_epoch",
+            "workspace",
+            "lawful_terms_ref",
+            "retention_ref",
+            "clock",
+            "normalizer",
+            "_authority",
+            "workspace_instance_id",
+            "state_dir",
+            "state_path",
+            "_authority_binding_sha256",
+        }
+    )
+    _STATE_FIELDS = frozenset(
+        {
+            "schema",
+            "schema_version",
+            "source_id",
+            "stream_epoch",
+            "workspace_instance_id",
+            "generation",
+            "authority_tx_id",
+            "last_catalog_position",
+            "last_catalog_cursor",
+            "last_catalog_page_sha256",
+            "last_confirmed_delta_position",
+            "last_confirmed_delta_cursor",
+            "last_confirmed_delta_id",
+            "last_committed_quote_digests",
+            "last_committed_dedupe_digests",
+            "pending",
+            "event_cache",
+            "state_sha256",
+        }
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        try:
+            sealed = object.__getattribute__(self, "_authority_fields_sealed")
+        except AttributeError:
+            sealed = False
+        if sealed and name in (
+            "_authority_fields_sealed",
+            "provider",
+            "source_id",
+            "stream_epoch",
+            "workspace",
+            "lawful_terms_ref",
+            "retention_ref",
+            "clock",
+            "normalizer",
+            "_authority",
+            "workspace_instance_id",
+            "state_dir",
+            "state_path",
+            "_authority_binding_sha256",
+        ):
+            raise ProductSourceStateError(
+                f"product source authority field {name} is immutable after construction"
+            )
+        object.__setattr__(self, name, value)
 
     def __init__(
         self,
@@ -106,6 +152,7 @@ class ParlayApiProductSource:
             raise ProductSourceStateError("product source workspace cannot be resolved") from exc
         if not workspace_path.is_absolute():
             raise ProductSourceStateError("product source workspace must be absolute")
+        self._authority_fields_sealed = False
         self.provider = provider
         self.source_id = source_id
         self.stream_epoch = self._STREAM_EPOCH
@@ -147,6 +194,7 @@ class ParlayApiProductSource:
         ).hexdigest()
         self._initialize_state()
         self._read_state()
+        self._authority_fields_sealed = True
 
     @staticmethod
     def _text(value: object, field: str) -> str:

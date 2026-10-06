@@ -122,6 +122,15 @@ def _make_ticket_opening_authority_registry():
     commitment_for = _ticket_opening_commitment
     commitment_code = commitment_for.__code__
 
+    object_getattribute = object.__getattribute__
+
+    def tickets_for(book: object) -> dict[str, PaperTicket]:
+        state = object_getattribute(book, "__dict__")
+        tickets = state.get("tickets")
+        if type(tickets) is not dict:
+            raise ValueError("PaperBook ticket mapping authority changed")
+        return tickets
+
     def require_registry_key_authority(book: object) -> None:
         if require_registry_key.__code__ is not require_registry_key_code:
             raise ValueError("PaperBook registry key validator authority changed")
@@ -160,9 +169,10 @@ def _make_ticket_opening_authority_registry():
     def install_validated_snapshot(book: object) -> None:
         require_registry_key_authority(book)
         require_commitment_authority()
+        tickets = tickets_for(book)
         commitments = {
             ticket_id: commitment_for(ticket)
-            for ticket_id, ticket in book.tickets.items()
+            for ticket_id, ticket in tickets.items()
         }
         require_commitment_authority()
         with guard:
@@ -180,11 +190,12 @@ def _make_ticket_opening_authority_registry():
                     "PaperBook byte-loaded snapshot lacks product-issued opening authority"
                 )
             expected = dict(current)
-        if set(expected) != set(book.tickets):
+        tickets = tickets_for(book)
+        if set(expected) != set(tickets):
             raise ValueError(
                 "PaperBook ticket set changed outside product-issued opening authority"
             )
-        for ticket_id, ticket in book.tickets.items():
+        for ticket_id, ticket in tickets.items():
             commitment = commitment_for(ticket)
             require_commitment_authority()
             if expected[ticket_id] != commitment:
@@ -203,8 +214,8 @@ def _make_ticket_opening_authority_registry():
                     "PaperBook byte-loaded snapshot lacks product-issued opening authority"
                 )
             expected = dict(current)
-        candidate_tickets = getattr(candidate_book, "tickets", None)
-        if type(candidate_tickets) is not dict or set(candidate_tickets) != set(expected):
+        candidate_tickets = tickets_for(candidate_book)
+        if set(candidate_tickets) != set(expected):
             raise ValueError(
                 "PaperBook serialized candidate ticket set differs from product-issued opening authority"
             )

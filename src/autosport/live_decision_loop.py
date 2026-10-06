@@ -29,10 +29,16 @@ from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .live_observation import poll_open_market_store_once
+from .live_market_actionability import (
+    LiveInputRecheckTrigger,
+    LiveInputWaitReason,
+    evaluate_registered_input_current_view,
+)
 from .market_mirror import MarketMirror, MirrorSnapshot
 from .market_mirror_health import (
     HealthGatedMirrorDecisionIndex,
     HealthGatedMirrorSnapshot,
+    ProviderDecisionEligibility,
     ProviderHealthReplayBoundary,
 )
 from .monotonic_workspace_authority import (
@@ -174,6 +180,7 @@ _PHASE_APPEND_PENDING = "append_pending"
 _PHASE_COMMITTED = "committed"
 _GATE_NORMAL = "normal"
 _GATE_PROVIDER_GAP = "provider_gap"
+_GATE_ACTIONABILITY_WAIT = "actionability_wait"
 _SHA256_HEX = frozenset("0123456789abcdef")
 _CONTROL_SCHEMA = "autosport.live_decision_control"
 _CONTROL_VERSION = 1
@@ -624,7 +631,11 @@ class _Progress:
             _PHASE_COMMITTED,
         }:
             raise LiveDecisionProgressError("unsupported live progress phase")
-        if self.gate not in {_GATE_NORMAL, _GATE_PROVIDER_GAP}:
+        if self.gate not in {
+            _GATE_NORMAL,
+            _GATE_PROVIDER_GAP,
+            _GATE_ACTIONABILITY_WAIT,
+        }:
             raise LiveDecisionProgressError("unsupported live progress gate")
         if type(self.affected_input_ids) is not tuple:
             raise LiveDecisionProgressError("affected_input_ids must be a tuple")
@@ -1854,6 +1865,43 @@ class PersistentLiveDecisionLoop:
         decision_time = now
         snapshots = self._capture_input_views(refresh_input_ids, decision_time)
         current_market_sha = self._market_state_sha256()
+        actionability_wait_evidence = self._derive_actionability_wait_evidence(
+            refresh_input_ids,
+            decision_time,
+        )
+        if actionability_wait_evidence:
+            decision_ts = decision_time.isoformat()
+            self._write_pending(
+                decision_ts=decision_ts,
+                market_state_sha256=current_market_sha,
+                affected_input_ids=affected,
+                gate=_GATE_ACTIONABILITY_WAIT,
+                expected_input_specs=expected_input_specs,
+                expected_dependency_revisions=expected_dependency_revisions,
+            )
+            plan = build_portfolio_plan(
+                self.book,
+                (),
+                self.authority.risk_policy,
+                decision_ts,
+                dependency_graph=None,
+                market_outcome_authorities=(),
+            )
+            result = self._persist_plan(
+                plan=plan,
+                intents=(),
+                market_state_sha256=current_market_sha,
+                affected_input_ids=affected,
+                gate=_GATE_ACTIONABILITY_WAIT,
+                detail=(
+                    "live-state actionability failed closed before strategy/portfolio "
+                    "evaluation"
+                ),
+                actionability_wait_evidence=actionability_wait_evidence,
+            )
+            self._pending_affected.clear()
+            self._needs_cache_rebuild = False
+            return result
 
         clean_committed_restart = (
             self._needs_cache_rebuild
@@ -2112,6 +2160,22 @@ class PersistentLiveDecisionLoop:
             if progress.gate == _GATE_NORMAL
             else ()
         )
+        actionability_wait_evidence = (
+            self._derive_actionability_wait_evidence(
+                progress.registered_input_ids,
+                decision_time,
+                health_boundaries=progress.health_boundaries,
+            )
+            if progress.gate == _GATE_ACTIONABILITY_WAIT
+            else None
+        )
+        if (
+            progress.gate == _GATE_ACTIONABILITY_WAIT
+            and not actionability_wait_evidence
+        ):
+            raise LiveDecisionProgressError(
+                "unfinished actionability WAIT no longer reproduces its blocker"
+            )
 
         # Once the exact economic DecisionRecord is durable, it is the immutable
         # pre-action plan authority. In particular, an accepted #623 attempt may
@@ -2259,6 +2323,7 @@ class PersistentLiveDecisionLoop:
                 "recovered unfinished durable live decision before provider polling"
             ),
             decision_context_sha256_override=progress.decision_context_sha256,
+            actionability_wait_evidence=actionability_wait_evidence,
         )
         self._pending_affected.clear()
         self._needs_cache_rebuild = True
@@ -2571,6 +2636,263 @@ class PersistentLiveDecisionLoop:
             if owns_history_store and history_store is not None:
                 history_store.close()
         return snapshots
+
+    @staticmethod
+    def _validated_actionability_wait_evidence(
+        raw: object,
+    ) -> tuple[dict[str, object], ...]:
+        if type(raw) not in {tuple, list} or not raw:
+            raise LiveDecisionProgressError(
+                "actionability WAIT evidence must be a non-empty sequence"
+            )
+        canonical: list[dict[str, object]] = []
+        previous_input_id: str | None = None
+        for item in raw:
+            if type(item) is not dict or set(item) != {
+                "input_id",
+                "structural_evidence_sha256",
+                "wait_reasons",
+                "recheck_triggers",
+                "provider_health",
+                "evidence_sha256",
+            }:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT evidence row is noncanonical"
+                )
+            input_id = _canonical_text(
+                "actionability WAIT input_id",
+                item["input_id"],
+            )
+            if previous_input_id is not None and input_id <= previous_input_id:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT evidence must be sorted and unique by input_id"
+                )
+            previous_input_id = input_id
+            structural_sha = _canonical_sha256(
+                "actionability structural evidence_sha256",
+                item["structural_evidence_sha256"],
+            )
+            reasons = item["wait_reasons"]
+            triggers = item["recheck_triggers"]
+            provider_health = item["provider_health"]
+            if (
+                type(reasons) is not list
+                or not reasons
+                or any(type(value) is not str or not value for value in reasons)
+                or reasons != sorted(set(reasons))
+            ):
+                raise LiveDecisionProgressError(
+                    "actionability WAIT reasons must be sorted unique strings"
+                )
+            if (
+                type(triggers) is not list
+                or not triggers
+                or any(type(value) is not str or not value for value in triggers)
+                or triggers != sorted(set(triggers))
+            ):
+                raise LiveDecisionProgressError(
+                    "actionability WAIT recheck triggers must be sorted unique strings"
+                )
+            if type(provider_health) is not list:
+                raise LiveDecisionProgressError(
+                    "actionability provider-health evidence must be a list"
+                )
+            previous_source_id: str | None = None
+            canonical_health: list[dict[str, object]] = []
+            for health in provider_health:
+                if type(health) is not dict or set(health) != {
+                    "source_id",
+                    "eligibility",
+                    "source_status",
+                    "last_success_at",
+                    "replay_boundary",
+                }:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health row is noncanonical"
+                    )
+                source_id = _canonical_text(
+                    "actionability provider-health source_id",
+                    health["source_id"],
+                )
+                if previous_source_id is not None and source_id <= previous_source_id:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health rows must be sorted and unique"
+                    )
+                previous_source_id = source_id
+                try:
+                    eligibility = ProviderDecisionEligibility(health["eligibility"])
+                except (TypeError, ValueError) as exc:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health eligibility is invalid"
+                    ) from exc
+                source_status = _canonical_text(
+                    "actionability provider-health source_status",
+                    health["source_status"],
+                )
+                last_success_at = health["last_success_at"]
+                if last_success_at is not None:
+                    _canonical_timestamp(
+                        "actionability provider-health last_success_at",
+                        last_success_at,
+                    )
+                try:
+                    bound = ProviderHealthReplayBoundary.from_dict(
+                        health["replay_boundary"]
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health replay boundary is invalid"
+                    ) from exc
+                if bound.source_id != source_id:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health replay source is inconsistent"
+                    )
+                canonical_health.append(
+                    {
+                        "source_id": source_id,
+                        "eligibility": eligibility.value,
+                        "source_status": source_status,
+                        "last_success_at": last_success_at,
+                        "replay_boundary": bound.to_dict(),
+                    }
+                )
+            row_without_hash: dict[str, object] = {
+                "input_id": input_id,
+                "structural_evidence_sha256": structural_sha,
+                "wait_reasons": list(reasons),
+                "recheck_triggers": list(triggers),
+                "provider_health": canonical_health,
+            }
+            evidence_sha = _canonical_sha256(
+                "actionability WAIT evidence_sha256",
+                item["evidence_sha256"],
+            )
+            if _canonical_json_sha256(row_without_hash) != evidence_sha:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT evidence hash is invalid"
+                )
+            canonical.append(
+                {
+                    **row_without_hash,
+                    "evidence_sha256": evidence_sha,
+                }
+            )
+        return tuple(canonical)
+
+    def _derive_actionability_wait_evidence(
+        self,
+        input_ids: tuple[str, ...],
+        as_of: datetime,
+        *,
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        if type(input_ids) is not tuple:
+            raise TypeError("actionability input_ids must be an exact tuple")
+        if len(input_ids) != len(set(input_ids)):
+            raise LiveDecisionProgressError(
+                "actionability input_ids must be unique"
+            )
+        boundary_map = (
+            None
+            if health_boundaries is None
+            else {
+                boundary.source_id: boundary
+                for boundary in health_boundaries
+            }
+        )
+        trigger_by_reason = {
+            LiveInputWaitReason.NON_OPEN_STATUS: (
+                LiveInputRecheckTrigger.MARKET_STATUS_CHANGE.value
+            ),
+            LiveInputWaitReason.INVALID_CAUSAL_TIMESTAMP: (
+                LiveInputRecheckTrigger.VALID_CAUSAL_OBSERVATION.value
+            ),
+            LiveInputWaitReason.FUTURE_CAUSALITY: (
+                LiveInputRecheckTrigger.CAUSALLY_ADMISSIBLE_OBSERVATION.value
+            ),
+            LiveInputWaitReason.STALE: (
+                LiveInputRecheckTrigger.FRESH_OBSERVATION.value
+            ),
+        }
+        rows: list[dict[str, object]] = []
+        for input_id in sorted(input_ids):
+            diagnostic = evaluate_registered_input_current_view(
+                updates=self.mirror_updates,
+                dependencies=self.dependencies,
+                input_id=input_id,
+                as_of=as_of,
+                max_age=self.max_quote_age,
+            )
+            structural_reasons = tuple(
+                reason
+                for reason in diagnostic.wait_reasons
+                if reason in trigger_by_reason
+            )
+            wait_reasons = {reason.value for reason in structural_reasons}
+            recheck_triggers = {
+                trigger_by_reason[reason] for reason in structural_reasons
+            }
+            provider_rows: list[dict[str, object]] = []
+            if (
+                not structural_reasons
+                and diagnostic.components
+                and self._health_gate is not None
+            ):
+                source_ids = tuple(
+                    sorted({component.source_id for component in diagnostic.components})
+                )
+                local_boundaries = (
+                    {
+                        boundary.source_id: boundary
+                        for boundary in self._input_health_boundaries.get(input_id, ())
+                    }
+                    if boundary_map is None
+                    else boundary_map
+                )
+                if not set(source_ids).issubset(local_boundaries):
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health evidence lacks replay horizons"
+                    )
+                for source_id in source_ids:
+                    health = self._health_gate.provider_health(
+                        source_id,
+                        as_of=as_of,
+                        replay_boundary=local_boundaries[source_id],
+                    )
+                    provider_rows.append(
+                        {
+                            "source_id": source_id,
+                            "eligibility": health.eligibility.value,
+                            "source_status": health.source_status,
+                            "last_success_at": health.last_success_at,
+                            "replay_boundary": health.replay_boundary.to_dict(),
+                        }
+                    )
+                    if health.eligibility is not ProviderDecisionEligibility.ELIGIBLE:
+                        wait_reasons.add(
+                            f"provider_health:{health.eligibility.value}"
+                        )
+                        recheck_triggers.add("provider_health_transition")
+            if not wait_reasons:
+                continue
+            row_without_hash: dict[str, object] = {
+                "input_id": input_id,
+                "structural_evidence_sha256": diagnostic.evidence_sha256,
+                "wait_reasons": sorted(wait_reasons),
+                "recheck_triggers": sorted(recheck_triggers),
+                "provider_health": provider_rows,
+            }
+            rows.append(
+                {
+                    **row_without_hash,
+                    "evidence_sha256": _canonical_json_sha256(row_without_hash),
+                }
+            )
+        return (
+            self._validated_actionability_wait_evidence(tuple(rows))
+            if rows
+            else ()
+        )
 
     def _refresh_intents_from_snapshots(
         self,
@@ -3085,8 +3407,28 @@ class PersistentLiveDecisionLoop:
         gate: str,
         detail: str = "",
         decision_context_sha256_override: str | None = None,
+        actionability_wait_evidence: tuple[dict[str, object], ...] | None = None,
     ) -> LiveCycleResult:
         self._assert_canonical_persistence_authority()
+        canonical_actionability_wait = None
+        if gate == _GATE_ACTIONABILITY_WAIT:
+            if actionability_wait_evidence is None:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT gate requires durable evidence"
+                )
+            canonical_actionability_wait = (
+                self._validated_actionability_wait_evidence(
+                    actionability_wait_evidence
+                )
+            )
+            if intents or any(stake > 0 for stake in plan.stakes):
+                raise LiveDecisionProgressError(
+                    "actionability WAIT cannot carry intents or positive stake"
+                )
+        elif actionability_wait_evidence is not None:
+            raise LiveDecisionProgressError(
+                "actionability WAIT evidence is forbidden for other gates"
+            )
         if decision_context_sha256_override is None:
             decision_context_sha256 = self._decision_context_sha256()
         else:
@@ -3142,7 +3484,9 @@ class PersistentLiveDecisionLoop:
         )
         record_payload = {
             "schema": "autosport.persistent_live_decision",
-            "schema_version": 3,
+            "schema_version": (
+                4 if canonical_actionability_wait is not None else 3
+            ),
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -3164,6 +3508,10 @@ class PersistentLiveDecisionLoop:
             "plan": plan.to_dict(),
             MATERIAL_ACTION_ID_PAYLOAD_KEY: decision_id,
         }
+        if canonical_actionability_wait is not None:
+            record_payload["actionability_wait_evidence"] = [
+                dict(item) for item in canonical_actionability_wait
+            ]
         if expected_execution_payload is not None:
             # Execution adoption remains separately versioned evidence inside the
             # health-aware live-decision schema.
@@ -5118,11 +5466,11 @@ class PersistentLiveDecisionLoop:
             committed_market_history=committed_market_history,
         )
         payload_version = existing.payload.get("schema_version")
-        if payload_version not in {1, 2, 3}:
+        if payload_version not in {1, 2, 3, 4}:
             raise DecisionLedgerIntegrityError(
                 "committed live decision has unsupported schema_version"
             )
-        if payload_version in {2, 3}:
+        if payload_version in {2, 3, 4}:
             expected_payload_keys = {
                 "schema",
                 "schema_version",
@@ -5139,8 +5487,10 @@ class PersistentLiveDecisionLoop:
                 "plan",
                 MATERIAL_ACTION_ID_PAYLOAD_KEY,
             }
-            if payload_version == 3:
+            if payload_version in {3, 4}:
                 expected_payload_keys.add("health_boundaries")
+            if payload_version == 4:
+                expected_payload_keys.add("actionability_wait_evidence")
             if any(stake > 0 for stake in durable_plan.stakes):
                 expected_payload_keys.add("paper_execution")
             if set(existing.payload) != expected_payload_keys:
@@ -5150,7 +5500,7 @@ class PersistentLiveDecisionLoop:
 
         context_payload = {
             "schema": "autosport.live_decision_context",
-            "schema_version": payload_version,
+            "schema_version": 3 if payload_version == 4 else payload_version,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": progress.gate,
@@ -5158,7 +5508,7 @@ class PersistentLiveDecisionLoop:
             "decision_context_sha256": progress.decision_context_sha256,
             "plan_sha256": progress.plan_sha256,
         }
-        if payload_version in {2, 3}:
+        if payload_version in {2, 3, 4}:
             _, committed_decision_time = _canonical_timestamp(
                 "committed decision_ts",
                 progress.decision_ts,
@@ -5189,7 +5539,7 @@ class PersistentLiveDecisionLoop:
                     "intent_provenance_sha256": provenance.provenance_sha256,
                 }
             )
-            if payload_version == 3:
+            if payload_version in {3, 4}:
                 expected_health_boundaries = (
                     None
                     if progress.health_boundaries is None
@@ -5206,6 +5556,29 @@ class PersistentLiveDecisionLoop:
                         "committed live decision provider-health evidence conflicts "
                         "with durable progress"
                     )
+
+        if payload_version == 4:
+            if progress.gate != _GATE_ACTIONABILITY_WAIT:
+                raise DecisionLedgerIntegrityError(
+                    "schema v4 live decision must be an actionability WAIT"
+                )
+            if durable_plan.intent_ids or any(stake > 0 for stake in durable_plan.stakes):
+                raise DecisionLedgerIntegrityError(
+                    "actionability WAIT durable plan must be zero/no-intent"
+                )
+            try:
+                wait_evidence = self._validated_actionability_wait_evidence(
+                    detached_payload.get("actionability_wait_evidence")
+                )
+            except (LiveDecisionProgressError, TypeError, ValueError) as exc:
+                raise DecisionLedgerIntegrityError(
+                    "committed actionability WAIT evidence is invalid"
+                ) from exc
+            registered = frozenset(progress.registered_input_ids)
+            if any(item["input_id"] not in registered for item in wait_evidence):
+                raise DecisionLedgerIntegrityError(
+                    "actionability WAIT evidence references an unregistered input"
+                )
 
         expected_context_hash = _canonical_json_sha256(context_payload)
         expected_decision_id = f"live-{expected_context_hash}"

@@ -1513,6 +1513,100 @@ def test_payload_encoder_serializes_isolated_snapshot_after_source_mutation() ->
     assert goal.max_stake_fraction == Decimal("0.99")
 
 
+def test_payload_encoder_rejects_source_mutation_between_canonical_snapshots() -> None:
+    goal = _goal()
+    canonical_snapshot = economic_goal_store_module._canonical_contract_snapshot
+    mutated = False
+
+    def snapshot_then_mutate(contract):
+        nonlocal mutated
+        snapshot = canonical_snapshot(contract)
+        if not mutated:
+            object.__setattr__(goal, "max_stake_fraction", Decimal("0.99"))
+            object.__setattr__(goal, "blocked_sports", frozenset())
+            mutated = True
+        return snapshot
+
+    with pytest.raises(EconomicGoalContractError, match="changed during payload encoding"):
+        economic_goal_store_module._BOUND_ECONOMIC_GOAL_TO_PAYLOAD(
+            goal,
+            _snapshot=snapshot_then_mutate,
+        )
+
+    assert mutated is True
+
+
+
+def test_store_snapshot_covers_every_captured_contract_slot(
+    monkeypatch, tmp_path
+) -> None:
+    goal = _goal()
+    field_names = economic_goal_store_module._CONTRACT_KEYS_ORDERED
+    expected = economic_goal_to_payload(goal)["contract"]
+
+    for name in field_names:
+        class ForgedDescriptor:
+            def __get__(self, instance, owner=None):
+                raise AssertionError("rebound contract descriptor executed")
+
+        monkeypatch.setattr(EconomicGoalContract, name, ForgedDescriptor())
+        snapshot = economic_goal_store_module._snapshot_economic_goal_contract(goal)
+        assert snapshot == economic_goal_store_module._build_economic_goal_contract(
+            dict(zip(field_names, economic_goal_store_module._canonical_contract_snapshot(goal))),
+        )
+        monkeypatch.undo()
+
+    assert economic_goal_to_payload(goal)["contract"] == expected
+
+
+
+
+def test_store_snapshot_helper_ignores_rebound_snapshot_alias(monkeypatch, tmp_path) -> None:
+    goal = _goal(max_stake_fraction=Decimal("0.03"))
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound canonical contract snapshot executed")
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "_canonical_contract_snapshot",
+        forged,
+    )
+
+    snapshot = economic_goal_store_module._snapshot_economic_goal_contract(goal)
+    assert snapshot.max_stake_fraction == Decimal("0.03")
+
+
+
+
+def test_store_successor_rejects_descriptor_laundered_expansion(
+    monkeypatch, tmp_path
+) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.03"),
+    )
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(previous)
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return Decimal("0.02")
+
+    monkeypatch.setattr(
+        EconomicGoalContract,
+        "max_stake_fraction",
+        ForgedDescriptor(),
+    )
+
+    with pytest.raises(EconomicGoalContractError, match="must not increase"):
+        store.persist_automatic_successor(candidate)
+
+    assert EconomicGoalStore(tmp_path).load() == previous
+
+
 def test_payload_snapshot_ignores_rebound_contract_constructor(monkeypatch) -> None:
     goal = _goal()
     expected = economic_goal_to_payload(goal)

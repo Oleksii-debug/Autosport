@@ -494,3 +494,16 @@ def test_automatic_transition_ignores_rebound_contract_field_descriptor(monkeypa
 
     with pytest.raises(EconomicGoalContractError, match="must not increase"):
         validate_automatic_transition(previous, candidate)
+
+
+def test_transition_ignores_rebound_module_contract_type(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.03"),
+    )
+    monkeypatch.setattr(economic_goal_module, "EconomicGoalContract", object)
+
+    with pytest.raises(EconomicGoalContractError, match="must not increase"):
+        validate_automatic_transition(previous, candidate)

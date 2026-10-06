@@ -186,6 +186,12 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
     original_append_connection = store_cls._append_connection
     original_append = store_cls.append
     original_runtime_append = getattr(store_cls, "_append_with_runtime_stream_epoch", None)
+    original_migrate_event_payloads = getattr(store_cls, "migrate_event_payloads", None)
+    original_migrate_legacy_event_payloads = getattr(
+        store_cls,
+        "migrate_legacy_event_payloads",
+        None,
+    )
 
     def bounded_connect_path(path: Path) -> sqlite3.Connection:
         """Constrain every construction-time SQLite connection before any writes."""
@@ -349,6 +355,57 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
                 ) from exc
             raise
 
+    def bounded_event_payload_migration(
+        original: Any,
+        self: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Preserve the canonical RETENTION_REQUIRED contract during upgrades.
+
+        Event-payload migration writes through the same SQLite page ceiling as normal
+        intake. The active-store migration methods intentionally normalize SQLite
+        errors at their own boundary, so inspect the complete cause chain here just
+        like append/runtime append and retain the existing typed backpressure signal.
+        """
+
+        try:
+            return original(self, *args, **kwargs)
+        except Exception as exc:
+            if _sqlite_full_in_chain(exc):
+                raise CollectorStorageBackpressureError(
+                    "RETENTION_REQUIRED: collector SQLite page budget is exhausted "
+                    "during retained event migration; run explicit pin-aware "
+                    "compaction within the durable max_bytes, then retry"
+                ) from exc
+            raise
+
+    def bounded_migrate_event_payloads(
+        self: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        assert original_migrate_event_payloads is not None
+        return bounded_event_payload_migration(
+            original_migrate_event_payloads,
+            self,
+            *args,
+            **kwargs,
+        )
+
+    def bounded_migrate_legacy_event_payloads(
+        self: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        assert original_migrate_legacy_event_payloads is not None
+        return bounded_event_payload_migration(
+            original_migrate_legacy_event_payloads,
+            self,
+            *args,
+            **kwargs,
+        )
+
     def configured_max_bytes(self: Any) -> int | None:
         return getattr(self, "_collector_max_bytes_v1", None)
 
@@ -360,5 +417,9 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
     store_cls.append = bounded_append
     if original_runtime_append is not None:
         store_cls._append_with_runtime_stream_epoch = bounded_runtime_append
+    if original_migrate_event_payloads is not None:
+        store_cls.migrate_event_payloads = bounded_migrate_event_payloads
+    if original_migrate_legacy_event_payloads is not None:
+        store_cls.migrate_legacy_event_payloads = bounded_migrate_legacy_event_payloads
     store_cls.configured_max_bytes = property(configured_max_bytes)
     store_cls._collector_storage_budget_v1_installed = True

@@ -1,5 +1,6 @@
 import json
 import multiprocessing
+import os
 import sqlite3
 import tempfile
 import threading
@@ -10,6 +11,7 @@ from pathlib import Path
 from autosport.causal_collector import (
     CollectorDelta,
     CollectorDeltaStore,
+    CollectorStorageBackpressureError,
     CursorRegressionError,
     DeltaConflictError,
     GapState,
@@ -100,6 +102,406 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             self.assertEqual(reopened.get(delta.delta_id), delta)
             checkpoint = reopened.stream_checkpoint("source-x", "epoch-1")
             self.assertEqual(checkpoint.last_delta_id, delta.delta_id)
+
+    def test_existing_store_symlink_alias_is_rejected_before_first_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "collector-target.json"
+            CollectorDeltaStore(target)
+            before = target.read_bytes()
+            alias = root / "collector-alias.json"
+            try:
+                alias.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "invalid causal collector store"):
+                CollectorDeltaStore(alias)
+
+            self.assertEqual(target.read_bytes(), before)
+
+    def test_dangling_store_symlink_is_rejected_without_creating_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "outside-target.json"
+            alias = root / "collector-alias.json"
+            try:
+                alias.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "invalid causal collector store"):
+                CollectorDeltaStore(alias)
+
+            self.assertFalse(target.exists())
+
+    def test_existing_store_hardlink_alias_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "collector-target.json"
+            CollectorDeltaStore(target)
+            alias = root / "collector-hardlink.json"
+            try:
+                os.link(target, alias)
+            except OSError as exc:
+                self.skipTest(f"hardlink creation is unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "invalid causal collector store"):
+                CollectorDeltaStore(alias)
+
+    def test_event_payload_schema_marker_prevents_silent_recreation_after_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            store = CollectorDeltaStore(path)
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = make_delta(payload=payload)
+            store._append_with_runtime_stream_epoch(
+                delta,
+                activated_at="2026-01-01T00:00:00+00:00",
+                event=event,
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("DROP TABLE collector_event_payloads_v1")
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event payload schema integrity guard is missing",
+            ):
+                CollectorDeltaStore(path)
+
+    def test_event_payload_schema_rejects_same_name_weakened_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            CollectorDeltaStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("DROP INDEX collector_event_payloads_v1_quote")
+                connection.execute(
+                    "CREATE INDEX collector_event_payloads_v1_quote "
+                    "ON collector_event_payloads_v1(source_id, stream_epoch, dedupe_key)"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event payload schema integrity guard is missing",
+            ):
+                CollectorDeltaStore(path)
+
+    def test_runtime_append_archives_event_atomically_and_resolves_exact_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = make_delta(payload=payload)
+
+            self.assertTrue(
+                store._append_with_runtime_stream_epoch(
+                    delta,
+                    activated_at="2026-01-01T00:00:00+00:00",
+                    event=event,
+                )
+            )
+            self.assertEqual(store.resolve_event(delta), event)
+            quote_map, dedupe_map = store.event_digest_maps(
+                source_id=delta.source_id,
+                stream_epoch=delta.stream_epoch,
+                quote_keys=[event.quote_key],
+                dedupe_keys=[event.dedupe_key],
+            )
+            self.assertEqual(
+                quote_map,
+                {event.quote_key: delta.canonical_event_digest},
+            )
+            self.assertEqual(
+                dedupe_map,
+                {event.dedupe_key: delta.canonical_event_digest},
+            )
+
+            self.assertFalse(
+                store._append_with_runtime_stream_epoch(
+                    delta,
+                    activated_at="2026-01-01T00:00:05+00:00",
+                    event=event,
+                )
+            )
+            self.assertEqual(store.resolve_event(delta), event)
+
+    def test_event_payload_migration_allows_only_explicit_pending_missing_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            event = MarketEvent.from_dict(event_payload())
+            missing = "pending-not-yet-committed"
+
+            self.assertEqual(
+                store.migrate_event_payloads(
+                    {missing: event},
+                    allow_missing_delta_ids=(missing,),
+                ),
+                0,
+            )
+            with self.assertRaisesRegex(ValueError, "is not retained"):
+                store.migrate_event_payloads({"unexpected-missing": event})
+
+    def test_legacy_event_migration_distinguishes_tombstone_from_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            event = MarketEvent.from_dict(event_payload())
+            connection = store._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO collector_delta_tombstones_v1("
+                    "delta_id, source_id, stream_epoch, payload_sha256, "
+                    "compacted_at, plan_id"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        "retired-delta",
+                        "source-x",
+                        "epoch-1",
+                        "a" * 64,
+                        "2026-01-02T00:00:00+00:00",
+                        "retention-plan",
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO collector_delta_tombstones_v1("
+                    "delta_id, source_id, stream_epoch, payload_sha256, "
+                    "compacted_at, plan_id"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        "foreign-retired-delta",
+                        "source-y",
+                        "epoch-1",
+                        "b" * 64,
+                        "2026-01-02T00:00:00+00:00",
+                        "foreign-retention-plan",
+                    ),
+                )
+                connection.commit()
+            finally:
+                if connection.in_transaction:
+                    connection.rollback()
+                connection.close()
+
+            self.assertEqual(
+                store.migrate_legacy_event_payloads(
+                    {"retired-delta": event},
+                    source_id="source-x",
+                    stream_epoch="epoch-1",
+                ),
+                (0, ("retired-delta",)),
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "neither retained nor canonically retired",
+            ):
+                store.migrate_legacy_event_payloads(
+                    {"unexplained-missing": event},
+                    source_id="source-x",
+                    stream_epoch="epoch-1",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "tombstone conflicts with migration authority",
+            ):
+                store.migrate_legacy_event_payloads(
+                    {"foreign-retired-delta": event},
+                    source_id="source-x",
+                    stream_epoch="epoch-1",
+                )
+
+    def test_event_payload_conflict_rolls_back_new_delta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            delta = make_delta()
+            conflicting = MarketEvent.from_dict(event_payload(odds="1.91"))
+
+            with self.assertRaises(DeltaConflictError):
+                store._append_with_runtime_stream_epoch(
+                    delta,
+                    activated_at="2026-01-01T00:00:00+00:00",
+                    event=conflicting,
+                )
+
+            self.assertIsNone(store.get(delta.delta_id))
+
+    def test_event_payload_delete_requires_canonical_retention_tombstone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            store = CollectorDeltaStore(path)
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = make_delta(payload=payload)
+            store._append_with_runtime_stream_epoch(
+                delta,
+                activated_at="2026-01-01T00:00:00+00:00",
+                event=event,
+            )
+
+            connection = store._connect()
+            try:
+                with self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "requires retention tombstone",
+                ):
+                    connection.execute(
+                        "DELETE FROM collector_event_payloads_v1 WHERE delta_id=?",
+                        (delta.delta_id,),
+                    )
+                connection.rollback()
+                with self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "requires retention tombstone",
+                ):
+                    connection.execute(
+                        "DELETE FROM collector_deltas WHERE delta_id=?",
+                        (delta.delta_id,),
+                    )
+                connection.rollback()
+                self.assertEqual(store.resolve_event(delta), event)
+
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO collector_delta_tombstones_v1("
+                    "delta_id, source_id, stream_epoch, payload_sha256, "
+                    "compacted_at, plan_id"
+                    ") SELECT delta_id, source_id, stream_epoch, payload_sha256, ?, ? "
+                    "FROM collector_deltas WHERE delta_id=?",
+                    (
+                        "2026-01-02T00:00:00+00:00",
+                        "retention-test-plan",
+                        delta.delta_id,
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "requires retention tombstone",
+                ):
+                    connection.execute(
+                        "DELETE FROM collector_event_payloads_v1 WHERE delta_id=?",
+                        (delta.delta_id,),
+                    )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM collector_event_payloads_v1 "
+                        "WHERE delta_id=?",
+                        (delta.delta_id,),
+                    ).fetchone()[0],
+                    1,
+                )
+                connection.execute(
+                    "DELETE FROM collector_deltas WHERE delta_id=?",
+                    (delta.delta_id,),
+                )
+                connection.commit()
+            finally:
+                if connection.in_transaction:
+                    connection.rollback()
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "not retained exactly"):
+                store.resolve_event(delta)
+
+    def test_event_payload_schema_rejects_missing_retention_delete_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            CollectorDeltaStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "DROP TRIGGER collector_event_payloads_retention_delete_v1"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event payload schema integrity guard is missing",
+            ):
+                CollectorDeltaStore(path)
+
+    def test_event_payload_v2_delete_guard_upgrades_without_accepting_weakened_sql(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            CollectorDeltaStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "DROP TRIGGER collector_event_payloads_retention_delete_v1"
+                )
+                connection.execute(
+                    "CREATE TRIGGER collector_event_payloads_retention_delete_v1 "
+                    "BEFORE DELETE ON collector_event_payloads_v1 "
+                    "WHEN NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1 "
+                    "WHERE delta_id=OLD.delta_id AND source_id=OLD.source_id "
+                    "AND stream_epoch=OLD.stream_epoch) BEGIN "
+                    "SELECT RAISE(ABORT, 'collector event payload deletion requires retention tombstone'); END"
+                )
+                connection.execute(
+                    "UPDATE collector_meta SET value='2' "
+                    "WHERE key='collector_event_payload_schema_v1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            CollectorDeltaStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                marker = connection.execute(
+                    "SELECT value FROM collector_meta "
+                    "WHERE key='collector_event_payload_schema_v1'"
+                ).fetchone()[0]
+                trigger_sql = connection.execute(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE name='collector_event_payloads_retention_delete_v1'"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+
+            self.assertEqual(marker, "3")
+            self.assertIn(
+                "WHEN EXISTS (SELECT 1 FROM collector_deltas WHERE delta_id=OLD.delta_id)",
+                " ".join(trigger_sql.split()),
+            )
+
+    def test_event_payload_v2_upgrade_rejects_tampered_delete_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            CollectorDeltaStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "DROP TRIGGER collector_event_payloads_retention_delete_v1"
+                )
+                connection.execute(
+                    "CREATE TRIGGER collector_event_payloads_retention_delete_v1 "
+                    "BEFORE DELETE ON collector_event_payloads_v1 BEGIN SELECT 1; END"
+                )
+                connection.execute(
+                    "UPDATE collector_meta SET value='2' "
+                    "WHERE key='collector_event_payload_schema_v1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event payload schema integrity guard is missing",
+            ):
+                CollectorDeltaStore(path)
 
     def test_legacy_json_migrates_once_and_preserves_exact_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -436,6 +838,46 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(sorted(results), [False, True])
             self.assertEqual(CollectorDeltaStore(path).get("d1"), delta)
+
+    def test_legacy_event_migration_preserves_sqlite_full_backpressure_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = make_delta(payload=payload)
+            self.assertTrue(store.append(delta))
+
+            original_descriptor = vars(CollectorDeltaStore)[
+                "_append_event_payload_connection"
+            ]
+
+            def exhaust_page_budget(cls, connection, admitted_delta, admitted_event):
+                raise sqlite3.OperationalError("database or disk is full")
+
+            CollectorDeltaStore._append_event_payload_connection = classmethod(
+                exhaust_page_budget
+            )
+            try:
+                with self.assertRaisesRegex(
+                    CollectorStorageBackpressureError,
+                    "RETENTION_REQUIRED",
+                ):
+                    store.migrate_legacy_event_payloads(
+                        {delta.delta_id: event},
+                        source_id=delta.source_id,
+                        stream_epoch=delta.stream_epoch,
+                    )
+            finally:
+                CollectorDeltaStore._append_event_payload_connection = (
+                    original_descriptor
+                )
+
+            self.assertEqual(store.get(delta.delta_id), delta)
+            with self.assertRaisesRegex(
+                ValueError,
+                "event payload is unavailable",
+            ):
+                store.resolve_event(delta)
 
     def test_delivery_anchor_must_belong_to_requested_source(self):
         with tempfile.TemporaryDirectory() as tmp:

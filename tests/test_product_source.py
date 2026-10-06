@@ -8,7 +8,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import autosport.product_source as product_source_module
-from autosport.causal_collector import StreamCheckpoint
+from autosport.causal_collector import (
+    CollectorDeltaStore,
+    DesktopApplicationReceipt,
+    DesktopDeltaCheckpointStore,
+    StreamCheckpoint,
+)
+from autosport.collector_retention import CollectorRetentionManager
 from autosport.domain import MarketType
 from autosport.event_lifecycle import CatalogCheckpoint, EventPhase
 from autosport.parlayapi_provider import ParlayApiTableTennisProvider
@@ -43,12 +49,13 @@ def _quote(
     *,
     odds: str = "1.80",
     sequence: int = 1,
+    provider_event_id: str = "event-1",
     exchange_side: str | None = None,
     observed_ts: str = "2026-09-20T17:34:00+00:00",
     source_ts: str | None = "2026-09-20T17:33:59+00:00",
 ) -> ProviderQuote:
     return ProviderQuote(
-        provider_event_id="event-1",
+        provider_event_id=provider_event_id,
         provider_market_id="book:h2h",
         provider_selection_id="player-a",
         decimal_odds=Decimal(odds),
@@ -71,10 +78,22 @@ def _quote(
     )
 
 
-def _batch(*, cursor: str, odds: str = "1.80", sequence: int = 1) -> ProviderBatch:
+def _batch(
+    *,
+    cursor: str,
+    odds: str = "1.80",
+    sequence: int = 1,
+    provider_event_id: str = "event-1",
+) -> ProviderBatch:
     return ProviderBatch(
         source_id=_SOURCE_ID,
-        quotes=(_quote(odds=odds, sequence=sequence),),
+        quotes=(
+            _quote(
+                odds=odds,
+                sequence=sequence,
+                provider_event_id=provider_event_id,
+            ),
+        ),
         cursor=cursor,
     )
 
@@ -96,6 +115,34 @@ def _stream_checkpoint(delta) -> StreamCheckpoint:
         delta.source_cursor,
         delta.cursor_position,
         delta.delta_id,
+    )
+
+
+def _archive_pending_delta(source: ParlayApiProductSource, delta) -> None:
+    event = source.resolve_event(delta)
+    store = source._require_collector_store()
+    store._append_with_runtime_stream_epoch(
+        delta,
+        activated_at=delta.collector_committed_at,
+        event=event,
+    )
+
+
+def _ack_retention_delta(
+    checkpoint: DesktopDeltaCheckpointStore,
+    delta,
+    *,
+    ordinal: int,
+) -> None:
+    checkpoint.ack(
+        delta,
+        application_receipt=DesktopApplicationReceipt(
+            delta_id=delta.delta_id,
+            canonical_event_digest=delta.canonical_event_digest,
+            receipt_id=f"product-source-retention:{ordinal}:{delta.delta_id}",
+            applied_at=f"2026-09-20T17:40:0{ordinal}+00:00",
+        ),
+        acknowledged_at=f"2026-09-20T17:41:0{ordinal}+00:00",
     )
 
 
@@ -235,6 +282,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(event.decimal_odds, Decimal("1.80"))
             self.assertEqual(event.event_id, delta.event_id)
 
+            _archive_pending_delta(source, delta)
             collector_checkpoint = _stream_checkpoint(delta)
             self.assertEqual(source.fetch_deltas(collector_checkpoint, (), 10), ())
 
@@ -410,6 +458,251 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 source.fetch_catalog_page(None)
 
             self.assertEqual(hostile.calls, 0)
+
+    def test_legacy_event_migration_commits_before_source_history_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            source.fetch_catalog_page(None)
+            delta = source.fetch_deltas(None, (), 1)[0]
+            event = source.resolve_event(delta)
+            store = source._require_collector_store()
+            store._append_with_runtime_stream_epoch(
+                delta,
+                activated_at=delta.collector_committed_at,
+            )
+            state = source._read_state()
+            state["event_cache"] = {delta.delta_id: event.to_dict()}
+            state["last_committed_quote_digests"] = {
+                event.quote_key: delta.canonical_event_digest
+            }
+            state["last_committed_dedupe_digests"] = {
+                event.dedupe_key: delta.canonical_event_digest
+            }
+            source._write_state(state)
+
+            with patch.object(
+                source,
+                "_write_state",
+                side_effect=ProductSourceStateError("injected source publish failure"),
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "injected source publish failure",
+                ):
+                    source._migrate_legacy_history_to_collector_store()
+
+            self.assertEqual(store.resolve_event(delta), event)
+            still_legacy = source._read_state()
+            self.assertIn(delta.delta_id, still_legacy["event_cache"])
+
+            source._migrate_legacy_history_to_collector_store()
+            migrated = source._read_state()
+            self.assertEqual(migrated["event_cache"], {})
+            self.assertEqual(migrated["last_committed_quote_digests"], {})
+            self.assertEqual(migrated["last_committed_dedupe_digests"], {})
+            self.assertEqual(store.resolve_event(delta), event)
+
+    def test_legacy_migration_accepts_multi_price_canonical_retirement_without_resurrection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
+            source = ParlayApiProductSource(
+                _Provider(
+                    [
+                        _batch(
+                            cursor="snapshot-1",
+                            odds="1.80",
+                            sequence=1,
+                            provider_event_id="event-1",
+                        ),
+                        _batch(
+                            cursor="snapshot-2",
+                            odds="1.90",
+                            sequence=2,
+                            provider_event_id="event-1",
+                        ),
+                        _batch(
+                            cursor="snapshot-3",
+                            odds="2.00",
+                            sequence=3,
+                            provider_event_id="event-2",
+                        ),
+                    ]
+                ),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+
+            first_page = source.fetch_catalog_page(None)
+            first = source.fetch_deltas(None, (), 1)[0]
+            first_event = source.resolve_event(first)
+            _archive_pending_delta(source, first)
+            source.fetch_deltas(_stream_checkpoint(first), (), 1)
+
+            second_page = source.fetch_catalog_page(_catalog_checkpoint(first_page))
+            second = source.fetch_deltas(_stream_checkpoint(first), (), 1)[0]
+            second_event = source.resolve_event(second)
+            _archive_pending_delta(source, second)
+            source.fetch_deltas(_stream_checkpoint(second), (), 1)
+
+            source.fetch_catalog_page(_catalog_checkpoint(second_page))
+            third = source.fetch_deltas(_stream_checkpoint(second), (), 1)[0]
+            third_event = source.resolve_event(third)
+            _archive_pending_delta(source, third)
+            store = source._require_collector_store()
+
+            self.assertEqual(first_event.quote_key, second_event.quote_key)
+            self.assertNotEqual(
+                first.canonical_event_digest,
+                second.canonical_event_digest,
+            )
+
+            legacy = source._read_state()
+            legacy["pending"] = None
+            legacy["event_cache"] = {
+                first.delta_id: first_event.to_dict(),
+                second.delta_id: second_event.to_dict(),
+            }
+            legacy["last_committed_quote_digests"] = {
+                second_event.quote_key: second.canonical_event_digest
+            }
+            legacy["last_committed_dedupe_digests"] = {
+                first_event.dedupe_key: first.canonical_event_digest,
+                second_event.dedupe_key: second.canonical_event_digest,
+            }
+            source._write_state(legacy)
+
+            desktop = DesktopDeltaCheckpointStore(
+                workspace / "desktop-retention-checkpoint.json"
+            )
+            _ack_retention_delta(desktop, first, ordinal=1)
+            _ack_retention_delta(desktop, second, ordinal=2)
+            _ack_retention_delta(desktop, third, ordinal=3)
+
+            connection = store._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                generation = connection.execute(
+                    "SELECT MAX(generation) FROM collector_epoch_activations_v1 "
+                    "WHERE source_id=?",
+                    (source.source_id,),
+                ).fetchone()[0]
+                self.assertIsInstance(generation, int)
+                connection.execute(
+                    "INSERT INTO collector_epoch_activations_v1("
+                    "source_id, generation, stream_epoch, activated_at"
+                    ") VALUES(?,?,?,?)",
+                    (
+                        source.source_id,
+                        int(generation) + 1,
+                        "post-retention-test-epoch",
+                        "2026-09-20T17:42:00+00:00",
+                    ),
+                )
+                connection.commit()
+            finally:
+                if connection.in_transaction:
+                    connection.rollback()
+                connection.close()
+
+            manager = CollectorRetentionManager(store)
+            plan = manager.preview(
+                source_id=source.source_id,
+                stream_epoch=source.stream_epoch,
+                desktop_checkpoint=desktop,
+            )
+            self.assertEqual(
+                plan.delete_delta_ids,
+                (first.delta_id, second.delta_id),
+            )
+            self.assertIn(third.delta_id, plan.retained_delta_ids)
+            result = manager.compact(
+                plan,
+                desktop_checkpoint=desktop,
+                compacted_at="2026-09-20T17:43:00+00:00",
+            )
+            self.assertEqual(
+                result.deleted_delta_ids,
+                (first.delta_id, second.delta_id),
+            )
+            for retired in (first, second):
+                self.assertIsNone(store.get(retired.delta_id))
+                with self.assertRaisesRegex(ValueError, "not retained exactly"):
+                    store.resolve_event(retired)
+            self.assertEqual(store.resolve_event(third), third_event)
+
+            restored = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            restored.bind_collector_store(store)
+
+            migrated = restored._read_state()
+            self.assertEqual(migrated["event_cache"], {})
+            self.assertEqual(migrated["last_committed_quote_digests"], {})
+            self.assertEqual(migrated["last_committed_dedupe_digests"], {})
+            for retired in (first, second):
+                self.assertIsNone(store.get(retired.delta_id))
+                with self.assertRaisesRegex(ValueError, "not retained exactly"):
+                    store.resolve_event(retired)
+            self.assertEqual(store.resolve_event(third), third_event)
+
+    def test_legacy_digest_migration_verifies_in_bounded_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            state = source._read_state()
+            digest = "a" * 64
+            state["last_committed_quote_digests"] = {
+                "quote-1": digest,
+                "quote-2": digest,
+                "quote-3": digest,
+            }
+            source._write_state(state)
+            store = source._require_collector_store()
+            calls = []
+
+            def fake_maps(*, source_id, stream_epoch, quote_keys, dedupe_keys):
+                calls.append((quote_keys, dedupe_keys))
+                return (
+                    {key: digest for key in quote_keys},
+                    {key: digest for key in dedupe_keys},
+                )
+
+            with (
+                patch.object(source, "_LEGACY_HISTORY_VERIFY_CHUNK", 2),
+                patch.object(store, "event_digest_maps", side_effect=fake_maps),
+            ):
+                source._migrate_legacy_history_to_collector_store()
+
+            self.assertEqual(
+                [len(quote_keys) for quote_keys, _ in calls],
+                [2, 1],
+            )
+            migrated = source._read_state()
+            self.assertEqual(migrated["last_committed_quote_digests"], {})
+            self.assertEqual(migrated["last_committed_dedupe_digests"], {})
+            self.assertEqual(migrated["event_cache"], {})
 
     def test_pending_snapshot_rejects_provider_batch_subclass(self) -> None:
         class _BatchSubclass(ProviderBatch):
@@ -861,6 +1154,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             )
             page = source.fetch_catalog_page(None)
             delta = source.fetch_deltas(None, (), 1)[0]
+            _archive_pending_delta(source, delta)
             checkpoint = _stream_checkpoint(delta)
             source.fetch_deltas(checkpoint, (), 1)
 
@@ -878,7 +1172,452 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             ):
                 restored.fetch_catalog_page(_catalog_checkpoint(page))
 
-    def test_missing_durable_event_cache_fails_closed(self) -> None:
+    def test_missing_retained_collector_event_payload_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
+            source = ParlayApiProductSource(
+                _Provider(
+                    [
+                        _batch(cursor="snapshot-1"),
+                        _batch(cursor="snapshot-2", odds="1.90", sequence=2),
+                    ]
+                ),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            page = source.fetch_catalog_page(None)
+            delta = source.fetch_deltas(None, (), 1)[0]
+            _archive_pending_delta(source, delta)
+            source.fetch_deltas(_stream_checkpoint(delta), (), 1)
+            source.fetch_catalog_page(_catalog_checkpoint(page))
+
+            store = source._require_collector_store()
+            connection = store._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "DELETE FROM collector_event_payloads_v1 WHERE delta_id=?",
+                    (delta.delta_id,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaises(ProductSourceStateError):
+                source.resolve_event(delta)
+
+    def test_lazy_store_creation_ignores_mutable_module_constructor_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            hostile_calls = []
+
+            class AttackerStore:
+                def __init__(self, *args, **kwargs):
+                    hostile_calls.append((args, kwargs))
+                    raise AssertionError("hostile store constructor executed")
+
+            with patch.object(
+                product_source_module,
+                "CollectorDeltaStore",
+                AttackerStore,
+            ):
+                store = source._require_collector_store()
+
+            self.assertIs(type(store), CollectorDeltaStore)
+            self.assertEqual(hostile_calls, [])
+
+    def test_collector_store_binding_rejects_subclass_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            class ForgedCollectorDeltaStore(CollectorDeltaStore):
+                pass
+
+            forged = ForgedCollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact canonical CollectorDeltaStore",
+            ):
+                source.bind_collector_store(forged)
+
+            self.assertIsNone(source._collector_store)
+
+    def test_collector_store_binding_rejects_wrong_path_when_resolve_is_rebound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            wrong_store = CollectorDeltaStore(
+                Path(directory) / "wrong-workspace" / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            hostile_calls = []
+
+            def hostile_resolve(path, *, strict=False):
+                hostile_calls.append((path, strict))
+                return source._collector_store_path
+
+            with patch.object(Path, "resolve", hostile_resolve):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "canonical workspace store",
+                ):
+                    source.bind_collector_store(wrong_store)
+
+            self.assertEqual(hostile_calls, [])
+            self.assertIsNone(source._collector_store)
+
+    def test_collector_store_binding_fails_closed_on_path_equality_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            wrong_store = CollectorDeltaStore(
+                Path(directory) / "wrong-workspace" / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            hostile_calls = []
+
+            def hostile_eq(left, right):
+                hostile_calls.append((left, right))
+                return True
+
+            with patch.object(Path, "__eq__", hostile_eq):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "path comparison dispatch was replaced",
+                ):
+                    source.bind_collector_store(wrong_store)
+
+            self.assertEqual(hostile_calls, [])
+            self.assertIsNone(source._collector_store)
+
+    def test_bound_store_reuse_fails_closed_on_path_equality_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            hostile_calls = []
+
+            def hostile_eq(left, right):
+                hostile_calls.append((left, right))
+                return True
+
+            with patch.object(Path, "__eq__", hostile_eq):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "path comparison dispatch was replaced",
+                ):
+                    source._require_collector_store()
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_bound_store_instance_method_shadow_cannot_redirect_history_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            hostile_calls = []
+
+            def hostile(*args, **kwargs):
+                hostile_calls.append((args, kwargs))
+                raise AssertionError("hostile instance dispatch executed")
+
+            store.event_digest_maps = hostile
+            page = source.fetch_catalog_page(None)
+
+            self.assertEqual(page.cursor, "snapshot-1")
+            self.assertEqual(hostile_calls, [])
+
+    def test_bound_store_transitive_connect_shadow_fails_before_hostile_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            source.fetch_catalog_page(None)
+            delta = source.fetch_deltas(None, (), 1)[0]
+            _archive_pending_delta(source, delta)
+            source.fetch_deltas(_stream_checkpoint(delta), (), 1)
+            hostile_calls = []
+
+            def hostile_connect():
+                hostile_calls.append(True)
+                raise AssertionError("hostile transitive _connect executed")
+
+            with patch.object(store, "_connect", hostile_connect):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "durable-history dispatch was replaced",
+                ):
+                    source.resolve_event(delta)
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_bound_store_staticmethod_code_mutation_fails_before_hostile_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            descriptor = vars(CollectorDeltaStore)["_bounded_identity_keys"]
+            original_bounded_keys = descriptor.__func__
+            original_code = original_bounded_keys.__code__
+
+            def hostile_bounded_keys(values, field):
+                raise AssertionError(
+                    "hostile in-place _bounded_identity_keys code executed"
+                )
+
+            try:
+                original_bounded_keys.__code__ = hostile_bounded_keys.__code__
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "durable-history dispatch was replaced",
+                ):
+                    source.fetch_catalog_page(None)
+            finally:
+                original_bounded_keys.__code__ = original_code
+
+    def test_bound_store_classmethod_code_mutation_fails_before_hostile_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            descriptor = vars(CollectorDeltaStore)["_path_file_identity"]
+            original_path_identity = descriptor.__func__
+            original_code = original_path_identity.__code__
+
+            def hostile_path_identity(cls, path):
+                raise AssertionError(
+                    "hostile in-place _path_file_identity code executed"
+                )
+
+            try:
+                original_path_identity.__code__ = hostile_path_identity.__code__
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "durable-history dispatch was replaced",
+                ):
+                    source.fetch_catalog_page(None)
+            finally:
+                original_path_identity.__code__ = original_code
+
+    def test_bound_store_class_method_replacement_fails_before_hostile_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            hostile_calls = []
+
+            def hostile(*args, **kwargs):
+                hostile_calls.append((args, kwargs))
+                raise AssertionError("hostile class dispatch executed")
+
+            with patch.object(CollectorDeltaStore, "event_digest_maps", hostile):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "durable-history dispatch was replaced",
+                ):
+                    source.fetch_catalog_page(None)
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_failed_explicit_collector_store_binding_rolls_back_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+
+            with patch.object(
+                source,
+                "_migrate_legacy_history_to_collector_store",
+                side_effect=ProductSourceStateError("injected migration failure"),
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "injected migration failure",
+                ):
+                    source.bind_collector_store(store)
+
+            self.assertIsNone(source._collector_store)
+
+    def test_failed_lazy_collector_store_binding_rolls_back_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            with patch.object(
+                source,
+                "_migrate_legacy_history_to_collector_store",
+                side_effect=ProductSourceStateError("injected migration failure"),
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "injected migration failure",
+                ):
+                    source._require_collector_store()
+
+            self.assertIsNone(source._collector_store)
+
+    def test_collector_store_binding_is_same_object_idempotent_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            first = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(first)
+            source.bind_collector_store(first)
+
+            replacement = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "authority cannot be replaced",
+            ):
+                source.bind_collector_store(replacement)
+
+            self.assertIs(source._require_collector_store(), first)
+
+    def test_construction_defers_collector_store_until_canonical_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            store_path = workspace / "collector_deltas.json"
+
+            self.assertIsNone(source._collector_store)
+            self.assertFalse(store_path.exists())
+
+            store = CollectorDeltaStore(store_path, max_bytes=4 * 1024 * 1024)
+            source.bind_collector_store(store)
+
+            self.assertIs(source._require_collector_store(), store)
+            self.assertEqual(store.configured_max_bytes, 4 * 1024 * 1024)
+
+    def test_oversized_legacy_history_migrates_before_current_state_cap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"
             authority_root = Path(directory) / "authority"
@@ -892,14 +1631,141 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             )
             source.fetch_catalog_page(None)
             delta = source.fetch_deltas(None, (), 1)[0]
-            state_path = source.state_path
-            raw = state_path.read_text(encoding="utf-8")
-            state_path.write_text(
-                raw.replace(f'"{delta.delta_id}":', '"missing-delta":', 1),
-                encoding="utf-8",
+            event = source.resolve_event(delta)
+            store = source._require_collector_store()
+            store._append_with_runtime_stream_epoch(
+                delta,
+                activated_at=delta.collector_committed_at,
             )
-            with self.assertRaises(ProductSourceStateError):
-                source.resolve_event(delta)
+
+            legacy = source._read_state()
+            legacy["pending"] = None
+            legacy["event_cache"] = {delta.delta_id: event.to_dict()}
+            legacy["last_committed_quote_digests"] = {
+                event.quote_key: delta.canonical_event_digest
+            }
+            legacy["last_committed_dedupe_digests"] = {
+                event.dedupe_key: delta.canonical_event_digest
+            }
+            source._write_state(legacy)
+
+            cleared = dict(source._read_state())
+            cleared["event_cache"] = {}
+            cleared["last_committed_quote_digests"] = {}
+            cleared["last_committed_dedupe_digests"] = {}
+            cleared_rendered = (
+                json.dumps(
+                    source._seal_state(cleared),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            legacy_size = source.state_path.stat().st_size
+            bound = len(cleared_rendered) + 64
+            self.assertLess(bound, legacy_size)
+
+            with patch.object(ParlayApiProductSource, "_MAX_STATE_BYTES", bound):
+                restored = ParlayApiProductSource(
+                    _Provider([]),
+                    workspace=workspace,
+                    authority_root=authority_root,
+                    lawful_terms_ref="terms:parlayapi:v1",
+                    retention_ref="retention:parlayapi:v1",
+                )
+                self.assertTrue(restored._legacy_oversized_state)
+                budgeted = CollectorDeltaStore(
+                    workspace / "collector_deltas.json",
+                    max_bytes=4 * 1024 * 1024,
+                )
+                restored.bind_collector_store(budgeted)
+
+                self.assertFalse(restored._legacy_oversized_state)
+                self.assertLessEqual(restored.state_path.stat().st_size, bound)
+                self.assertEqual(budgeted.resolve_event(delta), event)
+
+    def test_state_reader_rejects_symlink_and_byte_bound_before_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            original = source.state_path.read_bytes()
+            oversized = source.state_path.with_name("oversized.json")
+            oversized.write_bytes(b"x" * 65)
+            old_path = source.state_path
+            source.state_path = oversized
+            old_bound = source._MAX_STATE_BYTES
+            source._MAX_STATE_BYTES = 64
+            try:
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "bounded canonical file",
+                ):
+                    source._read_state_unlocked()
+            finally:
+                source._MAX_STATE_BYTES = old_bound
+                source.state_path = old_path
+            self.assertEqual(source.state_path.read_bytes(), original)
+
+    def test_state_reader_requires_canonical_no_follow_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            with patch.object(
+                product_source_module,
+                "_open_read_only_descriptor",
+                side_effect=OSError("injected no-follow rejection"),
+            ) as no_follow:
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "cannot verify durable product source state",
+                ):
+                    source._read_state_unlocked()
+
+            no_follow.assert_called_once_with(source.state_path)
+
+    def test_oversized_candidate_does_not_prepare_monotonic_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            current = source._read_state()
+            candidate = dict(current)
+            candidate["event_cache"] = {"unpublishable": {"payload": "x" * 256}}
+            sealed = source._seal_state(candidate)
+
+            with (
+                patch.object(source, "_MAX_STATE_BYTES", 64),
+                patch.object(source._authority, "prepare") as prepare,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "exceeds bounded checkpoint capacity",
+                ):
+                    source._publish_state_locked(
+                        sealed,
+                        observed_state_sha256=str(current["state_sha256"]),
+                    )
+
+            prepare.assert_not_called()
 
     def test_two_instances_cannot_last_writer_win_pending_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

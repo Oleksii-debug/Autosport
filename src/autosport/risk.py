@@ -1988,20 +1988,25 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         self,
         initial_bankroll: Decimal,
         balance: Decimal,
-        committed_stake: Decimal,
-        amount: Decimal,
+        committed_capital: Decimal,
+        stake_amount: Decimal,
+        capital_amount: Decimal,
     ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | None:
         try:
             ticket_fraction, committed_fraction = self._effective_fraction_limits()
-            # Protective caps/reserve remain fail-closed on any limit-relaxing rounding.
+            # Per-ticket limits remain stake-denominated, while aggregate exposure
+            # and cash reserve are capital-at-risk constraints. For BACK these are
+            # identical; for LAY capital_amount is the exact liability.
             with localcontext(self._decimal_context()):
                 ticket_limit = initial_bankroll * ticket_fraction
                 committed_limit = initial_bankroll * committed_fraction
-                remaining_balance = balance - amount
+                remaining_balance = balance - capital_amount
                 reserve_limit = initial_bankroll * self.minimum_cash_reserve_fraction
             # Exposure itself can legitimately require more than 28 significant digits even
             # when every PaperBook debit was canonical, so aggregate it exactly.
-            aggregate_committed = self._exact_positive_sum((committed_stake, amount))
+            aggregate_committed = self._exact_positive_sum(
+                (committed_capital, capital_amount)
+            )
         except (ArithmeticError, TypeError, ValueError):
             return None
 
@@ -2068,6 +2073,15 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         if amount <= 0:
             return RiskDecision(False, "stake must be positive")
 
+        try:
+            capital_amount = (
+                amount
+                if context is None
+                else _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(amount, context.legs)
+            )
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            return RiskDecision(False, "proposed ticket capital exposure is invalid")
+
         state = self._book_state(book)
         if state is None:
             return RiskDecision(False, "virtual bankroll state is invalid")
@@ -2117,17 +2131,27 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             history_limits = (
                 (
                     session_room,
+                    capital_amount,
                     "economic goal conservative session loss limit exceeded",
                 ),
                 (
                     day_room,
+                    capital_amount,
                     "economic goal conservative day loss limit exceeded",
                 ),
-                (drawdown_room, "economic goal drawdown limit exceeded"),
-                (turnover_room, "economic goal turnover limit exceeded"),
+                (
+                    drawdown_room,
+                    capital_amount,
+                    "economic goal drawdown limit exceeded",
+                ),
+                (
+                    turnover_room,
+                    amount,
+                    "economic goal turnover limit exceeded",
+                ),
             )
-            for room, reason in history_limits:
-                if amount > room:
+            for room, exposure, reason in history_limits:
+                if exposure > room:
                     return RiskDecision(False, reason)
 
             quote_decision = self._quote_risk_decision(goal, context)
@@ -2141,7 +2165,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 if ruin_decision is not None:
                     return ruin_decision
 
-        derived = self._derived_risk_values(initial_bankroll, balance, committed_stake, amount)
+        derived = self._derived_risk_values(
+            initial_bankroll,
+            balance,
+            committed_stake,
+            amount,
+            capital_amount,
+        )
         if derived is None:
             return RiskDecision(False, "virtual bankroll state is invalid")
         ticket_limit, aggregate_committed, committed_limit, remaining_balance, reserve_limit = derived

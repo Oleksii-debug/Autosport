@@ -261,6 +261,7 @@ class QuoteRef:
     market_event_hash: str
     market_snapshot_hash: str | None = None
     sport: str | None = None
+    market_semantics_id: str | None = None
 
     def __post_init__(
         self,
@@ -288,6 +289,7 @@ class QuoteRef:
             )
         _canonical_hash(self.market_event_hash, "market_event_hash")
         _optional_hash(self.market_snapshot_hash, "market_snapshot_hash")
+        _optional_text(self.market_semantics_id, "quote market_semantics_id")
 
     @property
     def quote_key(self, _quote_key_fn=_quote_key) -> str:
@@ -336,6 +338,7 @@ class QuoteRef:
                 "market_snapshot_hash",
             ),
             sport=canonical.sport,
+            market_semantics_id=canonical.market_semantics_id,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -354,6 +357,8 @@ class QuoteRef:
         }
         if self.sport is not None:
             payload["sport"] = self.sport
+        if self.market_semantics_id is not None:
+            payload["market_semantics_id"] = self.market_semantics_id
         return payload
 
     @classmethod
@@ -374,6 +379,8 @@ class QuoteRef:
         if type(raw) is not dict or frozenset(raw) not in {
             frozenset(expected),
             frozenset(expected | {"sport"}),
+            frozenset(expected | {"market_semantics_id"}),
+            frozenset(expected | {"sport", "market_semantics_id"}),
         }:
             raise OpportunityContractError(
                 "quote reference must contain canonical fields"
@@ -406,6 +413,10 @@ class QuoteRef:
                 raw["market_snapshot_hash"], "market_snapshot_hash"
             ),
             sport=_optional_sport(raw.get("sport")),
+            market_semantics_id=_optional_text(
+                raw.get("market_semantics_id"),
+                "quote market_semantics_id",
+            ),
         )
 
 

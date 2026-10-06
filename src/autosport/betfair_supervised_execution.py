@@ -140,6 +140,20 @@ _GENERIC_CONFIRMATION_MONOTONIC_TYPE = (
 _GENERIC_CONFIRMATION_MONOTONIC_GRAPH = _snapshot_confirmation_class_graph(
     _GENERIC_CONFIRMATION_MONOTONIC_TYPE
 )
+_BETFAIR_CONFIRMATION_PROJECTION_TYPES = (
+    _betfair_confirmation.BetfairExecutionConfirmationSpec,
+    _betfair_confirmation.BetfairExecutionConfirmationWitness,
+)
+_BETFAIR_CONFIRMATION_PROJECTION_GRAPHS = tuple(
+    (projection_type, _snapshot_confirmation_class_graph(projection_type))
+    for projection_type in _BETFAIR_CONFIRMATION_PROJECTION_TYPES
+)
+_BETFAIR_CONFIRMATION_SLOT_GRAPH = tuple(
+    (projection_type, slot_name, getattr(projection_type, slot_name))
+    for projection_type in _BETFAIR_CONFIRMATION_PROJECTION_TYPES
+    for slot_name in getattr(projection_type, "__slots__", ())
+    if type(slot_name) is str
+)
 _GENERIC_CONFIRMATION_PROJECTION_TYPES = (
     _GENERIC_CONFIRMATION_MODULE.SupervisedExecutionReview,
     _GENERIC_CONFIRMATION_MODULE.OperatorConfirmationReceipt,
@@ -216,6 +230,15 @@ def _betfair_confirmation_graph_unchanged() -> bool:
         and _callable_graph_unchanged(
             _GENERIC_CONFIRMATION_MODULE,
             _GENERIC_CONFIRMATION_CALLABLE_GRAPH,
+        )
+        and all(
+            _class_graph_unchanged(projection_type, graph)
+            for projection_type, graph in _BETFAIR_CONFIRMATION_PROJECTION_GRAPHS
+        )
+        and all(
+            getattr(projection_type, slot_name, None) is descriptor
+            for projection_type, slot_name, descriptor
+            in _BETFAIR_CONFIRMATION_SLOT_GRAPH
         )
         and _GENERIC_CONFIRMATION_MODULE.SupervisedConfirmationAuthority
         is _GENERIC_CONFIRMATION_AUTHORITY_TYPE

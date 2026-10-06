@@ -2330,6 +2330,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         if cycle.provider_unavailable:
             with _running_fence(self._state):
+                if self._state._checkpoint_token != observation_token:
+                    raise ContinuousSessionError(
+                        "provider-unavailable observation was superseded by "
+                        "a newer canonical session generation"
+                    )
                 # A provider-unavailable collector cycle commits no source deltas,
                 # so there is no new source projection to publish. Avoid the full
                 # continuous-session snapshot path here: retained settlement history
@@ -2370,6 +2375,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
 
         with _running_fence(self._state):
+            if self._state._checkpoint_token != observation_token:
+                raise ContinuousSessionError(
+                    "collector observation was superseded by a newer "
+                    "canonical session generation"
+                )
             try:
                 source_snapshot = self._refresh_source_state_projection()
                 source_gap_states = (

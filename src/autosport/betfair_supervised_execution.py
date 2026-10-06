@@ -100,6 +100,101 @@ _REQUIRE_CURRENT_BETFAIR_CONFIRMATION_CODE = getattr(
 )
 
 
+def _snapshot_confirmation_callable_graph(namespace: dict[str, object]):
+    return tuple(
+        (name, value, getattr(value, "__code__", None))
+        for name, value in sorted(namespace.items())
+        if callable(value)
+    )
+
+
+def _snapshot_confirmation_class_graph(authority_type: type):
+    return tuple(
+        (
+            name,
+            getattr(authority_type, name),
+            getattr(getattr(authority_type, name), "__code__", None),
+        )
+        for name in sorted(vars(authority_type))
+        if callable(getattr(authority_type, name, None))
+    )
+
+
+_BETFAIR_CONFIRMATION_CALLABLE_GRAPH = _snapshot_confirmation_callable_graph(
+    vars(_betfair_confirmation)
+)
+_GENERIC_CONFIRMATION_MODULE = _betfair_confirmation._confirmation
+_GENERIC_CONFIRMATION_CALLABLE_GRAPH = _snapshot_confirmation_callable_graph(
+    vars(_GENERIC_CONFIRMATION_MODULE)
+)
+_GENERIC_CONFIRMATION_AUTHORITY_TYPE = (
+    _GENERIC_CONFIRMATION_MODULE.SupervisedConfirmationAuthority
+)
+_GENERIC_CONFIRMATION_AUTHORITY_GRAPH = _snapshot_confirmation_class_graph(
+    _GENERIC_CONFIRMATION_AUTHORITY_TYPE
+)
+_GENERIC_CONFIRMATION_MONOTONIC_TYPE = (
+    _GENERIC_CONFIRMATION_MODULE.MonotonicWorkspaceAuthority
+)
+_GENERIC_CONFIRMATION_MONOTONIC_GRAPH = _snapshot_confirmation_class_graph(
+    _GENERIC_CONFIRMATION_MONOTONIC_TYPE
+)
+_GENERIC_CONFIRMATION_PROJECTION_TYPES = (
+    _GENERIC_CONFIRMATION_MODULE.SupervisedExecutionReview,
+    _GENERIC_CONFIRMATION_MODULE.OperatorConfirmationReceipt,
+    _GENERIC_CONFIRMATION_MODULE.SupervisedConfirmationBinding,
+    _GENERIC_CONFIRMATION_MODULE._Record,
+    _GENERIC_CONFIRMATION_MODULE._State,
+)
+_GENERIC_CONFIRMATION_PROJECTION_GRAPHS = tuple(
+    (projection_type, _snapshot_confirmation_class_graph(projection_type))
+    for projection_type in _GENERIC_CONFIRMATION_PROJECTION_TYPES
+)
+_GENERIC_CONFIRMATION_SLOT_GRAPH = tuple(
+    (projection_type, slot_name, getattr(projection_type, slot_name))
+    for projection_type in _GENERIC_CONFIRMATION_PROJECTION_TYPES
+    for slot_name in getattr(projection_type, "__slots__", ())
+    if type(slot_name) is str
+)
+_BETFAIR_CONFIRMATION_HASHLIB = _betfair_confirmation.hashlib
+_BETFAIR_CONFIRMATION_HASHLIB_SHA256 = _BETFAIR_CONFIRMATION_HASHLIB.sha256
+_BETFAIR_CONFIRMATION_JSON = _betfair_confirmation.json
+_BETFAIR_CONFIRMATION_JSON_DUMPS = _BETFAIR_CONFIRMATION_JSON.dumps
+_BETFAIR_CONFIRMATION_DATETIME = _betfair_confirmation.datetime
+_BETFAIR_CONFIRMATION_PATH = _betfair_confirmation.Path
+_BETFAIR_CONFIRMATION_PATH_RESOLVE = _BETFAIR_CONFIRMATION_PATH.resolve
+_GENERIC_CONFIRMATION_HASHLIB = _GENERIC_CONFIRMATION_MODULE.hashlib
+_GENERIC_CONFIRMATION_HASHLIB_SHA256 = _GENERIC_CONFIRMATION_HASHLIB.sha256
+_GENERIC_CONFIRMATION_JSON = _GENERIC_CONFIRMATION_MODULE.json
+_GENERIC_CONFIRMATION_JSON_DUMPS = _GENERIC_CONFIRMATION_JSON.dumps
+_GENERIC_CONFIRMATION_PATH = _GENERIC_CONFIRMATION_MODULE.Path
+_GENERIC_CONFIRMATION_PATH_RESOLVE = _GENERIC_CONFIRMATION_PATH.resolve
+_BETFAIR_CONFIRMATION_FILENAME = _betfair_confirmation.CONFIRMATION_FILENAME
+_BETFAIR_CONFIRMATION_DOMAINS = (
+    _betfair_confirmation._REVIEW_PAYLOAD_DOMAIN,
+    _betfair_confirmation._DECISION_DOMAIN,
+    _betfair_confirmation._DECISION_ID_DOMAIN,
+    _betfair_confirmation._CONSUMER_DOMAIN,
+    _betfair_confirmation._WITNESS_DOMAIN,
+)
+
+
+def _callable_graph_unchanged(module, graph) -> bool:
+    return all(
+        getattr(module, name, None) is value
+        and getattr(value, "__code__", None) is code
+        for name, value, code in graph
+    )
+
+
+def _class_graph_unchanged(authority_type: type, graph) -> bool:
+    return all(
+        getattr(authority_type, name, None) is value
+        and getattr(value, "__code__", None) is code
+        for name, value, code in graph
+    )
+
+
 def _betfair_confirmation_graph_unchanged() -> bool:
     return (
         _betfair_confirmation.BetfairExecutionConfirmationError
@@ -112,8 +207,67 @@ def _betfair_confirmation_graph_unchanged() -> bool:
         is _REQUIRE_CURRENT_BETFAIR_CONFIRMATION
         and getattr(_REQUIRE_CURRENT_BETFAIR_CONFIRMATION, "__code__", None)
         is _REQUIRE_CURRENT_BETFAIR_CONFIRMATION_CODE
+        and _callable_graph_unchanged(
+            _betfair_confirmation,
+            _BETFAIR_CONFIRMATION_CALLABLE_GRAPH,
+        )
+        and _betfair_confirmation._confirmation is _GENERIC_CONFIRMATION_MODULE
+        and _callable_graph_unchanged(
+            _GENERIC_CONFIRMATION_MODULE,
+            _GENERIC_CONFIRMATION_CALLABLE_GRAPH,
+        )
+        and _GENERIC_CONFIRMATION_MODULE.SupervisedConfirmationAuthority
+        is _GENERIC_CONFIRMATION_AUTHORITY_TYPE
+        and _class_graph_unchanged(
+            _GENERIC_CONFIRMATION_AUTHORITY_TYPE,
+            _GENERIC_CONFIRMATION_AUTHORITY_GRAPH,
+        )
+        and _GENERIC_CONFIRMATION_MODULE.MonotonicWorkspaceAuthority
+        is _GENERIC_CONFIRMATION_MONOTONIC_TYPE
+        and _class_graph_unchanged(
+            _GENERIC_CONFIRMATION_MONOTONIC_TYPE,
+            _GENERIC_CONFIRMATION_MONOTONIC_GRAPH,
+        )
+        and all(
+            _class_graph_unchanged(projection_type, graph)
+            for projection_type, graph in _GENERIC_CONFIRMATION_PROJECTION_GRAPHS
+        )
+        and all(
+            getattr(projection_type, slot_name, None) is descriptor
+            for projection_type, slot_name, descriptor
+            in _GENERIC_CONFIRMATION_SLOT_GRAPH
+        )
+        and _betfair_confirmation.hashlib is _BETFAIR_CONFIRMATION_HASHLIB
+        and _BETFAIR_CONFIRMATION_HASHLIB.sha256
+        is _BETFAIR_CONFIRMATION_HASHLIB_SHA256
+        and _betfair_confirmation.json is _BETFAIR_CONFIRMATION_JSON
+        and _BETFAIR_CONFIRMATION_JSON.dumps is _BETFAIR_CONFIRMATION_JSON_DUMPS
+        and _betfair_confirmation.datetime is _BETFAIR_CONFIRMATION_DATETIME
+        and _betfair_confirmation.Path is _BETFAIR_CONFIRMATION_PATH
+        and _BETFAIR_CONFIRMATION_PATH.resolve
+        is _BETFAIR_CONFIRMATION_PATH_RESOLVE
+        and _GENERIC_CONFIRMATION_MODULE.hashlib
+        is _GENERIC_CONFIRMATION_HASHLIB
+        and _GENERIC_CONFIRMATION_HASHLIB.sha256
+        is _GENERIC_CONFIRMATION_HASHLIB_SHA256
+        and _GENERIC_CONFIRMATION_MODULE.json is _GENERIC_CONFIRMATION_JSON
+        and _GENERIC_CONFIRMATION_JSON.dumps
+        is _GENERIC_CONFIRMATION_JSON_DUMPS
+        and _GENERIC_CONFIRMATION_MODULE.Path is _GENERIC_CONFIRMATION_PATH
+        and _GENERIC_CONFIRMATION_PATH.resolve
+        is _GENERIC_CONFIRMATION_PATH_RESOLVE
+        and _betfair_confirmation.CONFIRMATION_FILENAME
+        == _BETFAIR_CONFIRMATION_FILENAME
+        and (
+            _betfair_confirmation._REVIEW_PAYLOAD_DOMAIN,
+            _betfair_confirmation._DECISION_DOMAIN,
+            _betfair_confirmation._DECISION_ID_DOMAIN,
+            _betfair_confirmation._CONSUMER_DOMAIN,
+            _betfair_confirmation._WITNESS_DOMAIN,
+        )
+        == _BETFAIR_CONFIRMATION_DOMAINS
+        and _betfair_confirmation._authority_graph_unchanged()
     )
-
 
 class PlaceOrdersOutcome(str, Enum):
     ACCEPTED = "ACCEPTED"

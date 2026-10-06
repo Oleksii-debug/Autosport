@@ -415,6 +415,29 @@ def test_contract_successor_ignores_rebound_canonical_transition_alias(monkeypat
     previous.validate_automatic_successor(candidate)
 
 
+def test_transition_authority_rejects_in_place_nested_kwdefault_mutation() -> None:
+    def nested_guard(*_args, policy="strict"):
+        return None
+
+    def operation(_previous, _candidate, helper=nested_guard):
+        helper()
+
+    bound = economic_goal_module._make_transition_validator_authority(operation)
+    original_kwdefaults = nested_guard.__kwdefaults__
+    assert original_kwdefaults is not None
+    original_policy = original_kwdefaults["policy"]
+
+    nested_guard.__kwdefaults__["policy"] = "forged"
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="nested validator keyword defaults authority changed",
+        ):
+            bound(None, None)
+    finally:
+        nested_guard.__kwdefaults__["policy"] = original_policy
+
+
 def test_contract_constructor_rejects_authority_injection() -> None:
     with pytest.raises(TypeError):
         _goal(_validator=lambda value: None)  # type: ignore[arg-type]

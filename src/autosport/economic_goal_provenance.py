@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from functools import wraps
 from typing import Final
 
 from .economic_goal import EconomicGoalContract, EconomicGoalContractError
@@ -154,7 +155,42 @@ def _provenance_init_authority(
     _CANONICAL_PROVENANCE_VALIDATOR(self)
 
 
-EconomicGoalProvenance.__init__ = _provenance_init_authority
+def _make_provenance_constructor_authority(operation):
+    operation_code = operation.__code__
+    operation_defaults = operation.__defaults__
+    operation_kwdefaults = operation.__kwdefaults__
+    error_type = EconomicGoalProvenanceError
+
+    @wraps(operation)
+    def bound(*args, **kwargs):
+        if operation.__code__ is not operation_code:
+            raise error_type("economic-goal provenance constructor authority changed")
+        if operation.__defaults__ is not operation_defaults:
+            raise error_type(
+                "economic-goal provenance constructor defaults authority changed"
+            )
+        if operation.__kwdefaults__ is not operation_kwdefaults:
+            raise error_type(
+                "economic-goal provenance constructor keyword defaults authority changed"
+            )
+        result = operation(*args, **kwargs)
+        if operation.__code__ is not operation_code:
+            raise error_type("economic-goal provenance constructor authority changed")
+        if operation.__defaults__ is not operation_defaults:
+            raise error_type(
+                "economic-goal provenance constructor defaults authority changed"
+            )
+        if operation.__kwdefaults__ is not operation_kwdefaults:
+            raise error_type(
+                "economic-goal provenance constructor keyword defaults authority changed"
+            )
+        return result
+
+
+_CANONICAL_PROVENANCE_INIT: Final = _make_provenance_constructor_authority(
+    _provenance_init_authority
+)
+EconomicGoalProvenance.__init__ = _CANONICAL_PROVENANCE_INIT
 
 
 def _build_provenance(

@@ -480,3 +480,26 @@ def test_codec_ignores_rebound_size_bounds(monkeypatch) -> None:
     member_body["blocked_sports"] = ["s" * 513]
     with pytest.raises(EconomicGoalContractError, match="non-canonical restriction text"):
         economic_goal_from_payload(oversized_member)
+
+
+def test_store_binding_validation_does_not_dispatch_path_equality(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    def forged_eq(*args, **kwargs):
+        raise AssertionError("rebound Path.__eq__ executed")
+
+    monkeypatch.setattr(type(store.path), "__eq__", forged_eq)
+
+    assert store.load() == _goal()
+
+
+def test_store_rejects_equal_but_distinct_path_rebind(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    original_path = store.path
+    object.__setattr__(store, "path", type(original_path)(str(original_path)))
+
+    with pytest.raises(EconomicGoalContractError, match="path binding was rebound"):
+        store.load()

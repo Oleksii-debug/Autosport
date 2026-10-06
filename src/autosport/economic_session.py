@@ -529,6 +529,8 @@ def _read_regular_bytes(
     _close=os.close,
     _open=_open_read_only_descriptor,
     _is_regular=stat.S_ISREG,
+    _min=min,
+    _len=len,
 ) -> bytes:
     try:
         before = _stat(path, follow_symlinks=False)
@@ -559,11 +561,11 @@ def _read_regular_bytes(
             remaining = limit + 1 - total
             if remaining <= 0:
                 raise EconomicSessionIntegrityError(f"{label} exceeds bounded size")
-            chunk = _read(descriptor, min(64 * 1024, remaining))
+            chunk = _read(descriptor, _min(64 * 1024, remaining))
             if not chunk:
                 break
             chunks.append(chunk)
-            total += len(chunk)
+            total += _len(chunk)
             if total > limit:
                 raise EconomicSessionIntegrityError(f"{label} exceeds bounded size")
         after = _fstat(descriptor)

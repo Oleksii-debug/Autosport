@@ -104,6 +104,43 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         self.assertFalse(evidence.automatic_rollover_supported)
         self.assertFalse(evidence.real_money_execution_authorized)
 
+    def test_bounded_reader_uses_captured_builtin_authority(self) -> None:
+        import autosport.economic_session as economic_session
+
+        path = self.workspace / "paper_book.json"
+        expected = path.read_bytes()
+        limit = len(expected) + 1
+        names = ("min", "len")
+        missing = object()
+        originals = {
+            name: economic_session.__dict__.get(name, missing)
+            for name in names
+        }
+        calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("rebound bounded-reader builtin executed")
+
+        try:
+            for name in names:
+                setattr(economic_session, name, hostile)
+            observed = economic_session._read_regular_bytes(
+                path,
+                limit=limit,
+                label="canonical PaperBook",
+            )
+        finally:
+            for name, original in originals.items():
+                if original is missing:
+                    economic_session.__dict__.pop(name, None)
+                else:
+                    setattr(economic_session, name, original)
+
+        self.assertEqual(observed, expected)
+        self.assertEqual(calls, 0)
+
     def test_opening_paperbook_validation_parses_exact_hashed_bytes(self) -> None:
         import autosport.economic_session as economic_session
 

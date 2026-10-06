@@ -103,6 +103,7 @@ _POLICY_SOURCE_SHA256: Final = hashlib.sha256(
             "primary_rate_source": _CALLS_AND_FEES_URL,
             "supplemental_rate_sources": {
                 "ListSelectionTrades": _BETDAQPRO_API_EXPLAINED_URL,
+                _ANY_OTHER_RATE_POLICY_KEY: _BETDAQPRO_API_EXPLAINED_URL,
             },
             "operation_sources": [
                 _PLACEMENT_METHODS_URL,

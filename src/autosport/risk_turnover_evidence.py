@@ -1310,18 +1310,7 @@ type.__setattr__(
 )
 _SESSION_TURNOVER_RESOLVE_BOUND = PaperSessionTurnoverResolver.resolve
 
-_raw_session_require_descriptor = PaperSessionTurnoverResolver.__dict__["require_current"]
-if type(_raw_session_require_descriptor) is not classmethod:
-    raise RuntimeError("canonical session turnover require_current classmethod is unavailable")
-_session_require_globals = _freeze_turnover_module_globals()
-_session_require_globals["_SESSION_TURNOVER_RESOLVE_BOUND"] = (
-    _SESSION_TURNOVER_RESOLVE_BOUND
-)
-_raw_session_require = _raw_session_require_descriptor.__func__
-_raw_session_require_code = _raw_session_require.__code__
-
-
-def _session_require_current_sealed(
+def _session_require_current_source(
     cls,
     candidate: PaperSessionTurnoverEvidence,
     *,
@@ -1330,13 +1319,6 @@ def _session_require_current_sealed(
     session_store: ProductEconomicSessionStore,
     session_evidence: ProductEconomicSession,
 ) -> PaperSessionTurnoverEvidence:
-    if (
-        type(_raw_session_require) is not FunctionType
-        or _raw_session_require.__code__ is not _raw_session_require_code
-    ):
-        raise PaperSessionTurnoverEvidenceIncompleteError(
-            "canonical session turnover resolver executable authority changed"
-        )
     if cls is not PaperSessionTurnoverResolver:
         raise PaperSessionTurnoverEvidenceMismatchError(
             "session turnover resolver must be canonical exact class"
@@ -1358,12 +1340,21 @@ def _session_require_current_sealed(
     return current
 
 
+_session_require_globals = _freeze_turnover_module_globals()
+_session_require_globals["_SESSION_TURNOVER_RESOLVE_BOUND"] = (
+    _SESSION_TURNOVER_RESOLVE_BOUND
+)
 type.__setattr__(
     PaperSessionTurnoverResolver,
     "require_current",
-    classmethod(_session_require_current_sealed),
+    classmethod(
+        _seal_session_turnover_resolver_method(
+            _session_require_current_source,
+            _session_require_globals,
+        )
+    ),
 )
 
 del _raw_session_resolve_descriptor
 del _session_resolve_globals
-del _raw_session_require_descriptor
+del _session_require_globals

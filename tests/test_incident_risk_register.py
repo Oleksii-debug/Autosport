@@ -228,11 +228,35 @@ class IncidentRiskRegisterTests(unittest.TestCase):
                 evidence_state=RiskEvidenceState.PARTIAL,
                 requires_operator_action=False,
             )
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "evidence beyond occurrence evidence",
+        ):
+            self._entry(
+                status=RiskStatus.RESOLVED,
+                mitigation="Provider recovered and replay was reconciled.",
+                evidence_state=RiskEvidenceState.VERIFIED,
+                requires_operator_action=False,
+            )
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "evidence beyond occurrence evidence",
+        ):
+            self._entry(
+                status=RiskStatus.SUPERSEDED,
+                mitigation="A successor occurrence was reported.",
+                evidence_state=RiskEvidenceState.VERIFIED,
+                requires_operator_action=False,
+            )
         with self.assertRaisesRegex(IncidentRiskRegisterError, "cannot require operator action"):
             self._entry(
                 status=RiskStatus.RESOLVED,
                 mitigation="Provider recovered and replay was reconciled.",
                 evidence_state=RiskEvidenceState.VERIFIED,
+                evidence_refs=(
+                    "evidence://provider-gap/001",
+                    "evidence://resolution/001",
+                ),
                 requires_operator_action=True,
             )
 
@@ -243,6 +267,10 @@ class IncidentRiskRegisterTests(unittest.TestCase):
             mitigation="Provider recovered and replay was reconciled.",
             residual_risk="No unresolved gap remains in the recorded interval.",
             evidence_state=RiskEvidenceState.VERIFIED,
+            evidence_refs=(
+                "evidence://provider-gap/001",
+                "evidence://resolution/001",
+            ),
             requires_operator_action=False,
         )
         self.assertEqual(closed.status, RiskStatus.RESOLVED)

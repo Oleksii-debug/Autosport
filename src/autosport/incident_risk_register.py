@@ -388,6 +388,10 @@ class IncidentRiskEntry:
                 raise IncidentRiskRegisterError(
                     "terminal entries require verified evidence"
                 )
+            if not set(self.occurrence_evidence_refs) < set(self.evidence_refs):
+                raise IncidentRiskRegisterError(
+                    "terminal entries require evidence beyond occurrence evidence"
+                )
             if self.requires_operator_action:
                 raise IncidentRiskRegisterError(
                     "terminal entries cannot require operator action"

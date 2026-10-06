@@ -1331,6 +1331,8 @@ class AutosportWebController:
                 )
                 self._ok(self.product_runtime_status)
             elif product_message.kind == "TICK" and product_message.tick is not None:
+                prior_source_status = self.product_runtime_source_status
+                prior_source_attention = self._product_runtime_source_attention_required
                 if not self._bind_product_runtime_identity(
                     workspace=Path(self._active_workspace),
                     session_id=product_message.tick.session_id,
@@ -1352,7 +1354,19 @@ class AutosportWebController:
                     f"зафіксовано змін {len(product_message.tick.committed_delta_ids)}; "
                     f"завершено розрахунків {len(product_message.tick.settled_ticket_ids)}."
                 )
-                self.status = self.product_runtime_status
+                # Routine cycle progress remains inspectable in the labeled runtime
+                # field but must not continuously overwrite the global polite live
+                # region during 24/7 operation. Announce only source-attention
+                # transitions (including recovery), where operator action may be
+                # required and the change is semantically meaningful.
+                if (
+                    self.product_runtime_source_status != prior_source_status
+                    and (
+                        self._product_runtime_source_attention_required is True
+                        or prior_source_attention is True
+                    )
+                ):
+                    self.status = self.product_runtime_source_status
             elif product_message.kind == "STOPPED" and product_message.status is not None:
                 if not self._bind_product_runtime_identity(
                     workspace=Path(self._active_workspace),

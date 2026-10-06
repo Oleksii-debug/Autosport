@@ -3100,6 +3100,30 @@ def test_each_learning_resolution_detach_has_independent_quote_mapping() -> None
     assert canonical[0].quote_outcomes == {"quote-1": "win"}
 
 
+def test_settlement_consumer_rejects_conflicting_duplicate_evidence_before_io() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    first = _resolution(outcome="win", digest_char="a")
+    conflicting = _resolution(outcome="loss", digest_char="b")
+
+    try:
+        coordinator._settle(resolutions=(first, conflicting))
+    except continuous_session.ContinuousSessionError as exc:
+        assert "conflicting duplicate evidence_id" in str(exc)
+    else:
+        raise AssertionError("conflicting duplicate evidence reached settlement consumer")
+
+
+def test_settlement_consumer_requires_exact_resolution_tuple() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    try:
+        coordinator._settle(resolutions=[_resolution()])  # type: ignore[arg-type]
+    except TypeError as exc:
+        assert "exact tuple" in str(exc)
+    else:
+        raise AssertionError("non-tuple settlement resolution batch was accepted")
+
+
 
 def test_stale_instance_failure_cannot_override_newer_state_transition_generation() -> None:
     with tempfile.TemporaryDirectory() as directory:

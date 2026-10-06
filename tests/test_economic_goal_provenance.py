@@ -225,6 +225,8 @@ def test_provenance_rejects_contract_and_provenance_subclasses() -> None:
     class ProvenanceSubclass(EconomicGoalProvenance):
         pass
 
+    assert isinstance(ProvenanceSubclass.decision_identity, property)
+
     goal = _goal()
     contract_subclass = ContractSubclass(
         **{field.name: getattr(goal, field.name) for field in fields(EconomicGoalContract)}

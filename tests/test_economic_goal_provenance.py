@@ -135,6 +135,8 @@ def test_provenance_authority_rejects_direct_type_mutation() -> None:
         raise AssertionError("direct type mutation executed")
 
     for name, replacement in (
+        ("__init__", forged_property),
+        ("__post_init__", forged_property),
         ("decision_identity", forged_property),
         ("_authority_operations_sealed", False),
     ):
@@ -636,12 +638,21 @@ def test_provenance_constructor_rejects_code_rebinding(monkeypatch) -> None:
         operation.__code__ = original_code
 
 
-def test_provenance_constructor_ignores_rebound_post_init(monkeypatch) -> None:
-    monkeypatch.setattr(
-        EconomicGoalProvenance,
-        "__post_init__",
-        lambda self: None,
-    )
+def test_provenance_constructor_and_post_init_bindings_are_sealed() -> None:
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound provenance constructor authority executed")
+
+    for name in ("__init__", "__post_init__"):
+        with pytest.raises(
+            TypeError,
+            match="provenance public authority binding is immutable",
+        ):
+            setattr(EconomicGoalProvenance, name, forged)
+        with pytest.raises(
+            TypeError,
+            match="provenance public authority binding is immutable",
+        ):
+            type.__setattr__(EconomicGoalProvenance, name, forged)
 
     with pytest.raises(EconomicGoalProvenanceError, match="SHA-256 hex"):
         EconomicGoalProvenance(
@@ -751,15 +762,19 @@ def test_decision_identity_ignores_rebound_provenance_field_descriptors(monkeypa
     assert evidence.decision_identity == expected
 
 
-def test_provenance_creation_and_identity_ignore_rebound_constructor(monkeypatch) -> None:
+def test_provenance_creation_and_identity_use_sealed_constructor_authority() -> None:
     goal = _goal()
     expected = provenance_for(goal)
 
     def forged(*args, **kwargs):
         raise AssertionError("rebound EconomicGoalProvenance constructor executed")
 
-    monkeypatch.setattr(EconomicGoalProvenance, "__init__", forged)
-    monkeypatch.setattr(EconomicGoalProvenance, "__post_init__", forged)
+    for name in ("__init__", "__post_init__"):
+        with pytest.raises(
+            TypeError,
+            match="provenance public authority binding is immutable",
+        ):
+            setattr(EconomicGoalProvenance, name, forged)
 
     evidence = provenance_for(goal)
     assert evidence == expected

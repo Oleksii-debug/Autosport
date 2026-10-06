@@ -882,6 +882,8 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
     snapshot_path_mkdir_code = snapshot_path_mkdir.__code__
     snapshot_path_eq = snapshot_path_type.__eq__
     snapshot_path_eq_code = getattr(snapshot_path_eq, "__code__", None)
+    snapshot_path_fspath = snapshot_path_type.__fspath__
+    snapshot_path_fspath_code = getattr(snapshot_path_fspath, "__code__", None)
     snapshot_path_parent = snapshot_path_type.parent
     snapshot_path_name = snapshot_path_type.name
     snapshot_helper_authorities = None
@@ -1062,6 +1064,13 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             and getattr(snapshot_path_eq, "__code__", None) is not snapshot_path_eq_code
         ):
             raise ValueError("PaperBook snapshot equality callable authority changed")
+        if snapshot_path_type.__fspath__ is not snapshot_path_fspath:
+            raise ValueError("PaperBook snapshot filesystem path authority changed")
+        if (
+            snapshot_path_fspath_code is not None
+            and getattr(snapshot_path_fspath, "__code__", None) is not snapshot_path_fspath_code
+        ):
+            raise ValueError("PaperBook snapshot filesystem path callable authority changed")
         if snapshot_path_type.parent is not snapshot_path_parent:
             raise ValueError("PaperBook snapshot parent descriptor authority changed")
         if snapshot_path_type.name is not snapshot_path_name:
@@ -1648,6 +1657,8 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
     path_factory_new = path_factory.__new__
     path_factory_new_code = getattr(path_factory_new, "__code__", None)
     path_type = type(path_factory("."))
+    path_fspath = path_type.__fspath__
+    path_fspath_code = getattr(path_fspath, "__code__", None)
     path_unlink = path_type.unlink
     path_unlink_code = path_unlink.__code__
     os_module = os
@@ -1671,6 +1682,13 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
             and getattr(path_factory_new, "__code__", None) is not path_factory_new_code
         ):
             raise ValueError("PaperBook snapshot Path constructor callable authority changed")
+        if path_type.__fspath__ is not path_fspath:
+            raise ValueError("PaperBook snapshot filesystem path authority changed")
+        if (
+            path_fspath_code is not None
+            and getattr(path_fspath, "__code__", None) is not path_fspath_code
+        ):
+            raise ValueError("PaperBook snapshot filesystem path callable authority changed")
         if path_type.unlink is not path_unlink:
             raise ValueError("PaperBook snapshot unlink authority changed")
         if path_unlink.__code__ is not path_unlink_code:

@@ -180,6 +180,8 @@ def _make_account_identity_authority():
     missing_value = object()
 
     canonical_client_init = client_type.__init__
+    canonical_client_getattribute = client_type.__getattribute__
+    canonical_transport_getattribute = transport_type.__getattribute__
     canonical_clock = readonly_module._canonical_utc_now
     canonical_clock_code = getattr(canonical_clock, "__code__", None)
     canonical_datetime = readonly_module.datetime
@@ -539,6 +541,8 @@ def _make_account_identity_authority():
     def client_class_dispatch_is_current() -> bool:
         return (
             client_type.__init__ is canonical_client_init
+            and client_type.__getattribute__ is canonical_client_getattribute
+            and transport_type.__getattribute__ is canonical_transport_getattribute
             and readonly_module._canonical_utc_now is canonical_clock
             and getattr(canonical_clock, "__code__", None) is canonical_clock_code
             and readonly_module.datetime is canonical_datetime

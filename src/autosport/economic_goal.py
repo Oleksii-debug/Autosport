@@ -529,3 +529,16 @@ def validate_automatic_transition(
 
 
 _CANONICAL_TRANSITION_VALIDATOR: Final = validate_automatic_transition
+
+# Bind the convenience method to the canonical transition function object after
+# its definition.  This avoids resolving a mutable module alias when an owner
+# contract validates a machine-proposed successor.
+def _validate_automatic_successor_bound(
+    self: EconomicGoalContract,
+    candidate: EconomicGoalContract,
+    _validator=validate_automatic_transition,
+) -> None:
+    _validator(self, candidate)
+
+
+EconomicGoalContract.validate_automatic_successor = _validate_automatic_successor_bound

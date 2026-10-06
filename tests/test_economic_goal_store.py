@@ -867,3 +867,72 @@ def test_store_load_normalizes_invalid_utf8_to_contract_error(tmp_path) -> None:
 
     with pytest.raises(EconomicGoalContractError, match="valid UTF-8"):
         store.load()
+
+
+def test_verified_read_rejects_in_place_mutation_between_byte_images(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+    original_open = economic_goal_store_module._CANONICAL_OPEN_READ_ONLY_DESCRIPTOR
+    calls = 0
+
+    def racing_open(path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            path.write_text('{"schema":"attacker"}', encoding="utf-8")
+        return original_open(path)
+
+    with pytest.raises(EconomicGoalContractError, match="bytes changed"):
+        economic_goal_store_module._read_economic_goal_text(
+            store.path,
+            _open_descriptor=racing_open,
+        )
+
+
+def test_verified_read_rejects_path_replacement_after_second_descriptor_open(
+    tmp_path,
+) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text('{"schema":"attacker"}', encoding="utf-8")
+    original_stat = economic_goal_store_module._CANONICAL_OS_STAT
+    path_stat_calls = 0
+
+    def racing_stat(path, *args, **kwargs):
+        nonlocal path_stat_calls
+        if path == store.path:
+            path_stat_calls += 1
+            if path_stat_calls == 2:
+                os.replace(replacement, store.path)
+        return original_stat(path, *args, **kwargs)
+
+    with pytest.raises(EconomicGoalContractError, match="changed during verified read"):
+        economic_goal_store_module._read_economic_goal_text(
+            store.path,
+            _stat=racing_stat,
+        )
+
+
+def test_verified_read_rejects_path_replacement_after_final_byte_read(
+    tmp_path,
+) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text('{"schema":"attacker"}', encoding="utf-8")
+    original_open = economic_goal_store_module._CANONICAL_OPEN_READ_ONLY_DESCRIPTOR
+    calls = 0
+
+    def racing_open(path):
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            os.replace(replacement, path)
+        return original_open(path)
+
+    with pytest.raises(EconomicGoalContractError, match="changed after verified read"):
+        economic_goal_store_module._read_economic_goal_text(
+            store.path,
+            _open_descriptor=racing_open,
+        )

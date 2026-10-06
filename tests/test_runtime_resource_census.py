@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import queue
 import runpy
 from pathlib import Path
 import tempfile
@@ -397,6 +398,47 @@ class RuntimeResourceCoverageTruthTests(unittest.TestCase):
         status = verdict([], ())
 
         self.assertEqual(status, "PASS")
+
+
+    def test_runner_rejects_worker_with_residual_owned_queue_item(self) -> None:
+        namespace = self._runner_namespace()
+        finish_worker = namespace["_finish_worker"]
+
+        class ResidualQueueWorker:
+            def __init__(self) -> None:
+                self._messages: queue.Queue[object] = queue.Queue(maxsize=2)
+                self._thread: threading.Thread | None = None
+                self.busy = False
+
+            def start(self, task) -> bool:
+                self.busy = True
+
+                def run() -> None:
+                    try:
+                        task()
+                    except Exception as exc:
+                        self._messages.put(type("Message", (), {"error": str(exc)})())
+                        self._messages.put(object())
+
+                self._thread = threading.Thread(
+                    target=run,
+                    name="autosport-test-residual-queue",
+                    daemon=False,
+                )
+                self._thread.start()
+                return True
+
+            def poll(self):
+                item = self._messages.get_nowait()
+                self.busy = False
+                return item
+
+        worker = ResidualQueueWorker()
+        with self.assertRaisesRegex(RuntimeError, "retained terminal queue items"):
+            finish_worker(worker, "residual queue worker")
+
+        if worker._thread is not None:
+            worker._thread.join(5.0)
 
 
 if __name__ == "__main__":

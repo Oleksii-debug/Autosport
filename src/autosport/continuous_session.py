@@ -2332,6 +2332,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self,
         *,
         collector: HeadlessCollectorService | None = None,
+        source_id: str | None = None,
+        delta_store: Any | None = None,
+        max_items: int | None = None,
         _snapshot_method: Callable[
             ["_ContinuousSessionState"], ContinuousSessionStatus
         ] = _ContinuousSessionState.snapshot,
@@ -2356,14 +2359,27 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "canonical source-projection coordinator authority changed"
             )
         collector = self.collector if collector is None else collector
+        source_id = collector.source_id if source_id is None else source_id
+        delta_store = collector.delta_store if delta_store is None else delta_store
+        max_items = collector.config.max_items if max_items is None else max_items
+        if (
+            type(source_id) is not str
+            or not source_id
+            or source_id.strip() != source_id
+            or type(max_items) is not int
+            or max_items <= 0
+        ):
+            raise ContinuousSessionError(
+                "collector projection configuration is invalid"
+            )
         snapshot = _snapshot_method(self._state)
-        deltas = collector.delta_store.deltas_after_commit(
-            source_id=collector.source_id,
+        deltas = delta_store.deltas_after_commit(
+            source_id=source_id,
             after_delta_id=snapshot.source_state_delta_id,
-            max_items=collector.config.max_items + 1,
+            max_items=max_items + 1,
         )
-        backlog = len(deltas) > collector.config.max_items
-        selected = deltas[: collector.config.max_items]
+        backlog = len(deltas) > max_items
+        selected = deltas[:max_items]
         _record_source_projection_method(
             self._state,
             deltas=selected,
@@ -2380,6 +2396,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         outcome_authority: SettlementOutcomeAuthority | None | object = (
             _OUTCOME_AUTHORITY_UNSET
         ),
+        records_reader: Callable[[], tuple[EventLifecycleRecord, ...]] | None = None,
+        resolve_outcome: Callable[
+            ..., SettlementResolution | None
+        ] | None | object = _OUTCOME_AUTHORITY_UNSET,
         _outcome_authority_unset: object = _OUTCOME_AUTHORITY_UNSET,
         _resolution_validate: Callable[..., None] = SettlementResolution.validate,
         _resolution_validate_code: object = SettlementResolution.validate.__code__,
@@ -2402,20 +2422,30 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "canonical settlement resolution validator authority changed"
             )
         lifecycle = self.lifecycle if lifecycle is None else lifecycle
-        if outcome_authority is _outcome_authority_unset:
-            outcome_authority = self.outcome_authority
-        if outcome_authority is None:
+        if records_reader is None:
+            records_reader = lifecycle.records
+        if resolve_outcome is _outcome_authority_unset:
+            if outcome_authority is _outcome_authority_unset:
+                outcome_authority = self.outcome_authority
+            if outcome_authority is None:
+                return ()
+            resolve_outcome = getattr(outcome_authority, "resolve", None)
+        elif resolve_outcome is None:
             return ()
-        resolve_outcome = getattr(outcome_authority, "resolve", None)
         if not callable(resolve_outcome):
             raise ContinuousSessionError(
                 "settlement outcome authority resolver is not callable"
+            )
+        records = records_reader()
+        if type(records) is not tuple:
+            raise ContinuousSessionError(
+                "lifecycle settlement records must be an exact tuple"
             )
         cutoff = _instant_validator(as_of, "as_of")
         resolutions: list[SettlementResolution] = []
         evidence_by_id: dict[str, SettlementResolution] = {}
         outcome_by_settlement: dict[tuple[str, str], dict[str, str]] = {}
-        for record in lifecycle.records():
+        for record in records:
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
                 continue
             # Settlement truth is causal only after product state discovered both
@@ -2843,9 +2873,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _require_running_method(self)
         observation_token = self._state._checkpoint_token
         collector = self.collector
+        collector_run_cycle = collector.run_cycle
+        collector_source_id = collector.source_id
+        collector_delta_store = collector.delta_store
+        collector_max_items = collector.config.max_items
         lifecycle = self.lifecycle
+        lifecycle_register_eligible = lifecycle.register_eligible
+        lifecycle_records = lifecycle.records
         market_store = self.market_store
         desktop_consumer = self.desktop_consumer
+        desktop_drain = desktop_consumer.drain
         invalidation_buffer = self.invalidation_buffer
         dependency_index = self.dependency_index
         max_invalidation_batches = self.max_invalidation_batches_per_tick
@@ -2853,7 +2890,37 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         causal_view = self.causal_view
         required_history = self.required_history
         outcome_authority = self.outcome_authority
+        outcome_resolver = (
+            None
+            if outcome_authority is None
+            else getattr(outcome_authority, "resolve", None)
+        )
+        if outcome_resolver is not None and not callable(outcome_resolver):
+            raise ContinuousSessionError(
+                "settlement outcome authority resolver is not callable"
+            )
         learning_handoff = self.settlement_learning_handoff
+        prepare_settlement = None
+        reconcile_after_settlement = None
+        if learning_handoff is not None:
+            prepare_settlement = getattr(
+                learning_handoff,
+                "prepare_settlement",
+                None,
+            )
+            reconcile_after_settlement = getattr(
+                learning_handoff,
+                "reconcile_after_settlement",
+                None,
+            )
+            if prepare_settlement is not None and not callable(prepare_settlement):
+                raise ContinuousSessionError(
+                    "settlement learning prepare callback is not callable"
+                )
+            if not callable(reconcile_after_settlement):
+                raise ContinuousSessionError(
+                    "settlement learning reconcile callback is not callable"
+                )
         workspace = self.workspace
         paper_book_path = self.paper_book_path
         initial_bankroll = self.initial_bankroll
@@ -2861,7 +2928,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _instant_validator(now, "now")
 
         try:
-            cycle = collector.run_cycle()
+            cycle = collector_run_cycle()
             cycle_source_id = cycle_source_id
             cycle_provider_unavailable = cycle_provider_unavailable
             cycle_committed_delta_ids = cycle_committed_delta_ids
@@ -2869,6 +2936,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 type(cycle_source_id) is not str
                 or not cycle_source_id
                 or cycle_source_id.strip() != cycle_source_id
+                or cycle_source_id != collector_source_id
                 or type(cycle_provider_unavailable) is not bool
                 or type(cycle_committed_delta_ids) is not tuple
                 or any(
@@ -2963,6 +3031,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 source_snapshot = _refresh_source_state_projection_method(
                     self,
                     collector=collector,
+                    source_id=collector_source_id,
+                    delta_store=collector_delta_store,
+                    max_items=collector_max_items,
                 )
                 source_gap_states = (
                     ()
@@ -2974,7 +3045,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     if source_snapshot.source_sync_state is None
                     else (source_snapshot.source_sync_state,)
                 )
-                delivered = desktop_consumer.drain(
+                delivered = desktop_drain(
                     as_of=now,
                     view=causal_view,
                 )
@@ -3022,7 +3093,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     if before:
                         retired.append(input_id)
 
-                registered = lifecycle.register_eligible(
+                registered = lifecycle_register_eligible(
                     market_store,
                     as_of=now,
                     required_history=required_history,
@@ -3057,6 +3128,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     as_of=now,
                     lifecycle=lifecycle,
                     outcome_authority=outcome_authority,
+                    records_reader=lifecycle_records,
+                    resolve_outcome=outcome_resolver,
                 )
                 _validate_settlement_evidence_method(
                     self._state,
@@ -3070,30 +3143,6 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     raise ContinuousSessionError(
                         "settlement economic configuration changed during tick"
                     )
-                prepare_settlement = None
-                reconcile_after_settlement = None
-                if learning_handoff is not None:
-                    prepare_settlement = getattr(
-                        learning_handoff,
-                        "prepare_settlement",
-                        None,
-                    )
-                    reconcile_after_settlement = getattr(
-                        learning_handoff,
-                        "reconcile_after_settlement",
-                        None,
-                    )
-                    if (
-                        prepare_settlement is not None
-                        and not callable(prepare_settlement)
-                    ):
-                        raise ContinuousSessionError(
-                            "settlement learning prepare callback is not callable"
-                        )
-                    if not callable(reconcile_after_settlement):
-                        raise ContinuousSessionError(
-                            "settlement learning reconcile callback is not callable"
-                        )
                 if prepare_settlement is not None:
                     prepare_settlement(
                         paper_book_path=paper_book_path,

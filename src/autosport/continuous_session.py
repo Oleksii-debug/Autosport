@@ -417,7 +417,7 @@ class _ContinuousSessionState:
         # then silently adopt the winner's identity.
         with _durable_path_lock(self.path):
             if _path_exists(self.path):
-                raw = _read_method(self)
+                raw = self._read()
             else:
                 resolved_id = _text(
                     session_id or str(uuid.uuid4()),

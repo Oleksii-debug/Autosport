@@ -40,6 +40,8 @@ _PATH_TYPE: Final = type(_PATH_FACTORY("."))
 _PATH_NEW: Final = _PATH_FACTORY.__new__
 _PATH_EXPANDUSER: Final = _PATH_TYPE.expanduser
 _PATH_RESOLVE: Final = _PATH_TYPE.resolve
+_PATH_EXISTS: Final = _PATH_TYPE.exists
+_PATH_EXISTS_CODE: Final = getattr(_PATH_EXISTS, "__code__", None)
 _PATH_EXPANDUSER_CODE: Final = getattr(_PATH_EXPANDUSER, "__code__", None)
 _PATH_RESOLVE_CODE: Final = getattr(_PATH_RESOLVE, "__code__", None)
 
@@ -702,6 +704,7 @@ class ProductEconomicSessionStore:
         self._path_new_witness = _path_new
         self._path_expanduser_witness = _path_expanduser
         self._path_resolve_witness = _path_resolve
+        self._path_exists_witness = _PATH_EXISTS
         self._workspace_witness = self.workspace
         self._state_path_witness = self.state_path
         self._paperbook_path_witness = self.paperbook_path
@@ -799,6 +802,12 @@ class ProductEconomicSessionStore:
             or _PATH_NEW is not self._path_new_witness
             or _PATH_EXPANDUSER is not self._path_expanduser_witness
             or _PATH_RESOLVE is not self._path_resolve_witness
+            or _PATH_EXISTS is not self._path_exists_witness
+            or _PATH_TYPE.exists is not self._path_exists_witness
+            or (
+                _PATH_EXISTS_CODE is not None
+                and getattr(self._path_exists_witness, "__code__", None) is not _PATH_EXISTS_CODE
+            )
             or _PATH_FACTORY.__new__ is not self._path_new_witness
             or _PATH_TYPE.expanduser is not self._path_expanduser_witness
             or _PATH_TYPE.resolve is not self._path_resolve_witness
@@ -936,7 +945,7 @@ class ProductEconomicSessionStore:
                 raise MonotonicAuthorityRollbackError(
                     "economic-session state is missing after authority establishment"
                 )
-            if not self._paperbook_path_witness.exists():
+            if not self._path_exists_witness(self._paperbook_path_witness):
                 raise EconomicSessionIntegrityError(
                     "canonical paper_book.json is required before economic-session issuance"
                 )
@@ -1002,7 +1011,7 @@ class ProductEconomicSessionStore:
                 raise EconomicSessionMismatchError(
                     "owner EconomicGoal is unchanged; explicit transition is not authorized"
                 )
-            if not self._paperbook_path_witness.exists():
+            if not self._path_exists_witness(self._paperbook_path_witness):
                 raise EconomicSessionIntegrityError(
                     "canonical paper_book.json is required before economic-session transition"
                 )

@@ -582,6 +582,7 @@ class MarketBookBatchAttemptExecution:
 def _install_transport_result_authority() -> None:
     issued: dict[int, tuple[object, str, bool]] = {}
     validate = MarketBookBatchTransportResult.__post_init__
+    authority_fingerprint = MarketBookBatchTransportResult._authority_fingerprint
     validate_attempt_execution = MarketBookBatchAttemptExecution.__post_init__
     rate_reserve = BetfairMarketBookPerMarketRateGate.reserve
     concurrency_begin = BetfairMarketBookProjectionConcurrencyGate.begin
@@ -732,6 +733,10 @@ def _install_transport_result_authority() -> None:
                     complete=concurrency_complete,
                 )
                 raise
+        # Re-run the original structural validator before minting closure-local
+        # authority. Dataclass __post_init__ and fingerprint methods are mutable
+        # class attributes after import and therefore cannot be trusted here.
+        validate(result)
         key = id(result)
 
         def forget(_weakref: object, *, result_id: int = key) -> None:
@@ -739,7 +744,7 @@ def _install_transport_result_authority() -> None:
 
         issued[key] = (
             ref(result, forget),
-            result._authority_fingerprint(),
+            authority_fingerprint(result),
             result.canonical_network_origin,
         )
         return result
@@ -753,7 +758,7 @@ def _install_transport_result_authority() -> None:
             raise MarketBookBatchTransportError(
                 "MarketBook batch transport result was not issued by canonical transport"
             )
-        if record[1] != self._authority_fingerprint():
+        if record[1] != authority_fingerprint(self):
             raise MarketBookBatchTransportError(
                 "MarketBook batch transport result changed after canonical issuance"
             )

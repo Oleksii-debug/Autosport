@@ -1208,3 +1208,26 @@ def test_source_projection_rejects_noncanonical_delta_collection(
                 max_items=1,
             )
 
+def test_tick_rejects_collector_source_drift_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Collector:
+            source_id = "provider-attacker"
+            delta_store = _DeltaStore()
+            config = type("ConfigStub", (), {"max_items": 1})()
+
+            def run_cycle(self):
+                raise AssertionError("provider I/O ran with mismatched session source")
+
+        coordinator.collector = Collector()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="collector source identity does not match continuous session",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().cycles_completed == 0
+

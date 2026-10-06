@@ -48,6 +48,7 @@ _PROVIDER_CONTRACT_REF = (
 _WRITE_ADAPTER_ID = WRITE_ADAPTER_ID
 _WRITE_ADAPTER_VERSION = WRITE_ADAPTER_VERSION
 _CANONICAL_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
+_CANONICAL_PROVIDER_CLIENT_TYPE = BetfairSupervisedPlaceOrdersClient
 _CAPTURE_PROVIDER_ORDER_REF = "0" * 32
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -338,7 +339,11 @@ class _CaptureTransport:
         raise _CapturedPlaceOrdersRequest(body)
 
 
-def _capture_canonical_instruction(action: ExecutionAction) -> dict[str, Any]:
+def _capture_canonical_instruction(
+    action: ExecutionAction,
+    _client_type=_CANONICAL_PROVIDER_CLIENT_TYPE,
+    _place_action=_CANONICAL_PLACE_ACTION,
+) -> dict[str, Any]:
     """Capture the exact instruction emitted by the real provider-write method.
 
     The transport is a local fail-before-I/O capture object. Therefore this path
@@ -348,7 +353,7 @@ def _capture_canonical_instruction(action: ExecutionAction) -> dict[str, Any]:
     duplicated request builder or an adapter-version bump.
     """
 
-    client = object.__new__(BetfairSupervisedPlaceOrdersClient)
+    client = object.__new__(_client_type)
     client._credentials = _CaptureCredentials()
     client._gate = _CaptureGate()
     client._transport = _CaptureTransport()
@@ -357,7 +362,7 @@ def _capture_canonical_instruction(action: ExecutionAction) -> dict[str, Any]:
     client._request_id = 0
 
     try:
-        _CANONICAL_PLACE_ACTION(
+        _place_action(
             client,
             action,
             profile=None,

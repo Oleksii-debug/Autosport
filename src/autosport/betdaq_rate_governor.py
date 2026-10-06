@@ -75,6 +75,7 @@ _OPERATION_TO_RATE_POLICY_KEY: Final[Mapping[str, str]] = MappingProxyType(
         "UpdateOrdersNoReceipt": "ChangeOrderNoReceipt",
         "GetEventSubTreeNoSelections": "GetEventSubTreeNoSelections",
         "GetEventSubTreeWithSelections": "GetEventSubTreeWithSelections",
+        "ListBlacklistInformation": _ANY_OTHER_RATE_POLICY_KEY,
         "ListBootstrapOrders": "ListBootstrapOrders",
         "GetPrices": "GetPrices",
         "GetOddsLadder": _ANY_OTHER_RATE_POLICY_KEY,
@@ -90,6 +91,7 @@ _PROVIDER_API_NAME_TO_OPERATION_ID: Final[Mapping[str, str]] = MappingProxyType(
         "changeordernoreceipt": "UpdateOrdersNoReceipt",
         "geteventsubtreenoselections": "GetEventSubTreeNoSelections",
         "geteventsubtreewithselections": "GetEventSubTreeWithSelections",
+        "listblacklistinformation": "ListBlacklistInformation",
         "listbootstraporders": "ListBootstrapOrders",
         "getprices": "GetPrices",
         "getoddsladder": "GetOddsLadder",
@@ -326,6 +328,7 @@ class BetdaqRatePolicy:
                 "methods must be a non-empty tuple of BetdaqMethodRatePolicy"
             )
         seen: set[str] = set()
+        rate_axis_settings: dict[str, tuple[int, int]] = {}
         for method in self.methods:
             if type(method) is not BetdaqMethodRatePolicy:
                 raise BetdaqRateGovernorError(
@@ -334,6 +337,15 @@ class BetdaqRatePolicy:
             if method.method in seen:
                 raise BetdaqRateGovernorError("method policies must be unique")
             seen.add(method.method)
+            axis_settings = (method.capacity, method.safety_reserve)
+            prior_axis_settings = rate_axis_settings.get(method.rate_policy_key)
+            if prior_axis_settings is None:
+                rate_axis_settings[method.rate_policy_key] = axis_settings
+            elif prior_axis_settings != axis_settings:
+                raise BetdaqRateGovernorError(
+                    "operations sharing one BETDAQ rate-policy axis must use "
+                    "identical capacity and safety_reserve"
+                )
         if (
             isinstance(self.combined_capacity, bool)
             or type(self.combined_capacity) is not int
@@ -409,13 +421,24 @@ def default_betdaq_rate_policy(
         raise BetdaqRateGovernorError(
             "safety reserve includes operation without exact documented mapping"
         )
+    reserves_by_axis: dict[str, int] = {}
+    for operation_id, reserve in reserves.items():
+        if isinstance(reserve, bool) or type(reserve) is not int or reserve < 0:
+            raise BetdaqRateGovernorError(
+                "safety reserve must be a non-negative integer"
+            )
+        rate_policy_key = _OPERATION_TO_RATE_POLICY_KEY[operation_id]
+        existing = reserves_by_axis.get(rate_policy_key)
+        reserves_by_axis[rate_policy_key] = (
+            reserve if existing is None else max(existing, reserve)
+        )
     return BetdaqRatePolicy(
         policy_revision=policy_revision,
         methods=tuple(
             BetdaqMethodRatePolicy(
                 method=operation_id,
                 capacity=_DEFAULT_RATE_POLICY_PER_MINUTE[rate_policy_key],
-                safety_reserve=reserves.get(operation_id, 0),
+                safety_reserve=reserves_by_axis.get(rate_policy_key, 0),
             )
             for operation_id, rate_policy_key in sorted(
                 _OPERATION_TO_RATE_POLICY_KEY.items()

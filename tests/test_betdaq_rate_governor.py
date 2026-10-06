@@ -255,7 +255,7 @@ def test_unknown_method_never_inherits_ambiguous_any_row(tmp_path: Path) -> None
     )
 
     with pytest.raises(BetdaqRateDeferred) as denied:
-        governor.admit("ListBlacklistInformation")
+        governor.admit("GetAccountBalances")
     assert denied.value.reason == "unmodeled_provider_rate_axis"
     assert denied.value.retry_after_seconds is None
 
@@ -886,8 +886,90 @@ def test_unknown_operation_still_cannot_inherit_any_other_allowance(
     )
 
     with pytest.raises(BetdaqRateDeferred) as denied:
-        governor.admit("ListBlacklistInformation")
+        governor.admit("GetAccountBalances")
 
     assert denied.value.reason == "unmodeled_provider_rate_axis"
     assert denied.value.retry_after_seconds is None
+
+
+def test_allowlisted_any_other_operations_share_one_conservative_axis(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, _, _ = make_ready(
+        tmp_path,
+        default_betdaq_rate_policy(),
+    )
+
+    for _ in range(60):
+        governor.admit("GetOddsLadder")
+    for _ in range(40):
+        governor.admit("ListBlacklistInformation")
+
+    for operation_id in ("GetOddsLadder", "ListBlacklistInformation"):
+        with pytest.raises(BetdaqRateDeferred) as denied:
+            governor.admit(operation_id)
+        assert denied.value.reason == "provider_rate_capacity_exhausted"
+        assert denied.value.retry_after_seconds == pytest.approx(60.0)
+
+
+def test_any_other_safety_reserve_is_shared_across_sibling_operations(
+    tmp_path: Path,
+) -> None:
+    configured = default_betdaq_rate_policy(
+        safety_reserve_by_method={"ListBlacklistInformation": 10},
+    )
+    governor, _, _, _, _ = make_ready(tmp_path, configured)
+
+    for _ in range(90):
+        governor.admit("GetOddsLadder")
+
+    for operation_id in ("GetOddsLadder", "ListBlacklistInformation"):
+        with pytest.raises(BetdaqRateDeferred) as denied:
+            governor.admit(operation_id)
+        assert denied.value.reason == "safety_capacity_reserved"
+
+    safety = governor.admit(
+        "ListBlacklistInformation",
+        priority=BetdaqRatePriority.SAFETY,
+    )
+    assert safety.rate_policy_key == "Any Other"
+    assert safety.any_axis_status == "CONSERVATIVE_SHARED_DEFAULT_ANY_OTHER"
+    assert safety.method_active == 91
+    assert safety.method_remaining_total == 9
+    assert safety.method_remaining_background == 0
+
+
+def test_custom_policy_cannot_split_one_shared_rate_axis() -> None:
+    with pytest.raises(
+        BetdaqRateGovernorError,
+        match="sharing one BETDAQ rate-policy axis",
+    ):
+        BetdaqRatePolicy(
+            policy_revision="split-any-other-axis",
+            methods=(
+                BetdaqMethodRatePolicy("GetOddsLadder", 100, 0),
+                BetdaqMethodRatePolicy("ListBlacklistInformation", 99, 0),
+            ),
+        )
+
+
+def test_listblacklistinformation_is_explicit_any_other_allowlist_member(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, _, _ = make_ready(
+        tmp_path,
+        default_betdaq_rate_policy(),
+    )
+
+    receipt = governor.admit(
+        "ListBlacklistInformation",
+        priority=BetdaqRatePriority.RECONCILIATION,
+    )
+
+    assert receipt.operation_id == "ListBlacklistInformation"
+    assert receipt.rate_policy_key == "Any Other"
+    assert receipt.any_axis_status == "CONSERVATIVE_SHARED_DEFAULT_ANY_OTHER"
+    assert receipt.grants_execution_authority is False
+    assert receipt.grants_write_permission is False
+    assert receipt.grants_freshness is False
 

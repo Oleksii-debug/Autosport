@@ -1056,6 +1056,50 @@ def test_attempt_executor_records_rate_denial_as_required_gap():
     assert transport.calls == []
 
 
+def test_attempt_executor_records_unexpected_post_response_finalization_failure(
+    monkeypatch,
+):
+    plan = _plan(
+        market_ids=("1.001",),
+        order_projection="EXECUTABLE",
+    )
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+
+    def fail_finalization(self):
+        raise RuntimeError("synthetic post-response finalizer failure")
+
+    monkeypatch.setattr(
+        MarketBookBatchTransportResult,
+        "__post_init__",
+        fail_finalization,
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        MarketBookAttemptHistory(plan, ()),
+        batch_id=batch.batch_id,
+        attempt_id="attempt-finalizer-failure",
+        required=True,
+        request_id="finalizer-failure",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.TRANSPORT_FAILURE
+    assert execution.result is None
+    assert execution.history.required_gap_attempt_ids == (
+        "attempt-finalizer-failure",
+    )
+    assert len(transport.calls) == 1
+    assert concurrency_gate.snapshot().active == ()
+    rate_state = rate_gate.snapshot()
+    assert len(rate_state.markets) == 1
+    assert len(rate_state.markets[0].accepted_at_utc_us) == 1
+
+
 def test_attempt_executor_records_transport_failure_and_releases_projection_lease():
     class RaisingTransport:
         def post(self, url, *, headers, body, timeout_seconds):

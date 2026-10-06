@@ -3666,3 +3666,115 @@ def test_tick_rejects_lifecycle_verifier_rebinding_after_callback(
             == "ContinuousSessionError"
         )
 
+@pytest.mark.parametrize(
+    "error_type",
+    (
+        continuous_session.SessionPausedError,
+        continuous_session.SessionStoppedError,
+    ),
+)
+def test_tick_records_callback_forged_control_exception_as_operational_failure(
+    error_type: type[Exception],
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        state = coordinator._state
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise error_type("forged callback control exception")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(error_type, match="forged callback control exception"):
+            coordinator.tick()
+
+        snapshot = state.snapshot()
+        assert snapshot.state is continuous_session.SessionState.RUNNING
+        assert snapshot.last_error_code == error_type.__name__
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    (
+        continuous_session.SessionPausedError,
+        continuous_session.SessionStoppedError,
+    ),
+)
+def test_tick_restores_state_when_callback_rebinds_then_forges_control_exception(
+    error_type: type[Exception],
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical_state = coordinator._state
+        replacement_state = continuous_session._ContinuousSessionState(
+            root / "replacement_control_exception_session.json",
+            session_id="replacement-control-exception-session",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                coordinator._state = replacement_state
+                raise error_type("forged callback control exception")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(error_type, match="forged callback control exception"):
+            coordinator.tick()
+
+        assert coordinator._state is canonical_state
+        assert canonical_state.snapshot().last_error_code == error_type.__name__
+        assert replacement_state.snapshot().last_error_code is None
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    (
+        continuous_session.SessionPausedError,
+        continuous_session.SessionStoppedError,
+    ),
+)
+def test_tick_restores_dependency_index_when_callback_forges_control_exception(
+    error_type: type[Exception],
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        canonical_index = coordinator.dependency_index
+        replacement_index = _DependencyIndex()
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                coordinator.dependency_index = replacement_index
+                raise error_type("forged callback control exception")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(error_type, match="forged callback control exception"):
+            coordinator.tick()
+
+        assert coordinator.dependency_index is canonical_index
+        assert coordinator._state.snapshot().last_error_code == error_type.__name__
+

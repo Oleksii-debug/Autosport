@@ -2247,14 +2247,42 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if register_input is None
             else register_input
         )
-        if input_id in dependency_index.input_ids:
+        before_ids = dependency_index.input_ids
+        if (
+            type(before_ids) is not tuple
+            or any(
+                type(value) is not str
+                or not value
+                or value.strip() != value
+                for value in before_ids
+            )
+            or len(set(before_ids)) != len(before_ids)
+        ):
+            raise ContinuousSessionError(
+                "dependency index input identity state is invalid"
+            )
+        if input_id in before_ids:
             return False
         if not callable(register_input):
             raise ContinuousSessionError(
                 "dependency index registration authority is unavailable"
             )
         register_input(input_id, **selectors)
-        if input_id not in dependency_index.input_ids:
+        after_ids = dependency_index.input_ids
+        if (
+            type(after_ids) is not tuple
+            or any(
+                type(value) is not str
+                or not value
+                or value.strip() != value
+                for value in after_ids
+            )
+            or len(set(after_ids)) != len(after_ids)
+        ):
+            raise ContinuousSessionError(
+                "dependency index input identity state is invalid"
+            )
+        if input_id not in after_ids:
             raise ContinuousSessionError(
                 "dependency index registration did not publish the input"
             )
@@ -2279,12 +2307,40 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index retirement authority is unavailable"
             )
+        before_ids = dependency_index.input_ids
+        if (
+            type(before_ids) is not tuple
+            or any(
+                type(value) is not str
+                or not value
+                or value.strip() != value
+                for value in before_ids
+            )
+            or len(set(before_ids)) != len(before_ids)
+        ):
+            raise ContinuousSessionError(
+                "dependency index input identity state is invalid"
+            )
         removed = unregister_input(input_id)
         if type(removed) is not bool:
             raise ContinuousSessionError(
                 "dependency index retirement receipt is invalid"
             )
-        if removed and input_id in dependency_index.input_ids:
+        after_ids = dependency_index.input_ids
+        if (
+            type(after_ids) is not tuple
+            or any(
+                type(value) is not str
+                or not value
+                or value.strip() != value
+                for value in after_ids
+            )
+            or len(set(after_ids)) != len(after_ids)
+        ):
+            raise ContinuousSessionError(
+                "dependency index input identity state is invalid"
+            )
+        if removed and input_id in after_ids:
             raise ContinuousSessionError(
                 "dependency index retirement did not remove the input"
             )
@@ -3365,8 +3421,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # The lifecycle is canonical about eligibility; the index is canonical
                 # about dependency routing. Keep both outputs for auditability, but never
                 # report a lifecycle registration that is absent from the routing index.
+                indexed_input_ids = dependency_index.input_ids
+                if (
+                    type(indexed_input_ids) is not tuple
+                    or any(
+                        type(value) is not str
+                        or not value
+                        or value.strip() != value
+                        for value in indexed_input_ids
+                    )
+                    or len(set(indexed_input_ids)) != len(indexed_input_ids)
+                ):
+                    raise ContinuousSessionError(
+                        "dependency index input identity state is invalid"
+                    )
                 for input_id in registered:
-                    if input_id not in dependency_index.input_ids:
+                    if input_id not in indexed_input_ids:
                         raise ContinuousSessionError(
                             "lifecycle reported an input absent from dependency index"
                         )

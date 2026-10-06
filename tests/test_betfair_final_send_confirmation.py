@@ -846,6 +846,21 @@ def test_receipt_for_other_attempt_never_reaches_provider(monkeypatch) -> None:
             action_id=action.action_id,
         )
 
+        restarted = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=target_attempt,
+            profile=profile,
+            client=client,
+            confirmation_receipt_id=receipt.receipt_id,
+            confirmation_review_sha256=review.review_sha256,
+        )
+        assert restarted.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert restarted.attempt_state is AttemptState.UNKNOWN
+        assert transport.calls == []
+
 
 def test_preconsumed_confirmation_never_reaches_provider(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -1032,3 +1047,56 @@ def test_final_send_review_payload_preserves_domain_schema() -> None:
         assert spec.review_payload["decision_id"] == spec.decision_id
         assert spec.review_payload["decision_sha256"] == spec.decision_sha256
         assert spec.review_payload["risk_evidence_sha256"] == spec.risk_evidence_sha256
+
+
+
+def test_backward_trusted_clock_after_confirmation_never_reaches_provider(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-post-confirmation-clock-regression"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _issue_confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        _set_trusted_times(
+            monkeypatch,
+            RESERVED_AT,
+            SUBMITTED_AT,
+            RESERVED_AT,
+        )
+
+        with pytest.raises(
+            BetfairFinalConfirmationDenied,
+            match="clock moved backwards",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.SUBMITTED
+        binding = authority.resolve_receipt_binding(
+            receipt_id=receipt.receipt_id,
+            expected_review_sha256=review.review_sha256,
+            require_unconsumed=False,
+        )
+        assert binding.receipt.consumed_at is not None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )

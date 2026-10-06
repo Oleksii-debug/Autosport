@@ -2413,6 +2413,10 @@ def _place_action_with_final_durable_authority(
     confirmation_review_sha256: str | None,
     _canonical_dispatch,
     _confirmation_guard,
+    _trusted_now,
+    _require_live_approval,
+    _require_live_durable_approval,
+    _parse_time,
 ) -> BetfairPlaceExecutionReport:
     """Hold durable approval + exact operator confirmation through the provider boundary."""
 
@@ -2462,7 +2466,7 @@ def _place_action_with_final_durable_authority(
                 "final supervised send provider order reference drifted"
             )
 
-        _require_durable_approval(ledger, bound, approval)
+        _require_live_durable_approval(ledger, bound, approval)
         _validate_betfair_place_action(action)
         _canonical_place_client_preflight(client)
         client._gate.require(
@@ -2486,17 +2490,17 @@ def _place_action_with_final_durable_authority(
         def authorize_and_submit(request_sha256: str) -> None:
             nonlocal submitted, submitted_request_sha256
             _sha(request_sha256, "submitted_request_sha256")
-            send_at = _supervised_execution_runtime._trusted_now()
-            _require_approval(bound, approval, send_at)
-            _require_durable_approval(ledger, bound, approval)
-            if _time(send_at, "final send time") < _time(
+            send_at = _trusted_now()
+            _require_live_approval(bound, approval, send_at)
+            _require_live_durable_approval(ledger, bound, approval)
+            if _parse_time(send_at, "final send time") < _parse_time(
                 attempt.attempt.reserved_at,
                 "attempt reserved_at",
             ):
                 raise BetfairSupervisedExecutionError(
                     "final send time precedes attempt reservation"
                 )
-            if _time(send_at, "final send time") >= _time(
+            if _parse_time(send_at, "final send time") >= _parse_time(
                 action.expires_at,
                 "action expires_at",
             ):
@@ -2537,7 +2541,7 @@ def _place_action_with_final_durable_authority(
                     "durable Betfair operator confirmation denied final provider send"
                 ) from exc
 
-            final_send_at = _supervised_execution_runtime._trusted_now()
+            final_send_at = _trusted_now()
             if not _confirmation_guard():
                 raise BetfairFinalConfirmationDenied(
                     "durable Betfair confirmation authority changed after consumption"
@@ -2560,15 +2564,15 @@ def _place_action_with_final_durable_authority(
                     "durable Betfair operator confirmation changed before provider send"
                 ) from exc
 
-            _require_approval(bound, approval, final_send_at)
-            _require_durable_approval(ledger, bound, approval)
-            final_send_instant = _time(final_send_at, "final send time")
-            submitted_instant = _time(send_at, "submitted_at")
+            _require_live_approval(bound, approval, final_send_at)
+            _require_live_durable_approval(ledger, bound, approval)
+            final_send_instant = _parse_time(final_send_at, "final send time")
+            submitted_instant = _parse_time(send_at, "submitted_at")
             if final_send_instant < submitted_instant:
                 raise BetfairFinalConfirmationDenied(
                     "trusted Betfair final-send clock moved backwards"
                 )
-            if final_send_instant >= _time(
+            if final_send_instant >= _parse_time(
                 action.expires_at,
                 "action expires_at",
             ):
@@ -2602,21 +2606,21 @@ def _place_action_with_final_durable_authority(
 
             # Last clock sample is immediately adjacent to the irreversible POST.
             # All durable I/O is complete; only pure in-memory expiry checks follow.
-            provider_send_at = _supervised_execution_runtime._trusted_now()
-            provider_send_instant = _time(provider_send_at, "provider send time")
+            provider_send_at = _trusted_now()
+            provider_send_instant = _parse_time(provider_send_at, "provider send time")
             if provider_send_instant < final_send_instant:
                 raise BetfairFinalConfirmationDenied(
                     "trusted Betfair final-send clock moved backwards at provider seam"
                 )
-            if provider_send_instant >= _time(
+            if provider_send_instant >= _parse_time(
                 review_expires_at,
                 "confirmation review expires_at",
             ):
                 raise BetfairFinalConfirmationDenied(
                     "durable Betfair operator confirmation expired before provider send"
                 )
-            _require_approval(bound, approval, provider_send_at)
-            if provider_send_instant >= _time(
+            _require_live_approval(bound, approval, provider_send_at)
+            if provider_send_instant >= _parse_time(
                 action.expires_at,
                 "action expires_at",
             ):
@@ -2887,8 +2891,39 @@ def _build_final_send_helper_boundary(
     canonical_dispatch,
     confirmation_guard,
     confirmation_guard_code,
+    trusted_now,
+    trusted_now_code,
+    require_live_approval,
+    require_live_approval_code,
+    require_live_durable_approval,
+    require_live_durable_approval_code,
+    parse_time,
+    parse_time_code,
     frame_getter,
 ):
+    def sealed_call(function, function_code, label):
+        def call(*args, **kwargs):
+            if getattr(function, "__code__", None) is not function_code:
+                raise BetfairSupervisedExecutionError(
+                    f"canonical Betfair {label} authority changed"
+                )
+            return function(*args, **kwargs)
+
+        return call
+
+    sealed_trusted_now = sealed_call(trusted_now, trusted_now_code, "clock")
+    sealed_require_live_approval = sealed_call(
+        require_live_approval,
+        require_live_approval_code,
+        "approval",
+    )
+    sealed_require_live_durable_approval = sealed_call(
+        require_live_durable_approval,
+        require_live_durable_approval_code,
+        "durable approval",
+    )
+    sealed_parse_time = sealed_call(parse_time, parse_time_code, "time parser")
+
     def protected_final_send_helper(
         ledger: RealExecutionLedger,
         bound: BoundSupervisedExecutionPlan,
@@ -2919,6 +2954,15 @@ def _build_final_send_helper_boundary(
             raise BetfairSupervisedExecutionError(
                 "canonical Betfair confirmation guard authority changed"
             )
+        if (
+            _supervised_execution_runtime._trusted_now is not trusted_now
+            or _require_approval is not require_live_approval
+            or _require_durable_approval is not require_live_durable_approval
+            or _time is not parse_time
+        ):
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair final-send functional authority changed"
+            )
         return raw_helper(
             ledger,
             bound,
@@ -2933,6 +2977,10 @@ def _build_final_send_helper_boundary(
             confirmation_review_sha256=confirmation_review_sha256,
             _canonical_dispatch=canonical_dispatch,
             _confirmation_guard=confirmation_guard,
+            _trusted_now=sealed_trusted_now,
+            _require_live_approval=sealed_require_live_approval,
+            _require_live_durable_approval=sealed_require_live_durable_approval,
+            _parse_time=sealed_parse_time,
         )
 
     return protected_final_send_helper
@@ -2945,6 +2993,14 @@ _PROTECTED_FINAL_SEND_HELPER = _build_final_send_helper_boundary(
     _CANONICAL_PROVIDER_DISPATCH,
     _betfair_confirmation_graph_unchanged,
     _betfair_confirmation_graph_unchanged.__code__,
+    _supervised_execution_runtime._trusted_now,
+    _supervised_execution_runtime._trusted_now.__code__,
+    _require_approval,
+    _require_approval.__code__,
+    _require_durable_approval,
+    _require_durable_approval.__code__,
+    _time,
+    _time.__code__,
     sys._getframe,
 )
 del _build_final_send_helper_boundary

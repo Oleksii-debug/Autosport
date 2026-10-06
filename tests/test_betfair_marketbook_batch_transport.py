@@ -3990,3 +3990,54 @@ def test_attempt_execution_rejects_provider_code_on_nonprovider_outcome():
             issued,
             "SERVICE_BUSY",
         )
+
+
+def test_retry_aware_executor_does_not_auto_retry_incomplete_response():
+    plan = _plan(market_ids=("1.001", "1.002"))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    client, transport = _client(_payload(("1.001",)))
+    rate_gate, concurrency_gate = _gates()
+    retry_gate = MarketBookRetryBackoffGate(
+        plan,
+        provider_source_id=PROVIDER_SOURCE_ID,
+    )
+
+    incomplete = execute_market_book_batch_attempt_with_backoff(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="incomplete-first",
+        required=True,
+        request_id="incomplete-first",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+        retry_gate=retry_gate,
+    )
+
+    assert incomplete.outcome is MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
+    assert len(transport.calls) == 1
+    decision = retry_gate.admit(batch.batch_id, observed_at=NOW)
+    assert decision.allowed is False
+    assert decision.disposition is MarketBookRetryDisposition.TERMINAL
+
+    blocked = execute_market_book_batch_attempt_with_backoff(
+        client,
+        incomplete.history,
+        batch_id=batch.batch_id,
+        attempt_id="incomplete-blocked",
+        required=True,
+        request_id="incomplete-blocked",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+        retry_gate=retry_gate,
+    )
+
+    assert blocked.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_BACKOFF
+    assert len(transport.calls) == 1
+    assert blocked.history.required_gap_attempt_ids == (
+        "incomplete-first",
+        "incomplete-blocked",
+    )

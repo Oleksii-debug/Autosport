@@ -171,23 +171,44 @@ def test_naive_timestamp_fails_closed(
     assert result.reason is ActionabilityReason.INVALID_TIMESTAMP
 
 
-@pytest.mark.parametrize(
-    "max_quote_age",
-    [timedelta(0), timedelta(microseconds=-1)],
-)
-def test_nonpositive_max_age_fails_closed(
+def test_negative_max_age_fails_closed(
     coherent_evidence: MarketActionabilityEvidence,
-    max_quote_age: timedelta,
 ) -> None:
     result = evaluate_market_actionability(
-        replace(coherent_evidence, max_quote_age=max_quote_age)
+        replace(coherent_evidence, max_quote_age=timedelta(microseconds=-1))
     )
 
     assert result.action is ActionabilityAction.WAIT
     assert result.reason is ActionabilityReason.INVALID_MAX_QUOTE_AGE
 
 
-def test_exact_freshness_boundary_is_stale(
+def test_zero_max_age_allows_only_exact_decision_instant_then_reaches_origin_gate(
+    coherent_evidence: MarketActionabilityEvidence,
+) -> None:
+    exact = evaluate_market_actionability(
+        replace(
+            coherent_evidence,
+            quote_observed_at=coherent_evidence.decision_at,
+            max_quote_age=timedelta(0),
+        )
+    )
+    expired = evaluate_market_actionability(
+        replace(
+            coherent_evidence,
+            quote_observed_at=(
+                coherent_evidence.decision_at - timedelta(microseconds=1)
+            ),
+            max_quote_age=timedelta(0),
+        )
+    )
+
+    assert exact.action is ActionabilityAction.WAIT
+    assert exact.reason is ActionabilityReason.PRODUCT_ORIGIN_UNPROVEN
+    assert expired.action is ActionabilityAction.WAIT
+    assert expired.reason is ActionabilityReason.QUOTE_STALE
+
+
+def test_exact_freshness_boundary_is_inclusive_and_reaches_origin_gate(
     coherent_evidence: MarketActionabilityEvidence,
 ) -> None:
     result = evaluate_market_actionability(
@@ -200,10 +221,10 @@ def test_exact_freshness_boundary_is_stale(
     )
 
     assert result.action is ActionabilityAction.WAIT
-    assert result.reason is ActionabilityReason.QUOTE_STALE
+    assert result.reason is ActionabilityReason.PRODUCT_ORIGIN_UNPROVEN
 
 
-def test_one_microsecond_inside_freshness_boundary_reaches_origin_gate(
+def test_one_microsecond_beyond_freshness_boundary_is_stale(
     coherent_evidence: MarketActionabilityEvidence,
 ) -> None:
     result = evaluate_market_actionability(
@@ -212,14 +233,13 @@ def test_one_microsecond_inside_freshness_boundary_reaches_origin_gate(
             quote_observed_at=(
                 coherent_evidence.decision_at
                 - coherent_evidence.max_quote_age
-                + timedelta(microseconds=1)
+                - timedelta(microseconds=1)
             ),
         )
     )
 
     assert result.action is ActionabilityAction.WAIT
-    assert result.reason is ActionabilityReason.PRODUCT_ORIGIN_UNPROVEN
-
+    assert result.reason is ActionabilityReason.QUOTE_STALE
 
 def test_evidence_subclass_is_rejected_before_caller_dispatch(
     coherent_evidence: MarketActionabilityEvidence,

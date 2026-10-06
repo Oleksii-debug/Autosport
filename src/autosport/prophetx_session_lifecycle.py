@@ -294,34 +294,6 @@ class ProphetXSessionSnapshot:
             )
 
         if (
-            self.last_failure_class is not None
-            and self.last_renewal_failure_class is not None
-        ):
-            raise ProphetXSessionLifecycleError(
-                "login and renewal failure evidence cannot coexist"
-            )
-
-        has_transient_failure_evidence = (
-            self.last_failure_class
-            in {
-                ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED,
-                ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
-                ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION,
-                ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
-            }
-            or self.last_renewal_failure_class
-            in {
-                ProphetXRenewalFailureClass.RETRYABLE,
-                ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
-                ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT,
-            }
-        )
-        if has_transient_failure_evidence and self.transient_failures <= 0:
-            raise ProphetXSessionLifecycleError(
-                "transient failure evidence requires a positive failure count"
-            )
-
-        if (
             self.state
             in {
                 ProphetXSessionState.NO_SESSION,
@@ -403,6 +375,14 @@ class ProphetXSessionSnapshot:
             raise ProphetXSessionLifecycleError(
                 "credential-rejection evidence cannot appear outside "
                 "credential-rejected state"
+            )
+
+        if (
+            self.last_failure_class is not None
+            and self.last_renewal_failure_class is not None
+        ):
+            raise ProphetXSessionLifecycleError(
+                "login and renewal failure evidence cannot coexist"
             )
 
         if self.last_failure_class is not None:
@@ -710,6 +690,26 @@ class ProphetXSessionSnapshot:
         ):
             raise ProphetXSessionLifecycleError(
                 "empty or expired state cannot carry session, slot, or retry evidence"
+            )
+
+        has_transient_failure_evidence = (
+            self.last_failure_class
+            in {
+                ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED,
+                ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+                ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION,
+                ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+            }
+            or self.last_renewal_failure_class
+            in {
+                ProphetXRenewalFailureClass.RETRYABLE,
+                ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
+                ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+            }
+        )
+        if has_transient_failure_evidence and self.transient_failures <= 0:
+            raise ProphetXSessionLifecycleError(
+                "transient failure evidence requires a positive failure count"
             )
 
     def to_json_dict(

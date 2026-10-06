@@ -14,14 +14,26 @@ from .decision_ledger import (
 )
 from .domain import MarketEvent, PaperTicket, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
+from .opportunity import ForecastRef, QuoteRef
 from .price_truth import paper_quote_rejection_reason
 from .probability import paper_value
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext
+from .uncertainty_sizing import (
+    UncertaintySizingDecision,
+    UncertaintySizingEvidence,
+    UncertaintySizingPolicy,
+    UncertaintySizingRequest,
+)
 
 
 _MATERIAL_ACTION_SCHEMA = "autosport.paper-value.open-ticket.v1"
 _MATERIAL_ACTION_MARKER = "material_action_id="
 _MATERIAL_ACTION_NAME = "OPEN_PAPER_VALUE_TICKET"
+
+# Positive predictive and sizing authority is resolved at producer-owned boundaries.
+# Do not cache executable/code witness pairs in this consumer module: coordinated
+# rebinding of a consumer executable and its expected witness must not mint PAPER
+# exposure.
 
 
 class PaperDecisionReconciliationRequired(RuntimeError):
@@ -52,8 +64,66 @@ class PaperValueAgent:
         stake: Decimal | str = "50",
         minimum_expected_profit_per_unit: Decimal | str = "0.05",
         risk_policy: PaperRiskPolicy | None = None,
+        predictive_forecast_refs: dict[str, ForecastRef] | None = None,
+        uncertainty_sizing_evidence: dict[str, UncertaintySizingEvidence] | None = None,
+        uncertainty_sizing_policy: UncertaintySizingPolicy | None = None,
     ) -> None:
         self.forecasts = forecasts
+        refs = {} if predictive_forecast_refs is None else predictive_forecast_refs
+        if type(refs) is not dict:
+            raise TypeError("predictive_forecast_refs must be a canonical dict")
+        normalized_refs: dict[str, ForecastRef] = {}
+        for quote_key, reference in refs.items():
+            if (
+                type(quote_key) is not str
+                or not quote_key
+                or quote_key.strip() != quote_key
+            ):
+                raise ValueError(
+                    "predictive_forecast_refs keys must be canonical non-empty text"
+                )
+            if type(reference) is not ForecastRef:
+                raise TypeError(
+                    "predictive_forecast_refs values must be exact ForecastRef values"
+                )
+            if reference.quote_key != quote_key:
+                raise ValueError(
+                    "predictive ForecastRef key must match its bound quote_key"
+                )
+            normalized_refs[quote_key] = reference
+        self.predictive_forecast_refs = normalized_refs
+
+        sizing_evidence = (
+            {} if uncertainty_sizing_evidence is None else uncertainty_sizing_evidence
+        )
+        if type(sizing_evidence) is not dict:
+            raise TypeError("uncertainty_sizing_evidence must be a canonical dict")
+        normalized_sizing_evidence: dict[str, UncertaintySizingEvidence] = {}
+        for quote_key, evidence in sizing_evidence.items():
+            if (
+                type(quote_key) is not str
+                or not quote_key
+                or quote_key.strip() != quote_key
+            ):
+                raise ValueError(
+                    "uncertainty_sizing_evidence keys must be canonical non-empty text"
+                )
+            if type(evidence) is not UncertaintySizingEvidence:
+                raise TypeError(
+                    "uncertainty_sizing_evidence values must be exact "
+                    "UncertaintySizingEvidence values"
+                )
+            normalized_sizing_evidence[quote_key] = evidence
+        if (
+            uncertainty_sizing_policy is not None
+            and type(uncertainty_sizing_policy) is not UncertaintySizingPolicy
+        ):
+            raise TypeError(
+                "uncertainty_sizing_policy must be exact UncertaintySizingPolicy or None"
+            )
+        self.uncertainty_sizing_evidence = normalized_sizing_evidence
+        self.uncertainty_sizing_policy = uncertainty_sizing_policy
+
         # ``stake`` remains a compatibility input for legacy/no-goal paper runs.
         # Once an EconomicGoalContract is active it has no financial authority:
         # the strategy derives a bounded proposal from edge + current PaperBook
@@ -62,6 +132,265 @@ class PaperValueAgent:
         self.minimum_edge = Decimal(str(minimum_expected_profit_per_unit))
         self.risk_policy = risk_policy or PaperRiskPolicy()
         self._acted: set[str] = set()
+    def _qualified_forecast_probability(
+        self,
+        forecast: ForecastLike,
+        event: MarketEvent,
+        context: AgentContext,
+    ) -> Decimal | None:
+        """Return one uncertainty-conservative probability or fail closed.
+
+        Legacy Forecast remains a compatibility-only PAPER input. Modern
+        ForecastRecord probability edge must reuse the canonical predictive
+        authority from #597/#615: an exact resolver-minted ForecastRef bound to
+        this forecast and this exact quote snapshot. Caller-authored/audit-only
+        ForecastRef values are not positive authority because the installed
+        predictive_eligibility_reason guard requires runtime resolver identity.
+
+        Once that authority is present, its declared
+        absolute_probability_radius_v1 uncertainty is applied exactly once.
+        BACK uses the lower probability endpoint; LAY uses the upper endpoint.
+        This is only an edge precondition and does not replace PaperRiskPolicy or
+        the canonical #623 PAPER execution authority.
+        """
+
+        if type(forecast) is Forecast:
+            return forecast.probability
+        if type(forecast) is not ForecastRecord:
+            context.notes.append(
+                "paper-value material action withheld: forecast type is not canonical"
+            )
+            return None
+
+        reference = self.predictive_forecast_refs.get(event.quote_key)
+        if reference is None:
+            context.notes.append(
+                "paper-value material action withheld: modern ForecastRecord lacks "
+                "canonical predictive ForecastRef authority"
+            )
+            return None
+        if forecast.market_snapshot_hash is None:
+            context.notes.append(
+                "paper-value material action withheld: modern ForecastRecord lacks "
+                "canonical market_snapshot_hash evidence"
+            )
+            return None
+
+        try:
+            rebound_quote = QuoteRef.from_market_event(
+                event,
+                market_snapshot_hash=forecast.market_snapshot_hash,
+            )
+        except Exception:
+            context.notes.append(
+                "paper-value material action withheld: current quote cannot be rebound "
+                "to canonical predictive evidence"
+            )
+            return None
+
+        if (
+            reference.forecast_id != forecast.forecast_id
+            or reference.forecast_hash != forecast.canonical_hash
+            or reference.quote_key != forecast.quote_key
+            or reference.probability != forecast.probability
+            or reference.input_cutoff_ts != forecast.input_cutoff_ts
+            or reference.market_snapshot_hash != forecast.market_snapshot_hash
+            or reference.quote_market_event_hash != rebound_quote.market_event_hash
+            or reference.model_id != forecast.model_id
+            or reference.model_version != forecast.model_version
+            or reference.strategy_version != forecast.strategy_version
+            or reference.uncertainty != forecast.uncertainty
+        ):
+            context.notes.append(
+                "paper-value material action withheld: predictive ForecastRef does "
+                "not bind the exact forecast/current quote snapshot"
+            )
+            return None
+
+        if type(reference) is not ForecastRef:
+            context.notes.append(
+                "paper-value material action withheld: predictive ForecastRef type "
+                "is not canonical"
+            )
+            return None
+        try:
+            # Resolve the producer module at use time. Runtime membership is owned
+            # by predictive_authority's closure, not by a consumer-side function/code
+            # witness pair that can be moved coherently with a forged verifier.
+            from . import predictive_authority as predictive_authority_producer
+
+            reason = (
+                predictive_authority_producer.runtime_forecast_ref_eligibility_reason(
+                    reference,
+                    parse_iso_timestamp(event.observed_ts),
+                    expected_model_id=forecast.model_id,
+                )
+            )
+        except Exception:
+            context.notes.append(
+                "paper-value material action withheld: predictive authority "
+                "resolution could not be verified"
+            )
+            return None
+        if reason is not None:
+            context.notes.append("paper-value material action withheld: " + reason)
+            return None
+
+        witness = reference.predictive_eligibility
+        if (
+            witness is None
+            or witness.uncertainty_kind != "absolute_probability_radius_v1"
+            or reference.uncertainty is None
+        ):
+            context.notes.append(
+                "paper-value material action withheld: predictive uncertainty "
+                "semantics are not canonical"
+            )
+            return None
+
+        if event.exchange_side == "lay":
+            return min(
+                Decimal("1"),
+                reference.probability + reference.uncertainty,
+            )
+        return max(
+            Decimal("0"),
+            reference.probability - reference.uncertainty,
+        )
+
+    def _canonical_uncertainty_sizing_decision(
+        self,
+        *,
+        forecast: ForecastRecord,
+        event: MarketEvent,
+        context: AgentContext,
+        goal,
+        qualified_probability: Decimal,
+        sizing_bankroll: Decimal,
+    ) -> UncertaintySizingDecision | None:
+        """Resolve the existing canonical uncertainty-sizing prerequisite.
+
+        This bridge does not estimate costs, probabilities, or stake itself.  It
+        requires externally produced canonical sizing evidence to bind the exact
+        modern forecast candidate and current executable quote, then delegates all
+        uncertainty/payoff sizing semantics to evaluate_uncertainty_sizing().
+        """
+
+        if event.exchange_side == "lay":
+            context.notes.append(
+                "paper-value material action withheld: canonical #623 paper "
+                "execution bridge is BACK-only for LAY"
+            )
+            return None
+
+        evidence = self.uncertainty_sizing_evidence.get(event.quote_key)
+        policy = self.uncertainty_sizing_policy
+        if evidence is None or policy is None:
+            context.notes.append(
+                "paper-value material action withheld: canonical uncertainty sizing "
+                "evidence/policy is unavailable"
+            )
+            return None
+
+        reference = self.predictive_forecast_refs.get(event.quote_key)
+        if reference is None or forecast.market_snapshot_hash is None:
+            context.notes.append(
+                "paper-value material action withheld: predictive authority is "
+                "unavailable for uncertainty sizing"
+            )
+            return None
+        try:
+            quote = QuoteRef.from_market_event(
+                event,
+                market_snapshot_hash=forecast.market_snapshot_hash,
+            )
+        except Exception:
+            context.notes.append(
+                "paper-value material action withheld: current quote cannot be "
+                "bound to uncertainty sizing"
+            )
+            return None
+
+        uncertainty = reference.uncertainty
+        if uncertainty is None:
+            context.notes.append(
+                "paper-value material action withheld: predictive uncertainty "
+                "is unavailable for sizing"
+            )
+            return None
+        expected_lower = max(
+            Decimal("0"),
+            reference.probability - uncertainty,
+        )
+        expected_upper = min(
+            Decimal("1"),
+            reference.probability + uncertainty,
+        )
+        if (
+            evidence.candidate_id != forecast.forecast_id
+            or evidence.quote_sha256 != quote.market_event_hash
+            or evidence.probability_model_version_id != forecast.model_version
+            or evidence.probability_point != reference.probability
+            or evidence.probability_lower != expected_lower
+            or evidence.probability_upper != expected_upper
+            or qualified_probability != expected_lower
+        ):
+            context.notes.append(
+                "paper-value material action withheld: uncertainty sizing evidence "
+                "does not bind the exact forecast/current quote/predictive interval"
+            )
+            return None
+
+        # The sizing evidence describes all-in *net* profit on one winning BACK
+        # stake, while #623 executes the exact current quote. Net payoff cannot
+        # exceed that quote's gross win profit unless a separate product authority
+        # proves an external rebate/promotion cashflow; no such authority is part of
+        # this PaperValue route. Fail closed rather than let payoff evidence inflate
+        # conservative EV or the Kelly-derived stake ceiling.
+        gross_win_profit_per_stake = event.decimal_odds - Decimal("1")
+        if evidence.net_win_profit_per_stake > gross_win_profit_per_stake:
+            context.notes.append(
+                "paper-value material action withheld: uncertainty sizing all-in "
+                "payoff exceeds current executable gross quote payoff"
+            )
+            return None
+
+        try:
+            request = UncertaintySizingRequest(
+                candidate_id=forecast.forecast_id,
+                quote_sha256=quote.market_event_hash,
+                decision_ts=event.observed_ts,
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+                bankroll=sizing_bankroll,
+            )
+            # Resolve the producer module at use time. The producer closure captures
+            # the canonical evaluator/result type and does not dispatch through the
+            # mutable public evidence class method.
+            from . import uncertainty_sizing as uncertainty_sizing_producer
+
+            decision = (
+                uncertainty_sizing_producer.evaluate_authoritative_uncertainty_sizing(
+                    evidence,
+                    request,
+                    policy,
+                )
+            )
+        except Exception:
+            context.notes.append(
+                "paper-value material action withheld: canonical uncertainty sizing "
+                "could not be evaluated"
+            )
+            return None
+
+        if decision.action.value != "eligible":
+            reason = ",".join(decision.reasons) if decision.reasons else "abstain"
+            context.notes.append(
+                "paper-value material action withheld: canonical uncertainty sizing "
+                "abstained: " + reason
+            )
+        return decision
+
 
     @staticmethod
     def _forecast_matches_market_identity(
@@ -377,7 +706,18 @@ class PaperValueAgent:
             return
         if parse_iso_timestamp(forecast.as_of_ts) > parse_iso_timestamp(event.observed_ts):
             return
-        estimate = paper_value(event.quote_key, forecast.probability, event.decimal_odds)
+        qualified_probability = self._qualified_forecast_probability(
+            forecast,
+            event,
+            context,
+        )
+        if qualified_probability is None:
+            return
+        estimate = paper_value(
+            event.quote_key,
+            qualified_probability,
+            event.decimal_odds,
+        )
         expected_profit_per_unit = estimate.expected_profit_per_unit
         if event.exchange_side == "lay":
             # paper_value is the canonical BACK value p*O - 1. For a LAY quote
@@ -446,6 +786,53 @@ class PaperValueAgent:
                     "paper-value decision"
                 )
 
+        sizing_decision: UncertaintySizingDecision | None = None
+        if goal is not None and type(forecast) is ForecastRecord:
+            sizing_bankroll = context.paper_book.balance
+            if persisted is not None:
+                raw_sizing_bankroll = persisted.payload.get(
+                    "uncertainty_sizing_bankroll"
+                )
+                if type(raw_sizing_bankroll) is not str:
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value decision lacks canonical uncertainty "
+                        "sizing bankroll"
+                    )
+                try:
+                    sizing_bankroll = Decimal(raw_sizing_bankroll)
+                except Exception as exc:
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value uncertainty sizing bankroll is invalid"
+                    ) from exc
+                if (
+                    not sizing_bankroll.is_finite()
+                    or sizing_bankroll <= 0
+                    or str(sizing_bankroll) != raw_sizing_bankroll
+                ):
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value uncertainty sizing bankroll is invalid"
+                    )
+            sizing_decision = self._canonical_uncertainty_sizing_decision(
+                forecast=forecast,
+                event=event,
+                context=context,
+                goal=goal,
+                qualified_probability=qualified_probability,
+                sizing_bankroll=sizing_bankroll,
+            )
+            sizing_eligible = (
+                sizing_decision is not None
+                and sizing_decision.action.value == "eligible"
+                and sizing_decision.conservative_ev_per_stake >= self.minimum_edge
+            )
+            if not sizing_eligible:
+                if persisted is not None:
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value decision cannot re-resolve current "
+                        "canonical uncertainty sizing authority"
+                    )
+                return
+
         chosen_stake: Decimal | None = None
         if persisted is not None:
             payload = persisted.payload
@@ -461,6 +848,45 @@ class PaperValueAgent:
                 raise PaperDecisionReconciliationRequired(
                     "durable paper-value decision identity changed across restart"
                 )
+            if type(forecast) is ForecastRecord:
+                reference = self.predictive_forecast_refs.get(event.quote_key)
+                if (
+                    reference is None
+                    or payload.get("predictive_forecast_ref")
+                    != reference.to_dict()
+                    or payload.get("qualified_probability")
+                    != str(qualified_probability)
+                ):
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value decision does not bind current "
+                        "predictive uncertainty authority"
+                    )
+                if goal is not None:
+                    evidence = self.uncertainty_sizing_evidence.get(event.quote_key)
+                    policy = self.uncertainty_sizing_policy
+                    if (
+                        sizing_decision is None
+                        or evidence is None
+                        or policy is None
+                        or payload.get("uncertainty_sizing_evidence_fingerprint")
+                        != evidence.fingerprint_sha256
+                        or payload.get("uncertainty_sizing_policy_fingerprint")
+                        != policy.fingerprint_sha256
+                        or payload.get("uncertainty_sizing_decision_fingerprint")
+                        != sizing_decision.decision_fingerprint_sha256
+                        or payload.get("uncertainty_sizing_bankroll")
+                        != str(sizing_decision.bankroll)
+                        or payload.get("uncertainty_sizing_stake_ceiling")
+                        != str(sizing_decision.stake_ceiling)
+                        or payload.get(
+                            "uncertainty_sizing_conservative_ev_per_stake"
+                        )
+                        != str(sizing_decision.conservative_ev_per_stake)
+                    ):
+                        raise PaperDecisionReconciliationRequired(
+                            "durable paper-value decision does not bind current "
+                            "canonical uncertainty sizing authority"
+                        )
             try:
                 chosen_stake = Decimal(str(payload["requested_stake"]))
             except Exception as exc:
@@ -473,16 +899,33 @@ class PaperValueAgent:
                 )
 
         if chosen_stake is None:
+            sizing_edge = (
+                sizing_decision.conservative_ev_per_stake
+                if sizing_decision is not None
+                else expected_profit_per_unit
+            )
             chosen_stake = (
                 self.stake
                 if goal is None
                 else self._derive_goal_stake(
                     context,
-                    expected_profit_per_unit,
+                    sizing_edge,
                 )
             )
             if chosen_stake is None:
                 return
+            if sizing_decision is not None:
+                chosen_stake = min(chosen_stake, sizing_decision.stake_ceiling)
+                if chosen_stake <= 0:
+                    return
+        elif (
+            sizing_decision is not None
+            and chosen_stake > sizing_decision.stake_ceiling
+        ):
+            raise PaperDecisionReconciliationRequired(
+                "durable paper-value requested stake exceeds current canonical "
+                "uncertainty sizing ceiling"
+            )
 
         if paper_quote_rejection_reason(event, chosen_stake) is not None:
             return
@@ -566,10 +1009,38 @@ class PaperValueAgent:
                             "input_cutoff_ts": forecast.input_cutoff_ts,
                             "generated_at": forecast.generated_at,
                             "uncertainty": str(forecast.uncertainty),
+                            "qualified_probability": str(qualified_probability),
+                            "predictive_forecast_ref": self.predictive_forecast_refs[
+                                event.quote_key
+                            ].to_dict(),
                             "evidence_hashes": list(forecast.evidence_hashes),
                             "market_snapshot_hash": forecast.market_snapshot_hash,
                         }
                     )
+                    if goal is not None:
+                        evidence = self.uncertainty_sizing_evidence[event.quote_key]
+                        policy = self.uncertainty_sizing_policy
+                        if sizing_decision is None or policy is None:
+                            raise PaperDecisionReconciliationRequired(
+                                "canonical uncertainty sizing disappeared before "
+                                "durable decision persistence"
+                            )
+                        payload.update(
+                            {
+                                "uncertainty_sizing_evidence_fingerprint":
+                                    evidence.fingerprint_sha256,
+                                "uncertainty_sizing_policy_fingerprint":
+                                    policy.fingerprint_sha256,
+                                "uncertainty_sizing_decision_fingerprint":
+                                    sizing_decision.decision_fingerprint_sha256,
+                                "uncertainty_sizing_bankroll":
+                                    str(sizing_decision.bankroll),
+                                "uncertainty_sizing_stake_ceiling":
+                                    str(sizing_decision.stake_ceiling),
+                                "uncertainty_sizing_conservative_ev_per_stake":
+                                    str(sizing_decision.conservative_ev_per_stake),
+                            }
+                        )
                 record = DecisionRecord(
                     replay_run_id=context.replay_run_id,
                     agent=self.name,

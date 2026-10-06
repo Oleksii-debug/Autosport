@@ -1244,5 +1244,26 @@ def test_read_regular_bytes_preserves_primary_domain_error_when_close_also_fails
         )
 
 
+
+
+def test_read_regular_bytes_normalizes_primary_read_os_error(tmp_path) -> None:
+    target = tmp_path / "economic-session.json"
+    target.write_bytes(b"{\"schema\":\"ok\"}")
+
+    def failing_read(_descriptor: int, _size: int) -> bytes:
+        raise OSError("read failure")
+
+    with pytest.raises(
+        economic_session.EconomicSessionIntegrityError,
+        match="cannot safely read test reader",
+    ):
+        economic_session._read_regular_bytes(
+            target,
+            limit=4096,
+            label="test reader",
+            _read=failing_read,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

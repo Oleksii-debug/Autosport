@@ -1063,11 +1063,17 @@ class ParlayApiProductSource:
             raise ProductSourceStateError("pending snapshot cannot confirm before assignment")
         if type(pending["catalog_events"]) is not list:
             raise ProductSourceStateError("pending catalog_events must be a list")
+        catalog_identities: set[str] = set()
         for event_raw in pending["catalog_events"]:
             try:
-                CatalogEvent.from_dict(event_raw)
+                catalog_event = CatalogEvent.from_dict(event_raw)
             except (TypeError, ValueError) as exc:
                 raise ProductSourceStateError("pending catalog event is invalid") from exc
+            if catalog_event.source_id != self.source_id:
+                raise ProductSourceStateError(
+                    "pending catalog event source conflicts with product source"
+                )
+            catalog_identities.add(catalog_event.identity)
         flags = pending["quality_flags"]
         if (
             type(flags) is not list
@@ -1093,6 +1099,14 @@ class ParlayApiProductSource:
                 event = MarketEvent.from_dict(item["event"])
             except (TypeError, ValueError) as exc:
                 raise ProductSourceStateError("pending canonical event is invalid") from exc
+            if event.source_id != self.source_id:
+                raise ProductSourceStateError(
+                    "pending market event source conflicts with product source"
+                )
+            if event.event_id not in catalog_identities:
+                raise ProductSourceStateError(
+                    "pending market event is absent from catalog snapshot"
+                )
             if item["quote_key"] != event.quote_key or item["dedupe_key"] != event.dedupe_key:
                 raise ProductSourceStateError("pending event identity cache mismatch")
             if item["canonical_digest"] != canonical_event_digest(event):
@@ -1105,8 +1119,7 @@ class ParlayApiProductSource:
                 except (TypeError, ValueError) as exc:
                     raise ProductSourceStateError("pending collector delta is invalid") from exc
                 if (
-                    event.source_id != self.source_id
-                    or delta.source_id != self.source_id
+                    delta.source_id != self.source_id
                     or delta.stream_epoch != self.stream_epoch
                     or delta.source_cursor != pending["catalog_cursor"]
                     or delta.source_observed_at != event.observed_ts

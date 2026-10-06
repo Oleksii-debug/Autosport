@@ -1157,6 +1157,78 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                     }
                 )
 
+    def test_unassigned_pending_rejects_foreign_catalog_event_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            source.fetch_catalog_page(None)
+            state = source._read_state()
+            pending = state["pending"]
+            assert isinstance(pending, dict)
+            pending["catalog_events"][0]["source_id"] = "source-y"
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "pending catalog event source conflicts",
+            ):
+                source._validate_pending(pending)
+
+    def test_unassigned_pending_rejects_foreign_market_event_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            source.fetch_catalog_page(None)
+            state = source._read_state()
+            pending = state["pending"]
+            assert isinstance(pending, dict)
+            item = pending["items"][0]
+            item["event"]["source_id"] = "source-y"
+            event = MarketEvent.from_dict(item["event"])
+            item["dedupe_key"] = event.dedupe_key
+            item["canonical_digest"] = canonical_event_digest(event)
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "pending market event source conflicts",
+            ):
+                source._validate_pending(pending)
+
+    def test_unassigned_pending_rejects_market_event_absent_from_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            source.fetch_catalog_page(None)
+            state = source._read_state()
+            pending = state["pending"]
+            assert isinstance(pending, dict)
+            item = pending["items"][0]
+            item["event"]["event_id"] = item["event"]["event_id"] + ":tampered"
+            event = MarketEvent.from_dict(item["event"])
+            item["quote_key"] = event.quote_key
+            item["dedupe_key"] = event.dedupe_key
+            item["canonical_digest"] = canonical_event_digest(event)
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "pending market event is absent from catalog snapshot",
+            ):
+                source._validate_pending(pending)
+
     def test_assigned_pending_delta_must_match_frozen_compliance_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = ParlayApiProductSource(

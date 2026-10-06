@@ -154,6 +154,34 @@ class PaperCampaignEpisodeHandoffResult:
     receipt: PaperCampaignEpisodeHandoffReceipt
 
 
+@dataclass(frozen=True, slots=True)
+class PaperCampaignEpisodeHandoffRecord:
+    """Immutable restart locator projected from one committed durable handoff."""
+
+    prepare_id: str
+    handoff_id: str
+    parent_checkpoint_id: str
+    parent_transition_id: str
+    parent_episode_id: str
+    parent_policy_id: str
+    parent_agent_loop_state_sha256: str
+    environment_id: str
+    child_agent_loop_path: str
+    child_loop_id: str
+    child_episode_key: str
+    canonical_strategy_id: str
+    champion_as_of: str
+    config_sha256: str
+    economic_goal_fingerprint: str
+    risk_fingerprint: str
+    source_sha256: str
+    admissible_actions: tuple[str, ...]
+    prepared_at: str
+    child_policy_id: str
+    child_episode_id: str
+    child_initial_checkpoint_id: str
+
+
 class PaperCampaignEpisodeHandoff:
     """Persist the smallest exactly-once witness between two existing authorities."""
 
@@ -163,8 +191,8 @@ class PaperCampaignEpisodeHandoff:
         *,
         state_path: str | Path | None = None,
     ) -> None:
-        if not isinstance(campaign, PaperCampaignRuntime):
-            raise TypeError("campaign must be PaperCampaignRuntime")
+        if type(campaign) is not PaperCampaignRuntime:
+            raise TypeError("campaign must be exact PaperCampaignRuntime")
         self.campaign = campaign
         self.state_path = (
             Path(state_path)
@@ -179,6 +207,49 @@ class PaperCampaignEpisodeHandoff:
                 self._read_state()
             else:
                 self._write_state({})
+
+    @classmethod
+    def open_existing(
+        cls,
+        campaign: PaperCampaignRuntime,
+        *,
+        state_path: str | Path | None = None,
+    ) -> "PaperCampaignEpisodeHandoff":
+        """Open the canonical durable handoff for restart without creating state.
+
+        Writer construction intentionally remains able to initialize a virgin handoff.
+        Restart readback is different authority: it must bind to the campaign's
+        canonical handoff path and fail closed when those durable bytes are absent.
+        """
+
+        if type(campaign) is not PaperCampaignRuntime:
+            raise TypeError("campaign must be exact PaperCampaignRuntime")
+        canonical_path = campaign.state_path.with_name(
+            f"{campaign.state_path.name}.episode-handoff.json"
+        )
+        selected_path = Path(state_path) if state_path is not None else canonical_path
+        try:
+            selected_resolved = selected_path.resolve(strict=False)
+            canonical_resolved = canonical_path.resolve(strict=False)
+        except OSError as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "restart handoff state path cannot be resolved"
+            ) from exc
+        if selected_resolved != canonical_resolved:
+            raise PaperCampaignEpisodeHandoffError(
+                "restart handoff state path must match canonical campaign handoff path"
+            )
+
+        instance = cls.__new__(cls)
+        instance.campaign = campaign
+        instance.state_path = selected_path
+        with WorkspaceEconomicLock(selected_path.parent):
+            if not selected_path.exists():
+                raise PaperCampaignEpisodeHandoffError(
+                    "existing handoff state is missing for restart readback"
+                )
+            instance._read_state()
+        return instance
 
     def _write_state(self, handoffs: dict[str, object]) -> None:
         bare = {
@@ -229,6 +300,210 @@ class PaperCampaignEpisodeHandoff:
             _sha(checkpoint_id, "parent_checkpoint_id")
             self._validate_record(checkpoint_id, record)
         return state
+
+    @staticmethod
+    def _committed_projection(
+        record: dict[str, object],
+    ) -> PaperCampaignEpisodeHandoffRecord:
+        """Project one already-validated COMMITTED record without new authority."""
+
+        if record["status"] != _COMMITTED:
+            raise PaperCampaignEpisodeHandoffError(
+                "only COMMITTED handoffs can be projected for restart"
+            )
+        actions = record["admissible_actions"]
+        assert isinstance(actions, list)
+        return PaperCampaignEpisodeHandoffRecord(
+            prepare_id=_sha(record["prepare_id"], "prepare_id"),
+            handoff_id=_sha(record["handoff_id"], "handoff_id"),
+            parent_checkpoint_id=_sha(
+                record["parent_checkpoint_id"], "parent_checkpoint_id"
+            ),
+            parent_transition_id=_sha(
+                record["parent_transition_id"], "parent_transition_id"
+            ),
+            parent_episode_id=_sha(record["parent_episode_id"], "parent_episode_id"),
+            parent_policy_id=_text(record["parent_policy_id"], "parent_policy_id"),
+            parent_agent_loop_state_sha256=_sha(
+                record["parent_agent_loop_state_sha256"],
+                "parent_agent_loop_state_sha256",
+            ),
+            environment_id=_sha(record["environment_id"], "environment_id"),
+            child_agent_loop_path=_text(
+                record["child_agent_loop_path"], "child_agent_loop_path"
+            ),
+            child_loop_id=_text(record["child_loop_id"], "child_loop_id"),
+            child_episode_key=_text(
+                record["child_episode_key"], "child_episode_key"
+            ),
+            canonical_strategy_id=_text(
+                record["canonical_strategy_id"], "canonical_strategy_id"
+            ),
+            champion_as_of=_timestamp(record["champion_as_of"], "champion_as_of"),
+            config_sha256=_sha(record["config_sha256"], "config_sha256"),
+            economic_goal_fingerprint=_sha(
+                record["economic_goal_fingerprint"], "economic_goal_fingerprint"
+            ),
+            risk_fingerprint=_sha(record["risk_fingerprint"], "risk_fingerprint"),
+            source_sha256=_sha(record["source_sha256"], "source_sha256"),
+            admissible_actions=tuple(
+                _text(action, "admissible action") for action in actions
+            ),
+            prepared_at=_timestamp(record["prepared_at"], "prepared_at"),
+            child_policy_id=_text(record["child_policy_id"], "child_policy_id"),
+            child_episode_id=_sha(record["child_episode_id"], "child_episode_id"),
+            child_initial_checkpoint_id=_sha(
+                record["child_initial_checkpoint_id"],
+                "child_initial_checkpoint_id",
+            ),
+        )
+
+    def _verify_committed_authorities(
+        self,
+        record: dict[str, object],
+    ) -> None:
+        """Require both independent monotonic commits for a projected child."""
+
+        parent_checkpoint_id = _sha(
+            record["parent_checkpoint_id"], "parent_checkpoint_id"
+        )
+        prepare_id = _sha(record["prepare_id"], "prepare_id")
+        handoff_id = _sha(record["handoff_id"], "handoff_id")
+        try:
+            intent_history = self._intent_authority(
+                parent_checkpoint_id
+            ).read_history()
+            if (
+                not intent_history
+                or intent_history[-1].phase is not AuthorityPhase.COMMIT
+                or intent_history[-1].intended_state_sha256 != prepare_id
+                or intent_history[-1].semantic_binding_sha256
+                != self._intent_binding(parent_checkpoint_id, prepare_id)
+            ):
+                raise PaperCampaignEpisodeHandoffError(
+                    "committed child lacks exact independent intent authority"
+                )
+
+            consumption_binding = _digest(
+                {
+                    "kind": "paper-campaign-parent-consumption-v1",
+                    "parent_checkpoint_id": parent_checkpoint_id,
+                    "prepare_id": prepare_id,
+                    "handoff_id": handoff_id,
+                    "child_episode_id": _sha(
+                        record["child_episode_id"], "child_episode_id"
+                    ),
+                    "child_initial_checkpoint_id": _sha(
+                        record["child_initial_checkpoint_id"],
+                        "child_initial_checkpoint_id",
+                    ),
+                }
+            )
+            consumption_history = self._consumption_authority(
+                parent_checkpoint_id
+            ).read_history()
+            if (
+                not consumption_history
+                or consumption_history[-1].phase is not AuthorityPhase.COMMIT
+                or consumption_history[-1].intended_state_sha256 != handoff_id
+                or consumption_history[-1].semantic_binding_sha256
+                != consumption_binding
+            ):
+                raise PaperCampaignEpisodeHandoffError(
+                    "committed child lacks exact independent consumption authority"
+                )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "cannot verify independent committed handoff authority"
+            ) from exc
+
+    def _verify_prepared_not_independently_committed(
+        self,
+        record: dict[str, object],
+    ) -> None:
+        """Reject local PREPARED state when stronger consumption truth is COMMIT."""
+
+        parent_checkpoint_id = _sha(
+            record["parent_checkpoint_id"], "parent_checkpoint_id"
+        )
+        try:
+            consumption_history = self._consumption_authority(
+                parent_checkpoint_id
+            ).read_history()
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "cannot verify independent prepared handoff authority"
+            ) from exc
+
+        if any(
+            entry.phase is AuthorityPhase.COMMIT
+            for entry in consumption_history
+        ):
+            raise PaperCampaignEpisodeHandoffError(
+                "local PREPARED handoff conflicts with independent committed "
+                "consumption authority"
+            )
+
+    def _reject_omitted_committed_parent(
+        self,
+        state: dict[str, object],
+        parent_checkpoint_id: str,
+    ) -> None:
+        """Reject a locally rolled-back snapshot that omits a committed child."""
+
+        parent_checkpoint_id = _sha(
+            parent_checkpoint_id,
+            "parent_checkpoint_id",
+        )
+        handoffs = state["handoffs"]
+        assert isinstance(handoffs, dict)
+        if parent_checkpoint_id in handoffs:
+            return
+        try:
+            history = self._consumption_authority(
+                parent_checkpoint_id
+            ).read_history()
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "cannot verify omitted parent-checkpoint consumption authority"
+            ) from exc
+        if any(entry.phase is AuthorityPhase.COMMIT for entry in history):
+            raise PaperCampaignEpisodeHandoffError(
+                "local handoff state omits independently committed child"
+            )
+
+    def committed_children(
+        self,
+    ) -> tuple[PaperCampaignEpisodeHandoffRecord, ...]:
+        """Return validated immutable restart locators for committed child episodes.
+
+        PREPARED crash-prefix records are intentionally invisible only while the
+        independent consumption authority has never crossed COMMIT. This is a
+        projection only: it neither creates a child nor advances either monotonic
+        handoff authority.
+        """
+
+        _parent_snapshot, parent_checkpoint = self._parent_witness()
+        parent_checkpoint_id = _sha(
+            parent_checkpoint.checkpoint_id,
+            "parent_checkpoint_id",
+        )
+        with WorkspaceEconomicLock(self.state_path.parent):
+            state = self._read_state()
+            self._reject_omitted_committed_parent(
+                state,
+                parent_checkpoint_id,
+            )
+            projected: list[PaperCampaignEpisodeHandoffRecord] = []
+            for parent_checkpoint_id in sorted(state["handoffs"]):
+                raw = state["handoffs"][parent_checkpoint_id]
+                assert isinstance(raw, dict)
+                if raw["status"] == _PREPARED:
+                    self._verify_prepared_not_independently_committed(raw)
+                    continue
+                self._verify_committed_authorities(raw)
+                projected.append(self._committed_projection(raw))
+            return tuple(projected)
 
     def _consumption_authority(
         self, parent_checkpoint_id: str
@@ -561,15 +836,15 @@ class PaperCampaignEpisodeHandoff:
         changed identity fails closed instead of minting a second child episode.
         """
 
-        if not isinstance(registry, ScientificRegistry):
-            raise TypeError("registry must be ScientificRegistry")
-        if not isinstance(artifact_store, FactoryArtifactStore):
-            raise TypeError("artifact_store must be FactoryArtifactStore")
-        if not isinstance(identity, EnvironmentIdentity):
-            raise TypeError("identity must be EnvironmentIdentity")
-        if not isinstance(admissible_actions, frozenset) or not admissible_actions:
+        if type(registry) is not ScientificRegistry:
+            raise TypeError("registry must be exact ScientificRegistry")
+        if type(artifact_store) is not FactoryArtifactStore:
+            raise TypeError("artifact_store must be exact FactoryArtifactStore")
+        if type(identity) is not EnvironmentIdentity:
+            raise TypeError("identity must be exact EnvironmentIdentity")
+        if type(admissible_actions) is not frozenset or not admissible_actions:
             raise PaperCampaignEpisodeHandoffError(
-                "admissible_actions must be a non-empty frozenset"
+                "admissible_actions must be a non-empty exact frozenset"
             )
         for action in admissible_actions:
             _text(action, "admissible action")
@@ -803,5 +1078,6 @@ __all__ = [
     "PaperCampaignEpisodeHandoff",
     "PaperCampaignEpisodeHandoffError",
     "PaperCampaignEpisodeHandoffReceipt",
+    "PaperCampaignEpisodeHandoffRecord",
     "PaperCampaignEpisodeHandoffResult",
 ]

@@ -811,6 +811,7 @@ def _context_payload(context: ProposedTicketRiskContext) -> dict[str, object]:
                 "locked_odds": _decimal_text(leg.locked_odds, "locked_odds"),
                 "sport": leg.sport,
                 "exchange_side": leg.exchange_side,
+                "market_semantics_id": leg.market_semantics_id,
             }
             for leg in context.legs
         ],
@@ -873,6 +874,7 @@ def _context_from_payload(raw: object) -> ProposedTicketRiskContext:
             "locked_odds",
             "sport",
             "exchange_side",
+            "market_semantics_id",
         }:
             raise ProductProposalRiskTargetError(
                 "persisted TicketLeg schema is invalid"
@@ -892,6 +894,7 @@ def _context_from_payload(raw: object) -> ProposedTicketRiskContext:
                 locked_odds=odds,
                 sport=item["sport"],
                 exchange_side=item["exchange_side"],
+                market_semantics_id=item["market_semantics_id"],
             )
         )
 

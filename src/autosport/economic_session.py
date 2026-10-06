@@ -693,6 +693,18 @@ _PRODUCT_ECONOMIC_SESSION_EQ_CODE: Final = getattr(
     "__code__",
     None,
 )
+_PRODUCT_ECONOMIC_SESSION_INIT: Final = ProductEconomicSession.__init__
+_PRODUCT_ECONOMIC_SESSION_INIT_CODE: Final = getattr(
+    _PRODUCT_ECONOMIC_SESSION_INIT,
+    "__code__",
+    None,
+)
+_PRODUCT_ECONOMIC_SESSION_POST_INIT: Final = ProductEconomicSession.__post_init__
+_PRODUCT_ECONOMIC_SESSION_POST_INIT_CODE: Final = getattr(
+    _PRODUCT_ECONOMIC_SESSION_POST_INIT,
+    "__code__",
+    None,
+)
 
 
 _DECODE_STATE_CODE: Final = _decode_state.__code__
@@ -809,6 +821,10 @@ class ProductEconomicSessionStore:
         self._authority_type_witness = _AUTHORITY_TYPE
         self._product_economic_session_eq_witness = _PRODUCT_ECONOMIC_SESSION_EQ
         self._product_economic_session_eq_code_witness = _PRODUCT_ECONOMIC_SESSION_EQ_CODE
+        self._product_economic_session_init_witness = _PRODUCT_ECONOMIC_SESSION_INIT
+        self._product_economic_session_init_code_witness = _PRODUCT_ECONOMIC_SESSION_INIT_CODE
+        self._product_economic_session_post_init_witness = _PRODUCT_ECONOMIC_SESSION_POST_INIT
+        self._product_economic_session_post_init_code_witness = _PRODUCT_ECONOMIC_SESSION_POST_INIT_CODE
         self._authority_new_witness = _AUTHORITY_NEW
         self._authority_init_witness = _AUTHORITY_INIT
         self._authority_constructor_witness = _construct_economic_authority
@@ -966,6 +982,18 @@ class ProductEconomicSessionStore:
             or PaperBook.load is not self._paperbook_load_witness
             or PaperBook._validate_loaded_state is not self._paperbook_validate_witness
             or ProductEconomicSession.__eq__ is not self._product_economic_session_eq_witness
+            or ProductEconomicSession.__init__ is not self._product_economic_session_init_witness
+            or (
+                _PRODUCT_ECONOMIC_SESSION_INIT_CODE is not None
+                and getattr(self._product_economic_session_init_witness, "__code__", None)
+                is not _PRODUCT_ECONOMIC_SESSION_INIT_CODE
+            )
+            or ProductEconomicSession.__post_init__ is not self._product_economic_session_post_init_witness
+            or (
+                _PRODUCT_ECONOMIC_SESSION_POST_INIT_CODE is not None
+                and getattr(self._product_economic_session_post_init_witness, "__code__", None)
+                is not _PRODUCT_ECONOMIC_SESSION_POST_INIT_CODE
+            )
             or (
                 _PRODUCT_ECONOMIC_SESSION_EQ_CODE is not None
                 and getattr(self._product_economic_session_eq_witness, "__code__", None)

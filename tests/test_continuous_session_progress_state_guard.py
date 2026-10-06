@@ -118,3 +118,58 @@ def test_operator_state_transition_preserves_active_same_generation_failure(
         assert sidecar["last_error_code"] is None
         assert state.snapshot().last_error_code == "ProviderUnavailableError"
 
+def test_operator_state_transition_rejects_same_generation_failure_marker_conflict() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        state.record_failure(code="ProviderUnavailableError")
+        sidecar_path = path.with_name(f"{path.name}.operational_error.json")
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        sidecar["observed_cycles_completed"] = 1
+        sidecar_path.write_text(
+            json.dumps(sidecar, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        canonical_before = path.read_bytes()
+        sidecar_before = sidecar_path.read_bytes()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="same-generation operational error checkpoint markers conflict",
+        ):
+            state.set_state(continuous_session.SessionState.PAUSED)
+
+        assert path.read_bytes() == canonical_before
+        assert sidecar_path.read_bytes() == sidecar_before
+
+
+def test_operator_state_transition_does_not_resurrect_stale_failure_overlay() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        state.record_failure(code="ProviderUnavailableError")
+        stale_sidecar = json.loads(
+            path.with_name(f"{path.name}.operational_error.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert (
+            state.record_success(
+                at=_AT,
+                full_refresh=False,
+                settlement_evidence=(),
+            )
+            == 1
+        )
+        sidecar_path = path.with_name(f"{path.name}.operational_error.json")
+        sidecar_path.write_text(
+            json.dumps(stale_sidecar, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        state.set_state(continuous_session.SessionState.PAUSED)
+
+        durable = json.loads(path.read_text(encoding="utf-8"))
+        assert durable["generation"] == 2
+        assert durable["state"] == continuous_session.SessionState.PAUSED.value
+        assert durable["last_error_code"] is None
+        assert state.snapshot().last_error_code is None
+

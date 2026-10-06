@@ -2773,7 +2773,7 @@ def test_lay_void_returns_locked_liability_only() -> None:
     settled = book.settle(
         ticket.ticket_id,
         set(),
-        {ticket.legs[0].quote_key},
+        {ticket.legs[0].settlement_key},
         settled_at=_TS,
     )
 

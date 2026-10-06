@@ -33,6 +33,15 @@ from .monotonic_workspace_authority import (
 from .paper import PaperBook
 from .workspace_lock import WorkspaceEconomicLock, _open_read_only_descriptor
 
+_PATH_FACTORY: Final = Path
+_PATH_TYPE: Final = type(_PATH_FACTORY("."))
+_PATH_NEW: Final = _PATH_FACTORY.__new__
+_PATH_EXPANDUSER: Final = _PATH_TYPE.expanduser
+_PATH_RESOLVE: Final = _PATH_TYPE.resolve
+_PATH_EXPANDUSER_CODE: Final = getattr(_PATH_EXPANDUSER, "__code__", None)
+_PATH_RESOLVE_CODE: Final = getattr(_PATH_RESOLVE, "__code__", None)
+
+
 
 _STATE_SCHEMA: Final = "autosport.risk.economic-session"
 _STATE_SCHEMA_VERSION: Final = 2
@@ -535,8 +544,48 @@ class ProductEconomicSessionStore:
         *,
         authority_root: str | Path | None = None,
         _test_clock: Callable[[], int] | None = None,
+        _path_factory=_PATH_FACTORY,
+        _path_type=_PATH_TYPE,
+        _path_new=_PATH_NEW,
+        _path_expanduser=_PATH_EXPANDUSER,
+        _path_resolve=_PATH_RESOLVE,
     ) -> None:
-        self.workspace = Path(workspace).expanduser().resolve(strict=False)
+        if Path is not _path_factory or _path_factory.__new__ is not _path_new:
+            raise EconomicSessionIntegrityError(
+                "economic-session Path constructor authority changed"
+            )
+        if (
+            _path_type.expanduser is not _path_expanduser
+            or (
+                _PATH_EXPANDUSER_CODE is not None
+                and getattr(_path_expanduser, "__code__", None) is not _PATH_EXPANDUSER_CODE
+            )
+        ):
+            raise EconomicSessionIntegrityError(
+                "economic-session Path expanduser authority changed"
+            )
+        if (
+            _path_type.resolve is not _path_resolve
+            or (
+                _PATH_RESOLVE_CODE is not None
+                and getattr(_path_resolve, "__code__", None) is not _PATH_RESOLVE_CODE
+            )
+        ):
+            raise EconomicSessionIntegrityError(
+                "economic-session Path resolve authority changed"
+            )
+
+        workspace_path = _path_factory(workspace)
+        if type(workspace_path) is not _path_type:
+            raise EconomicSessionIntegrityError(
+                "economic-session Path concrete type changed"
+            )
+        workspace_path = _path_expanduser(workspace_path)
+        if type(workspace_path) is not _path_type:
+            raise EconomicSessionIntegrityError(
+                "economic-session Path expanduser returned a non-canonical type"
+            )
+        self.workspace = _path_resolve(workspace_path, strict=False)
         if not self.workspace.is_absolute():
             raise EconomicSessionIntegrityError("workspace must resolve to an absolute path")
         self.state_path = self.workspace / ".autosport" / _STATE_FILE_NAME
@@ -553,6 +602,11 @@ class ProductEconomicSessionStore:
             authority_root=authority_root,
         )
         # Capture the exact composition that owns this durable session boundary.
+        self._path_factory_witness = _path_factory
+        self._path_type_witness = _path_type
+        self._path_new_witness = _path_new
+        self._path_expanduser_witness = _path_expanduser
+        self._path_resolve_witness = _path_resolve
         self._workspace_witness = self.workspace
         self._state_path_witness = self.state_path
         self._paperbook_path_witness = self.paperbook_path
@@ -629,6 +683,24 @@ class ProductEconomicSessionStore:
             or self._authority.journal_dir is not self._authority_journal_dir_witness
             or self._authority.records_dir is not self._authority_records_dir_witness
             or self._authority.namespace_marker_path is not self._authority_namespace_marker_path_witness
+            or Path is not self._path_factory_witness
+            or _PATH_FACTORY is not self._path_factory_witness
+            or _PATH_TYPE is not self._path_type_witness
+            or _PATH_NEW is not self._path_new_witness
+            or _PATH_EXPANDUSER is not self._path_expanduser_witness
+            or _PATH_RESOLVE is not self._path_resolve_witness
+            or _PATH_FACTORY.__new__ is not self._path_new_witness
+            or _PATH_TYPE.expanduser is not self._path_expanduser_witness
+            or _PATH_TYPE.resolve is not self._path_resolve_witness
+            or self._path_factory_witness.__new__ is not self._path_new_witness
+            or (
+                _PATH_EXPANDUSER_CODE is not None
+                and getattr(self._path_expanduser_witness, "__code__", None) is not _PATH_EXPANDUSER_CODE
+            )
+            or (
+                _PATH_RESOLVE_CODE is not None
+                and getattr(self._path_resolve_witness, "__code__", None) is not _PATH_RESOLVE_CODE
+            )
             or self._clock is not self._clock_witness
             or self._product_clock is not self._product_clock_witness
             or _ECONOMIC_GOAL_LOAD is not self._economic_goal_load_witness

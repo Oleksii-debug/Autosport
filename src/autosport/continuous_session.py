@@ -1721,19 +1721,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "settlement evidence reference does not match lifecycle evidence"
                 )
+            # Detach mutable quote_outcomes before validation.  Validating the
+            # authority-owned mapping and copying it afterwards leaves a TOCTOU
+            # window where external mutation can change already-validated
+            # settlement truth before product state takes ownership.
+            resolution = replace(
+                resolution,
+                quote_outcomes=dict(resolution.quote_outcomes),
+            )
             try:
                 resolution.validate(as_of=as_of)
             except (TypeError, ValueError) as exc:
                 raise ContinuousSessionError(
                     "outcome authority returned invalid settlement resolution"
                 ) from exc
-            # Detach mutable quote_outcomes from the authority-owned object so
-            # external mutation after resolve() cannot alter validated product
-            # settlement truth.
-            resolution = replace(
-                resolution,
-                quote_outcomes=dict(resolution.quote_outcomes),
-            )
             settlement_key = (
                 resolution.event_identity,
                 resolution.settlement_ref,

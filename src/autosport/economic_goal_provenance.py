@@ -66,11 +66,17 @@ class EconomicGoalProvenance:
             raise EconomicGoalProvenanceError("contract_sha256 must be lowercase SHA-256 hex")
 
     @property
-    def decision_identity(self) -> str:
+    def decision_identity(self, _validator=__post_init__) -> str:
         """Return an immutable, revision-specific identity suitable for evidence binding."""
 
-        EconomicGoalProvenance.__post_init__(self)
+        _validator(self)
         return f"{self.goal_id}@{self.revision}:{self.contract_sha256}"
+
+
+_CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
+_CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
+_CANONICAL_PROVENANCE_TYPE: Final = EconomicGoalProvenance
+_CANONICAL_PROVENANCE_VALIDATOR: Final = EconomicGoalProvenance.__post_init__
 
 
 def _canonical_json(payload: object) -> bytes:
@@ -88,19 +94,19 @@ def _canonical_json(payload: object) -> bytes:
 def contract_sha256(contract: EconomicGoalContract) -> str:
     """Hash the exact canonical persisted representation of ``contract``."""
 
-    if type(contract) is not EconomicGoalContract:
+    if type(contract) is not _CANONICAL_GOAL_TYPE:
         raise EconomicGoalContractError("provenance hashing requires an EconomicGoalContract")
-    EconomicGoalContract.__post_init__(contract)
+    _CANONICAL_GOAL_VALIDATOR(contract)
     return hashlib.sha256(_canonical_json(economic_goal_to_payload(contract))).hexdigest()
 
 
 def provenance_for(contract: EconomicGoalContract) -> EconomicGoalProvenance:
     """Derive immutable provenance identity without introducing another authority."""
 
-    if type(contract) is not EconomicGoalContract:
+    if type(contract) is not _CANONICAL_GOAL_TYPE:
         raise EconomicGoalContractError("provenance requires an EconomicGoalContract")
-    EconomicGoalContract.__post_init__(contract)
-    return EconomicGoalProvenance(
+    _CANONICAL_GOAL_VALIDATOR(contract)
+    return _CANONICAL_PROVENANCE_TYPE(
         schema=PROVENANCE_SCHEMA,
         schema_version=PROVENANCE_SCHEMA_VERSION,
         goal_id=contract.goal_id,
@@ -116,12 +122,12 @@ def verify_provenance(
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
-    if type(contract) is not EconomicGoalContract:
+    if type(contract) is not _CANONICAL_GOAL_TYPE:
         raise EconomicGoalContractError("provenance verification requires an EconomicGoalContract")
-    if type(provenance) is not EconomicGoalProvenance:
+    if type(provenance) is not _CANONICAL_PROVENANCE_TYPE:
         raise EconomicGoalProvenanceError("provenance must be EconomicGoalProvenance")
-    EconomicGoalContract.__post_init__(contract)
-    EconomicGoalProvenance.__post_init__(provenance)
+    _CANONICAL_GOAL_VALIDATOR(contract)
+    _CANONICAL_PROVENANCE_VALIDATOR(provenance)
     if provenance.goal_id != contract.goal_id:
         raise EconomicGoalProvenanceError("provenance goal_id mismatch")
     if provenance.revision != contract.revision:

@@ -3120,26 +3120,51 @@ def test_settlement_resolution_detaches_authority_mapping_before_validation(
     record = _ResolutionRecord("provider-a:event-1", "settlement-1")
     original = _resolution(outcome="win")
     coordinator = _resolution_coordinator((record,), (original,))
-    canonical_validate = continuous_session.SettlementResolution.validate
+    canonical_text = continuous_session._text
 
-    def validate_then_mutate_authority(
-        self: continuous_session.SettlementResolution,
-        *,
-        as_of: str,
-    ) -> None:
-        canonical_validate(self, as_of=as_of)
-        original.quote_outcomes["quote-1"] = "attacker-invalid"
+    def text_then_mutate_authority(value: object, field: str) -> str:
+        normalized = canonical_text(value, field)
+        if field == "quote_outcomes quote_key":
+            # SettlementResolution.validate() already captured this item's
+            # outcome value for the current loop iteration.  Mutating the
+            # authority-owned mapping here models the old validate-then-copy
+            # TOCTOU window deterministically without replacing the validator.
+            original.quote_outcomes["quote-1"] = "attacker-invalid"
+        return normalized
 
-    monkeypatch.setattr(
-        continuous_session.SettlementResolution,
-        "validate",
-        validate_then_mutate_authority,
-    )
+    monkeypatch.setattr(continuous_session, "_text", text_then_mutate_authority)
 
     collected = coordinator._settlement_resolutions(as_of=_AT)
 
     assert original.quote_outcomes == {"quote-1": "attacker-invalid"}
     assert collected[0].quote_outcomes == {"quote-1": "win"}
+
+
+def test_settlement_resolution_collection_rejects_runtime_validator_rebinding(
+    monkeypatch,
+) -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    coordinator = _resolution_coordinator((record,), (_resolution(),))
+
+    def attacker_validate(
+        self: continuous_session.SettlementResolution,
+        *,
+        as_of: str,
+    ) -> None:
+        del self, as_of
+
+    monkeypatch.setattr(
+        continuous_session.SettlementResolution,
+        "validate",
+        attacker_validate,
+    )
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "validator authority changed" in str(exc)
+    else:
+        raise AssertionError("runtime-rebound settlement validator was accepted")
 
 
 def test_collected_settlement_resolution_is_detached_from_authority_mutation() -> None:

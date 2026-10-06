@@ -1349,6 +1349,59 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertEqual(calls, 0)
 
+    def test_lock_scope_kwdefault_mutation_fails_before_lock_dispatch(self) -> None:
+        store = self._store()
+        helper = economic_session._economic_session_lock_scope
+        kwdefaults = helper.__kwdefaults__
+        assert kwdefaults is not None
+        original = kwdefaults["_enter"]
+        calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("mutated lock enter kwdefault executed")
+
+        try:
+            kwdefaults["_enter"] = hostile
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+        finally:
+            kwdefaults["_enter"] = original
+
+        self.assertEqual(calls, 0)
+
+    def test_constructor_rejects_goal_store_helper_kwdefault_mutation(self) -> None:
+        helper = economic_session._construct_economic_goal_store
+        kwdefaults = helper.__kwdefaults__
+        assert kwdefaults is not None
+        original = kwdefaults["_init"]
+        calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("mutated goal store init kwdefault executed")
+
+        try:
+            kwdefaults["_init"] = hostile
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "construct_economic_goal_store callable authority changed",
+            ):
+                ProductEconomicSessionStore(
+                    self.workspace,
+                    authority_root=self.authority_root,
+                    _test_clock=self.clock,
+                )
+        finally:
+            kwdefaults["_init"] = original
+
+        self.assertEqual(calls, 0)
+
     def test_configuration_guard_default_replacement_fails_before_dispatch(self) -> None:
         store = self._store()
         authority = ProductEconomicSessionStore._require_configuration_authority

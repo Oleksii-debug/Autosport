@@ -815,3 +815,56 @@ def test_manifest_identity_rejects_state_reader_rebinding(monkeypatch) -> None:
     ):
         _ = manifest.manifest_id
 
+def test_bound_identity_fields_cannot_be_rewritten_with_coordinated_truth_mutation() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=25,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    prematch_manifest_fact = next(
+        fact
+        for fact in manifest.facts
+        if fact.capability is ProviderManifestCapability.PREMATCH_QUOTES
+    )
+    assert manifest.state_of(ProviderManifestCapability.PREMATCH_QUOTES) is (
+        ProviderManifestState.NOT_PROVEN
+    )
+
+    widened_profile_facts = profile.facts + (
+        BookmakerCapabilityFact(
+            BookmakerCapability.PREMATCH_QUOTES_READ,
+            BookmakerCapabilityState.SUPPORTED,
+        ),
+    )
+    object.__setattr__(profile, "facts", widened_profile_facts)
+    object.__setattr__(integration, "profile_id", profile.profile_id)
+    object.__setattr__(
+        prematch_manifest_fact,
+        "state",
+        ProviderManifestState.PROVEN,
+    )
+    object.__setattr__(manifest, "_bound_profile_id", profile.profile_id)
+    object.__setattr__(
+        manifest,
+        "_bound_integration_evidence_id",
+        integration.evidence_id,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="bound capability profile identity changed after validation",
+    ):
+        manifest.state_of(ProviderManifestCapability.PREMATCH_QUOTES)
+

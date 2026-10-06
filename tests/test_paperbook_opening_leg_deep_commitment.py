@@ -1005,6 +1005,51 @@ def test_constructor_rejects_in_place_registrar_code_mutation(
         registrar.__code__ = original_code
 
 
+@pytest.mark.parametrize(
+    ("registrar_name", "label"),
+    (
+        ("_register_paperbook_operation_lock", "operation lock"),
+        ("_register_ticket_opening_authority_book", "opening registry"),
+        (
+            "_register_paperbook_causal_history_authority_book",
+            "causal-history registry",
+        ),
+    ),
+)
+def test_constructor_rejects_registrar_closure_retarget(
+    registrar_name: str,
+    label: str,
+) -> None:
+    registrar = getattr(paper_module, registrar_name)
+    closure = registrar.__closure__ or ()
+    if registrar_name == "_register_paperbook_operation_lock":
+        target_cell = next(
+            cell for cell in closure if cell.cell_contents is paper_module.ref
+        )
+    elif registrar_name == "_register_ticket_opening_authority_book":
+        target_cell = next(
+            cell
+            for cell in closure
+            if cell.cell_contents is paper_module._ticket_opening_commitment
+        )
+    else:
+        target_cell = next(
+            cell
+            for cell in closure
+            if type(cell.cell_contents).__name__ == "WeakKeyDictionary"
+        )
+    original_value = target_cell.cell_contents
+    try:
+        target_cell.cell_contents = object()
+        with pytest.raises(
+            ValueError,
+            match=f"PaperBook {label} constructor authority closure changed",
+        ):
+            PaperBook("100")
+    finally:
+        target_cell.cell_contents = original_value
+
+
 def test_operation_lock_registration_ignores_rebound_weakref_factory(
     monkeypatch,
 ) -> None:

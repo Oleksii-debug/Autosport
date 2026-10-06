@@ -486,25 +486,32 @@ def test_contract_successor_method_rejects_validator_injection() -> None:
         previous.validate_automatic_successor(candidate)
 
 
-def test_transition_proof_uses_isolated_candidate_snapshot() -> None:
+
+def test_transition_proof_detects_mutation_between_canonical_snapshots() -> None:
     previous = _goal()
     candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
-    canonical_snapshotter = economic_goal_module._snapshot_transition_contract
+    canonical_snapshot = economic_goal_module._canonical_contract_snapshot
+    mutated = False
 
     def snapshot_then_mutate(contract):
-        snapshot = canonical_snapshotter(contract)
-        if contract is candidate:
+        nonlocal mutated
+        snapshot = canonical_snapshot(contract)
+        if contract is candidate and not mutated:
             object.__setattr__(candidate, "max_stake_fraction", Decimal("0.99"))
+            mutated = True
         return snapshot
 
-    economic_goal_module._validate_automatic_transition_bound(
-        previous,
-        candidate,
-        _snapshotter=snapshot_then_mutate,
-    )
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="changed during automatic transition validation",
+    ):
+        economic_goal_module._validate_automatic_transition_bound(
+            previous,
+            candidate,
+            _snapshot=snapshot_then_mutate,
+        )
 
-    assert candidate.max_stake_fraction == Decimal("0.99")
-
+    assert mutated is True
 
 def test_public_transition_ignores_rebound_snapshotter_alias(monkeypatch) -> None:
     previous = _goal()

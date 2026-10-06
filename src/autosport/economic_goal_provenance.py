@@ -228,13 +228,17 @@ def _provenance_for_bound(
     if before != after:
         raise _goal_error("economic goal changed during provenance derivation")
     values = dict(zip(_PROVENANCE_CONTRACT_FIELD_NAMES, after))
+    contract_sha256 = _contract_sha256(contract)
+    final_snapshot = _canonical_contract_snapshot(contract)
+    if after != final_snapshot:
+        raise _goal_error("economic goal changed during provenance derivation")
     provenance = _provenance_type(
         schema=_schema,
         schema_version=_schema_version,
-        goal_id=contract.goal_id,
-        revision=contract.revision,
-        bankroll_id=contract.bankroll_id,
-        contract_sha256=_contract_sha256(contract),
+        goal_id=values["goal_id"],
+        revision=values["revision"],
+        bankroll_id=values["bankroll_id"],
+        contract_sha256=contract_sha256,
     )
     _provenance_validator(provenance)
     return provenance
@@ -286,6 +290,9 @@ def _verify_provenance_bound(
     if proven_bankroll_id != bankroll_id:
         raise _provenance_error("provenance bankroll_id mismatch")
     actual = _contract_sha256(contract)
+    final_contract_snapshot = _canonical_contract_snapshot(contract)
+    if contract_after != final_contract_snapshot:
+        raise _goal_error("economic goal changed during provenance verification")
     if proven_contract_sha256 != actual:
         raise _provenance_error("provenance contract_sha256 mismatch")
 

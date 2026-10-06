@@ -3003,6 +3003,36 @@ def test_settlement_resolution_collection_keeps_corroborating_evidence_ids() -> 
     )
 
 
+def test_settlement_resolution_collection_rejects_noncanonical_outcome_mapping_before_copy() -> None:
+    class ExplodingDict(dict[str, str]):
+        def copy(self):
+            raise AssertionError("noncanonical mapping copy executed")
+
+        def items(self):
+            raise AssertionError("noncanonical mapping items executed")
+
+        def __iter__(self):
+            raise AssertionError("noncanonical mapping iteration executed")
+
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    resolution = continuous_session.SettlementResolution(
+        event_identity="provider-a:event-1",
+        settlement_ref="settlement-1",
+        quote_outcomes=ExplodingDict({"quote-1": "win"}),
+        evidence_id="evidence-1",
+        evidence_sha256="a" * 64,
+        available_at=_AT,
+    )
+    coordinator = _resolution_coordinator((record,), (resolution,))
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "quote_outcomes must be an exact dict" in str(exc)
+    else:
+        raise AssertionError("noncanonical settlement outcome mapping was accepted")
+
+
 def test_settlement_resolution_collection_rejects_derived_resolution_type() -> None:
     class DerivedResolution(continuous_session.SettlementResolution):
         pass
@@ -3237,6 +3267,35 @@ def test_settlement_consumer_rejects_conflicting_outcomes_across_evidence_ids() 
         assert "conflicting settlement outcomes" in str(exc)
     else:
         raise AssertionError("conflicting settlement outcomes reached book I/O")
+
+
+def test_settlement_consumer_rejects_noncanonical_outcome_mapping_before_io() -> None:
+    class ExplodingDict(dict[str, str]):
+        def copy(self):
+            raise AssertionError("noncanonical consumer mapping copy executed")
+
+        def items(self):
+            raise AssertionError("noncanonical consumer mapping items executed")
+
+        def __iter__(self):
+            raise AssertionError("noncanonical consumer mapping iteration executed")
+
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    resolution = continuous_session.SettlementResolution(
+        event_identity="provider-a:event-1",
+        settlement_ref="settlement-1",
+        quote_outcomes=ExplodingDict({"quote-1": "win"}),
+        evidence_id="evidence-1",
+        evidence_sha256="a" * 64,
+        available_at=_AT,
+    )
+
+    try:
+        coordinator._settle(resolutions=(resolution,))
+    except continuous_session.ContinuousSessionError as exc:
+        assert "consumer quote_outcomes must be an exact dict" in str(exc)
+    else:
+        raise AssertionError("noncanonical consumer outcome mapping was accepted")
 
 
 def test_settlement_consumer_requires_exact_resolution_tuple() -> None:

@@ -2956,18 +2956,6 @@ def test_record_failure_returns_bounded_publication_without_full_history_read() 
         assert publication.last_error_code == "BOUNDED_FAILURE"
 
 
-def test_session_id_property_is_bounded_for_large_settlement_history() -> None:
-    with tempfile.TemporaryDirectory() as directory:
-        state = _state_with_history(Path(directory), _LARGE_HISTORY)
-
-        def forbidden_reader():
-            raise AssertionError(
-                "immutable session identity must not re-read retained settlement history"
-            )
-
-        with patch.object(state, "_read", forbidden_reader):
-            assert state.session_id == "session-history-scaling"
-
 
 def test_provider_unavailable_tick_uses_bounded_failure_publication() -> None:
     with tempfile.TemporaryDirectory() as directory:

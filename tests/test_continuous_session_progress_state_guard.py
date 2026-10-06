@@ -607,3 +607,23 @@ def test_settlement_evidence_validation_rejects_class_rebound_history_reader(
 
         assert path.read_bytes() == before
 
+def test_reader_rejects_runtime_timestamp_validator_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        before = path.read_bytes()
+
+        def attacker_instant(_value: object, _field: str) -> object:
+            raise AssertionError("runtime-rebound reader timestamp validator executed")
+
+        monkeypatch.setattr(continuous_session, "_instant", attacker_instant)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical session-reader code identity changed",
+        ):
+            state._read()
+
+        assert path.read_bytes() == before
+

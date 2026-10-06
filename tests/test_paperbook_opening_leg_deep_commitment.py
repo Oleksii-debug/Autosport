@@ -1226,7 +1226,11 @@ def _saved_snapshot_payload(tmp_path):
     book = PaperBook("100")
     book.open_ticket([_leg()], "10", placed_at=_TS)
     book.save(path)
-    return json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 7
+    for leg in payload["tickets"][0]["legs"]:
+        leg.pop("market_semantics_id", None)
+    return payload
 
 
 def test_schema7_rejects_unknown_root_field(tmp_path) -> None:

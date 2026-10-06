@@ -517,3 +517,60 @@ def test_public_transition_ignores_rebound_snapshotter_alias(monkeypatch) -> Non
 
     validate_automatic_transition(previous, candidate)
     previous.validate_automatic_successor(candidate)
+
+
+def test_automatic_transition_ignores_rebound_contract_field_descriptor(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.03"),
+    )
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return Decimal("0.02")
+
+    monkeypatch.setattr(
+        EconomicGoalContract,
+        "max_stake_fraction",
+        ForgedDescriptor(),
+    )
+
+    with pytest.raises(EconomicGoalContractError, match="must not increase"):
+        validate_automatic_transition(previous, candidate)
+
+
+def test_transition_ignores_rebound_module_contract_type(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.03"),
+    )
+    monkeypatch.setattr(economic_goal_module, "EconomicGoalContract", object)
+
+    with pytest.raises(EconomicGoalContractError, match="must not increase"):
+        validate_automatic_transition(previous, candidate)
+
+def test_contract_validation_ignores_rebound_snapshot_helper(monkeypatch) -> None:
+    goal = _goal()
+    called = False
+
+    def forged(*args: object, **kwargs: object) -> tuple[object, ...]:
+        nonlocal called
+        called = True
+        raise AssertionError("rebound contract snapshot helper executed")
+
+    monkeypatch.setattr(
+        economic_goal_module,
+        "_canonical_contract_snapshot",
+        forged,
+    )
+
+    EconomicGoalContract.__post_init__(goal)
+    validate_automatic_transition(
+        goal,
+        replace(goal, revision=2, max_stake_fraction=Decimal("0.01")),
+    )
+    assert called is False

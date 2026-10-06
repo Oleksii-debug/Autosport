@@ -25,6 +25,7 @@ from .economic_goal import (
     EconomicGoalContractError,
     EconomicObjective,
     validate_automatic_transition,
+    _canonical_contract_snapshot,
 )
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
@@ -71,6 +72,18 @@ _CONTRACT_KEYS: Final = frozenset(
     }
 )
 _ROOT_KEYS: Final = frozenset({"schema", "schema_version", "contract"})
+_CONTRACT_KEYS_ORDERED: Final = (
+    "goal_id", "revision", "bankroll_id", "currency", "objective",
+    "max_stake_fraction", "max_stake_amount", "max_session_loss_fraction",
+    "max_day_loss_fraction", "max_drawdown_fraction",
+    "max_capital_at_risk_fraction", "max_event_concentration_fraction",
+    "max_market_concentration_fraction", "max_provider_concentration_fraction",
+    "max_sport_concentration_fraction", "max_turnover_fraction", "max_risk_of_ruin",
+    "max_execution_slippage_fraction", "max_quote_age_seconds",
+    "minimum_data_quality", "max_concurrent_positions", "max_parlay_legs",
+    "automation_level", "emergency_stop", "blocked_sports", "blocked_providers",
+    "blocked_markets",
+)
 _DECIMAL_FIELDS: Final = (
     "max_stake_fraction",
     "max_session_loss_fraction",
@@ -324,51 +337,90 @@ def economic_goal_to_payload(
     _max_json_bytes=_MAX_ECONOMIC_GOAL_JSON_BYTES,
     _objective_value_getter=_CANONICAL_ENUM_VALUE_GETTER,
     _automation_value_getter=_CANONICAL_INT_ENUM_VALUE_GETTER,
+    _snapshot=_canonical_contract_snapshot,
 ) -> dict[str, object]:
     """Return the canonical schema-v1 JSON payload for ``contract``."""
 
-    contract = _snapshotter(contract)
+    if type(contract) is not _goal_type:
+        raise _error_type(
+            "economic goal persistence requires an EconomicGoalContract"
+        )
+    _goal_validator(contract)
+    first_snapshot = _snapshot(contract)
+    _goal_validator(contract)
+    second_snapshot = _snapshot(contract)
+    if first_snapshot != second_snapshot:
+        raise _error_type("economic goal changed during payload encoding")
+
+    values = dict(zip(_CONTRACT_KEYS_ORDERED, second_snapshot))
+    goal_id = values["goal_id"]
+    revision = values["revision"]
+    bankroll_id = values["bankroll_id"]
+    currency = values["currency"]
+    objective = values["objective"]
+    max_stake_fraction = values["max_stake_fraction"]
+    max_stake_amount = values["max_stake_amount"]
+    max_session_loss_fraction = values["max_session_loss_fraction"]
+    max_day_loss_fraction = values["max_day_loss_fraction"]
+    max_drawdown_fraction = values["max_drawdown_fraction"]
+    max_capital_at_risk_fraction = values["max_capital_at_risk_fraction"]
+    max_event_concentration_fraction = values["max_event_concentration_fraction"]
+    max_market_concentration_fraction = values["max_market_concentration_fraction"]
+    max_provider_concentration_fraction = values["max_provider_concentration_fraction"]
+    max_sport_concentration_fraction = values["max_sport_concentration_fraction"]
+    max_turnover_fraction = values["max_turnover_fraction"]
+    max_risk_of_ruin = values["max_risk_of_ruin"]
+    max_execution_slippage_fraction = values["max_execution_slippage_fraction"]
+    max_quote_age_seconds = values["max_quote_age_seconds"]
+    minimum_data_quality = values["minimum_data_quality"]
+    max_concurrent_positions = values["max_concurrent_positions"]
+    max_parlay_legs = values["max_parlay_legs"]
+    automation_level = values["automation_level"]
+    emergency_stop = values["emergency_stop"]
+    blocked_sports = values["blocked_sports"]
+    blocked_providers = values["blocked_providers"]
+    blocked_markets = values["blocked_markets"]
 
     body: dict[str, object] = {
-        "goal_id": contract.goal_id,
-        "revision": contract.revision,
-        "bankroll_id": contract.bankroll_id,
-        "currency": contract.currency,
-        "objective": _objective_value_getter(contract.objective),
-        "max_stake_fraction": str(contract.max_stake_fraction),
+        "goal_id": goal_id,
+        "revision": revision,
+        "bankroll_id": bankroll_id,
+        "currency": currency,
+        "objective": _objective_value_getter(objective),
+        "max_stake_fraction": str(max_stake_fraction),
         "max_stake_amount": (
-            None if contract.max_stake_amount is None else str(contract.max_stake_amount)
+            None if max_stake_amount is None else str(max_stake_amount)
         ),
-        "max_session_loss_fraction": str(contract.max_session_loss_fraction),
-        "max_day_loss_fraction": str(contract.max_day_loss_fraction),
-        "max_drawdown_fraction": str(contract.max_drawdown_fraction),
-        "max_capital_at_risk_fraction": str(contract.max_capital_at_risk_fraction),
+        "max_session_loss_fraction": str(max_session_loss_fraction),
+        "max_day_loss_fraction": str(max_day_loss_fraction),
+        "max_drawdown_fraction": str(max_drawdown_fraction),
+        "max_capital_at_risk_fraction": str(max_capital_at_risk_fraction),
         "max_event_concentration_fraction": str(
-            contract.max_event_concentration_fraction
+            max_event_concentration_fraction
         ),
         "max_market_concentration_fraction": str(
-            contract.max_market_concentration_fraction
+            max_market_concentration_fraction
         ),
         "max_provider_concentration_fraction": str(
-            contract.max_provider_concentration_fraction
+            max_provider_concentration_fraction
         ),
         "max_sport_concentration_fraction": str(
-            contract.max_sport_concentration_fraction
+            max_sport_concentration_fraction
         ),
-        "max_turnover_fraction": str(contract.max_turnover_fraction),
-        "max_risk_of_ruin": str(contract.max_risk_of_ruin),
+        "max_turnover_fraction": str(max_turnover_fraction),
+        "max_risk_of_ruin": str(max_risk_of_ruin),
         "max_execution_slippage_fraction": str(
-            contract.max_execution_slippage_fraction
+            max_execution_slippage_fraction
         ),
-        "max_quote_age_seconds": str(contract.max_quote_age_seconds),
-        "minimum_data_quality": str(contract.minimum_data_quality),
-        "max_concurrent_positions": contract.max_concurrent_positions,
-        "max_parlay_legs": contract.max_parlay_legs,
-        "automation_level": _automation_value_getter(contract.automation_level),
-        "emergency_stop": contract.emergency_stop,
-        "blocked_sports": sorted(contract.blocked_sports),
-        "blocked_providers": sorted(contract.blocked_providers),
-        "blocked_markets": sorted(contract.blocked_markets),
+        "max_quote_age_seconds": str(max_quote_age_seconds),
+        "minimum_data_quality": str(minimum_data_quality),
+        "max_concurrent_positions": max_concurrent_positions,
+        "max_parlay_legs": max_parlay_legs,
+        "automation_level": _automation_value_getter(automation_level),
+        "emergency_stop": emergency_stop,
+        "blocked_sports": sorted(blocked_sports),
+        "blocked_providers": sorted(blocked_providers),
+        "blocked_markets": sorted(blocked_markets),
     }
     payload: dict[str, object] = {
         "schema": _schema,

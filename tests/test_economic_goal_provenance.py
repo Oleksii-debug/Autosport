@@ -421,3 +421,91 @@ def test_provenance_creation_and_identity_ignore_rebound_constructor(monkeypatch
     assert evidence == expected
     assert evidence.decision_identity == expected.decision_identity
     verify_provenance(goal, evidence)
+
+
+def test_verification_ignores_rebound_provenance_field_descriptor(monkeypatch) -> None:
+    goal = _goal()
+    evidence = provenance_for(goal)
+    expected_sha = evidence.contract_sha256
+    object.__setattr__(evidence, "contract_sha256", "0" * 64)
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return expected_sha
+
+    monkeypatch.setattr(
+        EconomicGoalProvenance,
+        "contract_sha256",
+        ForgedDescriptor(),
+    )
+
+    with pytest.raises(EconomicGoalProvenanceError, match="contract_sha256 mismatch"):
+        verify_provenance(goal, evidence)
+
+
+def test_provenance_ignores_rebound_module_evidence_type(monkeypatch) -> None:
+    goal = _goal()
+    evidence = provenance_for(goal)
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "EconomicGoalProvenance",
+        object,
+    )
+
+    verify_provenance(goal, evidence)
+    assert evidence.decision_identity
+
+def test_provenance_operations_ignore_rebound_snapshot_helpers(monkeypatch) -> None:
+    goal = _goal()
+    provenance = provenance_for(goal)
+    contract_called = False
+    provenance_called = False
+
+    def forged_contract(*args: object, **kwargs: object) -> tuple[object, ...]:
+        nonlocal contract_called
+        contract_called = True
+        raise AssertionError("rebound contract snapshot helper executed")
+
+    def forged_provenance(*args: object, **kwargs: object) -> tuple[object, ...]:
+        nonlocal provenance_called
+        provenance_called = True
+        raise AssertionError("rebound provenance snapshot helper executed")
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_canonical_contract_snapshot",
+        forged_contract,
+    )
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_canonical_provenance_snapshot",
+        forged_provenance,
+    )
+
+    regenerated = provenance_for(goal)
+    verify_provenance(goal, provenance)
+    assert regenerated.contract_sha256 == provenance.contract_sha256
+    assert provenance.decision_identity == (
+        f"{provenance.goal_id}@{provenance.revision}:{provenance.contract_sha256}"
+    )
+    assert contract_called is False
+    assert provenance_called is False
+
+def test_decision_identity_ignores_rebound_bound_implementation(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    expected = evidence.decision_identity
+    called = False
+
+    def forged(*args: object, **kwargs: object) -> str:
+        nonlocal called
+        called = True
+        raise AssertionError("rebound decision identity implementation executed")
+
+    monkeypatch.setattr(
+        economic_goal_provenance_module,
+        "_decision_identity_bound",
+        forged,
+    )
+
+    assert evidence.decision_identity == expected
+    assert called is False

@@ -1360,3 +1360,25 @@ def test_payload_decoder_ignores_rebound_contract_constructor(monkeypatch) -> No
 
     restored = economic_goal_from_payload(payload)
     assert restored == expected
+
+
+def test_payload_uses_captured_contract_field_values_after_descriptor_rebinding(
+    monkeypatch,
+) -> None:
+    goal = _goal(max_stake_fraction=Decimal("0.03"))
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return Decimal("0.02")
+
+    monkeypatch.setattr(
+        EconomicGoalContract,
+        "max_stake_fraction",
+        ForgedDescriptor(),
+    )
+
+    payload = economic_goal_to_payload(goal)
+
+    body = payload["contract"]
+    assert isinstance(body, dict)
+    assert body["max_stake_fraction"] == "0.03"

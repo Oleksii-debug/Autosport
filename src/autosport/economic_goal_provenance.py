@@ -12,7 +12,11 @@ import json
 from dataclasses import dataclass
 from typing import Final
 
-from .economic_goal import EconomicGoalContract, EconomicGoalContractError
+from .economic_goal import (
+    EconomicGoalContract,
+    EconomicGoalContractError,
+    _canonical_contract_snapshot,
+)
 from .economic_goal_store import economic_goal_from_payload, economic_goal_to_payload
 
 
@@ -36,53 +40,119 @@ class EconomicGoalProvenance:
     bankroll_id: str
     contract_sha256: str
 
-    def __post_init__(
-        self,
-        _schema=PROVENANCE_SCHEMA,
-        _schema_version=PROVENANCE_SCHEMA_VERSION,
-        _max_identity_chars=_MAX_PROVENANCE_IDENTITY_CHARS,
-        _error_type=EconomicGoalProvenanceError,
-    ) -> None:
-        if type(self.schema) is not str or self.schema != _schema:
-            raise _error_type("unsupported provenance schema")
-        if type(self.schema_version) is not int or self.schema_version != _schema_version:
-            raise _error_type("unsupported provenance schema version")
-        for name, value in (("goal_id", self.goal_id), ("bankroll_id", self.bankroll_id)):
-            if type(value) is not str or not value:
-                raise _error_type(f"{name} must be a non-empty string")
-            if value != value.strip():
-                raise _error_type(f"{name} must be canonical text")
-            if len(value) > _max_identity_chars:
-                raise _error_type(f"{name} exceeds the identity size limit")
-            if "\x00" in value:
-                raise _error_type(f"{name} must not contain NUL")
-            try:
-                value.encode("utf-8", errors="strict")
-            except UnicodeEncodeError as exc:
-                raise _error_type(
-                    f"{name} must be valid UTF-8 text"
-                ) from exc
-        if type(self.revision) is not int or self.revision <= 0:
-            raise _error_type("revision must be a positive integer")
-        if (
-            type(self.contract_sha256) is not str
-            or len(self.contract_sha256) != 64
-            or any(ch not in "0123456789abcdef" for ch in self.contract_sha256)
-        ):
-            raise _error_type("contract_sha256 must be lowercase SHA-256 hex")
-
+    def __post_init__(self) -> None:
+        _validate_provenance_bound(self)
     @property
-    def decision_identity(self, _validator=__post_init__) -> str:
+    def decision_identity(self) -> str:
         """Return an immutable, revision-specific identity suitable for evidence binding."""
 
-        _validator(self)
-        return f"{self.goal_id}@{self.revision}:{self.contract_sha256}"
+        return _decision_identity_bound(self)
 
+
+_PROVENANCE_CONTRACT_FIELD_NAMES: Final = (
+    "goal_id", "revision", "bankroll_id", "currency", "objective",
+    "max_stake_fraction", "max_stake_amount", "max_session_loss_fraction",
+    "max_day_loss_fraction", "max_drawdown_fraction", "max_capital_at_risk_fraction",
+    "max_event_concentration_fraction", "max_market_concentration_fraction",
+    "max_provider_concentration_fraction", "max_sport_concentration_fraction",
+    "max_turnover_fraction", "max_risk_of_ruin", "max_execution_slippage_fraction",
+    "max_quote_age_seconds", "minimum_data_quality", "max_concurrent_positions",
+    "max_parlay_legs", "automation_level", "emergency_stop",
+    "blocked_sports", "blocked_providers", "blocked_markets",
+)
+
+_PROVENANCE_FIELD_NAMES: Final = (
+    "schema", "schema_version", "goal_id", "revision", "bankroll_id",
+    "contract_sha256",
+)
+
+_CANONICAL_PROVENANCE_FIELD_GETTERS: Final = tuple(
+    (name, EconomicGoalProvenance.__dict__[name].__get__)
+    for name in _PROVENANCE_FIELD_NAMES
+)
+
+def _canonical_provenance_snapshot(
+    provenance: EconomicGoalProvenance,
+    _field_getters=_CANONICAL_PROVENANCE_FIELD_GETTERS,
+    _provenance_type=EconomicGoalProvenance,
+) -> tuple[object, ...]:
+    return tuple(
+        getter(provenance, _provenance_type)
+        for _, getter in _field_getters
+    )
+
+def _validate_provenance_bound(
+    self: EconomicGoalProvenance,
+    _schema=PROVENANCE_SCHEMA,
+    _schema_version=PROVENANCE_SCHEMA_VERSION,
+    _max_identity_chars=_MAX_PROVENANCE_IDENTITY_CHARS,
+    _error_type=EconomicGoalProvenanceError,
+    _provenance_type=EconomicGoalProvenance,
+    _snapshot=_canonical_provenance_snapshot,
+) -> None:
+    """Validate provenance through captured slot descriptors."""
+    if type(self) is not _provenance_type:
+        raise _error_type("provenance must use the exact evidence type")
+    schema, schema_version, goal_id, revision, bankroll_id, contract_sha256 = _snapshot(self)
+    if type(schema) is not str or schema != _schema:
+        raise _error_type("unsupported provenance schema")
+    if type(schema_version) is not int or schema_version != _schema_version:
+        raise _error_type("unsupported provenance schema version")
+    for name, value in (("goal_id", goal_id), ("bankroll_id", bankroll_id)):
+        if type(value) is not str or not value:
+            raise _error_type(f"{name} must be a non-empty string")
+        if value != value.strip():
+            raise _error_type(f"{name} must be canonical text")
+        if len(value) > _max_identity_chars:
+            raise _error_type(f"{name} exceeds the identity size limit")
+        if "\x00" in value:
+            raise _error_type(f"{name} must not contain NUL")
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise _error_type(f"{name} must be valid UTF-8 text") from exc
+    if type(revision) is not int or revision <= 0:
+        raise _error_type("revision must be a positive integer")
+    if (
+        type(contract_sha256) is not str
+        or len(contract_sha256) != 64
+        or any(ch not in "0123456789abcdef" for ch in contract_sha256)
+    ):
+        raise _error_type("contract_sha256 must be lowercase SHA-256 hex")
+
+def _decision_identity_bound(
+    self: EconomicGoalProvenance,
+    _validator=_validate_provenance_bound,
+    _snapshot=_canonical_provenance_snapshot,
+    _error_type=EconomicGoalProvenanceError,
+) -> str:
+    _validator(self)
+    before = _snapshot(self)
+    _validator(self)
+    after = _snapshot(self)
+    if before != after:
+        raise _error_type(
+            "economic-goal provenance changed during identity derivation"
+        )
+    _, _, goal_id, revision, _, contract_sha256 = after
+    return f"{goal_id}@{revision}:{contract_sha256}"
+
+def _bind_decision_identity(operation):
+    def bound(self: EconomicGoalProvenance) -> str:
+        return operation(self)
+
+    return property(bound)
+
+
+EconomicGoalProvenance.__post_init__ = _validate_provenance_bound
+EconomicGoalProvenance.decision_identity = _bind_decision_identity(
+    _decision_identity_bound
+)
 
 _CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
 _CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
 _CANONICAL_PROVENANCE_TYPE: Final = EconomicGoalProvenance
-_CANONICAL_PROVENANCE_VALIDATOR: Final = EconomicGoalProvenance.__post_init__
+_CANONICAL_PROVENANCE_VALIDATOR: Final = _validate_provenance_bound
 
 
 def _build_provenance(
@@ -189,21 +259,30 @@ def _provenance_for_bound(
     _schema=PROVENANCE_SCHEMA,
     _schema_version=PROVENANCE_SCHEMA_VERSION,
     _goal_error=EconomicGoalContractError,
+    _contract_snapshot=_canonical_contract_snapshot,
 ) -> EconomicGoalProvenance:
     """Derive immutable provenance identity without introducing another authority."""
 
     if type(contract) is not _goal_type:
         raise _goal_error("provenance requires an EconomicGoalContract")
     _goal_validator(contract)
-    payload = _payload_encoder(contract)
-    snapshot = _payload_decoder(payload)
-    provenance = _provenance_builder(
+    before = _contract_snapshot(contract)
+    _goal_validator(contract)
+    after = _contract_snapshot(contract)
+    if before != after:
+        raise _goal_error("economic goal changed during provenance derivation")
+    values = dict(zip(_PROVENANCE_CONTRACT_FIELD_NAMES, after))
+    contract_sha256 = _contract_sha256(contract)
+    final_snapshot = _contract_snapshot(contract)
+    if after != final_snapshot:
+        raise _goal_error("economic goal changed during provenance derivation")
+    provenance = _provenance_type(
         schema=_schema,
         schema_version=_schema_version,
-        goal_id=snapshot.goal_id,
-        revision=snapshot.revision,
-        bankroll_id=snapshot.bankroll_id,
-        contract_sha256=_contract_sha256(snapshot),
+        goal_id=values["goal_id"],
+        revision=values["revision"],
+        bankroll_id=values["bankroll_id"],
+        contract_sha256=contract_sha256,
     )
     _provenance_validator(provenance)
     return provenance
@@ -222,6 +301,8 @@ def _verify_provenance_bound(
     _contract_sha256=_contract_sha256_bound,
     _goal_error=EconomicGoalContractError,
     _provenance_error=EconomicGoalProvenanceError,
+    _contract_snapshot=_canonical_contract_snapshot,
+    _provenance_snapshot=_canonical_provenance_snapshot,
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
@@ -229,17 +310,39 @@ def _verify_provenance_bound(
         raise _goal_error("provenance verification requires an EconomicGoalContract")
     if type(provenance) is not _provenance_type:
         raise _provenance_error("provenance must be EconomicGoalProvenance")
+
     _goal_validator(contract)
-    contract_snapshot = _payload_decoder(_payload_encoder(contract))
-    evidence = _provenance_snapshotter(provenance)
-    if evidence.goal_id != contract_snapshot.goal_id:
+    contract_before = _contract_snapshot(contract)
+    _provenance_validator(provenance)
+    provenance_before = _provenance_snapshot(provenance)
+
+    _goal_validator(contract)
+    contract_after = _contract_snapshot(contract)
+    _provenance_validator(provenance)
+    provenance_after = _provenance_snapshot(provenance)
+
+    if contract_before != contract_after:
+        raise _goal_error("economic goal changed during provenance verification")
+    if provenance_before != provenance_after:
+        raise _provenance_error("economic-goal provenance changed during verification")
+
+    _, _, goal_id, revision, bankroll_id = contract_after[:5]
+    proven_goal_id = provenance_after[2]
+    proven_revision = provenance_after[3]
+    proven_bankroll_id = provenance_after[4]
+    proven_contract_sha256 = provenance_after[5]
+
+    if proven_goal_id != goal_id:
         raise _provenance_error("provenance goal_id mismatch")
-    if evidence.revision != contract_snapshot.revision:
+    if proven_revision != revision:
         raise _provenance_error("provenance revision mismatch")
-    if evidence.bankroll_id != contract_snapshot.bankroll_id:
+    if proven_bankroll_id != bankroll_id:
         raise _provenance_error("provenance bankroll_id mismatch")
-    actual = _contract_sha256(contract_snapshot)
-    if evidence.contract_sha256 != actual:
+    actual = _contract_sha256(contract)
+    final_contract_snapshot = _contract_snapshot(contract)
+    if contract_after != final_contract_snapshot:
+        raise _goal_error("economic goal changed during provenance verification")
+    if proven_contract_sha256 != actual:
         raise _provenance_error("provenance contract_sha256 mismatch")
 
 

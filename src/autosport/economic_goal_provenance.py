@@ -25,12 +25,53 @@ PROVENANCE_SCHEMA_VERSION: Final = 1
 _MAX_PROVENANCE_IDENTITY_CHARS: Final = 512
 
 
+class _EconomicGoalProvenanceMeta(type):
+    """Seal the public provenance-identity property after canonical binding."""
+
+    _AUTHORITY_NAMES: Final = frozenset(
+        {
+            "decision_identity",
+            "_authority_operations_sealed",
+        }
+    )
+
+    def __setattr__(
+        cls,
+        name: str,
+        value: object,
+        _authority_names=_AUTHORITY_NAMES,
+    ) -> None:
+        if (
+            cls.__dict__.get("_authority_operations_sealed", False)
+            and name in _authority_names
+        ):
+            raise TypeError(
+                "economic-goal provenance public authority binding is immutable"
+            )
+        super().__setattr__(name, value)
+
+    def __delattr__(
+        cls,
+        name: str,
+        _authority_names=_AUTHORITY_NAMES,
+    ) -> None:
+        if (
+            cls.__dict__.get("_authority_operations_sealed", False)
+            and name in _authority_names
+        ):
+            raise TypeError(
+                "economic-goal provenance public authority binding is immutable"
+            )
+        super().__delattr__(name)
+
+
+
 class EconomicGoalProvenanceError(ValueError):
     """Raised when economic-goal provenance evidence is malformed or mismatched."""
 
 
 @dataclass(frozen=True, slots=True)
-class EconomicGoalProvenance:
+class EconomicGoalProvenance(metaclass=_EconomicGoalProvenanceMeta):
     """Immutable evidence identity for one persisted goal-contract revision."""
 
     schema: str
@@ -39,6 +80,8 @@ class EconomicGoalProvenance:
     revision: int
     bankroll_id: str
     contract_sha256: str
+
+    _authority_operations_sealed = False
 
     def __post_init__(
         self,
@@ -644,3 +687,6 @@ _decision_identity_authority = _make_provenance_authority(
     "economic-goal provenance decision identity",
 )
 EconomicGoalProvenance.decision_identity = property(_decision_identity_authority)
+
+# Freeze the public identity property after its closure has captured canonical authority.
+EconomicGoalProvenance._authority_operations_sealed = True

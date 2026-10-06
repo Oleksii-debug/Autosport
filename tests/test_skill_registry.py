@@ -767,7 +767,8 @@ def test_handler_unexpected_process_handle_close_failure_becomes_terminal_truth(
 
 
 @pytest.mark.parametrize("failure_point", ("poll", "recv"))
-def test_handler_result_pipe_value_error_becomes_terminal_truth(monkeypatch, failure_point):
+@pytest.mark.parametrize("failure_type", (ValueError, RuntimeError))
+def test_handler_result_pipe_failure_becomes_terminal_truth(monkeypatch, failure_point, failure_type):
     class FakeReceiver:
         def __init__(self):
             self.closed = False
@@ -777,12 +778,12 @@ def test_handler_result_pipe_value_error_becomes_terminal_truth(monkeypatch, fai
 
         def poll(self):
             if failure_point == "poll":
-                raise ValueError("simulated closed result pipe during poll")
+                raise failure_type("simulated result pipe failure during poll")
             return True
 
         def recv(self):
             if failure_point == "recv":
-                raise ValueError("simulated closed result pipe during recv")
+                raise failure_type("simulated result pipe failure during recv")
             raise AssertionError("unexpected recv")
 
     class FakeSender:

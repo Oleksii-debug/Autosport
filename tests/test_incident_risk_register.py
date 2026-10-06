@@ -541,6 +541,19 @@ class IncidentRiskRegisterTests(unittest.TestCase):
             "[REDACTED] [REDACTED]",
         )
 
+    def test_operator_projection_redacts_aws_credential_environment_variables(self) -> None:
+        entry = self._entry(
+            title="AWS_ACCESS_KEY_ID=AKIA1234567890ABCD",
+            summary="AWS_SECRET_ACCESS_KEY=secret-value AWS_SESSION_TOKEN=session-value",
+            mitigation="security_token: security-secret",
+        )
+
+        projection = operator_projection(entry)
+
+        self.assertEqual(projection.title, "AWS_ACCESS_KEY_ID=[REDACTED]")
+        self.assertEqual(projection.summary, "[REDACTED] [REDACTED]")
+        self.assertEqual(projection.mitigation, "[REDACTED]")
+
     def test_operator_projection_preserves_noncredential_text(self) -> None:
         entry = self._entry(
             title="Provider session recovered",

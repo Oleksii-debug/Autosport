@@ -655,3 +655,42 @@ def test_rate_gate_restart_validation_ignores_rebound_dto_validators(monkeypatch
 
     with pytest.raises(TypeError, match="accepted rate timestamp"):
         gate_type(state=state)
+
+
+def test_rate_snapshot_is_detached_from_live_window_authority() -> None:
+    value = BetfairMarketBookPerMarketRateGate()
+    for index in range(5):
+        assert value.reserve(
+            ("1.234",),
+            scheduled_at=T0 + timedelta(milliseconds=100 * index),
+        ).allowed
+
+    snapshot = value.snapshot()
+    exposed = snapshot.markets[0]
+    object.__setattr__(exposed, "accepted_at_utc_us", ())
+
+    live = value.snapshot()
+    assert len(live.markets[0].accepted_at_utc_us) == 5
+    denied = value.reserve(
+        ("1.234",),
+        scheduled_at=T0 + timedelta(milliseconds=500),
+    )
+    assert denied.allowed is False
+
+
+def test_rate_restart_detaches_imported_window_authority() -> None:
+    source = BetfairMarketBookPerMarketRateGate()
+    assert source.reserve(("1.234",), scheduled_at=T0).allowed
+    state = source.snapshot()
+
+    restored = BetfairMarketBookPerMarketRateGate(state=state)
+    imported = state.markets[0]
+    object.__setattr__(imported, "market_id", "forged-after-restart")
+    object.__setattr__(imported, "accepted_at_utc_us", ())
+
+    live = restored.snapshot()
+    assert len(live.markets) == 1
+    assert live.markets[0].market_id == "1.234"
+    assert live.markets[0].accepted_at_utc_us == (
+        int(T0.timestamp() * 1_000_000),
+    )

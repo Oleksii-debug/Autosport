@@ -687,6 +687,14 @@ def _decode_state(
     return canonical
 
 
+_PRODUCT_ECONOMIC_SESSION_EQ: Final = ProductEconomicSession.__eq__
+_PRODUCT_ECONOMIC_SESSION_EQ_CODE: Final = getattr(
+    _PRODUCT_ECONOMIC_SESSION_EQ,
+    "__code__",
+    None,
+)
+
+
 _DECODE_STATE_CODE: Final = _decode_state.__code__
 
 
@@ -799,6 +807,8 @@ class ProductEconomicSessionStore:
         self._economic_goal_store_init_witness = _ECONOMIC_GOAL_STORE_INIT
         self._economic_goal_store_constructor_witness = _construct_economic_goal_store
         self._authority_type_witness = _AUTHORITY_TYPE
+        self._product_economic_session_eq_witness = _PRODUCT_ECONOMIC_SESSION_EQ
+        self._product_economic_session_eq_code_witness = _PRODUCT_ECONOMIC_SESSION_EQ_CODE
         self._authority_new_witness = _AUTHORITY_NEW
         self._authority_init_witness = _AUTHORITY_INIT
         self._authority_constructor_witness = _construct_economic_authority
@@ -955,6 +965,12 @@ class ProductEconomicSessionStore:
             or MonotonicWorkspaceAuthority.commit is not self._authority_commit_witness
             or PaperBook.load is not self._paperbook_load_witness
             or PaperBook._validate_loaded_state is not self._paperbook_validate_witness
+            or ProductEconomicSession.__eq__ is not self._product_economic_session_eq_witness
+            or (
+                _PRODUCT_ECONOMIC_SESSION_EQ_CODE is not None
+                and getattr(self._product_economic_session_eq_witness, "__code__", None)
+                is not _PRODUCT_ECONOMIC_SESSION_EQ_CODE
+            )
             or WorkspaceEconomicLock is not self._workspace_lock_type_witness
             or uuid.uuid4 is not self._uuid4_witness
             or (
@@ -1074,7 +1090,9 @@ class ProductEconomicSessionStore:
             current_evidence = self._evidence(
                 payload, observed, recovery.committed_generation
             )
-            if previous != current_evidence:
+            if not self._product_economic_session_eq_witness(
+                previous, current_evidence
+            ):
                 raise EconomicSessionMismatchError(
                     "explicit transition predecessor does not match current durable session"
                 )

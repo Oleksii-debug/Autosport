@@ -3751,6 +3751,38 @@ def test_settlement_resolution_collection_rejects_callback_phase_mutation() -> N
         raise AssertionError("callback lifecycle phase mutation was accepted")
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    ("completion_discovered_at", "settlement_discovered_at"),
+)
+def test_settlement_resolution_collection_rejects_callback_discovery_mutation(
+    field_name: str,
+) -> None:
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    coordinator = _resolution_coordinator((record,), (_resolution(),))
+
+    class MutatingAuthority:
+        def resolve(self, live_record: object, *, as_of: str) -> None:
+            assert as_of == _AT
+            setattr(
+                live_record,
+                field_name,
+                "2026-09-21T23:59:59+00:00",
+            )
+            return None
+
+    coordinator.outcome_authority = MutatingAuthority()
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "mutated lifecycle settlement causality" in str(exc)
+    else:
+        raise AssertionError(
+            f"callback mutation of {field_name} was accepted"
+        )
+
+
 def test_settlement_resolution_detaches_authority_mapping_before_validation(
     monkeypatch,
 ) -> None:

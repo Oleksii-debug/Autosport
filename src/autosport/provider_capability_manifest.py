@@ -2,9 +2,10 @@
 
 The canonical :class:'BookmakerCapabilityProfile' remains the authority for every
 capability it already owns.  This module projects that authority into a complete
-manifest and adds narrowly-scoped evidence-backed facets that the canonical profile
-does not currently model.  Unknown or absent evidence is always explicit
-''NOT_PROVEN''; it never defaults to support.
+manifest and represents extension facets that the canonical profile does not currently
+model.  Public evidence references are structural provenance only: until a separate
+product-owned, re-resolvable issuer is composed, every extension facet remains
+''NOT_PROVEN'' and caller-authored evidence can never become capability truth.
 
 This module is descriptive only.  It performs no provider I/O, handles no credentials,
 and grants no provider-write, execution, settlement, legal, real-money, or release
@@ -39,8 +40,8 @@ class ProviderManifestCapability(str, Enum):
     """Complete manifest vocabulary.
 
     Capabilities already represented by 'BookmakerCapability' are projected from
-    that canonical profile.  The remaining entries require their own explicit
-    evidence before they may become conclusive.
+    that canonical profile.  The remaining entries stay NOT_PROVEN until a
+    separate product-owned evidence issuer is composed.
     """
 
     SPORTS = "sports"
@@ -173,7 +174,7 @@ def _profile_state(
 
 @dataclass(frozen=True, slots=True)
 class ProviderCapabilityEvidenceRef:
-    """Secret-free immutable reference to one exact capability-evidence payload."""
+    """Secret-free structural reference; possession does not confer evidence authority."""
 
     kind: str
     evidence_ref: str
@@ -210,8 +211,8 @@ class ProviderCapabilityEvidenceRef:
 class ProviderCapabilityManifestFact:
     """One explicit manifest fact.
 
-    Canonical-profile facts cannot carry caller evidence.  Extension facts become
-    conclusive only when bound to an exact evidence reference.
+    Canonical-profile facts cannot carry caller evidence.  Extension evidence refs are
+    structural DTOs only and cannot make an extension fact conclusive by construction.
     """
 
     capability: ProviderManifestCapability
@@ -386,14 +387,14 @@ class ProviderCapabilityManifest:
                         f"{fact.capability.value} canonical projection cannot carry override data"
                     )
             else:
-                if fact.state is ProviderManifestState.NOT_PROVEN:
-                    if fact.authority is not ProviderManifestFactAuthority.NOT_PROVEN:
-                        raise ProviderCapabilityManifestError(
-                            f"{fact.capability.value} NOT_PROVEN must be explicit"
-                        )
-                elif fact.authority is not ProviderManifestFactAuthority.EXPLICIT_EVIDENCE:
+                if fact.state is not ProviderManifestState.NOT_PROVEN:
                     raise ProviderCapabilityManifestError(
-                        f"{fact.capability.value} conclusive state requires explicit evidence"
+                        f"{fact.capability.value} conclusive extension truth requires "
+                        "product-owned evidence authority; caller evidence refs are structural only"
+                    )
+                if fact.authority is not ProviderManifestFactAuthority.NOT_PROVEN:
+                    raise ProviderCapabilityManifestError(
+                        f"{fact.capability.value} NOT_PROVEN must be explicit"
                     )
 
             if fact.evidence is not None:
@@ -519,6 +520,8 @@ def build_provider_capability_manifest(
 
     Missing extension facts are materialized as ''NOT_PROVEN''.  Canonical capabilities
     cannot be supplied in ''extension_facts'' and therefore cannot be caller-overridden.
+    Public extension evidence remains structural only; conclusive extension facts fail
+    closed until a separate product-owned, re-resolvable issuer is composed.
     """
 
     _validate_exact_profile(profile)

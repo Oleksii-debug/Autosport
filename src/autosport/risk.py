@@ -1691,17 +1691,28 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             if goal.max_stake_amount is not None:
                 caps.append(goal.max_stake_amount)
             amount = min(caps)
-            if context is not None and amount > 0:
-                exact_capital = _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+            exact_capital = (
+                amount
+                if context is None
+                else _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
                     amount,
                     context.legs,
                 )
-                if any(exact_capital > room for room in capital_rooms):
-                    return None
+            )
+            if amount > 0 and any(exact_capital > room for room in capital_rooms):
+                return None
         except (ArithmeticError, AttributeError, TypeError, ValueError):
             return None
 
         if not isinstance(amount, Decimal) or not amount.is_finite() or amount <= 0:
+            return None
+        if self._derived_risk_values(
+            initial_bankroll,
+            balance,
+            committed_stake,
+            amount,
+            exact_capital,
+        ) is None:
             return None
         if goal.max_risk_of_ruin < Decimal("1"):
             assert context is not None
@@ -2258,6 +2269,7 @@ _PAPER_RISK_EVALUATE_HELPER_WITNESSES = (
 
 _PAPER_RISK_DERIVE_GOAL_STAKE_HELPER_WITNESSES = (
     ("_goal_history_rooms", _eval_history, _eval_history.__func__, _eval_history.__func__.__code__, True),
+    ("_derived_risk_values", _eval_derived, _eval_derived, _eval_derived.__code__, False),
     ("_effective_fraction_limits", _stake_limits, _stake_limits, _stake_limits.__code__, False),
     ("_decimal_context", _stake_decimal_context, _stake_decimal_context.__func__, _stake_decimal_context.__func__.__code__, True),
     ("_risk_of_ruin_evidence_decision", _eval_ruin, _eval_ruin.__func__, _eval_ruin.__func__.__code__, True),

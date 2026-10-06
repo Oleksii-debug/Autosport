@@ -230,3 +230,58 @@ def test_save_rejects_rebound_path_unlink_before_publication(
             book.save(tmp_path / "paper.json")
     finally:
         monkeypatch.setattr(paper_module.Path, "unlink", original)
+
+
+def test_load_rejects_rebound_path_factory_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    snapshot = tmp_path / "paper.json"
+    book.save(snapshot)
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound Path executed")
+
+    monkeypatch.setattr(paper_module, "Path", hostile)
+
+    with pytest.raises(
+        ValueError,
+        match=r"load Path authority changed",
+    ):
+        PaperBook.load(snapshot)
+
+    assert attacker_calls == 0
+
+
+def test_load_rejects_rebound_read_bytes_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    snapshot = tmp_path / "paper.json"
+    book.save(snapshot)
+    path_type = type(paper_module.Path("."))
+    original = path_type.read_bytes
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound read_bytes executed")
+
+    monkeypatch.setattr(path_type, "read_bytes", hostile)
+
+    try:
+        with pytest.raises(
+            ValueError,
+            match=r"snapshot read authority changed",
+        ):
+            PaperBook.load(snapshot)
+    finally:
+        monkeypatch.setattr(path_type, "read_bytes", original)
+
+    assert attacker_calls == 0

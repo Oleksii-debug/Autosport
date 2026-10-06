@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+import autosport.betfair_marketbook_batch_transport as _batch_transport_module
 from autosport.betfair_account_readonly import (
     BETTING_JSON_RPC_ENDPOINT,
     BetfairReadOnlyClient,
@@ -612,6 +613,105 @@ def test_class_rebound_assert_issued_cannot_mutate_valid_execution_semantics(mon
     assert issued.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
     assert execution.result is issued
     assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+
+
+def test_module_rebound_core_read_cannot_replace_canonical_transport(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    called = False
+
+    def forged_core(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("rebound core read must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "_read_market_book_batch",
+        forged_core,
+    )
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="sealed-core-read",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    result.assert_issued()
+    assert called is False
+    assert len(transport.calls) == 1
+
+
+def test_module_rebound_physical_post_cannot_replace_canonical_transport(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    called = False
+
+    def forged_post(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("rebound physical post must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module._transport,
+        "_post_market_book_readonly",
+        forged_post,
+    )
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="sealed-physical-post",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    result.assert_issued()
+    assert called is False
+    assert len(transport.calls) == 1
+
+
+def test_module_rebound_request_budget_cannot_replace_canonical_preflight(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    called = False
+
+    def forged_budget(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("rebound request budget must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module._transport,
+        "_market_book_request_budget",
+        forged_budget,
+    )
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="sealed-request-budget",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    result.assert_issued()
+    assert called is False
+    assert len(transport.calls) == 1
 
 
 def test_invalid_client_fails_before_gate_mutation():

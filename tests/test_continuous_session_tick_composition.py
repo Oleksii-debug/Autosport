@@ -1231,3 +1231,126 @@ def test_tick_rejects_collector_source_drift_before_provider_io() -> None:
 
         assert coordinator._state.snapshot().cycles_completed == 0
 
+def test_tick_rejects_duplicate_collector_commit_ids() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Cycle:
+            source_id = "provider-a"
+            provider_unavailable = False
+            committed_delta_ids = ("delta-1", "delta-1")
+
+        class Collector:
+            source_id = "provider-a"
+            delta_store = _DeltaStore()
+            config = type("ConfigStub", (), {"max_items": 1})()
+
+            def run_cycle(self):
+                return Cycle()
+
+        coordinator.collector = Collector()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="collector returned invalid continuous-session cycle metadata",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_provider_unavailable_cycle_with_committed_effects() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Cycle:
+            source_id = "provider-a"
+            provider_unavailable = True
+            committed_delta_ids = ("delta-1",)
+
+        class Collector:
+            source_id = "provider-a"
+            delta_store = _DeltaStore()
+            config = type("ConfigStub", (), {"max_items": 1})()
+
+            def run_cycle(self):
+                return Cycle()
+
+        coordinator.collector = Collector()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="collector returned invalid continuous-session cycle metadata",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_duplicate_desktop_delivery_ids() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ("delta-1", "delta-1")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="desktop consumer returned invalid delivered delta ids",
+        ):
+            coordinator.tick()
+
+
+def test_tick_rejects_duplicate_lifecycle_registration_ids() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Index:
+            def __init__(self) -> None:
+                self.ids = set()
+
+            @property
+            def input_ids(self):
+                return tuple(sorted(self.ids))
+
+            def affected_inputs(self, _batch):
+                return ()
+
+            def register(self, input_id: str, **_selectors):
+                self.ids.add(input_id)
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                register_input,
+                **_kwargs,
+            ):
+                register_input("input-new")
+                return ("input-new", "input-new")
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.dependency_index = Index()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="lifecycle returned invalid registered input ids",
+        ):
+            coordinator.tick()
+

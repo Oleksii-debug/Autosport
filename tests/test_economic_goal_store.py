@@ -279,6 +279,27 @@ def test_json_decoder_rejects_string_subclasses_before_parsing() -> None:
         economic_goal_from_json(TextSubclass("{}"))
 
 
+def test_json_decoder_rejects_oversize_document() -> None:
+    oversized = "{}" + (" " * economic_goal_store_module._MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS)
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="JSON text exceeds the canonical size limit",
+    ):
+        economic_goal_from_json(oversized)
+
+
+def test_json_decoder_bound_is_not_rebound_by_module_constant(monkeypatch) -> None:
+    monkeypatch.setattr(economic_goal_store_module, "_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS", 1)
+
+    payload = economic_goal_to_payload(_goal())
+    import json
+
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    assert economic_goal_from_json(text) == _goal()
+
+
 def test_payload_decoder_rejects_schema_and_objective_subclasses_before_semantic_lookup() -> None:
     class TextSubclass(str):
         comparisons = 0

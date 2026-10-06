@@ -265,6 +265,15 @@ def _core_sha256(
     return hashlib.sha256(payload).hexdigest()
 
 
+def _stable_stat_metadata(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_mode == right.st_mode
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
+
+
 def _read_stable_store_text(path: Path) -> str:
     """Read only one verified regular store object without following aliases."""
     try:
@@ -272,7 +281,9 @@ def _read_stable_store_text(path: Path) -> str:
     except FileNotFoundError:
         raise
     except OSError as exc:
-        raise IncidentRiskStoreError("cannot inspect durable incident/model-risk store path") from exc
+        raise IncidentRiskStoreError(
+            "cannot inspect durable incident/model-risk store path"
+        ) from exc
     if not stat.S_ISREG(path_before.st_mode) or path_before.st_nlink != 1:
         raise IncidentRiskStoreError(
             "durable incident/model-risk store path must be a regular non-aliased file"
@@ -287,22 +298,40 @@ def _read_stable_store_text(path: Path) -> str:
             "cannot open durable incident/model-risk store path safely"
         ) from exc
 
-    primary_error: BaseException | None = None
     try:
         try:
             opened_before = os.fstat(descriptor)
+            path_after_open = os.stat(path, follow_symlinks=False)
         except OSError as exc:
             raise IncidentRiskStoreError(
                 "cannot validate durable incident/model-risk store descriptor"
             ) from exc
+
+        verification_descriptor: int | None = None
+        try:
+            verification_descriptor = _open_read_only_descriptor(path)
+            same_file = os.path.sameopenfile(
+                descriptor,
+                verification_descriptor,
+            )
+        except OSError as exc:
+            raise IncidentRiskStoreError(
+                "cannot verify durable incident/model-risk store identity"
+            ) from exc
+        finally:
+            if verification_descriptor is not None:
+                try:
+                    os.close(verification_descriptor)
+                except OSError:
+                    pass
+
         if (
             not stat.S_ISREG(opened_before.st_mode)
             or opened_before.st_nlink != 1
-            or not _stable_stat_metadata(path_before, os.stat(path, follow_symlinks=False))
-            or not os.path.sameopenfile(
-                descriptor,
-                _open_read_only_descriptor(path),
-            )
+            or not stat.S_ISREG(path_after_open.st_mode)
+            or path_after_open.st_nlink != 1
+            or not _stable_stat_metadata(path_before, path_after_open)
+            or not same_file
         ):
             raise IncidentRiskStoreError(
                 "durable incident/model-risk store path changed while validating"
@@ -324,37 +353,34 @@ def _read_stable_store_text(path: Path) -> str:
             raise IncidentRiskStoreError(
                 "durable incident/model-risk store changed during read"
             )
+
         try:
-            current = os.stat(path, follow_symlinks=False)
+            path_after_read = os.stat(path, follow_symlinks=False)
         except OSError as exc:
             raise IncidentRiskStoreError(
                 "durable incident/model-risk store path disappeared during read"
             ) from exc
         if (
-            not stat.S_ISREG(current.st_mode)
-            or current.st_nlink != 1
-            or not _stable_stat_metadata(path_before, current)
+            not stat.S_ISREG(path_after_read.st_mode)
+            or path_after_read.st_nlink != 1
+            or not _stable_stat_metadata(path_before, path_after_read)
         ):
             raise IncidentRiskStoreError(
                 "durable incident/model-risk store path changed during read"
             )
-        return b"".join(chunks).decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise IncidentRiskStoreError(
-            "durable incident/model-risk store is not valid UTF-8"
-        ) from exc
-    except BaseException as exc:
-        primary_error = exc
-        raise
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk store is not valid UTF-8"
+            ) from exc
     finally:
         try:
             os.close(descriptor)
         except OSError as close_error:
-            if primary_error is None:
-                raise IncidentRiskStoreError(
-                    "cannot close durable incident/model-risk store descriptor"
-                ) from close_error
-
+            raise IncidentRiskStoreError(
+                "cannot close durable incident/model-risk store descriptor"
+            ) from close_error
 
 def _authority_tx_id(state_sha256: str) -> str:
     return f"incident-risk-store:{_sha256_text('state_sha256', state_sha256)}"

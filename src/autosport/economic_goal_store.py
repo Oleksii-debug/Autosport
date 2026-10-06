@@ -699,21 +699,31 @@ class EconomicGoalStore:
         _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
         _transition_validator=_CANONICAL_TRANSITION_VALIDATOR,
         _payload_encoder=economic_goal_to_payload,
+        _payload_decoder=economic_goal_from_payload,
         _writer=_CANONICAL_ATOMIC_WRITE_JSON,
         _json_decoder=economic_goal_from_json,
         _binding_resolver=_resolve_store_binding,
         _text_reader=_CANONICAL_GOAL_TEXT_READER,
         _lock_scope=_workspace_lock_scope,
     ) -> None:
-        """Publish one machine revision only when durable authority cannot expand."""
+        """Publish one machine revision only when durable authority cannot expand.
+
+        The candidate is serialized before the monotonic transition proof and the
+        proof is applied to a canonical decode of that exact payload. Publication
+        then writes the same payload object. This binds validation to the durable
+        image and prevents an object.__setattr__ race from widening the candidate
+        between validation and serialization.
+        """
 
         if type(self) is not __class__:
             raise TypeError("EconomicGoalStore authority requires the exact store type")
         workspace, path, _, _ = _binding_resolver(self)
         with _lock_scope(workspace, _lock_type):
             previous = _json_decoder(_text_reader(path))
-            _transition_validator(previous, candidate)
-            _writer(path, _payload_encoder(candidate))
+            candidate_payload = _payload_encoder(candidate)
+            candidate_snapshot = _payload_decoder(candidate_payload)
+            _transition_validator(previous, candidate_snapshot)
+            _writer(path, candidate_payload)
 
 
 # Freeze public codec/store call shapes.  Authority-bearing dependencies remain

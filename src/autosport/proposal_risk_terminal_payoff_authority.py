@@ -732,6 +732,7 @@ def _candidate_tickets(
                 "locked_odds",
                 "sport",
                 "exchange_side",
+                "market_semantics_id",
             }:
                 raise ProductProposalRiskTerminalPayoffEvaluationError(
                     "proposal target TicketLeg schema changed"
@@ -761,6 +762,7 @@ def _candidate_tickets(
                     ),
                     sport=leg_raw["sport"],
                     exchange_side=leg_raw["exchange_side"],
+                    market_semantics_id=leg_raw["market_semantics_id"],
                 )
             except (ArithmeticError, TypeError, ValueError) as exc:
                 raise ProductProposalRiskTerminalPayoffEvaluationError(

@@ -174,7 +174,11 @@ def _profile_state(
     profile: BookmakerCapabilityProfile,
     capability: BookmakerCapability,
 ) -> ProviderManifestState:
-    state = profile.state_of(capability)
+    state = BookmakerCapabilityState.UNKNOWN
+    for fact in profile.facts:
+        if fact.capability is capability:
+            state = fact.state
+            break
     if state is BookmakerCapabilityState.SUPPORTED:
         return ProviderManifestState.PROVEN
     if state is BookmakerCapabilityState.UNSUPPORTED:

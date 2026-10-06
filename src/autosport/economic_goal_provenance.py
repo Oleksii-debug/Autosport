@@ -219,6 +219,8 @@ def _provenance_init_authority(
     revision: int,
     bankroll_id: str,
     contract_sha256: str,
+    _validator=_CANONICAL_PROVENANCE_VALIDATOR,
+    _setattr=_PROVENANCE_OBJECT_SETATTR,
 ) -> None:
     for name, value in (
         ("schema", schema),
@@ -228,8 +230,8 @@ def _provenance_init_authority(
         ("bankroll_id", bankroll_id),
         ("contract_sha256", contract_sha256),
     ):
-        _PROVENANCE_OBJECT_SETATTR(self, name, value)
-    _CANONICAL_PROVENANCE_VALIDATOR(self)
+        _setattr(self, name, value)
+    _validator(self)
 
 
 def _make_provenance_constructor_authority(operation):

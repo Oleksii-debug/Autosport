@@ -1086,7 +1086,32 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 invalidations._full_refresh_required = 1
                 with self.assertRaisesRegex(
                     ContinuousSessionError,
-                    "invalidation buffer status state is invalid",
+                    "canonical invalidation buffer state is invalid",
+                ):
+                    coordinator.status()
+            finally:
+                store.close()
+
+    def test_status_rejects_malformed_canonical_invalidation_dirty_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                invalidations = coordinator.invalidation_buffer
+                invalidations._dirty = {("provider-a", "quote-a"): object()}
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "canonical invalidation buffer state is invalid",
                 ):
                     coordinator.status()
             finally:

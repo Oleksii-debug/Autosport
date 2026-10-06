@@ -636,3 +636,65 @@ def test_store_failure_paths_ignore_rebound_error_authority(monkeypatch, tmp_pat
         store.persist_automatic_successor(
             replace(_goal(), revision=2, max_stake_fraction=Decimal("0.01"))
         )
+
+
+def test_store_rejects_oversized_durable_text_before_json_decoder(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.path.write_text(
+        "x" * (economic_goal_store_module._MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS + 1),
+        encoding="utf-8",
+    )
+
+    calls = 0
+
+    def forged_decoder(text):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("JSON decoder executed for oversized durable text")
+
+    with pytest.raises(EconomicGoalContractError, match="JSON text exceeds"):
+        store.load(_json_decoder=forged_decoder)
+
+    assert calls == 0
+
+
+def test_successor_rejects_oversized_predecessor_before_transition_or_write(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.path.write_text(
+        "x" * (economic_goal_store_module._MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS + 1),
+        encoding="utf-8",
+    )
+    before = store.path.read_bytes()
+
+    calls = []
+
+    def forged_decoder(text):
+        calls.append("decode")
+        raise AssertionError("decoder executed")
+
+    def forged_transition(previous, candidate):
+        calls.append("transition")
+        raise AssertionError("transition executed")
+
+    def forged_writer(path, payload):
+        calls.append("write")
+        raise AssertionError("writer executed")
+
+    with pytest.raises(EconomicGoalContractError, match="JSON text exceeds"):
+        store.persist_automatic_successor(
+            replace(_goal(), revision=2, max_stake_fraction=Decimal("0.01")),
+            _json_decoder=forged_decoder,
+            _transition_validator=forged_transition,
+            _writer=forged_writer,
+        )
+
+    assert calls == []
+    assert store.path.read_bytes() == before
+
+
+def test_store_normalizes_invalid_utf8_read_failure(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.path.write_bytes(b"\xff")
+
+    with pytest.raises(EconomicGoalContractError, match="cannot read persisted economic goal"):
+        store.load()

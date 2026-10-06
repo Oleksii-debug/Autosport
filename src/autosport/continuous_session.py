@@ -2991,7 +2991,32 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "canonical dependency index subtype is not supported"
                 )
+        dependency_index_was_canonical = (
+            type(dependency_index) is _dependency_index_type
+        )
+
+        def restore_dependency_index_type_authority() -> bool:
+            if (
+                not dependency_index_was_canonical
+                or type(dependency_index) is _dependency_index_type
+            ):
+                return False
+            try:
+                object.__setattr__(
+                    dependency_index,
+                    "__class__",
+                    _dependency_index_type,
+                )
+            except (AttributeError, TypeError):
+                pass
+            return True
+
+        def require_dependency_index_type_authority(message: str) -> None:
+            if restore_dependency_index_type_authority():
+                raise ContinuousSessionError(message)
+
         def require_dependency_identity_dispatch(message: str) -> None:
+            require_dependency_index_type_authority(message)
             if type(dependency_index) is not _dependency_index_type:
                 return
             descriptor = _dependency_index_type.__dict__.get("input_ids")
@@ -3049,6 +3074,30 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "canonical invalidation buffer subtype is not supported"
             )
+        invalidation_buffer_was_canonical = (
+            type(invalidation_buffer) is _invalidation_buffer_type
+        )
+
+        def restore_invalidation_buffer_type_authority() -> bool:
+            if (
+                not invalidation_buffer_was_canonical
+                or type(invalidation_buffer) is _invalidation_buffer_type
+            ):
+                return False
+            try:
+                object.__setattr__(
+                    invalidation_buffer,
+                    "__class__",
+                    _invalidation_buffer_type,
+                )
+            except (AttributeError, TypeError):
+                pass
+            return True
+
+        def require_invalidation_buffer_type_authority(message: str) -> None:
+            if restore_invalidation_buffer_type_authority():
+                raise ContinuousSessionError(message)
+
         if type(invalidation_buffer) is _invalidation_buffer_type:
             if (
                 _validate_canonical_invalidation_buffer_state
@@ -3297,6 +3346,26 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             try:
                 yield
             except Exception as exc:
+                dependency_type_changed = restore_dependency_index_type_authority()
+                invalidation_type_changed = (
+                    restore_invalidation_buffer_type_authority()
+                )
+                if dependency_type_changed:
+                    try:
+                        exc.add_note(
+                            "canonical dependency index runtime type was changed "
+                            "during invalidation consumption and was restored"
+                        )
+                    except BaseException:
+                        pass
+                if invalidation_type_changed:
+                    try:
+                        exc.add_note(
+                            "canonical invalidation buffer runtime type was changed "
+                            "during invalidation consumption and was restored"
+                        )
+                    except BaseException:
+                        pass
                 if type(invalidation_buffer) is _invalidation_buffer_type:
                     try:
                         if (
@@ -3332,8 +3401,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
             matching_state_before_drain = capture_matching_key_state()
             matching_keys_before_drain = matching_keys_authority()
-            batch = drain_invalidation(max_items=max_items)
             with consumed_batch_recovery():
+                batch = drain_invalidation(max_items=max_items)
+                require_invalidation_buffer_type_authority(
+                    "canonical invalidation buffer type changed during invalidation routing"
+                )
+                require_dependency_index_type_authority(
+                    "canonical dependency index type changed during invalidation routing"
+                )
                 if read_dependency_input_ids() != indexed_input_ids:
                     restore_dependency_authority()
                     restore_matching_key_state(matching_state_before_drain)
@@ -3382,6 +3457,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 batch_full_refresh_required = batch.full_refresh_required
                 batch_has_more = batch.has_more
                 routed = affected_inputs(batch)
+                require_invalidation_buffer_type_authority(
+                    "canonical invalidation buffer type changed during invalidation routing"
+                )
+                require_dependency_index_type_authority(
+                    "canonical dependency index type changed during invalidation routing"
+                )
                 if (
                     batch.changed_keys != batch_changed_keys
                     or batch.full_refresh_required is not batch_full_refresh_required
@@ -3442,6 +3523,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         matching_state_before_backlog = capture_matching_key_state()
         matching_keys_before_backlog = matching_keys_authority()
+        require_invalidation_buffer_type_authority(
+            "canonical invalidation buffer type changed before backlog inspection"
+        )
+        require_dependency_index_type_authority(
+            "canonical dependency index type changed before backlog inspection"
+        )
         if type(invalidation_buffer) is _invalidation_buffer_type:
             pending_count = _pending_count_getter(invalidation_buffer)
             pending_full_refresh = _full_refresh_getter(invalidation_buffer)

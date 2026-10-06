@@ -873,6 +873,10 @@ class ProductEconomicSessionStore:
         self._exact_type_witness = _EXACT_TYPE
         self._product_economic_session_eq_witness = _PRODUCT_ECONOMIC_SESSION_EQ
         self._product_economic_session_eq_code_witness = _PRODUCT_ECONOMIC_SESSION_EQ_CODE
+        self._current_method_witness = type(self).__dict__["current"]
+        self._current_method_code_witness = getattr(
+            self._current_method_witness, "__code__", None
+        )
         self._product_economic_session_init_witness = _PRODUCT_ECONOMIC_SESSION_INIT
         self._product_economic_session_init_code_witness = _PRODUCT_ECONOMIC_SESSION_INIT_CODE
         self._product_economic_session_post_init_witness = _PRODUCT_ECONOMIC_SESSION_POST_INIT
@@ -1056,6 +1060,13 @@ class ProductEconomicSessionStore:
             or _PRODUCT_ECONOMIC_SESSION_TYPE is not self._product_economic_session_type_witness
             or ProductEconomicSession is not self._product_economic_session_type_witness
             or ProductEconomicSession.__eq__ is not self._product_economic_session_eq_witness
+            or _type(self).__dict__.get("current") is not self._current_method_witness
+            or (
+                self._current_method_code_witness is not None
+                and _getattr(self._current_method_witness, "__code__", None)
+                is not self._current_method_code_witness
+            )
+            or "current" in self.__dict__
             or _any(
                 ProductEconomicSession.__dict__[name] is not descriptor
                 for name, descriptor in self._product_economic_session_field_descriptors_witness
@@ -1290,16 +1301,21 @@ class ProductEconomicSessionStore:
             )
 
     def require_current(self, candidate: ProductEconomicSession) -> ProductEconomicSession:
-        if type(candidate) is not ProductEconomicSession:
+        self._require_configuration_authority()
+        if (
+            self._exact_type_witness(candidate)
+            is not self._product_economic_session_type_witness
+        ):
             raise EconomicSessionMismatchError(
                 "candidate must be exact ProductEconomicSession evidence"
             )
-        current = self.current()
+        current = self._current_method_witness(self)
+        self._require_configuration_authority()
         if not current.product_clock_authoritative:
             raise EconomicSessionIntegrityError(
                 "synthetic clock cannot mint positive economic-session authority"
             )
-        if candidate != current:
+        if not self._product_economic_session_eq_witness(candidate, current):
             raise EconomicSessionMismatchError(
                 "economic-session evidence does not match current durable authority"
             )

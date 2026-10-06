@@ -22,6 +22,14 @@ PaperLegAttempt = _impl.PaperLegAttempt
 PaperExecutionRun = _impl.PaperExecutionRun
 PaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
 
+_CANONICAL_RECOVERY_DECISION_TYPE = RecoveryDecision
+_CANONICAL_TEXT_VALIDATOR = _impl._CANONICAL_TEXT_VALIDATOR
+_CANONICAL_DECIMAL_PARSER = _impl._CANONICAL_DECIMAL_PARSER
+_CANONICAL_DECIMAL_TEXT_FORMATTER = _impl._CANONICAL_DECIMAL_TEXT_FORMATTER
+_CANONICAL_CANONICALIZER = _impl._CANONICAL_CANONICALIZER
+_CANONICAL_OS_FSYNC = os.fsync
+_MAX_DURABLE_EVENT_LINE_CHARS = _impl._MAX_DURABLE_EVENT_LINE_CHARS
+
 
 def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
     if not value.is_finite():
@@ -177,13 +185,17 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 )
             return
 
-        encoded = _impl._canonical(event) + "\n"
+        encoded = _CANONICAL_CANONICALIZER(event) + "\n"
+        if len(encoded) > _MAX_DURABLE_EVENT_LINE_CHARS + 1:
+            raise PaperExecutionIntegrityError(
+                "PAPER execution ledger event exceeds resource limit"
+            )
         path_existed_before = self.path.exists()
         try:
             with self.path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(encoded)
                 handle.flush()
-                os.fsync(handle.fileno())
+                _CANONICAL_OS_FSYNC(handle.fileno())
             if not path_existed_before or not self._path_durable:
                 self._sync_parent_directory()
             self._write_anchor_unlocked(events + [event])
@@ -202,10 +214,10 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         recovery_decision: RecoveryDecision,
         worst_case_exposure: Decimal,
     ) -> None:
-        run_id = _impl._text(run_id, "run_id")
-        if not isinstance(recovery_decision, RecoveryDecision):
-            raise TypeError("recovery_decision must be RecoveryDecision")
-        supplied_exposure = _impl._decimal(
+        run_id = _CANONICAL_TEXT_VALIDATOR(run_id, "run_id")
+        if type(recovery_decision) is not _CANONICAL_RECOVERY_DECISION_TYPE:
+            raise TypeError("recovery_decision must be exact RecoveryDecision")
+        supplied_exposure = _CANONICAL_DECIMAL_PARSER(
             worst_case_exposure,
             "worst_case_exposure",
             allow_zero=True,
@@ -260,7 +272,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             payload = {
                 "pending_action_ids": list(derived.pending_action_ids),
                 "recovery_decision": derived.recovery_decision.value,
-                "worst_case_exposure": _impl._decimal_text(
+                "worst_case_exposure": _CANONICAL_DECIMAL_TEXT_FORMATTER(
                     derived.worst_case_exposure
                 ),
             }
@@ -339,10 +351,16 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     "completion payload schema is invalid"
                 )
             try:
-                recovery = RecoveryDecision(payload["recovery_decision"])
+                recovery = _CANONICAL_RECOVERY_DECISION_TYPE(
+                    payload["recovery_decision"]
+                )
                 pending = tuple(payload["pending_action_ids"])
-                exposure = Decimal(payload["worst_case_exposure"])
-            except (KeyError, ValueError, InvalidOperation, TypeError) as exc:
+                exposure = _CANONICAL_DECIMAL_PARSER(
+                    payload["worst_case_exposure"],
+                    "worst_case_exposure",
+                    allow_zero=True,
+                )
+            except (KeyError, ValueError, TypeError) as exc:
                 raise PaperExecutionIntegrityError("invalid completion payload") from exc
             if (
                 pending != derived.pending_action_ids

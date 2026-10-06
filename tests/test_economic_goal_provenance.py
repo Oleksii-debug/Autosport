@@ -866,3 +866,24 @@ def test_provenance_verifier_rejects_transitive_hash_dependency_mutation() -> No
             verify_provenance(goal, evidence)
     finally:
         nested_json_encoder.__code__ = original_code
+
+
+def test_provenance_verifier_maps_contract_identity_fields_by_canonical_position() -> None:
+    goal = _goal(
+        goal_id="goal-distinct",
+        revision=7,
+        bankroll_id="bankroll-distinct",
+        currency="EUR",
+    )
+    evidence = provenance_for(goal)
+
+    # A valid canonical provenance must verify before any mismatch falsifier.
+    verify_provenance(goal, evidence)
+
+    for field, value, message in (
+        ("goal_id", "other-goal", "goal_id mismatch"),
+        ("revision", 8, "revision mismatch"),
+        ("bankroll_id", "other-bankroll", "bankroll_id mismatch"),
+    ):
+        with pytest.raises(EconomicGoalProvenanceError, match=message):
+            verify_provenance(replace(goal, **{field: value}), evidence)

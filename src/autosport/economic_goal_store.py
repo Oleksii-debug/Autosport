@@ -178,6 +178,8 @@ _CANONICAL_WORKSPACE_LOCK_ENTER: Final = WorkspaceEconomicLock.__enter__
 _CANONICAL_WORKSPACE_LOCK_EXIT: Final = WorkspaceEconomicLock.__exit__
 _CANONICAL_WORKSPACE_LOCK_ACQUIRE: Final = WorkspaceEconomicLock.acquire
 _CANONICAL_WORKSPACE_LOCK_RELEASE: Final = WorkspaceEconomicLock.release
+_CANONICAL_WORKSPACE_LOCK_NEW: Final = WorkspaceEconomicLock.__new__
+_CANONICAL_WORKSPACE_LOCK_INIT: Final = WorkspaceEconomicLock.__init__
 _CANONICAL_PATH_TYPE: Final = Path
 _CANONICAL_STORE_FILE_NAME: Final = "economic_goal_contract.json"
 _CANONICAL_OPEN_READ_ONLY_DESCRIPTOR: Final = _open_read_only_descriptor
@@ -203,7 +205,11 @@ def _workspace_lock_scope(
     _enter=_CANONICAL_WORKSPACE_LOCK_ENTER,
     _exit=_CANONICAL_WORKSPACE_LOCK_EXIT,
 ):
-    lock = _lock_type(workspace)
+    if _lock_type is _CANONICAL_WORKSPACE_LOCK_TYPE:
+        lock = _CANONICAL_WORKSPACE_LOCK_NEW(_lock_type)
+        _CANONICAL_WORKSPACE_LOCK_INIT(lock, workspace)
+    else:
+        lock = _lock_type(workspace)
     _CANONICAL_OBJECT_SETATTR(
         lock,
         "acquire",

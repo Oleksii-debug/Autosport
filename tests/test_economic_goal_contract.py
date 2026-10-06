@@ -472,3 +472,25 @@ def test_contract_successor_method_rejects_validator_injection() -> None:
 
     with pytest.raises(EconomicGoalContractError, match="must not increase"):
         previous.validate_automatic_successor(candidate)
+
+
+def test_automatic_transition_ignores_rebound_contract_field_descriptor(monkeypatch) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.03"),
+    )
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return Decimal("0.02")
+
+    monkeypatch.setattr(
+        EconomicGoalContract,
+        "max_stake_fraction",
+        ForgedDescriptor(),
+    )
+
+    with pytest.raises(EconomicGoalContractError, match="must not increase"):
+        validate_automatic_transition(previous, candidate)

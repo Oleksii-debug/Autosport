@@ -1319,7 +1319,7 @@ def test_client_repr_never_exposes_session_credentials() -> None:
     assert "enabled=False" in rendered
 
 
-def test_structural_and_authoritative_reports_have_distinct_evidence_identity() -> None:
+def test_direct_public_place_action_is_disabled_even_with_enabled_gate() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, _approval, _ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
@@ -1331,17 +1331,16 @@ def test_structural_and_authoritative_reports_have_distinct_evidence_identity() 
         )
         client = _enabled_client(profile, transport, store=goal_store)
 
-        report = client.place_action(
-            action,
-            profile=profile,
-            bound=bound,
-            provider_order_ref="a" * 32,
-            execution_workspace=Path(tmp),
-        )
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="direct public Betfair provider write is disabled",
+        ):
+            client.place_action(
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref="a" * 32,
+                execution_workspace=Path(tmp),
+            )
 
-        assert report.provider_origin_authoritative is False
-        authoritative_shape = replace(
-            report,
-            provider_origin_authoritative=True,
-        )
-        assert report.evidence_id != authoritative_shape.evidence_id
+        assert transport.calls == []

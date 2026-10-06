@@ -5379,6 +5379,65 @@ def test_successful_invalidation_routing_does_not_force_recovery_refresh() -> No
     assert backlog is False
     assert buffer.full_refresh_required is False
 
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda buffer: setattr(buffer, "_dirty", {("provider-a", "quote-a"): object()}),
+        lambda buffer: setattr(buffer, "_max_dirty_keys", 0),
+        lambda buffer: (
+            setattr(buffer, "_dirty", {("provider-a", "quote-a"): None}),
+            setattr(buffer, "_full_refresh_required", True),
+        ),
+    ),
+)
+def test_direct_invalidation_helper_rejects_malformed_canonical_buffer_state(
+    mutate,
+) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+    index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+    mutate(buffer)
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical invalidation buffer state is invalid",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=index.affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+
+
+def test_tick_rejects_malformed_canonical_invalidation_state_before_provider_io() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        buffer._dirty = {("provider-a", "quote-a"): None}
+        buffer._full_refresh_required = True
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+        coordinator.collector = _Collector(
+            callback=lambda: (_ for _ in ()).throw(
+                AssertionError("collector ran before malformed invalidation rejection")
+            )
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical invalidation buffer state is invalid",
+        ):
+            coordinator.tick()
+
+
 def test_tick_rejects_invalidation_drain_dispatch_rebinding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

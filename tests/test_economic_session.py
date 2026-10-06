@@ -186,6 +186,24 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                 product_clock_authoritative=evidence.product_clock_authoritative,
             )
 
+    def test_durable_state_rejects_noncanonical_equivalent_utc_offset(self) -> None:
+        import autosport.economic_session as economic_session
+
+        store = self._store()
+        store.current()
+        payload = json.loads(store.state_path.read_text(encoding="utf-8"))
+        payload["started_at"] = payload["started_at"].replace("Z", "+00:00")
+        raw = economic_session._canonical_json_bytes(payload)
+
+        with self.assertRaisesRegex(
+            EconomicSessionIntegrityError,
+            "canonical UTC ISO-8601 text",
+        ):
+            economic_session._decode_state(
+                raw,
+                workspace_instance_id=store._authority.workspace_instance_id,
+            )
+
     def test_midnight_does_not_reset_economic_session(self) -> None:
         first = self._store().current()
         self.clock.set("2026-10-06T12:00:00Z")

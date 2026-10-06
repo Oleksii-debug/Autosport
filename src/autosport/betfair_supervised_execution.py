@@ -26,6 +26,7 @@ from .betfair_account_readonly import (
     BetfairReadOnlyError,
     BetfairSessionCredentials,
     UrllibBetfairHttpTransport,
+    _execution_provider_network_dispatch_is_current,
 )
 from .bookmaker_capability import (
     BookmakerCapability,
@@ -442,6 +443,7 @@ class BetfairPlaceExecutionReport:
     status: str
     error_code: str | None
     instruction: BetfairInstructionReport
+    provider_origin_authoritative: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -479,6 +481,10 @@ class BetfairPlaceExecutionReport:
         if not isinstance(self.instruction, BetfairInstructionReport):
             raise BetfairSupervisedExecutionError(
                 "instruction must be BetfairInstructionReport"
+            )
+        if type(self.provider_origin_authoritative) is not bool:
+            raise BetfairSupervisedExecutionError(
+                "provider_origin_authoritative must be bool"
             )
 
     @property
@@ -662,6 +668,10 @@ class BetfairSupervisedPlaceOrdersClient:
         }
         if _before_transport is not None:
             _before_transport(request_sha256)
+        origin_candidate = (
+            type(self._transport) is UrllibBetfairHttpTransport
+            and _execution_provider_network_dispatch_is_current()
+        )
         try:
             payload = self._transport.post(
                 BETTING_JSON_RPC_ENDPOINT,
@@ -685,6 +695,11 @@ class BetfairSupervisedPlaceOrdersClient:
             action=action,
             provider_order_ref=provider_ref,
             observed_at=self._clock(),
+            provider_origin_authoritative=(
+                origin_candidate
+                and type(self._transport) is UrllibBetfairHttpTransport
+                and _execution_provider_network_dispatch_is_current()
+            ),
         )
 
 
@@ -1055,6 +1070,7 @@ def _parse_place_orders_response(
     action: ExecutionAction,
     provider_order_ref: str,
     observed_at: str,
+    provider_origin_authoritative: bool = False,
 ) -> BetfairPlaceExecutionReport:
     decoded = _decode_provider_json(payload)
     if isinstance(decoded, list):
@@ -1226,6 +1242,7 @@ def _parse_place_orders_response(
             "execution errorCode",
         ),
         instruction=instruction,
+        provider_origin_authoritative=provider_origin_authoritative,
     )
 
 
@@ -1497,6 +1514,23 @@ def execute_betfair_supervised_action(
                 None,
                 None,
             )
+
+    if not report.provider_origin_authoritative:
+        ledger.mark_unknown(
+            attempt_id,
+            reason=(
+                "betfair_placeOrders_non_authoritative_response_"
+                "requires_authenticated_readback"
+            ),
+            observed_at=trusted_now(),
+        )
+        return BetfairSupervisedExecutionResult(
+            PlaceOrdersOutcome.UNKNOWN,
+            attempt_id,
+            ledger.attempt_state(attempt_id),
+            None,
+            None,
+        )
 
     evidence_id = report.evidence_id
     ledger.bind_provider_evidence(

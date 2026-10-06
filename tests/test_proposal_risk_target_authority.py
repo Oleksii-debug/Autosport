@@ -1,0 +1,822 @@
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+import unittest
+from dataclasses import replace
+from decimal import Decimal
+from pathlib import Path
+from unittest.mock import patch
+
+from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.domain import MarketEvent, TicketLeg
+from autosport.economic_goal import EconomicGoalContract
+from autosport.economic_goal_store import EconomicGoalStore
+from autosport.paper import PaperBook
+from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
+import autosport.proposal_risk_target_authority as proposal_target_authority
+from autosport.proposal_risk_target_authority import (
+    ProductProposalRiskTarget,
+    ProductProposalRiskTargetError,
+    issue_product_proposal_risk_target,
+    resolve_product_proposal_risk_target,
+)
+import autosport.risk as risk_module
+from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
+
+
+class ProductProposalRiskTargetTests(unittest.TestCase):
+    DECISION_TS = "2026-09-18T13:20:00+00:00"
+    QUOTE_TS = "2026-09-18T13:19:59+00:00"
+
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        root = Path(self._temp.name).resolve()
+        self.workspace = root / "workspace"
+        self.workspace.mkdir()
+        self.authority_root = root / "machine-authority"
+        self._env = patch.dict(
+            os.environ,
+            {"AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(self.authority_root)},
+        )
+        self._env.start()
+        self.goal = self._goal()
+        EconomicGoalStore(self.workspace).initialize_owner(self.goal)
+        PaperBook(Decimal("1000")).save(self.workspace / "paper_book.json")
+
+    def tearDown(self) -> None:
+        self._env.stop()
+        self._temp.cleanup()
+
+    @staticmethod
+    def _goal(**overrides: object) -> EconomicGoalContract:
+        values: dict[str, object] = {
+            "goal_id": "goal-proposal-target",
+            "revision": 1,
+            "bankroll_id": "paper-bankroll",
+            "currency": "USD",
+            "max_stake_fraction": Decimal("0.10"),
+            "max_session_loss_fraction": Decimal("1"),
+            "max_day_loss_fraction": Decimal("1"),
+            "max_drawdown_fraction": Decimal("1"),
+            "max_capital_at_risk_fraction": Decimal("1"),
+            "max_event_concentration_fraction": Decimal("1"),
+            "max_market_concentration_fraction": Decimal("1"),
+            "max_provider_concentration_fraction": Decimal("1"),
+            "max_sport_concentration_fraction": Decimal("1"),
+            "max_turnover_fraction": Decimal("1000"),
+            "max_risk_of_ruin": Decimal("0.01"),
+            "max_execution_slippage_fraction": Decimal("1"),
+            "max_quote_age_seconds": Decimal("3600"),
+            "minimum_data_quality": Decimal("0"),
+            "max_concurrent_positions": 10,
+            "max_parlay_legs": 1,
+        }
+        values.update(overrides)
+        return EconomicGoalContract(**values)  # type: ignore[arg-type]
+
+    @classmethod
+    def _context(
+        cls,
+        goal: EconomicGoalContract,
+        suffix: str,
+        *,
+        proposal_ts: str | None = None,
+        scalar_ruin_bound: Decimal | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> ProposedTicketRiskContext:
+        leg = TicketLeg(
+            event_id=f"event-{suffix}",
+            market_id=f"market-{suffix}",
+            selection_id=f"selection-{suffix}",
+            locked_odds=Decimal("2"),
+            sport="soccer",
+        )
+        quote = MarketEvent(
+            event_id=leg.event_id,
+            market_id=leg.market_id,
+            selection_id=leg.selection_id,
+            decimal_odds=Decimal("2"),
+            observed_ts=cls.QUOTE_TS,
+            source_id=f"provider-{suffix}",
+            sequence=1,
+            source_ts=cls.QUOTE_TS,
+            ingest_ts=cls.QUOTE_TS,
+            metadata=metadata or {},
+            sport="soccer",
+        )
+        return ProposedTicketRiskContext(
+            legs=(leg,),
+            quotes=(quote,),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+            proposal_ts=proposal_ts or cls.DECISION_TS,
+            risk_of_ruin_upper_bound=scalar_ruin_bound,
+        )
+
+    def _contexts(self) -> tuple[ProposedTicketRiskContext, ...]:
+        return (
+            self._context(self.goal, "a"),
+            self._context(self.goal, "b"),
+        )
+
+    def _issue(self) -> ProductProposalRiskTarget:
+        return issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("1"), Decimal("0.8")),
+            contexts=self._contexts(),
+        )
+
+    def test_native_path_workspace_is_accepted_without_subclass_widening(self) -> None:
+        self.assertIs(type(self.workspace), proposal_target_authority._PATH_TYPE)
+        self.assertEqual(
+            proposal_target_authority._workspace_path(self.workspace),
+            self.workspace,
+        )
+
+        class ForgedPath(type(self.workspace)):
+            pass
+
+        forged = ForgedPath(str(self.workspace))
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "exact absolute pathlib.Path",
+        ):
+            proposal_target_authority._workspace_path(forged)
+
+    def test_workspace_lock_transitive_dispatch_rebinding_fails_closed(self) -> None:
+        for name in (
+            "__init__",
+            "acquire",
+            "release",
+            "__enter__",
+            "__exit__",
+            "_open_lock_handle",
+            "_open_new_lock_handle",
+            "_validate_existing_lock_path",
+            "_validate_open_handle_identity",
+            "_require_regular_file",
+            "_require_single_link",
+            "_lock_handle",
+            "_unlock_handle",
+        ):
+            with self.subTest(name=name):
+                original = proposal_target_authority.WorkspaceEconomicLock.__dict__[name]
+                try:
+                    setattr(
+                        proposal_target_authority.WorkspaceEconomicLock,
+                        name,
+                        lambda *args, **kwargs: None,
+                    )
+                    with self.assertRaisesRegex(
+                        ProductProposalRiskTargetError,
+                        "WorkspaceEconomicLock",
+                    ):
+                        proposal_target_authority._require_dispatch()
+                finally:
+                    setattr(
+                        proposal_target_authority.WorkspaceEconomicLock,
+                        name,
+                        original,
+                    )
+
+    def test_constructor_dispatch_rebinding_fails_closed(self) -> None:
+        owners = (
+            ("EconomicGoalStore", proposal_target_authority.EconomicGoalStore),
+            ("JsonlDecisionLedger", proposal_target_authority.JsonlDecisionLedger),
+            (
+                "MonotonicWorkspaceAuthority",
+                proposal_target_authority.MonotonicWorkspaceAuthority,
+            ),
+        )
+        for label, owner in owners:
+            with self.subTest(label=label):
+                original = owner.__init__
+                try:
+                    owner.__init__ = lambda *args, **kwargs: None
+                    with self.assertRaisesRegex(
+                        ProductProposalRiskTargetError,
+                        rf"{label}\.__init__",
+                    ):
+                        proposal_target_authority._require_dispatch()
+                finally:
+                    owner.__init__ = original
+
+    def test_constructor_witness_root_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority._CONSTRUCTOR_WITNESSES
+        try:
+            proposal_target_authority._CONSTRUCTOR_WITNESSES = ()
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "constructor witness root",
+            ):
+                proposal_target_authority._require_dispatch()
+        finally:
+            proposal_target_authority._CONSTRUCTOR_WITNESSES = original
+
+    def test_direct_construction_is_not_authority(self) -> None:
+        with self.assertRaisesRegex(TypeError, "product-issued"):
+            ProductProposalRiskTarget()
+
+    def test_product_issues_and_reresolves_exact_non_authorizing_target(self) -> None:
+        issued = self._issue()
+
+        self.assertTrue(issued.proposal_target_identity_proven)
+        self.assertFalse(issued.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(issued.risk_upper_bound_for_target)
+        self.assertFalse(issued.grants_ticket_authority)
+        self.assertFalse(issued.grants_real_money_authority)
+        self.assertEqual(issued.decision_ts, self.DECISION_TS)
+        self.assertEqual(issued.bankroll_id, self.goal.bankroll_id)
+        self.assertEqual(issued.currency, self.goal.currency)
+        self.assertEqual(len(issued.candidate_sha256s), 2)
+        self.assertEqual(len(issued.evaluated_stakes), 2)
+        self.assertTrue(any(stake > 0 for stake in issued.evaluated_stakes))
+
+        resolved = resolve_product_proposal_risk_target(
+            self.workspace, issued.target_sha256
+        )
+        self.assertEqual(resolved, issued)
+
+    def test_retry_is_idempotent_and_does_not_append_duplicate_target(self) -> None:
+        first = self._issue()
+        second = self._issue()
+
+        self.assertEqual(second, first)
+        records = JsonlDecisionLedger(
+            self.workspace / "decisions.jsonl"
+        ).verified_records()
+        target_records = [
+            record
+            for record in records
+            if record.action == "PROPOSAL_RISK_TARGET_PRECOMMIT"
+        ]
+        self.assertEqual(len(target_records), 1)
+        self.assertEqual(
+            target_records[0].payload["target_sha256"],
+            first.target_sha256,
+        )
+
+    def test_ledger_precommit_contains_no_positive_ruin_result(self) -> None:
+        issued = self._issue()
+        record = JsonlDecisionLedger(
+            self.workspace / "decisions.jsonl"
+        ).verified_records()[0]
+
+        self.assertEqual(record.payload["target_sha256"], issued.target_sha256)
+        self.assertNotIn("upper_bound", record.payload)
+        self.assertNotIn("risk_of_ruin_evidence", record.payload)
+        self.assertIs(record.payload["risk_upper_bound_for_target"], False)
+        self.assertIs(record.payload["grants_ticket_authority"], False)
+        self.assertIs(record.payload["grants_real_money_authority"], False)
+
+    def test_scalar_or_preexisting_ruin_evidence_cannot_enter_target_inputs(self) -> None:
+        contexts = (
+            self._context(
+                self.goal,
+                "a",
+                scalar_ruin_bound=Decimal("0"),
+            ),
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "exclude risk-of-ruin result evidence",
+        ):
+            issue_product_proposal_risk_target(
+                self.workspace,
+                signal_strengths=(Decimal("1"),),
+                contexts=contexts,
+            )
+
+    def test_target_requires_positive_vector_from_existing_allocator(self) -> None:
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "no positive canonical pre-risk stake vector",
+        ):
+            issue_product_proposal_risk_target(
+                self.workspace,
+                signal_strengths=(Decimal("0"), Decimal("-1")),
+                contexts=self._contexts(),
+            )
+
+    def test_target_requires_one_exact_shared_proposal_timestamp(self) -> None:
+        contexts = (
+            self._context(self.goal, "a"),
+            self._context(
+                self.goal,
+                "b",
+                proposal_ts="2026-09-18T13:20:01+00:00",
+            ),
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "one exact shared proposal timestamp",
+        ):
+            issue_product_proposal_risk_target(
+                self.workspace,
+                signal_strengths=(Decimal("1"), Decimal("0.8")),
+                contexts=contexts,
+            )
+
+    def test_target_is_stale_after_paperbook_mutation(self) -> None:
+        issued = self._issue()
+        context = self._contexts()[0]
+        book = PaperBook.load(self.workspace / "paper_book.json")
+        book.open_ticket(
+            context.legs,
+            Decimal("1"),
+            reason="post-target-mutation",
+            placed_at=context.proposal_ts,
+            provider_source_ids=tuple(sorted(context.source_ids)),
+            bankroll_id=context.bankroll_id,
+            currency=context.currency,
+        )
+        book.save(self.workspace / "paper_book.json")
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "base portfolio is stale",
+        ):
+            resolve_product_proposal_risk_target(
+                self.workspace, issued.target_sha256
+            )
+
+    def test_target_is_stale_after_owner_goal_tightens(self) -> None:
+        issued = self._issue()
+        successor = replace(
+            self.goal,
+            revision=2,
+            max_risk_of_ruin=Decimal("0.005"),
+        )
+        EconomicGoalStore(self.workspace).persist_automatic_successor(successor)
+
+        with self.assertRaises(ProductProposalRiskTargetError):
+            resolve_product_proposal_risk_target(
+                self.workspace, issued.target_sha256
+            )
+
+    def test_copied_workspace_cannot_reuse_original_machine_authority(self) -> None:
+        issued = self._issue()
+        copied = self.workspace.parent / "copied-workspace"
+        shutil.copytree(self.workspace, copied)
+
+        with self.assertRaises(ProductProposalRiskTargetError):
+            resolve_product_proposal_risk_target(copied, issued.target_sha256)
+
+    def test_deleted_ledger_record_cannot_be_bootstrapped_from_target_dto(self) -> None:
+        issued = self._issue()
+        (self.workspace / "decisions.jsonl").write_bytes(b"")
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "missing from the canonical Decision Ledger",
+        ):
+            resolve_product_proposal_risk_target(
+                self.workspace, issued.target_sha256
+            )
+
+    def test_future_result_metadata_cannot_cross_precommit_ledger_boundary(self) -> None:
+        contexts = (
+            self._context(
+                self.goal,
+                "a",
+                metadata={"outcome": "future"},
+            ),
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "Decision Ledger append failed",
+        ):
+            issue_product_proposal_risk_target(
+                self.workspace,
+                signal_strengths=(Decimal("1"),),
+                contexts=contexts,
+            )
+
+    def test_risk_policy_provenance_global_rebinding_fails_closed(self) -> None:
+        with patch.object(
+            risk_module,
+            "_sha256_payload",
+            lambda _payload: "0" * 64,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "risk-policy provenance hash helper",
+            ):
+                self._issue()
+
+        with patch.object(
+            risk_module,
+            "provenance_for",
+            lambda _goal: object(),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "risk-policy provenance dependency",
+            ):
+                self._issue()
+
+    def test_risk_policy_provenance_descriptor_rebinding_fails_closed(self) -> None:
+        forged = property(lambda _policy: "0" * 64)
+        with patch.object(
+            PaperRiskPolicy,
+            "provenance_sha256",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "risk-policy provenance digest",
+            ):
+                self._issue()
+
+    def test_dispatch_rebinding_of_existing_allocator_fails_closed(self) -> None:
+        original = PaperRiskPolicy.derive_goal_stake_vector
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        with patch.object(
+            PaperRiskPolicy,
+            "derive_goal_stake_vector",
+            fake,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "dispatch authority changed",
+            ):
+                self._issue()
+
+    def test_dispatch_guard_root_rebinding_fails_closed(self) -> None:
+        with patch.object(
+            proposal_target_authority,
+            "_require_dispatch",
+            lambda: None,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "dispatch guard root changed",
+            ):
+                self._issue()
+
+    def test_internal_helper_witness_table_substitution_fails_closed(self) -> None:
+        original = proposal_target_authority._derive
+
+        def fake(policy: object, book: object, signals: object, contexts: object) -> object:
+            return original(policy, book, signals, contexts)
+
+        substituted = tuple(
+            (
+                name,
+                fake if name == "_derive" else expected,
+                getattr(fake, "__code__", None) if name == "_derive" else code,
+            )
+            for name, expected, code in (
+                proposal_target_authority._PROPOSAL_TARGET_HELPER_WITNESSES
+            )
+        )
+        with (
+            patch.object(proposal_target_authority, "_derive", fake),
+            patch.object(
+                proposal_target_authority,
+                "_PROPOSAL_TARGET_HELPER_WITNESSES",
+                substituted,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "helper witness root changed",
+            ):
+                self._issue()
+
+    def test_monotonic_witness_table_substitution_fails_closed(self) -> None:
+        original = MonotonicWorkspaceAuthority.prepare
+
+        def fake(instance: object, *args: object, **kwargs: object) -> object:
+            return original(instance, *args, **kwargs)
+
+        substituted = tuple(
+            (
+                name,
+                fake if name == "prepare" else expected,
+                getattr(fake, "__code__", None) if name == "prepare" else code,
+            )
+            for name, expected, code in (
+                proposal_target_authority._AUTHORITY_METHOD_WITNESSES
+            )
+        )
+        with (
+            patch.object(MonotonicWorkspaceAuthority, "prepare", fake),
+            patch.object(
+                proposal_target_authority,
+                "_AUTHORITY_METHOD_WITNESSES",
+                substituted,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "witness root changed",
+            ):
+                self._issue()
+
+    def test_decision_ledger_integrity_dispatch_rebinding_fails_closed(self) -> None:
+        original = JsonlDecisionLedger.verify_integrity
+
+        def fake(instance: JsonlDecisionLedger) -> object:
+            return original(instance)
+
+        with patch.object(JsonlDecisionLedger, "verify_integrity", fake):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "Decision Ledger verify_integrity",
+            ):
+                self._issue()
+
+    def test_market_event_serializer_rebinding_fails_closed(self) -> None:
+        original = MarketEvent.to_dict
+
+        def fake(instance: MarketEvent) -> object:
+            return original(instance)
+
+        with patch.object(MarketEvent, "to_dict", fake):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "MarketEvent to_dict",
+            ):
+                self._issue()
+
+    def test_market_event_parser_rebinding_fails_closed(self) -> None:
+        issued = self._issue()
+        descriptor = MarketEvent.__dict__["from_dict"]
+        if isinstance(descriptor, classmethod):
+            original = descriptor.__func__
+
+            def fake(cls: type[MarketEvent], *args: object, **kwargs: object) -> object:
+                return original(cls, *args, **kwargs)
+
+            replacement = classmethod(fake)
+        elif isinstance(descriptor, staticmethod):
+            original = descriptor.__func__
+
+            def fake(*args: object, **kwargs: object) -> object:
+                return original(*args, **kwargs)
+
+            replacement = staticmethod(fake)
+        else:
+            original = descriptor
+
+            def fake(*args: object, **kwargs: object) -> object:
+                return original(*args, **kwargs)
+
+            replacement = fake
+
+        with patch.object(MarketEvent, "from_dict", replacement):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "MarketEvent from_dict",
+            ):
+                resolve_product_proposal_risk_target(
+                    self.workspace, issued.target_sha256
+                )
+
+    def test_decision_record_constructor_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority.DecisionRecord
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        with patch.object(proposal_target_authority, "DecisionRecord", fake):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "DecisionRecord type",
+            ):
+                self._issue()
+
+    def test_sha256_dispatch_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority.hashlib.sha256
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        with patch.object(proposal_target_authority.hashlib, "sha256", fake):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "SHA-256 implementation",
+            ):
+                self._issue()
+
+    def test_canonical_json_dispatch_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority.json.dumps
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        with patch.object(proposal_target_authority.json, "dumps", fake):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "canonical JSON serializer",
+            ):
+                self._issue()
+
+    def test_nested_decision_ledger_snapshot_rebinding_fails_closed(self) -> None:
+        original = JsonlDecisionLedger.verified_snapshot
+
+        def fake(self: JsonlDecisionLedger) -> object:
+            return original(self)
+
+        with patch.object(
+            JsonlDecisionLedger,
+            "verified_snapshot",
+            fake,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "Decision Ledger verified_snapshot",
+            ):
+                self._issue()
+
+    def test_decision_record_serializer_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority.DecisionRecord.to_dict
+
+        def fake(self: object) -> object:
+            return original(self)
+
+        with patch.object(
+            proposal_target_authority.DecisionRecord,
+            "to_dict",
+            fake,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "DecisionRecord to_dict",
+            ):
+                self._issue()
+
+    def test_internal_product_state_helper_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority._current_product_state
+
+        def fake(workspace: Path) -> object:
+            return original(workspace)
+
+        with patch.object(
+            proposal_target_authority,
+            "_current_product_state",
+            fake,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "internal helper authority changed",
+            ):
+                self._issue()
+
+    def test_monotonic_authority_recover_rebinding_fails_closed(self) -> None:
+        original = MonotonicWorkspaceAuthority.recover
+
+        def fake(self: object, **kwargs: object) -> object:
+            return original(self, **kwargs)
+
+        with patch.object(
+            MonotonicWorkspaceAuthority,
+            "recover",
+            fake,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "monotonic authority recover",
+            ):
+                self._issue()
+
+    def test_relative_workspace_path_is_not_product_authority(self) -> None:
+        relative = Path(os.path.relpath(self.workspace, Path.cwd()))
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "exact absolute pathlib.Path",
+        ):
+            issue_product_proposal_risk_target(
+                relative,
+                signal_strengths=(Decimal("1"), Decimal("0.8")),
+                contexts=self._contexts(),
+            )
+
+    def test_signal_vector_is_bound_into_target_identity(self) -> None:
+        first = self._issue()
+        second = issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("0.9"), Decimal("0.8")),
+            contexts=self._contexts(),
+        )
+        self.assertNotEqual(first.target_sha256, second.target_sha256)
+        self.assertNotEqual(first.signal_strengths, second.signal_strengths)
+        self.assertEqual(
+            resolve_product_proposal_risk_target(
+                self.workspace, second.target_sha256
+            ),
+            second,
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "superseded",
+        ):
+            resolve_product_proposal_risk_target(
+                self.workspace, first.target_sha256
+            )
+
+    def test_target_chain_blocks_new_issue_after_latest_target_ledger_rollback(
+        self,
+    ) -> None:
+        first = self._issue()
+        (self.workspace / "decisions.jsonl").write_bytes(b"")
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "chain tip is missing",
+        ):
+            issue_product_proposal_risk_target(
+                self.workspace,
+                signal_strengths=(Decimal("0.9"), Decimal("0.8")),
+                contexts=self._contexts(),
+            )
+
+        with self.assertRaises(ProductProposalRiskTargetError):
+            resolve_product_proposal_risk_target(
+                self.workspace, first.target_sha256
+            )
+
+    def test_missing_append_prepare_is_aborted_before_real_target_issue(self) -> None:
+        workspace_authority = proposal_target_authority._authority_for_workspace(
+            self.workspace
+        )
+        chain = proposal_target_authority._target_authority(
+            self.workspace, workspace_authority.workspace_instance_id
+        )
+        interrupted = "a" * 64
+        chain.prepare(
+            tx_id="interrupted-before-ledger-append",
+            observed_state_sha256=None,
+            intended_state_sha256=interrupted,
+            semantic_binding_sha256=interrupted,
+        )
+
+        issued = self._issue()
+
+        self.assertEqual(
+            resolve_product_proposal_risk_target(
+                self.workspace, issued.target_sha256
+            ),
+            issued,
+        )
+        phases = tuple(record.phase.value for record in chain.read_history())
+        self.assertIn("ABORT", phases)
+        self.assertEqual(phases[-1], "COMMIT")
+
+    def test_superseded_target_cannot_be_reissued_as_current(self) -> None:
+        first = self._issue()
+        second = issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("0.9"), Decimal("0.8")),
+            contexts=self._contexts(),
+        )
+        self.assertNotEqual(first.target_sha256, second.target_sha256)
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "superseded and cannot be reissued",
+        ):
+            self._issue()
+
+    def test_target_chain_keeps_exact_append_history_while_only_latest_is_current(
+        self,
+    ) -> None:
+        first = self._issue()
+        second = issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("0.9"), Decimal("0.8")),
+            contexts=self._contexts(),
+        )
+
+        records = JsonlDecisionLedger(
+            self.workspace / "decisions.jsonl"
+        ).verified_records()
+        target_ids = tuple(
+            record.payload["target_sha256"]
+            for record in records
+            if record.action == "PROPOSAL_RISK_TARGET_PRECOMMIT"
+        )
+        self.assertEqual(target_ids, (first.target_sha256, second.target_sha256))
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "superseded",
+        ):
+            resolve_product_proposal_risk_target(
+                self.workspace, first.target_sha256
+            )
+        self.assertEqual(
+            resolve_product_proposal_risk_target(
+                self.workspace, second.target_sha256
+            ).target_sha256,
+            second.target_sha256,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

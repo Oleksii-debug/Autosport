@@ -129,6 +129,7 @@ def economic_goal_to_payload(contract: EconomicGoalContract) -> dict[str, object
         raise EconomicGoalContractError(
             "economic goal persistence requires an EconomicGoalContract"
         )
+    EconomicGoalContract.__post_init__(contract)
 
     body: dict[str, object] = {
         "goal_id": contract.goal_id,
@@ -188,7 +189,7 @@ def economic_goal_from_payload(payload: object) -> EconomicGoalContract:
     root: dict[str, object] = payload
     _require_exact_keys("economic goal payload", root, _ROOT_KEYS)
 
-    if root["schema"] != ECONOMIC_GOAL_SCHEMA:
+    if type(root["schema"]) is not str or root["schema"] != ECONOMIC_GOAL_SCHEMA:
         raise EconomicGoalContractError("unsupported economic goal schema")
     version = root["schema_version"]
     if type(version) is not int or version != ECONOMIC_GOAL_SCHEMA_VERSION:
@@ -212,6 +213,8 @@ def economic_goal_from_payload(payload: object) -> EconomicGoalContract:
             "max_stake_amount", body["max_stake_amount"]
         )
 
+    if type(body["objective"]) is not str:
+        raise EconomicGoalContractError("objective must be a string")
     try:
         decoded["objective"] = EconomicObjective(body["objective"])
     except (TypeError, ValueError) as exc:

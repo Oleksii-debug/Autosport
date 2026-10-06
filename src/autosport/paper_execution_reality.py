@@ -63,39 +63,49 @@ _CANONICAL_OS_FSYNC = os.fsync
 _MAX_DURABLE_EVENT_LINE_CHARS = _impl._MAX_DURABLE_EVENT_LINE_CHARS
 
 
-def _decimal_coefficient(
-    value: Decimal,
-    _decimal_type: type[Decimal] = Decimal,
-) -> tuple[int, int]:
-    if type(value) is not _decimal_type:
-        raise ValueError("exact Decimal required")
-    if not value.is_finite():
-        raise ValueError("Decimal must be finite")
-    parts = value.as_tuple()
-    coefficient = 0
-    for digit in parts.digits:
-        coefficient = coefficient * 10 + digit
-    if parts.sign:
-        coefficient = -coefficient
-    return coefficient, int(parts.exponent)
+def _build_decimal_coefficient():
+    decimal_type = Decimal
+
+    def decimal_coefficient(value: Decimal) -> tuple[int, int]:
+        if type(value) is not decimal_type:
+            raise ValueError("exact Decimal required")
+        if not value.is_finite():
+            raise ValueError("Decimal must be finite")
+        parts = value.as_tuple()
+        coefficient = 0
+        for digit in parts.digits:
+            coefficient = coefficient * 10 + digit
+        if parts.sign:
+            coefficient = -coefficient
+        return coefficient, int(parts.exponent)
+
+    return decimal_coefficient
 
 
-def _decimal_from_coefficient(
-    coefficient: int,
-    exponent: int,
-    _decimal_type: type[Decimal] = Decimal,
-    _resource_validator=_impl._CANONICAL_DECIMAL_RESOURCE_VALIDATOR,
-    _resource_validator_code=_impl._CANONICAL_DECIMAL_RESOURCE_VALIDATOR.__code__,
-) -> Decimal:
-    if getattr(_resource_validator, "__code__", None) is not _resource_validator_code:
-        raise ValueError("PAPER Decimal resource authority changed")
-    sign = 1 if coefficient < 0 else 0
-    magnitude = _decimal_type(abs(coefficient))
-    digits = magnitude.as_tuple().digits
-    result = _decimal_type((sign, digits, exponent))
-    _resource_validator(result)
-    return result
+_decimal_coefficient = _build_decimal_coefficient()
+del _build_decimal_coefficient
 
+
+def _build_decimal_from_coefficient():
+    decimal_type = Decimal
+    resource_validator = _impl._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+    resource_validator_code = resource_validator.__code__
+
+    def decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
+        if getattr(resource_validator, "__code__", None) is not resource_validator_code:
+            raise ValueError("PAPER Decimal resource authority changed")
+        sign = 1 if coefficient < 0 else 0
+        magnitude = decimal_type(abs(coefficient))
+        digits = magnitude.as_tuple().digits
+        result = decimal_type((sign, digits, exponent))
+        resource_validator(result)
+        return result
+
+    return decimal_from_coefficient
+
+
+_decimal_from_coefficient = _build_decimal_from_coefficient()
+del _build_decimal_from_coefficient
 
 _CANONICAL_DECIMAL_COEFFICIENT = _decimal_coefficient
 _CANONICAL_DECIMAL_COEFFICIENT_CODE = _decimal_coefficient.__code__
@@ -103,73 +113,86 @@ _CANONICAL_DECIMAL_FROM_COEFFICIENT = _decimal_from_coefficient
 _CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE = _decimal_from_coefficient.__code__
 
 
-def _decimal_add_exact(
-    left: Decimal,
-    right: Decimal,
-    _coefficient_fn=_decimal_coefficient,
-    _coefficient_code=_decimal_coefficient.__code__,
-    _from_coefficient=_decimal_from_coefficient,
-    _from_coefficient_code=_decimal_from_coefficient.__code__,
-) -> Decimal:
-    if (
-        getattr(_coefficient_fn, "__code__", None) is not _coefficient_code
-        or getattr(_from_coefficient, "__code__", None) is not _from_coefficient_code
-    ):
-        raise ValueError("PAPER exact Decimal arithmetic dependency changed")
-    left_coefficient, left_exponent = _coefficient_fn(left)
-    right_coefficient, right_exponent = _coefficient_fn(right)
-    exponent = min(left_exponent, right_exponent)
-    left_scaled = left_coefficient * (10 ** (left_exponent - exponent))
-    right_scaled = right_coefficient * (10 ** (right_exponent - exponent))
-    return _from_coefficient(left_scaled + right_scaled, exponent)
+def _build_decimal_add_exact():
+    coefficient_fn = _decimal_coefficient
+    coefficient_code = coefficient_fn.__code__
+    from_coefficient = _decimal_from_coefficient
+    from_coefficient_code = from_coefficient.__code__
+
+    def decimal_add_exact(left: Decimal, right: Decimal) -> Decimal:
+        if (
+            getattr(coefficient_fn, "__code__", None) is not coefficient_code
+            or getattr(from_coefficient, "__code__", None) is not from_coefficient_code
+        ):
+            raise ValueError("PAPER exact Decimal arithmetic dependency changed")
+        left_coefficient, left_exponent = coefficient_fn(left)
+        right_coefficient, right_exponent = coefficient_fn(right)
+        exponent = min(left_exponent, right_exponent)
+        left_scaled = left_coefficient * (10 ** (left_exponent - exponent))
+        right_scaled = right_coefficient * (10 ** (right_exponent - exponent))
+        return from_coefficient(left_scaled + right_scaled, exponent)
+
+    return decimal_add_exact
 
 
-def _decimal_subtract_exact(
-    left: Decimal,
-    right: Decimal,
-    _coefficient_fn=_decimal_coefficient,
-    _coefficient_code=_decimal_coefficient.__code__,
-    _from_coefficient=_decimal_from_coefficient,
-    _from_coefficient_code=_decimal_from_coefficient.__code__,
-    _add_exact=_decimal_add_exact,
-    _add_exact_code=_decimal_add_exact.__code__,
-) -> Decimal:
-    if (
-        getattr(_coefficient_fn, "__code__", None) is not _coefficient_code
-        or getattr(_from_coefficient, "__code__", None) is not _from_coefficient_code
-        or getattr(_add_exact, "__code__", None) is not _add_exact_code
-    ):
-        raise ValueError("PAPER exact Decimal arithmetic dependency changed")
-    right_coefficient, right_exponent = _coefficient_fn(right)
-    return _add_exact(
-        left,
-        _from_coefficient(-right_coefficient, right_exponent),
-    )
-
-
-def _decimal_scale_bps_exact(
-    value: Decimal,
-    basis_points: int,
-    _coefficient_fn=_decimal_coefficient,
-    _coefficient_code=_decimal_coefficient.__code__,
-    _from_coefficient=_decimal_from_coefficient,
-    _from_coefficient_code=_decimal_from_coefficient.__code__,
-) -> Decimal:
-    if type(basis_points) is not int or not 0 <= basis_points <= 10_000:
-        raise ValueError("basis_points must be an int in 0..10000")
-    if (
-        getattr(_coefficient_fn, "__code__", None) is not _coefficient_code
-        or getattr(_from_coefficient, "__code__", None) is not _from_coefficient_code
-    ):
-        raise ValueError("PAPER exact Decimal arithmetic dependency changed")
-    coefficient, exponent = _coefficient_fn(value)
-    return _from_coefficient(coefficient * basis_points, exponent - 4)
-
-
+_decimal_add_exact = _build_decimal_add_exact()
+del _build_decimal_add_exact
 _CANONICAL_DECIMAL_ADD_EXACT = _decimal_add_exact
 _CANONICAL_DECIMAL_ADD_EXACT_CODE = _decimal_add_exact.__code__
+
+
+def _build_decimal_subtract_exact():
+    coefficient_fn = _decimal_coefficient
+    coefficient_code = coefficient_fn.__code__
+    from_coefficient = _decimal_from_coefficient
+    from_coefficient_code = from_coefficient.__code__
+    add_exact = _decimal_add_exact
+    add_exact_code = add_exact.__code__
+
+    def decimal_subtract_exact(left: Decimal, right: Decimal) -> Decimal:
+        if (
+            getattr(coefficient_fn, "__code__", None) is not coefficient_code
+            or getattr(from_coefficient, "__code__", None) is not from_coefficient_code
+            or getattr(add_exact, "__code__", None) is not add_exact_code
+        ):
+            raise ValueError("PAPER exact Decimal arithmetic dependency changed")
+        right_coefficient, right_exponent = coefficient_fn(right)
+        return add_exact(
+            left,
+            from_coefficient(-right_coefficient, right_exponent),
+        )
+
+    return decimal_subtract_exact
+
+
+_decimal_subtract_exact = _build_decimal_subtract_exact()
+del _build_decimal_subtract_exact
 _CANONICAL_DECIMAL_SUBTRACT_EXACT = _decimal_subtract_exact
 _CANONICAL_DECIMAL_SUBTRACT_EXACT_CODE = _decimal_subtract_exact.__code__
+
+
+def _build_decimal_scale_bps_exact():
+    coefficient_fn = _decimal_coefficient
+    coefficient_code = coefficient_fn.__code__
+    from_coefficient = _decimal_from_coefficient
+    from_coefficient_code = from_coefficient.__code__
+
+    def decimal_scale_bps_exact(value: Decimal, basis_points: int) -> Decimal:
+        if type(basis_points) is not int or not 0 <= basis_points <= 10_000:
+            raise ValueError("basis_points must be an int in 0..10000")
+        if (
+            getattr(coefficient_fn, "__code__", None) is not coefficient_code
+            or getattr(from_coefficient, "__code__", None) is not from_coefficient_code
+        ):
+            raise ValueError("PAPER exact Decimal arithmetic dependency changed")
+        coefficient, exponent = coefficient_fn(value)
+        return from_coefficient(coefficient * basis_points, exponent - 4)
+
+    return decimal_scale_bps_exact
+
+
+_decimal_scale_bps_exact = _build_decimal_scale_bps_exact()
+del _build_decimal_scale_bps_exact
 _CANONICAL_DECIMAL_SCALE_BPS_EXACT = _decimal_scale_bps_exact
 _CANONICAL_DECIMAL_SCALE_BPS_EXACT_CODE = _decimal_scale_bps_exact.__code__
 

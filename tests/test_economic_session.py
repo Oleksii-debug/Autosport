@@ -473,6 +473,58 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         finally:
             ProductEconomicSessionStore.require_current = original
 
+    def test_direct_lookup_rejects_in_place_protected_method_code_mutation(self) -> None:
+        for name in (
+            "current",
+            "require_current",
+            "transition_to_current_goal",
+            "_publish_new",
+            "_evidence",
+            "_require_configuration_authority",
+        ):
+            with self.subTest(name=name):
+                store = ProductEconomicSessionStore(
+                    self.workspace,
+                    authority_root=self.authority_root,
+                )
+                authority = ProductEconomicSessionStore.__dict__[name]
+                original_code = authority.__code__
+
+                def hostile(*_args, **_kwargs):
+                    raise AssertionError(
+                        "mutated economic-session authority method executed"
+                    )
+
+                try:
+                    authority.__code__ = hostile.__code__
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority method code changed",
+                    ):
+                        store.current()
+                finally:
+                    authority.__code__ = original_code
+
+    def test_constructor_rejects_preexisting_protected_method_code_mutation(self) -> None:
+        authority = ProductEconomicSessionStore.current
+        original_code = authority.__code__
+
+        def hostile(*_args, **_kwargs):
+            raise AssertionError("preexisting mutated current executed")
+
+        try:
+            authority.__code__ = hostile.__code__
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "store method authority changed",
+            ):
+                ProductEconomicSessionStore(
+                    self.workspace,
+                    authority_root=self.authority_root,
+                )
+        finally:
+            authority.__code__ = original_code
+
     def test_transition_rejects_rebound_product_session_equality(self) -> None:
         store = self._store()
         first = store.current()

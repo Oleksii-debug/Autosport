@@ -299,6 +299,7 @@ def _ticket_opening_commitment(
         )
 
     return (
+        _ticket_id,
         stake,
         tuple(leg_commitments),
         placed_at,

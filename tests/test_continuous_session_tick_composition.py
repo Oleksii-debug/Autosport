@@ -6539,3 +6539,83 @@ def test_settlement_reconcile_cannot_consume_post_drain_invalidations() -> None:
 
         assert buffer.pending_count == 0
         assert buffer.full_refresh_required is True
+@pytest.mark.parametrize("injection_mode", ("dirty", "full_refresh"))
+def test_tick_reports_post_drain_invalidation_backlog(
+    injection_mode: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                if injection_mode == "dirty":
+                    with buffer._lock:
+                        buffer._dirty[("provider-a", "quote-late")] = None
+                else:
+                    buffer.force_full_refresh()
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        result = coordinator.tick()
+
+        assert result.invalidation_backlog is True
+        if injection_mode == "dirty":
+            assert buffer.pending_count == 1
+            assert buffer.full_refresh_required is False
+        else:
+            assert buffer.pending_count == 0
+            assert buffer.full_refresh_required is True
+
+
+def test_tick_reports_invalidation_added_during_settlement_reconciliation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class Handoff:
+            def prepare_settlement(self, **_kwargs):
+                return None
+
+            def reconcile_after_settlement(self, **_kwargs):
+                with buffer._lock:
+                    buffer._dirty[("provider-a", "quote-after-reconcile")] = None
+                return None
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.settlement_learning_handoff = Handoff()
+
+        result = coordinator.tick()
+
+        assert result.invalidation_backlog is True
+        assert buffer.pending_count == 1
+        assert buffer.full_refresh_required is False

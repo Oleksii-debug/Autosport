@@ -497,10 +497,12 @@ def validate_successor(
 ) -> None:
     """Require contiguous immutable-identity history for one register entry."""
 
-    if not isinstance(previous, IncidentRiskEntry) or not isinstance(
-        candidate, IncidentRiskEntry
-    ):
-        raise TypeError("register successor validation requires IncidentRiskEntry values")
+    if type(previous) is not IncidentRiskEntry or type(candidate) is not IncidentRiskEntry:
+        raise TypeError(
+            "register successor validation requires exact IncidentRiskEntry values"
+        )
+    previous.__post_init__()
+    candidate.__post_init__()
     if candidate.entry_id != previous.entry_id:
         raise IncidentRiskRegisterError("successor must preserve entry_id")
     if candidate.kind is not previous.kind:
@@ -584,6 +586,7 @@ class OperatorRiskProjection:
 def operator_projection(entry: IncidentRiskEntry) -> OperatorRiskProjection:
     if type(entry) is not IncidentRiskEntry:
         raise TypeError("operator projection requires an exact IncidentRiskEntry")
+    entry.__post_init__()
     return OperatorRiskProjection(
         entry_id=entry.entry_id,
         revision=entry.revision,
@@ -622,6 +625,8 @@ def operator_sort(entries: Iterable[IncidentRiskEntry]) -> tuple[IncidentRiskEnt
     materialized = tuple(entries)
     if any(type(entry) is not IncidentRiskEntry for entry in materialized):
         raise TypeError("operator_sort accepts only exact IncidentRiskEntry values")
+    for entry in materialized:
+        entry.__post_init__()
 
     def key(entry: IncidentRiskEntry) -> tuple[int, int, int, str]:
         _, updated = _canonical_timestamp("updated_at", entry.updated_at)

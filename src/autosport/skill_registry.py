@@ -462,9 +462,16 @@ class SkillRegistry:
                 except (OSError, ValueError):
                     pass
                 process.join(_HANDLER_TIMEOUT_REAP_GRACE_SECONDS)
+            if process.is_alive():
+                receiver.close()
+                return None,"HANDLER_TIMEOUT_STOP_FAILED"
+            if hasattr(process, "close"):
+                process.close()
             receiver.close()
             return None,"HANDLER_TIMEOUT"
         if not receiver.poll():
+            if hasattr(process, "close"):
+                process.close()
             receiver.close()
             return None,"HANDLER_PROCESS_EXITED"
         try:
@@ -473,6 +480,8 @@ class SkillRegistry:
             return None,"HANDLER_RESULT_UNAVAILABLE"
         finally:
             receiver.close()
+            if hasattr(process, "close"):
+                process.close()
         if kind=="ERROR":
             return None,"HANDLER_ERROR_"+_text(value,"handler error type").upper()
         if kind!="OK":

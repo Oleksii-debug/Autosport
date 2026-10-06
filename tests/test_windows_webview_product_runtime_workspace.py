@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import threading
 from pathlib import Path
 
@@ -64,6 +65,29 @@ def _controller(
     return controller, worker
 
 
+def _write_product_composition(
+    workspace: Path,
+    *,
+    source_id: str = "parlayapi:table_tennis",
+    initial_bankroll: str = "10000",
+) -> None:
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "product_composition.json").write_text(
+        json.dumps(
+            {
+                "schema": "autosport.autonomous_product_composition",
+                "schema_version": 2,
+                "source_id": source_id,
+                "initial_bankroll": initial_bankroll,
+                "settlement_authority_identity": None,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+
 def _configure_canonical_source(controller: AutosportWebController) -> None:
     OperatorSourceConfigStore(
         controller.workspace / "operator-source.json"
@@ -118,6 +142,77 @@ def test_product_runtime_start_uses_selected_strategy_workspace(
         }
     ]
     assert controller._active_workspace == strategy_workspace
+
+
+def test_product_runtime_start_adopts_verified_durable_composition_bankroll(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base_workspace = tmp_path / "workspace"
+    strategy_workspace = tmp_path / "workspace-research"
+    controller, worker = _controller(base_workspace)
+    _bind_strategy_workspace(controller, monkeypatch, strategy_workspace)
+    _configure_canonical_source(controller)
+    _write_product_composition(
+        strategy_workspace,
+        initial_bankroll="2500.50",
+    )
+
+    result = controller._action_product_runtime_start({})
+
+    assert result["status"] == "completed"
+    assert worker.start_calls == [
+        {
+            "workspace": strategy_workspace,
+            "source_factory": "autosport.product_source:create_parlay_product_source",
+            "expected_source_id": "parlayapi:table_tennis",
+            "initial_bankroll": "2500.50",
+            "poll_seconds": 30.0,
+        }
+    ]
+
+
+def test_product_runtime_start_rejects_durable_source_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base_workspace = tmp_path / "workspace"
+    strategy_workspace = tmp_path / "workspace-research"
+    controller, worker = _controller(base_workspace)
+    _bind_strategy_workspace(controller, monkeypatch, strategy_workspace)
+    _configure_canonical_source(controller)
+    _write_product_composition(
+        strategy_workspace,
+        source_id="different:provider",
+    )
+
+    result = controller._action_product_runtime_start({})
+
+    assert result["status"] == "rejected"
+    assert worker.start_calls == []
+    assert controller.product_worker.busy is False
+
+
+def test_product_runtime_start_rejects_corrupt_durable_composition(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base_workspace = tmp_path / "workspace"
+    strategy_workspace = tmp_path / "workspace-research"
+    controller, worker = _controller(base_workspace)
+    _bind_strategy_workspace(controller, monkeypatch, strategy_workspace)
+    _configure_canonical_source(controller)
+    strategy_workspace.mkdir(parents=True, exist_ok=True)
+    (strategy_workspace / "product_composition.json").write_text(
+        '{"schema":"autosport.autonomous_product_composition"}',
+        encoding="utf-8",
+    )
+
+    result = controller._action_product_runtime_start({})
+
+    assert result["status"] == "rejected"
+    assert worker.start_calls == []
+    assert controller.product_worker.busy is False
 
 
 def test_product_runtime_start_cannot_bypass_strategy_workspace_recovery_quarantine(

@@ -22,7 +22,21 @@ PaperLegAttempt = _impl.PaperLegAttempt
 PaperExecutionRun = _impl.PaperExecutionRun
 PaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
 
+_CANONICAL_EVIDENCE_GRADE_TYPE = EvidenceGrade
+_CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE = PaperAttemptOutcome
 _CANONICAL_RECOVERY_DECISION_TYPE = RecoveryDecision
+_CANONICAL_EXECUTION_PLAN_TYPE = ExecutionPlan
+_CANONICAL_PAPER_EXECUTION_MODEL_CONFIG_TYPE = PaperExecutionModelConfig
+_CANONICAL_PAPER_EXECUTION_EVIDENCE_REGISTRY_TYPE = PaperExecutionEvidenceRegistry
+_CANONICAL_MAPPING_TYPE = Mapping
+_EVIDENCE_SYNTHETIC = EvidenceGrade.SYNTHETIC
+_OUTCOME_ACCEPTED = PaperAttemptOutcome.ACCEPTED
+_OUTCOME_PARTIAL = PaperAttemptOutcome.PARTIAL
+_OUTCOME_REJECTED = PaperAttemptOutcome.REJECTED
+_OUTCOME_UNKNOWN = PaperAttemptOutcome.UNKNOWN
+_RECOVERY_NONE = RecoveryDecision.NONE
+_RECOVERY_NO_EXPOSURE = RecoveryDecision.NO_EXPOSURE
+_RECOVERY_HEDGE_REVIEW_REQUIRED = RecoveryDecision.HEDGE_REVIEW_REQUIRED
 _CANONICAL_DECIMAL_TYPE = Decimal
 _CANONICAL_TEXT_VALIDATOR = _impl._CANONICAL_TEXT_VALIDATOR
 _CANONICAL_DECIMAL_PARSER = _impl._CANONICAL_DECIMAL_PARSER
@@ -111,44 +125,44 @@ def _derive_run_economics(
             )
 
         if attempt.outcome in {
-            PaperAttemptOutcome.ACCEPTED,
-            PaperAttemptOutcome.PARTIAL,
+            _OUTCOME_ACCEPTED,
+            _OUTCOME_PARTIAL,
         }:
             assert attempt.execution_stake is not None
             known_exposure = _decimal_add_exact(known_exposure, attempt.execution_stake)
             worst_case = max(worst_case, known_exposure)
-        elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
+        elif attempt.outcome is _OUTCOME_UNKNOWN:
             worst_case = max(
                 worst_case,
                 _decimal_add_exact(known_exposure, attempt.requested_stake),
             )
 
-        if attempt.outcome is not PaperAttemptOutcome.ACCEPTED:
+        if attempt.outcome is not _OUTCOME_ACCEPTED:
             terminal_seen = True
 
     pending = action_ids[len(attempts) :]
     all_accepted_complete = (
         bool(attempts)
         and len(attempts) == len(action_ids)
-        and all(item.outcome is PaperAttemptOutcome.ACCEPTED for item in attempts)
+        and all(item.outcome is _OUTCOME_ACCEPTED for item in attempts)
     )
     can_complete = all_accepted_complete or (
         bool(attempts)
-        and attempts[-1].outcome is not PaperAttemptOutcome.ACCEPTED
+        and attempts[-1].outcome is not _OUTCOME_ACCEPTED
     )
     if all_accepted_complete:
-        recovery = RecoveryDecision.NONE
+        recovery = _RECOVERY_NONE
     elif can_complete:
         recovery = (
-            RecoveryDecision.HEDGE_REVIEW_REQUIRED
+            _RECOVERY_HEDGE_REVIEW_REQUIRED
             if worst_case > 0
-            else RecoveryDecision.NO_EXPOSURE
+            else _RECOVERY_NO_EXPOSURE
         )
     else:
         recovery = (
-            RecoveryDecision.HEDGE_REVIEW_REQUIRED
+            _RECOVERY_HEDGE_REVIEW_REQUIRED
             if worst_case > 0
-            else RecoveryDecision.NONE
+            else _RECOVERY_NONE
         )
     return _DerivedRunEconomics(
         pending_action_ids=pending,
@@ -410,6 +424,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         )
 
 
+_CANONICAL_PUBLIC_PAPER_EXECUTION_LEDGER_TYPE = PaperExecutionLedger
+
+
 def _synthetic_attempt(
     *,
     run_id: str,
@@ -442,13 +459,13 @@ def _synthetic_attempt(
     execution_stake: Decimal | None = None
 
     if suspended:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "configured/synthetic suspension at execution time"
     elif execution_time >= expires:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "decision quote expired before PAPER-equivalent execution"
     elif quote_age_ms > config.max_quote_age_ms:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "decision quote exceeded configured PAPER freshness bound"
     else:
         bucket = _CANONICAL_DETERMINISTIC_INT(
@@ -457,19 +474,19 @@ def _synthetic_attempt(
             10_000,
         )
         if bucket < config.unknown_bps:
-            outcome = PaperAttemptOutcome.UNKNOWN
+            outcome = _OUTCOME_UNKNOWN
             reason = "deterministic execution model produced UNKNOWN"
         elif bucket < config.unknown_bps + config.rejected_bps:
-            outcome = PaperAttemptOutcome.REJECTED
+            outcome = _OUTCOME_REJECTED
             reason = "deterministic execution model produced REJECTED"
         elif bucket < config.unknown_bps + config.rejected_bps + config.partial_bps:
-            outcome = PaperAttemptOutcome.PARTIAL
+            outcome = _OUTCOME_PARTIAL
             reason = "deterministic execution model produced PARTIAL"
         else:
-            outcome = PaperAttemptOutcome.ACCEPTED
+            outcome = _OUTCOME_ACCEPTED
             reason = "deterministic execution model produced ACCEPTED"
 
-        if outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             slippage_bps = (
                 0
                 if config.max_slippage_bps == 0
@@ -491,7 +508,7 @@ def _synthetic_attempt(
                 ),
             )
             execution_stake = action.requested_stake
-            if outcome is PaperAttemptOutcome.PARTIAL:
+            if outcome is _OUTCOME_PARTIAL:
                 execution_stake = _decimal_scale_bps_exact(
                     action.requested_stake,
                     config.partial_fill_bps,
@@ -520,7 +537,7 @@ def _synthetic_attempt(
         execution_odds=execution_odds,
         execution_stake=execution_stake,
         suspended=suspended,
-        evidence_grade=EvidenceGrade.SYNTHETIC,
+        evidence_grade=_EVIDENCE_SYNTHETIC,
         evidence_source=config.evidence_source,
         evidence_id=None,
         evidence_sha256=None,
@@ -541,17 +558,17 @@ def execute_paper_plan(
     suspended_action_ids: frozenset[str] = frozenset(),
 ) -> PaperExecutionRun:
     """Execute/resume one PAPER/SHADOW run without provider writes or real money."""
-    if not isinstance(plan, ExecutionPlan):
+    if not isinstance(plan, _CANONICAL_EXECUTION_PLAN_TYPE):
         raise TypeError("plan must be ExecutionPlan")
-    if not isinstance(config, PaperExecutionModelConfig):
+    if not isinstance(config, _CANONICAL_PAPER_EXECUTION_MODEL_CONFIG_TYPE):
         raise TypeError("config must be PaperExecutionModelConfig")
-    if not isinstance(ledger, PaperExecutionLedger):
+    if not isinstance(ledger, _CANONICAL_PUBLIC_PAPER_EXECUTION_LEDGER_TYPE):
         raise TypeError("ledger must be PaperExecutionLedger")
     trigger_id = _CANONICAL_TEXT_VALIDATOR(trigger_id, "trigger_id")
     _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at")
     if observations is None:
         observations = {}
-    if not isinstance(observations, Mapping):
+    if not isinstance(observations, _CANONICAL_MAPPING_TYPE):
         raise TypeError("observations must be a mapping")
     action_by_id = {action.action_id: action for action in plan.actions}
     if set(observations) - set(action_by_id):
@@ -562,7 +579,7 @@ def execute_paper_plan(
         )
     if observations and not isinstance(
         evidence_registry,
-        PaperExecutionEvidenceRegistry,
+        _CANONICAL_PAPER_EXECUTION_EVIDENCE_REGISTRY_TYPE,
     ):
         raise PaperExecutionStateError(
             "configured/empirical observations require a durable evidence registry"
@@ -600,14 +617,14 @@ def execute_paper_plan(
         return existing
 
     attempts = list(existing.attempts)
-    if attempts and attempts[-1].outcome is not PaperAttemptOutcome.ACCEPTED:
+    if attempts and attempts[-1].outcome is not _OUTCOME_ACCEPTED:
         ledger.complete_run(
             run_id=run_id,
             pending_action_ids=existing.pending_action_ids,
             recovery_decision=(
-                RecoveryDecision.HEDGE_REVIEW_REQUIRED
+                _RECOVERY_HEDGE_REVIEW_REQUIRED
                 if existing.worst_case_exposure > 0
-                else RecoveryDecision.NO_EXPOSURE
+                else _RECOVERY_NO_EXPOSURE
             ),
             worst_case_exposure=existing.worst_case_exposure,
         )
@@ -625,7 +642,7 @@ def execute_paper_plan(
     known_exposure = _CANONICAL_DECIMAL_TYPE("0")
     worst_case_exposure = _CANONICAL_DECIMAL_TYPE("0")
     for prior in attempts:
-        assert prior.outcome is PaperAttemptOutcome.ACCEPTED
+        assert prior.outcome is _OUTCOME_ACCEPTED
         assert prior.execution_stake is not None
         known_exposure = _decimal_add_exact(
             known_exposure,
@@ -665,8 +682,8 @@ def execute_paper_plan(
         attempts.append(attempt)
 
         if attempt.outcome in {
-            PaperAttemptOutcome.ACCEPTED,
-            PaperAttemptOutcome.PARTIAL,
+            _OUTCOME_ACCEPTED,
+            _OUTCOME_PARTIAL,
         }:
             assert attempt.execution_stake is not None
             known_exposure = _decimal_add_exact(
@@ -674,7 +691,7 @@ def execute_paper_plan(
                 attempt.execution_stake,
             )
             worst_case_exposure = max(worst_case_exposure, known_exposure)
-        elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
+        elif attempt.outcome is _OUTCOME_UNKNOWN:
             worst_case_exposure = max(
                 worst_case_exposure,
                 _decimal_add_exact(
@@ -683,14 +700,14 @@ def execute_paper_plan(
                 ),
             )
 
-        if attempt.outcome is not PaperAttemptOutcome.ACCEPTED:
+        if attempt.outcome is not _OUTCOME_ACCEPTED:
             pending = tuple(
                 item.action_id for item in plan.actions[sequence + 1 :]
             )
             recovery = (
-                RecoveryDecision.HEDGE_REVIEW_REQUIRED
+                _RECOVERY_HEDGE_REVIEW_REQUIRED
                 if worst_case_exposure > 0
-                else RecoveryDecision.NO_EXPOSURE
+                else _RECOVERY_NO_EXPOSURE
             )
             ledger.complete_run(
                 run_id=run_id,
@@ -712,7 +729,7 @@ def execute_paper_plan(
     ledger.complete_run(
         run_id=run_id,
         pending_action_ids=(),
-        recovery_decision=RecoveryDecision.NONE,
+        recovery_decision=_RECOVERY_NONE,
         worst_case_exposure=worst_case_exposure,
     )
     result = ledger.load_run(

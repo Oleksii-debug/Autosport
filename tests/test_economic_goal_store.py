@@ -1269,3 +1269,15 @@ def test_store_transition_proof_is_bound_to_exact_persisted_payload(tmp_path) ->
     assert restored.revision == 2
     assert restored.max_stake_fraction == Decimal("0.01")
     assert candidate.max_stake_fraction == Decimal("0.99")
+
+
+def test_payload_decoder_revalidates_with_captured_contract_validator(monkeypatch) -> None:
+    payload = economic_goal_to_payload(_goal())
+    body = payload["contract"]
+    assert type(body) is dict
+    body["max_stake_fraction"] = "2"
+
+    monkeypatch.setattr(EconomicGoalContract, "__post_init__", lambda self: None)
+
+    with pytest.raises(EconomicGoalContractError, match="between 0 and 1"):
+        economic_goal_from_payload(payload)

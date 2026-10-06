@@ -109,7 +109,7 @@ def _save_authoritative(workspace: Path, book: PaperBook) -> None:
         )
         book._product_day_admissions[ticket_id] = witness
         _fixture_causal_advance()(book, ticket_id, witness)
-    _save_authoritative(workspace, book)
+    book.save(workspace / "paper_book.json")
 
 
 def _setup(tmp_path, *, max_turnover: str = "1"):

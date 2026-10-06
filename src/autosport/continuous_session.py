@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable, Final, Protocol
+from typing import Any, Callable, Final, Iterator, Protocol
 
 from .causal_collector import (
     CollectorDelta,
@@ -1199,7 +1199,7 @@ class _ContinuousSessionState:
         *,
         _durable_path_lock: Callable[..., Any] = durable_path_lock,
         _durable_path_lock_code: object = durable_path_lock.__code__,
-    ):
+    ) -> Iterator[None]:
         if (
             durable_path_lock is not _durable_path_lock
             or getattr(_durable_path_lock, "__code__", None)

@@ -113,6 +113,41 @@ class SportSeasonIdentityTests(unittest.TestCase):
             (lineage,),
         )
 
+    def test_alias_correction_cannot_cross_entity_kind(self) -> None:
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        season = identity("season:football:2026", EntityKind.SEASON, "provider:season-2026")
+        sport = identity("sport:football", EntityKind.SPORT, "canonical:football")
+        registry.add_entity(season)
+        registry.add_entity(sport)
+        original = AliasRecord(
+            "provider-a", "football-2026", season.entity_id, T0, None, T0, SHA, T0
+        )
+        registry.add_alias(original)
+
+        with self.assertRaisesRegex(
+            ParticipantIdentityError,
+            "same EntityKind",
+        ):
+            registry.add_alias(
+                AliasRecord(
+                    "provider-a",
+                    "football-2026",
+                    sport.entity_id,
+                    T0,
+                    None,
+                    T2,
+                    "b" * 64,
+                    T2,
+                    supersedes_record_id=original.record_id,
+                )
+            )
+
+        reopened = ParticipantIdentityRegistry(self.path)
+        self.assertEqual(
+            reopened.resolve_alias("provider-a", "football-2026", as_of=T1),
+            season,
+        )
+
     def test_event_roster_rejects_non_participant_entity_kinds(self) -> None:
         for kind in (EntityKind.SPORT, EntityKind.LEAGUE, EntityKind.SEASON):
             with self.subTest(kind=kind):

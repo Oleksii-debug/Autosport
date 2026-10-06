@@ -93,6 +93,7 @@ def _save_authoritative(workspace: Path, book: PaperBook) -> None:
         epoch_ns = _epoch_ns(ticket.placed_at)
         day_store = ProductDayRiskWindowStore(
             workspace,
+            authority_root=workspace.parent / "authority",
             _test_clock=lambda value=epoch_ns: value,
         )
         window = day_store.current()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, fields, replace
 from decimal import Decimal
 
 import pytest
@@ -264,3 +264,49 @@ def test_automatic_transition_requires_typed_contracts() -> None:
 
     with pytest.raises(EconomicGoalContractError):
         validate_automatic_transition(previous, object())  # type: ignore[arg-type]
+
+
+def test_contract_rejects_scalar_and_container_subclasses() -> None:
+    class TextSubclass(str):
+        pass
+
+    class DecimalSubclass(Decimal):
+        pass
+
+    class IntSubclass(int):
+        pass
+
+    class FrozenSetSubclass(frozenset):
+        pass
+
+    with pytest.raises(EconomicGoalContractError):
+        _goal(goal_id=TextSubclass("goal"))
+    with pytest.raises(EconomicGoalContractError):
+        _goal(max_stake_fraction=DecimalSubclass("0.01"))
+    with pytest.raises(EconomicGoalContractError):
+        _goal(revision=IntSubclass(1))
+    with pytest.raises(EconomicGoalContractError):
+        _goal(blocked_sports=FrozenSetSubclass({"tennis"}))
+
+
+def test_automatic_transition_revalidates_post_construction_scalar_mutation() -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+    object.__setattr__(candidate, "max_stake_fraction", "0.01")
+
+    with pytest.raises(EconomicGoalContractError):
+        validate_automatic_transition(previous, candidate)
+
+
+def test_automatic_transition_rejects_contract_subclasses() -> None:
+    class ContractSubclass(EconomicGoalContract):
+        pass
+
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+    subclass = ContractSubclass(
+        **{field.name: getattr(candidate, field.name) for field in fields(EconomicGoalContract)}
+    )
+
+    with pytest.raises(EconomicGoalContractError, match="requires EconomicGoalContract"):
+        validate_automatic_transition(previous, subclass)

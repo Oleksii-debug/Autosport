@@ -242,12 +242,12 @@ _CANONICAL_JSON_DUMPS: Final = json.dumps
 def _make_store_binding_registry(
     _mapping_proxy=MappingProxyType,
 ):
-    bindings: dict[int, tuple[object, Path, Path, object, object]] = {}
+    bindings: dict[int, tuple[object, Path, Path, object]] = {}
     public_view = _mapping_proxy(bindings)
 
     def register(
         store_id: int,
-        entry: tuple[object, Path, Path, object, object],
+        entry: tuple[object, Path, Path, object],
     ) -> None:
         bindings[store_id] = entry
 
@@ -325,13 +325,13 @@ def _resolve_store_binding(
     entry = _binding_lookup(id(store))
     if entry is None or entry[0]() is not store:
         raise _error_type("economic goal store binding is unavailable")
-    workspace, path, path_exists, path_open = entry[1:]
+    workspace, path, path_exists = entry[1:]
     instance_state = _object_getattribute(store, "__dict__")
     if instance_state.get("workspace") is not workspace:
         raise _error_type("economic goal store workspace binding was rebound")
     if instance_state.get("path") is not path:
         raise _error_type("economic goal store path binding was rebound")
-    return workspace, path, path_exists, path_open
+    return workspace, path, path_exists
 
 
 def _snapshot_economic_goal_contract(
@@ -917,8 +917,6 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
             _binding_release(store_id, store_ref)
 
         store_ref = _weakref_ref(self, release_binding)
-        path_open = path.open
-
         def path_exists(
             _error_type=EconomicGoalContractError,
             _lstat=_path_lstat,
@@ -941,7 +939,6 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
                 workspace_path,
                 path,
                 path_exists,
-                path_open,
             ),
         )
 
@@ -953,7 +950,7 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
     ) -> EconomicGoalContract:
         if type(self) is not __class__:
             raise TypeError("EconomicGoalStore authority requires the exact store type")
-        _, path, _, _ = _binding_resolver(self)
+        _, path, _ = _binding_resolver(self)
         return _json_decoder(_text_reader(path))
 
     def initialize_owner(
@@ -970,7 +967,7 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
 
         if type(self) is not __class__:
             raise TypeError("EconomicGoalStore authority requires the exact store type")
-        workspace, path, path_exists, _ = _binding_resolver(self)
+        workspace, path, path_exists = _binding_resolver(self)
         with _lock_scope(workspace, _lock_type):
             if path_exists():
                 raise _error_type(
@@ -1003,7 +1000,7 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
 
         if type(self) is not __class__:
             raise TypeError("EconomicGoalStore authority requires the exact store type")
-        workspace, path, _, _ = _binding_resolver(self)
+        workspace, path, _ = _binding_resolver(self)
         with _lock_scope(workspace, _lock_type):
             previous = _json_decoder(_text_reader(path))
             candidate_payload = _payload_encoder(candidate)

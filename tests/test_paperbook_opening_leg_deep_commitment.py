@@ -2811,6 +2811,47 @@ def test_load_bytes_rejects_in_place_snapshot_helper_code_mutation(
     finally:
         authority.__code__ = original_code
 
+@pytest.mark.parametrize(
+    "dependency_name",
+    (
+        "Decimal",
+        "DecimalException",
+        "_MAX_PAPER_DECIMAL_TEXT_CHARS",
+        "str",
+        "int",
+        "float",
+        "type",
+        "len",
+        "ValueError",
+    ),
+)
+def test_decimal_helper_rejects_module_dependency_rebinding_before_execution(
+    monkeypatch,
+    dependency_name: str,
+) -> None:
+    attacker_calls = 0
+
+    def hostile_dependency(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound decimal dependency executed")
+
+    monkeypatch.setattr(
+        paper_module,
+        dependency_name,
+        hostile_dependency,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"decimal helper dependency changed: {dependency_name}",
+    ):
+        paper_module._canonical_paperbook_decimal_input(PaperBook, 10, "stake")
+
+    assert attacker_calls == 0
+
+
 def test_open_ticket_rejects_rebound_decimal_helper_before_execution(
     monkeypatch,
 ) -> None:

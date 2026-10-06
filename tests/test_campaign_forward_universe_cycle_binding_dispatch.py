@@ -1,0 +1,1650 @@
+from __future__ import annotations
+
+import inspect
+from types import SimpleNamespace
+
+import pytest
+
+import autosport.campaign_forward_universe_cycle_binding as binding
+from autosport.campaign_inception import (
+    CampaignInceptionReceipt,
+    CampaignInceptionSourceSpec,
+)
+from autosport.forward_evaluation_universe_binding import ForwardUniverseAuthorityIdentity
+from autosport.forward_evidence_completeness import (
+    ForwardEvidenceProtocolEnvelope,
+    VerificationCode,
+    VerificationResult,
+)
+
+
+@pytest.mark.parametrize(
+    ("attempted_at", "captured_at", "expected"),
+    [
+        (
+            "2100-01-01T06:00:10+00:00",
+            "2100-01-01T06:00:10+00:00",
+            "collector START is outside precommitted fixed schedule slot window",
+        ),
+        (
+            "2100-01-01T06:00:09+00:00",
+            "2100-01-01T06:00:10+00:00",
+            "provider observation is outside precommitted fixed schedule slot window",
+        ),
+    ],
+)
+def test_durable_cycle_chronology_rejects_legacy_cross_slot_observation(
+    tmp_path,
+    attempted_at: str,
+    captured_at: str,
+    expected: str,
+) -> None:
+    spec = CampaignInceptionSourceSpec(
+        expected_store_path=tmp_path / "collector.db",
+        source_id="parlayapi:table_tennis",
+        run_id="run-1",
+        stream_epoch="epoch-1",
+        anchor_at="2100-01-01T06:00:00+00:00",
+        interval_seconds=10,
+        max_items=250,
+        evaluation_start_slot_ordinal=0,
+        evaluation_end_slot_ordinal=1,
+    )
+    campaign = SimpleNamespace(
+        observation_not_before="2100-01-01T06:00:00+00:00",
+        observation_not_after="2100-01-01T07:00:00+00:00",
+    )
+    snapshot = SimpleNamespace(captured_at=captured_at)
+    collector_evidence = {
+        "attempted_at": attempted_at,
+        "completed_at": "2100-01-01T06:00:11+00:00",
+        "slot_ordinal": 0,
+        "due_at": "2100-01-01T06:00:00+00:00",
+    }
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match=expected,
+    ):
+        binding._require_cycle_observation_chronology(
+            campaign=campaign,
+            source_spec=spec,
+            snapshot=snapshot,
+            collector_evidence=collector_evidence,
+        )
+
+
+def test_durable_cycle_chronology_uses_canonical_next_due_rounding(
+    tmp_path,
+) -> None:
+    spec = CampaignInceptionSourceSpec(
+        expected_store_path=tmp_path / "collector.db",
+        source_id="parlayapi:table_tennis",
+        run_id="run-rounding",
+        stream_epoch="epoch-rounding",
+        anchor_at="2100-01-01T06:00:00+00:00",
+        interval_seconds=0.3333333,
+        max_items=250,
+        evaluation_start_slot_ordinal=0,
+        evaluation_end_slot_ordinal=2,
+    )
+    campaign = SimpleNamespace(
+        observation_not_before="2100-01-01T06:00:00+00:00",
+        observation_not_after="2100-01-01T06:00:02+00:00",
+    )
+    snapshot = SimpleNamespace(
+        captured_at="2100-01-01T06:00:00.666666+00:00",
+    )
+    collector_evidence = {
+        "attempted_at": "2100-01-01T06:00:00.333333+00:00",
+        "completed_at": "2100-01-01T06:00:00.666666+00:00",
+        "slot_ordinal": 1,
+        "due_at": "2100-01-01T06:00:00.333333+00:00",
+    }
+
+    binding._require_cycle_observation_chronology(
+        campaign=campaign,
+        source_spec=spec,
+        snapshot=snapshot,
+        collector_evidence=collector_evidence,
+    )
+
+
+def test_authority_preserves_distinct_plan_and_realized_universe_identity() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=2,
+    )
+
+    authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
+        campaign_id="campaign-1",
+        source_id="parlayapi:table_tennis",
+        cycle_receipt_sha256="1" * 64,
+        campaign_receipt_sha256="2" * 64,
+        provider_evidence_sha256="3" * 64,
+        provider_frame_sha256="4" * 64,
+        collector_artifact_evidence_sha256="5" * 64,
+        forward_identity=identity,
+    )
+
+    assert authority.prospective_evaluation_plan_sha256 == "b" * 64
+    assert authority.universe_sha256 == "d" * 64
+    assert authority.membership_sha256 == "e" * 64
+    assert authority.prospective_evaluation_plan_sha256 != authority.universe_sha256
+    assert len(authority.authority_sha256) == 64
+
+
+def test_composed_verification_receipt_fixes_nonpromotion_truth() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=2,
+    )
+    authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
+        campaign_id="campaign-1",
+        source_id="parlayapi:table_tennis",
+        cycle_receipt_sha256="1" * 64,
+        campaign_receipt_sha256="2" * 64,
+        provider_evidence_sha256="3" * 64,
+        provider_frame_sha256="4" * 64,
+        collector_artifact_evidence_sha256="5" * 64,
+        forward_identity=identity,
+    )
+    structural = VerificationResult(
+        ok=True,
+        codes=(VerificationCode.PASS,),
+        protocol_sha256="6" * 64,
+        terminal_root_sha256="7" * 64,
+        candidate_count=2,
+        details=(("scope", "structural"),),
+    )
+
+    receipt = binding.CampaignForwardEvidenceVerification._issue(
+        _issuance_capability=binding._VERIFICATION_ISSUANCE_CAPABILITY,
+        authority=authority,
+        structural_result=structural,
+    )
+
+    assert receipt.structural_ok is True
+    assert receipt.structural_codes == ("PASS",)
+    assert receipt.source_id == authority.source_id
+    assert receipt.campaign_receipt_sha256 == authority.campaign_receipt_sha256
+    assert receipt.campaign_cycle_authority_sha256 == authority.authority_sha256
+    assert receipt.prospective_evaluation_plan_sha256 == "b" * 64
+    assert receipt.universe_sha256 == "d" * 64
+    assert receipt.membership_sha256 == "e" * 64
+    assert receipt.verification_scope == "CYCLE_BOUND_PROVIDER_UNIVERSE_STRUCTURAL_ONLY"
+    assert receipt.provider_universe_authority_resolved is True
+    assert receipt.promotion_ready is False
+    assert receipt.real_money_ready is False
+    assert len(receipt.structural_result_sha256) == 64
+    assert len(receipt.receipt_sha256) == 64
+
+
+def test_composed_verification_receipt_rejects_true_failure_codes() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=1,
+    )
+    authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
+        campaign_id="campaign-1",
+        source_id="parlayapi:table_tennis",
+        cycle_receipt_sha256="1" * 64,
+        campaign_receipt_sha256="2" * 64,
+        provider_evidence_sha256="3" * 64,
+        provider_frame_sha256="4" * 64,
+        collector_artifact_evidence_sha256="5" * 64,
+        forward_identity=identity,
+    )
+    contradictory = VerificationResult(
+        ok=True,
+        codes=(VerificationCode.ECONOMICS_INCOMPLETE,),
+        protocol_sha256="6" * 64,
+        terminal_root_sha256=None,
+        candidate_count=1,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="ok flag conflicts",
+    ):
+        binding.CampaignForwardEvidenceVerification._issue(
+            _issuance_capability=binding._VERIFICATION_ISSUANCE_CAPABILITY,
+            authority=authority,
+            structural_result=contradictory,
+        )
+
+
+def test_composed_verification_receipt_rejects_false_pass_code() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=1,
+    )
+    authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
+        campaign_id="campaign-1",
+        source_id="parlayapi:table_tennis",
+        cycle_receipt_sha256="1" * 64,
+        campaign_receipt_sha256="2" * 64,
+        provider_evidence_sha256="3" * 64,
+        provider_frame_sha256="4" * 64,
+        collector_artifact_evidence_sha256="5" * 64,
+        forward_identity=identity,
+    )
+    contradictory = VerificationResult(
+        ok=False,
+        codes=(VerificationCode.PASS,),
+        protocol_sha256="6" * 64,
+        terminal_root_sha256=None,
+        candidate_count=1,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="ok flag conflicts",
+    ):
+        binding.CampaignForwardEvidenceVerification._issue(
+            _issuance_capability=binding._VERIFICATION_ISSUANCE_CAPABILITY,
+            authority=authority,
+            structural_result=contradictory,
+        )
+
+
+def test_composed_verification_receipt_preserves_negative_structural_verdict() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=1,
+    )
+    authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
+        campaign_id="campaign-1",
+        source_id="parlayapi:table_tennis",
+        cycle_receipt_sha256="1" * 64,
+        campaign_receipt_sha256="2" * 64,
+        provider_evidence_sha256="3" * 64,
+        provider_frame_sha256="4" * 64,
+        collector_artifact_evidence_sha256="5" * 64,
+        forward_identity=identity,
+    )
+    structural = VerificationResult(
+        ok=False,
+        codes=(VerificationCode.ECONOMICS_INCOMPLETE,),
+        protocol_sha256="6" * 64,
+        terminal_root_sha256=None,
+        candidate_count=1,
+        details=(("missing_cost", "1"),),
+    )
+
+    receipt = binding.CampaignForwardEvidenceVerification._issue(
+        _issuance_capability=binding._VERIFICATION_ISSUANCE_CAPABILITY,
+        authority=authority,
+        structural_result=structural,
+    )
+
+    assert receipt.structural_ok is False
+    assert receipt.structural_codes == ("ECONOMICS_INCOMPLETE",)
+    assert receipt.provider_universe_authority_resolved is True
+    assert receipt.promotion_ready is False
+    assert receipt.real_money_ready is False
+    assert receipt.terminal_root_sha256 is None
+
+
+def test_composed_verification_receipt_is_not_caller_constructible() -> None:
+    with pytest.raises(TypeError, match="resolver-issued"):
+        binding.CampaignForwardEvidenceVerification(
+            promotion_ready=True,
+            real_money_ready=True,
+        )
+
+
+def test_authority_private_issuer_rejects_wrong_capability() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=1,
+    )
+    with pytest.raises(TypeError, match="resolver-private"):
+        binding.CampaignForwardUniverseCycleAuthority._issue(
+            _issuance_capability=object(),
+            campaign_id="campaign-1",
+            source_id="parlayapi:table_tennis",
+            cycle_receipt_sha256="1" * 64,
+            campaign_receipt_sha256="2" * 64,
+            provider_evidence_sha256="3" * 64,
+            provider_frame_sha256="4" * 64,
+            collector_artifact_evidence_sha256="5" * 64,
+            forward_identity=identity,
+        )
+
+
+def test_verification_private_issuer_rejects_wrong_capability() -> None:
+    with pytest.raises(TypeError, match="resolver-private"):
+        binding.CampaignForwardEvidenceVerification._issue(
+            _issuance_capability=object(),
+            authority=object(),
+            structural_result=object(),
+        )
+
+
+def test_authority_private_issuer_rejects_subclass() -> None:
+    class HostileAuthority(binding.CampaignForwardUniverseCycleAuthority):
+        pass
+
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=1,
+    )
+    with pytest.raises(TypeError, match="exact canonical class"):
+        HostileAuthority._issue(
+            _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
+            campaign_id="campaign-1",
+            source_id="parlayapi:table_tennis",
+            cycle_receipt_sha256="1" * 64,
+            campaign_receipt_sha256="2" * 64,
+            provider_evidence_sha256="3" * 64,
+            provider_frame_sha256="4" * 64,
+            collector_artifact_evidence_sha256="5" * 64,
+            forward_identity=identity,
+        )
+
+
+def test_verification_private_issuer_rejects_subclass() -> None:
+    class HostileVerification(binding.CampaignForwardEvidenceVerification):
+        pass
+
+    with pytest.raises(TypeError, match="exact canonical class"):
+        HostileVerification._issue(
+            _issuance_capability=binding._VERIFICATION_ISSUANCE_CAPABILITY,
+            authority=object(),
+            structural_result=object(),
+        )
+
+
+def test_saved_verifier_rejects_issuance_capability_rebind_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(binding, "_VERIFICATION_ISSUANCE_CAPABILITY", object())
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
+def test_saved_verifier_rejects_capability_and_witness_double_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    hostile = object()
+    monkeypatch.setattr(binding, "_VERIFICATION_ISSUANCE_CAPABILITY", hostile)
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_VERIFICATION_ISSUANCE_CAPABILITY",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
+def test_saved_resolver_rejects_authority_issuance_capability_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    monkeypatch.setattr(binding, "_AUTHORITY_ISSUANCE_CAPABILITY", object())
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
+def test_saved_resolver_rejects_authority_capability_and_witness_double_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    hostile = object()
+    monkeypatch.setattr(binding, "_AUTHORITY_ISSUANCE_CAPABILITY", hostile)
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
+def test_composed_verification_issuer_rebind_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    def hostile(cls, **_kwargs):
+        del cls
+        called.append("issuer")
+        raise AssertionError("hostile composed verification issuer executed")
+
+    monkeypatch.setattr(
+        binding.CampaignForwardEvidenceVerification,
+        "_issue",
+        classmethod(hostile),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="forward verification issuer is rebound",
+    ):
+        binding._require_dispatch_integrity()
+
+    assert called == []
+
+
+def test_composed_verification_truth_field_rebind_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        binding.CampaignForwardEvidenceVerification,
+        "promotion_ready",
+        property(lambda _self: True),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="forward verification field descriptor changed: promotion_ready",
+    ):
+        binding._require_dispatch_integrity()
+
+
+def test_public_verifier_rejects_scope_constant_rebind_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(
+        binding,
+        "_COMPOSED_VERIFICATION_SCOPE",
+        "PROMOTION_READY",
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
+def test_forward_public_seals_do_not_expose_unsealed_delegates() -> None:
+    for sealed in (
+        binding.resolve_campaign_forward_universe_cycle_authority,
+        binding.authorize_campaign_forward_source_receipts,
+        binding.verify_campaign_forward_evidence,
+    ):
+        assert not hasattr(sealed, "__wrapped__")
+
+
+def test_positive_resolver_uses_captured_authority_issuer_not_live_class_lookup() -> None:
+    sealed = binding.resolve_campaign_forward_universe_cycle_authority
+    closure = {
+        name: cell.cell_contents
+        for name, cell in zip(sealed.__code__.co_freevars, sealed.__closure__ or ())
+    }
+    implementation = closure["expected_resolve"]
+
+    assert "_CANONICAL_AUTHORITY_ISSUER_FUNCTION" in implementation.__code__.co_names
+    assert "_CANONICAL_AUTHORITY_CLASS" in implementation.__code__.co_names
+    assert "_CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY" in implementation.__code__.co_names
+    assert "_issue" not in implementation.__code__.co_names
+
+
+def test_authority_issuer_rebind_fails_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    def hostile(cls, **_kwargs):
+        del cls
+        called.append("issuer")
+        raise AssertionError("hostile authority issuer executed")
+
+    monkeypatch.setattr(
+        binding.CampaignForwardUniverseCycleAuthority,
+        "_issue",
+        classmethod(hostile),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority issuer is rebound",
+    ):
+        binding._require_dispatch_integrity()
+
+    assert called == []
+
+
+def test_authority_issuer_in_place_code_mutation_fails_closed() -> None:
+    descriptor = inspect.getattr_static(
+        binding.CampaignForwardUniverseCycleAuthority,
+        "_issue",
+    )
+    target = descriptor.__func__
+    original_code = target.__code__
+
+    def hostile(cls, **_kwargs):
+        del cls
+        raise AssertionError("hostile authority issuer code executed")
+
+    assert original_code.co_freevars == hostile.__code__.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="authority issuer is rebound",
+        ):
+            binding._require_dispatch_integrity()
+    finally:
+        target.__code__ = original_code
+
+
+def test_authority_field_descriptor_rebind_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        binding.CampaignForwardUniverseCycleAuthority,
+        "campaign_id",
+        property(lambda _self: "forged-campaign"),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority field descriptor changed: campaign_id",
+    ):
+        binding._require_dispatch_integrity()
+
+
+def test_artifact_kind_rebind_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(binding, "ARTIFACT_KIND", "forged-artifact-kind")
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority class or artifact kind changed",
+    ):
+        binding._require_dispatch_integrity()
+
+
+def test_verify_rejects_rebound_authorizer_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+    verifier = binding.verify_campaign_forward_evidence
+
+    def hostile(**_kwargs):
+        called.append("authorizer")
+        raise AssertionError("hostile authorizer executed")
+
+    monkeypatch.setattr(
+        binding,
+        "authorize_campaign_forward_source_receipts",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="public verification surface changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+    assert called == []
+
+
+def test_verify_rejects_rebound_structural_verifier_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    def hostile(_evidence):
+        called.append("verifier")
+        raise AssertionError("hostile structural verifier executed")
+
+    monkeypatch.setattr(binding, "_VERIFY_FORWARD_EVIDENCE", hostile)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="dispatch authority is rebound: _VERIFY_FORWARD_EVIDENCE",
+    ):
+        binding._require_dispatch_integrity()
+
+    assert called == []
+
+
+def test_public_verifier_rejects_verification_code_rebind_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(binding, "VerificationCode", object)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed|authority class or artifact kind changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
+def test_public_verifier_rejects_verification_code_and_witness_double_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+
+    class HostileCode:
+        PASS = object()
+
+    monkeypatch.setattr(binding, "VerificationCode", HostileCode)
+    monkeypatch.setattr(binding, "_CANONICAL_VERIFICATION_CODE", HostileCode)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
+def test_verify_rejects_rebound_structural_evidence_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(binding, "CampaignEvidence", object)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
+def test_public_verifier_rejects_campaign_evidence_descriptor_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(
+        binding.CampaignEvidence,
+        "authoritative_receipts",
+        property(lambda _self: ()),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
+def test_public_verifier_rejects_campaign_evidence_init_rebind_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    verifier = binding.verify_campaign_forward_evidence
+
+    def hostile_init(self, *args, **kwargs):
+        del self, args, kwargs
+        calls.append("init")
+        raise AssertionError("hostile CampaignEvidence init executed")
+
+    monkeypatch.setattr(binding.CampaignEvidence, "__init__", hostile_init)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+    assert calls == []
+
+
+def test_public_verifier_rejects_verification_result_descriptor_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(
+        binding.VerificationResult,
+        "ok",
+        property(lambda _self: True),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
+def test_authorize_rejects_rebound_resolver_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    def hostile(**_kwargs):
+        called.append("resolver")
+        raise AssertionError("hostile composite resolver executed")
+
+    monkeypatch.setattr(
+        binding,
+        "resolve_campaign_forward_universe_cycle_authority",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle public authority surface changed",
+    ):
+        binding.authorize_campaign_forward_source_receipts(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+            opportunities=(),
+        )
+
+    assert called == []
+
+
+
+def test_authorize_rejects_rebound_integrity_guard_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    def hostile() -> None:
+        called.append("guard")
+        raise AssertionError("hostile integrity guard executed")
+
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    monkeypatch.setattr(binding, "_require_dispatch_integrity", hostile)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle integrity guard changed",
+    ):
+        authorizer(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+            opportunities=(),
+        )
+
+    assert called == []
+
+
+def test_authorize_rejects_rebound_reflection_module_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    monkeypatch.setattr(binding, "inspect", object())
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle reflection dispatch changed",
+    ):
+        authorizer(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+            opportunities=(),
+        )
+
+
+def test_authorize_rejects_reflection_helper_rebind_before_execution() -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    helper_globals = binding._CANONICAL_GETATTR_STATIC_GLOBALS
+    name, original, _code = next(
+        item
+        for item in binding._CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
+        if item[2] is not None
+    )
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(name)
+        raise AssertionError("hostile inspect helper executed")
+
+    helper_globals[name] = hostile
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="campaign forward-cycle reflection dispatch changed",
+        ):
+            authorizer(
+                precommit_locator=None,
+                collector_store=None,
+                source_spec=None,
+                cycle_receipt=None,
+                provider_evidence_store=None,
+                universe_store=None,
+                protocol=None,
+                event_lifecycle=None,
+                opportunities=(),
+            )
+    finally:
+        helper_globals[name] = original
+
+    assert hostile_calls == []
+
+
+def test_authorize_rejects_reflection_helper_code_mutation_before_execution() -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    _name, helper, original_code = next(
+        item
+        for item in binding._CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
+        if item[2] is not None and not item[2].co_freevars
+    )
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("hostile inspect helper executed")
+
+    assert not hostile.__code__.co_freevars
+    helper.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="campaign forward-cycle reflection dispatch changed",
+        ):
+            authorizer(
+                precommit_locator=None,
+                collector_store=None,
+                source_spec=None,
+                cycle_receipt=None,
+                provider_evidence_store=None,
+                universe_store=None,
+                protocol=None,
+                event_lifecycle=None,
+                opportunities=(),
+            )
+    finally:
+        helper.__code__ = original_code
+
+
+def test_resolver_rejects_reflection_dependency_witness_rebind_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS",
+        (),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle reflection dispatch changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
+def test_saved_resolver_rejects_shadowed_any_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    hostile_calls: list[str] = []
+
+    def hostile_any(*_args, **_kwargs):
+        hostile_calls.append("any")
+        raise AssertionError("hostile any executed")
+
+    monkeypatch.setattr(binding, "any", hostile_any, raising=False)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle builtin dispatch shadowed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert hostile_calls == []
+
+
+def test_saved_authorizer_rejects_shadowed_tuple_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    hostile_calls: list[str] = []
+
+    def hostile_tuple(*_args, **_kwargs):
+        hostile_calls.append("tuple")
+        raise AssertionError("hostile tuple executed")
+
+    monkeypatch.setattr(binding, "tuple", hostile_tuple, raising=False)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle builtin dispatch shadowed",
+    ):
+        authorizer(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+            opportunities=(),
+        )
+
+    assert hostile_calls == []
+
+
+def test_private_integrity_guard_rejects_shadowed_isinstance_without_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls: list[str] = []
+
+    def hostile_isinstance(*_args, **_kwargs):
+        hostile_calls.append("isinstance")
+        raise AssertionError("hostile isinstance executed")
+
+    monkeypatch.setattr(binding, "isinstance", hostile_isinstance, raising=False)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle builtin dispatch shadowed",
+    ):
+        binding._require_dispatch_integrity()
+
+    assert hostile_calls == []
+
+
+def test_saved_resolver_rejects_shadowed_type_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    hostile_calls: list[str] = []
+
+    def hostile_type(_value):
+        hostile_calls.append("type")
+        raise AssertionError("hostile type executed")
+
+    monkeypatch.setattr(binding, "type", hostile_type, raising=False)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle builtin dispatch shadowed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert hostile_calls == []
+
+
+def test_saved_authorizer_rejects_shadowed_getattr_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    hostile_calls: list[str] = []
+
+    def hostile_getattr(*_args, **_kwargs):
+        hostile_calls.append("getattr")
+        raise AssertionError("hostile getattr executed")
+
+    monkeypatch.setattr(binding, "getattr", hostile_getattr, raising=False)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle builtin dispatch shadowed",
+    ):
+        authorizer(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+            opportunities=(),
+        )
+
+    assert hostile_calls == []
+
+
+def test_private_integrity_guard_rejects_shadowed_builtins_without_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append("builtin")
+        raise AssertionError("hostile builtin executed")
+
+    monkeypatch.setattr(binding, "type", hostile, raising=False)
+    monkeypatch.setattr(binding, "getattr", hostile, raising=False)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle builtin dispatch shadowed",
+    ):
+        binding._require_dispatch_integrity()
+
+    assert hostile_calls == []
+
+
+def test_private_integrity_guard_does_not_dispatch_through_shadowed_globals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls: list[str] = []
+
+    def hostile_globals():
+        hostile_calls.append("globals")
+        raise AssertionError("hostile globals executed")
+
+    monkeypatch.setattr(binding, "globals", hostile_globals, raising=False)
+
+    binding._require_dispatch_integrity()
+
+    assert hostile_calls == []
+
+
+def test_saved_resolver_does_not_dispatch_through_shadowed_globals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    hostile_calls: list[str] = []
+
+    def hostile_globals():
+        hostile_calls.append("globals")
+        raise AssertionError("hostile globals executed")
+
+    monkeypatch.setattr(binding, "globals", hostile_globals, raising=False)
+
+    with pytest.raises(TypeError, match="precommit_locator must be exact"):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert hostile_calls == []
+
+
+def test_saved_resolver_rejects_canonical_module_mapping_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    monkeypatch.setattr(binding, "_CANONICAL_MODULE_GLOBALS", {})
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle reflection dispatch changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
+def test_private_integrity_guard_rejects_reflection_helper_rebind() -> None:
+    helper_globals = binding._CANONICAL_GETATTR_STATIC_GLOBALS
+    name, original, _code = next(
+        item
+        for item in binding._CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
+        if item[2] is not None
+    )
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("hostile inspect helper executed")
+
+    helper_globals[name] = hostile
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="campaign forward-cycle reflection dispatch changed",
+        ):
+            binding._require_dispatch_integrity()
+    finally:
+        helper_globals[name] = original
+
+
+def test_saved_resolver_rejects_public_surface_rebind_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+
+    def hostile(**_kwargs):
+        called.append("resolver")
+        raise AssertionError("hostile public resolver executed")
+
+    monkeypatch.setattr(
+        binding,
+        "resolve_campaign_forward_universe_cycle_authority",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle resolver surface changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert called == []
+
+
+def test_saved_authorizer_rejects_public_surface_rebind_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+    authorizer = binding.authorize_campaign_forward_source_receipts
+
+    def hostile(**_kwargs):
+        called.append("authorizer")
+        raise AssertionError("hostile public authorizer executed")
+
+    monkeypatch.setattr(
+        binding,
+        "authorize_campaign_forward_source_receipts",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle public authority surface changed",
+    ):
+        authorizer(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+            opportunities=(),
+        )
+
+    assert called == []
+
+
+def test_saved_resolver_rejects_internal_witness_table_erasure_before_hostile_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+
+    def hostile(*_args, **_kwargs):
+        called.append("chronology")
+        raise AssertionError("hostile chronology helper executed")
+
+    monkeypatch.setattr(binding, "_INTERNAL_CALLABLES", ())
+    monkeypatch.setattr(
+        binding,
+        "_require_cycle_observation_chronology",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="witness tables changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert called == []
+
+
+def test_saved_authorizer_rejects_provider_witness_map_in_place_mutation() -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    original = dict(binding._PROVIDER_UNIVERSE_VALUES)
+    binding._PROVIDER_UNIVERSE_VALUES.clear()
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="witness tables changed",
+        ):
+            authorizer(
+                precommit_locator=None,
+                collector_store=None,
+                source_spec=None,
+                cycle_receipt=None,
+                provider_evidence_store=None,
+                universe_store=None,
+                protocol=None,
+                event_lifecycle=None,
+                opportunities=(),
+            )
+    finally:
+        binding._PROVIDER_UNIVERSE_VALUES.update(original)
+
+
+def test_saved_resolver_rejects_schedule_deadline_dispatch_rebind_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    monkeypatch.setattr(
+        binding,
+        "_SCHEDULE_DUE_AT",
+        lambda **_kwargs: "2100-01-08T06:00:00+00:00",
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="dispatch authority is rebound: _SCHEDULE_DUE_AT",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
+def test_saved_resolver_rejects_datetime_primitive_rebind_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    monkeypatch.setattr(binding, "datetime", object())
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="chronology/digest primitives changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
+def test_saved_authorizer_rejects_sha256_primitive_mutation_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    original_sha256 = binding.hashlib.sha256
+    hostile_calls: list[str] = []
+
+    def hostile_sha256(*_args, **_kwargs):
+        hostile_calls.append("sha256")
+        raise AssertionError("hostile sha256 executed")
+
+    monkeypatch.setattr(binding.hashlib, "sha256", hostile_sha256)
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="chronology/digest primitives changed",
+        ):
+            authorizer(
+                precommit_locator=None,
+                collector_store=None,
+                source_spec=None,
+                cycle_receipt=None,
+                provider_evidence_store=None,
+                universe_store=None,
+                protocol=None,
+                event_lifecycle=None,
+                opportunities=(),
+            )
+    finally:
+        monkeypatch.setattr(binding.hashlib, "sha256", original_sha256)
+
+    assert hostile_calls == []
+
+
+def test_private_integrity_guard_rejects_json_module_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(binding, "json", object())
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="chronology/digest primitives changed",
+    ):
+        binding._require_dispatch_integrity()
+
+
+def test_saved_resolver_rejects_issuer_and_witness_double_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    hostile_calls: list[str] = []
+
+    def hostile(cls, **_kwargs):
+        del cls
+        hostile_calls.append("issuer")
+        raise AssertionError("hostile authority issuer executed")
+
+    monkeypatch.setattr(
+        binding.CampaignForwardUniverseCycleAuthority,
+        "_issue",
+        classmethod(hostile),
+    )
+    hostile_surface = inspect.getattr_static(
+        binding.CampaignForwardUniverseCycleAuthority,
+        "_issue",
+    )
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_AUTHORITY_ISSUER",
+        hostile_surface,
+    )
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_AUTHORITY_ISSUER_FUNCTION",
+        hostile_surface.__func__,
+    )
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_AUTHORITY_ISSUER_CODE",
+        hostile_surface.__func__.__code__,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert hostile_calls == []
+
+
+def test_saved_resolver_rejects_inception_window_descriptor_replacement() -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    original = vars(CampaignInceptionReceipt)["observation_not_after"]
+
+    type.__setattr__(
+        CampaignInceptionReceipt,
+        "observation_not_after",
+        property(lambda _self: "2200-01-01T00:00:00+00:00"),
+    )
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="inception receipt field descriptor changed",
+        ):
+            resolver(
+                precommit_locator=None,
+                collector_store=None,
+                source_spec=None,
+                cycle_receipt=None,
+                provider_evidence_store=None,
+                universe_store=None,
+                protocol=None,
+                event_lifecycle=None,
+            )
+    finally:
+        type.__setattr__(
+            CampaignInceptionReceipt,
+            "observation_not_after",
+            original,
+        )
+
+
+def test_forward_protocol_digest_descriptor_rebind_fails_closed(monkeypatch):
+    called = []
+    def hostile(_self):
+        called.append("protocol_sha256")
+        raise AssertionError("hostile protocol digest executed")
+    monkeypatch.setattr(ForwardEvidenceProtocolEnvelope, "protocol_sha256", property(hostile))
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="forward protocol executable surface changed",
+    ):
+        binding._require_dispatch_integrity()
+    assert called == []
+
+
+def test_forward_protocol_field_descriptor_rebind_fails_closed(monkeypatch):
+    monkeypatch.setattr(
+        ForwardEvidenceProtocolEnvelope,
+        "campaign_id",
+        property(lambda _self: "hostile-campaign"),
+    )
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="forward protocol field descriptor changed: campaign_id",
+    ):
+        binding._require_dispatch_integrity()
+
+
+def test_forward_protocol_payload_code_mutation_fails_closed():
+    method = ForwardEvidenceProtocolEnvelope.canonical_payload
+    original_code = method.__code__
+    def hostile(_self):
+        raise AssertionError("hostile protocol payload executed")
+    method.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="forward protocol executable surface changed",
+        ):
+            binding._require_dispatch_integrity()
+    finally:
+        method.__code__ = original_code

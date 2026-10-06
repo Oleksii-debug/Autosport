@@ -22,6 +22,7 @@ from .collector_sqlite_store import (
     _canonical_delta_json,
     _payload_digest,
 )
+from .json_integrity import strict_json_loads
 
 
 _SQLITE_HEADER = b"SQLite format 3\x00"
@@ -47,11 +48,25 @@ _CYCLE_START_IMMUTABLE_UPDATE_TRIGGER = "collector_cycle_starts_immutable_update
 _CYCLE_START_IMMUTABLE_DELETE_TRIGGER = "collector_cycle_starts_immutable_delete_v1"
 _CYCLE_TERMINAL_IMMUTABLE_UPDATE_TRIGGER = "collector_cycle_terminals_immutable_update_v1"
 _CYCLE_TERMINAL_IMMUTABLE_DELETE_TRIGGER = "collector_cycle_terminals_immutable_delete_v1"
+_CYCLE_ARTIFACT_IMMUTABLE_UPDATE_TRIGGER = "collector_cycle_artifacts_immutable_update_v1"
+_CYCLE_ARTIFACT_IMMUTABLE_DELETE_TRIGGER = "collector_cycle_artifacts_immutable_delete_v1"
 _SCHEDULE_POLICY = "fixed_interval_v1"
 _SCHEDULE_IMMUTABLE_UPDATE_TRIGGER = "collector_schedules_immutable_update_v1"
 _SCHEDULE_IMMUTABLE_DELETE_TRIGGER = "collector_schedules_immutable_delete_v1"
 _SCHEDULE_SLOT_IMMUTABLE_UPDATE_TRIGGER = "collector_schedule_slots_immutable_update_v1"
 _SCHEDULE_SLOT_IMMUTABLE_DELETE_TRIGGER = "collector_schedule_slots_immutable_delete_v1"
+_SCHEDULE_START_GATE_IMMUTABLE_UPDATE_TRIGGER = (
+    "collector_schedule_start_gates_immutable_update_v1"
+)
+_SCHEDULE_START_GATE_IMMUTABLE_DELETE_TRIGGER = (
+    "collector_schedule_start_gates_immutable_delete_v1"
+)
+_SCHEDULE_START_AUTH_IMMUTABLE_UPDATE_TRIGGER = (
+    "collector_schedule_start_authorizations_immutable_update_v1"
+)
+_SCHEDULE_START_AUTH_IMMUTABLE_DELETE_TRIGGER = (
+    "collector_schedule_start_authorizations_immutable_delete_v1"
+)
 _MAX_SCHEDULE_EVIDENCE_SLOTS = 1_000_000
 
 
@@ -192,6 +207,18 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "REFERENCES collector_cycle_starts_v1(source_id, cycle_seq))"
             )
             connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_cycle_artifacts_v1 ("
+                "source_id TEXT NOT NULL,"
+                "cycle_seq INTEGER NOT NULL CHECK(cycle_seq > 0),"
+                "artifact_id TEXT NOT NULL,"
+                "artifact_kind TEXT NOT NULL,"
+                "artifact_sha256 TEXT NOT NULL,"
+                "PRIMARY KEY(source_id, cycle_seq, artifact_id),"
+                "UNIQUE(artifact_id),"
+                "FOREIGN KEY(source_id, cycle_seq) "
+                "REFERENCES collector_cycle_starts_v1(source_id, cycle_seq))"
+            )
+            connection.execute(
                 "CREATE TABLE IF NOT EXISTS collector_schedules_v1 ("
                 "source_id TEXT NOT NULL,"
                 "run_id TEXT NOT NULL,"
@@ -252,6 +279,28 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "FOREIGN KEY(source_id, cycle_seq) "
                 "REFERENCES collector_cycle_starts_v1(source_id, cycle_seq))"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_schedule_start_gates_v1 ("
+                "source_id TEXT NOT NULL,"
+                "run_id TEXT NOT NULL,"
+                "schedule_id TEXT NOT NULL,"
+                "gate_binding_sha256 TEXT NOT NULL,"
+                "PRIMARY KEY(source_id, run_id),"
+                "UNIQUE(schedule_id),"
+                "FOREIGN KEY(source_id, run_id) "
+                "REFERENCES collector_schedules_v1(source_id, run_id))"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_schedule_start_authorizations_v1 ("
+                "source_id TEXT NOT NULL,"
+                "run_id TEXT NOT NULL,"
+                "schedule_id TEXT NOT NULL,"
+                "gate_binding_sha256 TEXT NOT NULL,"
+                "authorization_sha256 TEXT NOT NULL,"
+                "PRIMARY KEY(source_id, run_id),"
+                "FOREIGN KEY(source_id, run_id) "
+                "REFERENCES collector_schedule_start_gates_v1(source_id, run_id))"
+            )
             for trigger_name, table_name, timing in (
                 (_SCHEDULE_IMMUTABLE_UPDATE_TRIGGER, "collector_schedules_v1", "UPDATE"),
                 (_SCHEDULE_IMMUTABLE_DELETE_TRIGGER, "collector_schedules_v1", "DELETE"),
@@ -263,6 +312,26 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 (
                     _SCHEDULE_SLOT_IMMUTABLE_DELETE_TRIGGER,
                     "collector_schedule_slots_v1",
+                    "DELETE",
+                ),
+                (
+                    _SCHEDULE_START_GATE_IMMUTABLE_UPDATE_TRIGGER,
+                    "collector_schedule_start_gates_v1",
+                    "UPDATE",
+                ),
+                (
+                    _SCHEDULE_START_GATE_IMMUTABLE_DELETE_TRIGGER,
+                    "collector_schedule_start_gates_v1",
+                    "DELETE",
+                ),
+                (
+                    _SCHEDULE_START_AUTH_IMMUTABLE_UPDATE_TRIGGER,
+                    "collector_schedule_start_authorizations_v1",
+                    "UPDATE",
+                ),
+                (
+                    _SCHEDULE_START_AUTH_IMMUTABLE_DELETE_TRIGGER,
+                    "collector_schedule_start_authorizations_v1",
                     "DELETE",
                 ),
             ):
@@ -288,6 +357,15 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     f"CREATE TRIGGER IF NOT EXISTS {trigger_name} "
                     f"BEFORE {timing} ON collector_cycle_terminals_v1 BEGIN "
                     "SELECT RAISE(ABORT, 'collector cycle terminals are immutable'); END"
+                )
+            for trigger_name, timing in (
+                (_CYCLE_ARTIFACT_IMMUTABLE_UPDATE_TRIGGER, "UPDATE"),
+                (_CYCLE_ARTIFACT_IMMUTABLE_DELETE_TRIGGER, "DELETE"),
+            ):
+                connection.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS {trigger_name} "
+                    f"BEFORE {timing} ON collector_cycle_artifacts_v1 BEGIN "
+                    "SELECT RAISE(ABORT, 'collector cycle artifacts are immutable'); END"
                 )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS collector_delta_tombstones_v1 ("
@@ -395,6 +473,17 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         return value
 
     @staticmethod
+    def _schedule_authority_sha256(value: object, name: str) -> str:
+        if (
+            type(value) is not str
+            or len(value) != 64
+            or value != value.lower()
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError(f"{name} must be canonical lowercase SHA-256 hex")
+        return value
+
+    @staticmethod
     def _schedule_evaluation_window(
         start_slot_ordinal: object,
         end_slot_ordinal: object,
@@ -484,8 +573,16 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         max_items: int,
         evaluation_start_slot_ordinal: int | None = None,
         evaluation_end_slot_ordinal: int | None = None,
+        start_gate_binding_sha256: str | None = None,
     ) -> dict[str, object]:
-        """Create or re-resolve one immutable prospective schedule for a durable run."""
+        """Create or re-resolve one immutable prospective schedule for a durable run.
+
+        When start_gate_binding_sha256 is supplied, the gate is installed in the
+        same BEGIN IMMEDIATE transaction that creates/re-resolves the schedule. The
+        gate can only be installed while the durable run has zero collector STARTs.
+        Once present, every scheduled START remains fail-closed until an exact
+        authorization is durably appended for that same schedule/gate binding.
+        """
 
         source_id = _text(source_id, "source_id")
         run_id = _text(run_id, "run_id")
@@ -493,6 +590,14 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         canonical_anchor = _instant(anchor_at, "anchor_at").isoformat()
         interval_text = self._schedule_interval_text(interval_seconds)
         canonical_max_items = self._schedule_max_items(max_items)
+        canonical_start_gate = (
+            None
+            if start_gate_binding_sha256 is None
+            else self._schedule_authority_sha256(
+                start_gate_binding_sha256,
+                "start_gate_binding_sha256",
+            )
+        )
         evaluation_start, evaluation_end = self._schedule_evaluation_window(
             evaluation_start_slot_ordinal,
             evaluation_end_slot_ordinal,
@@ -610,6 +715,52 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                         "within a durable run"
                     )
                 schedule_id = row["schedule_id"]
+
+            gate_row = connection.execute(
+                "SELECT schedule_id, gate_binding_sha256 "
+                "FROM collector_schedule_start_gates_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if gate_row is not None:
+                stored_gate = self._schedule_authority_sha256(
+                    gate_row["gate_binding_sha256"],
+                    "stored gate_binding_sha256",
+                )
+                if gate_row["schedule_id"] != schedule_id:
+                    raise ValueError(
+                        "collector schedule START gate references another schedule"
+                    )
+                if (
+                    canonical_start_gate is not None
+                    and canonical_start_gate != stored_gate
+                ):
+                    raise ValueError(
+                        "collector schedule START gate binding cannot change "
+                        "within a durable run"
+                    )
+            elif canonical_start_gate is not None:
+                prior_start = connection.execute(
+                    "SELECT 1 FROM collector_cycle_starts_v1 "
+                    "WHERE source_id=? AND run_id=? LIMIT 1",
+                    (source_id, run_id),
+                ).fetchone()
+                if prior_start is not None:
+                    raise ValueError(
+                        "collector schedule START gate cannot be installed "
+                        "after collector START"
+                    )
+                connection.execute(
+                    "INSERT INTO collector_schedule_start_gates_v1("
+                    "source_id, run_id, schedule_id, gate_binding_sha256"
+                    ") VALUES(?,?,?,?)",
+                    (
+                        source_id,
+                        run_id,
+                        schedule_id,
+                        canonical_start_gate,
+                    ),
+                )
             connection.commit()
             return {
                 "schema_version": 4,
@@ -628,6 +779,171 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             if connection.in_transaction:
                 connection.rollback()
             raise ValueError("cannot establish collector schedule authority") from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _collector_schedule_start_gate_status(
+        self,
+        *,
+        source_id: str,
+        run_id: str,
+    ) -> dict[str, object] | None:
+        """Return exact durable gate state without minting schedule/START authority."""
+
+        source_id = _text(source_id, "source_id")
+        run_id = _text(run_id, "run_id")
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT g.schedule_id, g.gate_binding_sha256, "
+                "a.schedule_id AS authorization_schedule_id, "
+                "a.gate_binding_sha256 AS authorization_gate_binding_sha256, "
+                "a.authorization_sha256 "
+                "FROM collector_schedule_start_gates_v1 AS g "
+                "LEFT JOIN collector_schedule_start_authorizations_v1 AS a "
+                "ON a.source_id=g.source_id AND a.run_id=g.run_id "
+                "WHERE g.source_id=? AND g.run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if row is None:
+                return None
+            schedule_id = self._schedule_authority_sha256(
+                row["schedule_id"],
+                "stored schedule_id",
+            )
+            gate_binding = self._schedule_authority_sha256(
+                row["gate_binding_sha256"],
+                "stored gate_binding_sha256",
+            )
+            authorization = row["authorization_sha256"]
+            if authorization is not None:
+                authorization_schedule_id = self._schedule_authority_sha256(
+                    row["authorization_schedule_id"],
+                    "stored authorization schedule_id",
+                )
+                authorization_gate_binding = self._schedule_authority_sha256(
+                    row["authorization_gate_binding_sha256"],
+                    "stored authorization gate_binding_sha256",
+                )
+                authorization = self._schedule_authority_sha256(
+                    authorization,
+                    "stored authorization_sha256",
+                )
+                if (
+                    authorization_schedule_id != schedule_id
+                    or authorization_gate_binding != gate_binding
+                ):
+                    raise ValueError(
+                        "collector schedule START authorization identity is corrupt"
+                    )
+            return {
+                "schedule_id": schedule_id,
+                "gate_binding_sha256": gate_binding,
+                "authorization_sha256": authorization,
+            }
+        finally:
+            connection.close()
+
+    def _authorize_collector_schedule_start_gate(
+        self,
+        *,
+        source_id: str,
+        run_id: str,
+        schedule_id: str,
+        gate_binding_sha256: str,
+        authorization_sha256: str,
+    ) -> dict[str, object]:
+        """Append the one durable authorization that permits scheduled START.
+
+        This low-level store seam deliberately does not decide what constitutes a
+        valid campaign receipt. The campaign-inception composition must first
+        re-resolve its product authority and pass its exact receipt digest here.
+        """
+
+        source_id = _text(source_id, "source_id")
+        run_id = _text(run_id, "run_id")
+        schedule_id = self._schedule_authority_sha256(schedule_id, "schedule_id")
+        gate_binding = self._schedule_authority_sha256(
+            gate_binding_sha256,
+            "gate_binding_sha256",
+        )
+        authorization = self._schedule_authority_sha256(
+            authorization_sha256,
+            "authorization_sha256",
+        )
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            gate = connection.execute(
+                "SELECT schedule_id, gate_binding_sha256 "
+                "FROM collector_schedule_start_gates_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if gate is None:
+                raise ValueError("collector schedule START gate is missing")
+            stored_gate = self._schedule_authority_sha256(
+                gate["gate_binding_sha256"],
+                "stored gate_binding_sha256",
+            )
+            if gate["schedule_id"] != schedule_id or stored_gate != gate_binding:
+                raise ValueError(
+                    "collector schedule START gate identity does not match authorization"
+                )
+            prior_start = connection.execute(
+                "SELECT 1 FROM collector_cycle_starts_v1 "
+                "WHERE source_id=? AND run_id=? LIMIT 1",
+                (source_id, run_id),
+            ).fetchone()
+            if prior_start is not None:
+                raise ValueError(
+                    "collector schedule START authorization cannot follow collector START"
+                )
+            existing = connection.execute(
+                "SELECT schedule_id, gate_binding_sha256, authorization_sha256 "
+                "FROM collector_schedule_start_authorizations_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO collector_schedule_start_authorizations_v1("
+                    "source_id, run_id, schedule_id, gate_binding_sha256, "
+                    "authorization_sha256"
+                    ") VALUES(?,?,?,?,?)",
+                    (
+                        source_id,
+                        run_id,
+                        schedule_id,
+                        gate_binding,
+                        authorization,
+                    ),
+                )
+            elif (
+                existing["schedule_id"] != schedule_id
+                or existing["gate_binding_sha256"] != gate_binding
+                or existing["authorization_sha256"] != authorization
+            ):
+                raise ValueError(
+                    "collector schedule START authorization is already bound "
+                    "to different authority"
+                )
+            connection.commit()
+            return {
+                "schedule_id": schedule_id,
+                "gate_binding_sha256": gate_binding,
+                "authorization_sha256": authorization,
+            }
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError(
+                "cannot durably authorize collector schedule START gate"
+            ) from exc
         except Exception:
             if connection.in_transaction:
                 connection.rollback()
@@ -777,6 +1093,42 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             )
             if schedule["schedule_id"] != expected_id:
                 raise ValueError("collector schedule identity digest mismatch")
+            gate = connection.execute(
+                "SELECT schedule_id, gate_binding_sha256 "
+                "FROM collector_schedule_start_gates_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if gate is not None:
+                stored_gate = self._schedule_authority_sha256(
+                    gate["gate_binding_sha256"],
+                    "stored gate_binding_sha256",
+                )
+                if gate["schedule_id"] != expected_id:
+                    raise ValueError(
+                        "collector schedule START gate references another schedule"
+                    )
+                authorization = connection.execute(
+                    "SELECT schedule_id, gate_binding_sha256, authorization_sha256 "
+                    "FROM collector_schedule_start_authorizations_v1 "
+                    "WHERE source_id=? AND run_id=?",
+                    (source_id, run_id),
+                ).fetchone()
+                if authorization is None:
+                    raise ValueError(
+                        "collector schedule START gate is not durably authorized"
+                    )
+                if (
+                    authorization["schedule_id"] != expected_id
+                    or authorization["gate_binding_sha256"] != stored_gate
+                ):
+                    raise ValueError(
+                        "collector schedule START authorization is corrupt"
+                    )
+                self._schedule_authority_sha256(
+                    authorization["authorization_sha256"],
+                    "stored authorization_sha256",
+                )
             expected_due = self._collector_schedule_due_at(
                 anchor_at=schedule["anchor_at"],
                 interval_seconds=schedule["interval_seconds"],
@@ -1075,6 +1427,24 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            gate = connection.execute(
+                "SELECT schedule_id, gate_binding_sha256 "
+                "FROM collector_schedule_start_gates_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if gate is not None:
+                self._schedule_authority_sha256(
+                    gate["schedule_id"],
+                    "stored schedule_id",
+                )
+                self._schedule_authority_sha256(
+                    gate["gate_binding_sha256"],
+                    "stored gate_binding_sha256",
+                )
+                raise ValueError(
+                    "gated collector run requires canonical scheduled START authority"
+                )
             row = connection.execute(
                 "SELECT MAX(cycle_seq) FROM collector_cycle_starts_v1 "
                 "WHERE source_id=?",
@@ -1093,6 +1463,105 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             if connection.in_transaction:
                 connection.rollback()
             raise ValueError("cannot append collector cycle START evidence") from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _record_collector_cycle_observation_artifact(
+        self,
+        *,
+        source_id: str,
+        cycle_seq: int,
+        artifact_kind: str,
+        artifact_sha256: str,
+    ) -> dict[str, object]:
+        """Append one immutable non-market observation artifact to an open cycle.
+
+        This surface is intentionally separate from CollectorDelta: a complete-board
+        provider snapshot is source-observation evidence, not a synthetic desktop
+        MarketEvent.  The artifact becomes positive campaign evidence only after the
+        same cycle receives a SUCCESS terminal that cryptographically includes it.
+        """
+
+        source_id = _text(source_id, "source_id")
+        artifact_kind = _text(artifact_kind, "artifact_kind")
+        artifact_sha256 = self._schedule_authority_sha256(
+            artifact_sha256,
+            "artifact_sha256",
+        )
+        if isinstance(cycle_seq, bool) or not isinstance(cycle_seq, int) or cycle_seq <= 0:
+            raise ValueError("cycle_seq must be a positive integer")
+        artifact_id = hashlib.sha256(
+            self._cycle_terminal_payload_json(
+                {
+                    "schema": "autosport.collector_cycle_observation_artifact",
+                    "schema_version": 1,
+                    "source_id": source_id,
+                    "cycle_seq": cycle_seq,
+                    "artifact_kind": artifact_kind,
+                    "artifact_sha256": artifact_sha256,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            start = connection.execute(
+                "SELECT 1 FROM collector_cycle_starts_v1 "
+                "WHERE source_id=? AND cycle_seq=?",
+                (source_id, cycle_seq),
+            ).fetchone()
+            if start is None:
+                raise ValueError("collector cycle START evidence is missing")
+            terminal = connection.execute(
+                "SELECT 1 FROM collector_cycle_terminals_v1 "
+                "WHERE source_id=? AND cycle_seq=?",
+                (source_id, cycle_seq),
+            ).fetchone()
+            if terminal is not None:
+                raise ValueError(
+                    "collector cycle observation artifact cannot follow terminal evidence"
+                )
+            existing = connection.execute(
+                "SELECT artifact_kind, artifact_sha256 "
+                "FROM collector_cycle_artifacts_v1 "
+                "WHERE source_id=? AND cycle_seq=? AND artifact_id=?",
+                (source_id, cycle_seq, artifact_id),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO collector_cycle_artifacts_v1("
+                    "source_id, cycle_seq, artifact_id, artifact_kind, artifact_sha256"
+                    ") VALUES(?,?,?,?,?)",
+                    (
+                        source_id,
+                        cycle_seq,
+                        artifact_id,
+                        artifact_kind,
+                        artifact_sha256,
+                    ),
+                )
+            elif (
+                existing["artifact_kind"] != artifact_kind
+                or existing["artifact_sha256"] != artifact_sha256
+            ):
+                raise ValueError("collector cycle observation artifact conflicts")
+            connection.commit()
+            return {
+                "artifact_id": artifact_id,
+                "artifact_kind": artifact_kind,
+                "artifact_sha256": artifact_sha256,
+            }
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError(
+                "cannot append collector cycle observation artifact"
+            ) from exc
         except Exception:
             if connection.in_transaction:
                 connection.rollback()
@@ -1202,6 +1671,34 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     {"delta_id": delta_id, "payload_sha256": digest}
                 )
 
+            artifact_rows = connection.execute(
+                "SELECT artifact_id, artifact_kind, artifact_sha256 "
+                "FROM collector_cycle_artifacts_v1 "
+                "WHERE source_id=? AND cycle_seq=? ORDER BY artifact_id",
+                (source_id, cycle_seq),
+            ).fetchall()
+            observed_artifacts: list[dict[str, str]] = []
+            for artifact in artifact_rows:
+                artifact_id = self._schedule_authority_sha256(
+                    artifact["artifact_id"],
+                    "artifact_id",
+                )
+                artifact_kind = _text(
+                    artifact["artifact_kind"],
+                    "artifact_kind",
+                )
+                artifact_sha256 = self._schedule_authority_sha256(
+                    artifact["artifact_sha256"],
+                    "artifact_sha256",
+                )
+                observed_artifacts.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "artifact_kind": artifact_kind,
+                        "artifact_sha256": artifact_sha256,
+                    }
+                )
+
             payload: dict[str, object] = {
                 "schema": "autosport.collector_cycle_terminal",
                 "schema_version": 1,
@@ -1218,6 +1715,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "duplicate_delta_ids": list(duplicate_delta_ids),
                 "error_code": error_code,
             }
+            if observed_artifacts:
+                payload["observed_artifacts"] = observed_artifacts
             payload_json = self._cycle_terminal_payload_json(payload)
             payload_sha256 = self._cycle_terminal_payload_sha256(payload_json)
             connection.execute(
@@ -1235,6 +1734,193 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             if connection.in_transaction:
                 connection.rollback()
             raise
+        finally:
+            connection.close()
+
+    def collector_cycle_observation_artifact_evidence(
+        self,
+        *,
+        source_id: str,
+        cycle_seq: int,
+        artifact_kind: str,
+        artifact_sha256: str,
+    ) -> dict[str, object]:
+        """Resolve one exact artifact only from a SUCCESS terminal-bound cycle."""
+
+        source_id = _text(source_id, "source_id")
+        artifact_kind = _text(artifact_kind, "artifact_kind")
+        artifact_sha256 = self._schedule_authority_sha256(
+            artifact_sha256,
+            "artifact_sha256",
+        )
+        if isinstance(cycle_seq, bool) or not isinstance(cycle_seq, int) or cycle_seq <= 0:
+            raise ValueError("cycle_seq must be a positive integer")
+
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT a.artifact_id, a.artifact_kind, a.artifact_sha256, "
+                "s.run_id, s.stream_epoch, s.attempted_at, "
+                "t.payload_sha256, t.payload_json, "
+                "slots.slot_ordinal, slots.due_at, schedules.schedule_id, "
+                "gate.schedule_id AS gate_schedule_id, "
+                "gate.gate_binding_sha256 AS gate_binding_sha256, "
+                "auth.schedule_id AS auth_schedule_id, "
+                "auth.gate_binding_sha256 AS auth_gate_binding_sha256, "
+                "auth.authorization_sha256 "
+                "FROM collector_cycle_artifacts_v1 AS a "
+                "JOIN collector_cycle_starts_v1 AS s "
+                "ON s.source_id=a.source_id AND s.cycle_seq=a.cycle_seq "
+                "JOIN collector_cycle_terminals_v1 AS t "
+                "ON t.source_id=a.source_id AND t.cycle_seq=a.cycle_seq "
+                "LEFT JOIN collector_schedule_slots_v1 AS slots "
+                "ON slots.source_id=a.source_id AND slots.cycle_seq=a.cycle_seq "
+                "LEFT JOIN collector_schedules_v1 AS schedules "
+                "ON schedules.source_id=slots.source_id AND schedules.run_id=slots.run_id "
+                "LEFT JOIN collector_schedule_start_gates_v1 AS gate "
+                "ON gate.source_id=s.source_id AND gate.run_id=s.run_id "
+                "LEFT JOIN collector_schedule_start_authorizations_v1 AS auth "
+                "ON auth.source_id=gate.source_id AND auth.run_id=gate.run_id "
+                "WHERE a.source_id=? AND a.cycle_seq=? "
+                "AND a.artifact_kind=? AND a.artifact_sha256=?",
+                (source_id, cycle_seq, artifact_kind, artifact_sha256),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    "collector cycle observation artifact evidence is unavailable"
+                )
+            terminal_json = row["payload_json"]
+            terminal_sha256 = self._schedule_authority_sha256(
+                row["payload_sha256"],
+                "terminal payload_sha256",
+            )
+            if self._cycle_terminal_payload_sha256(terminal_json) != terminal_sha256:
+                raise ValueError("collector cycle terminal digest mismatch")
+            try:
+                terminal = strict_json_loads(terminal_json)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("collector cycle terminal payload is invalid") from exc
+            if (
+                type(terminal) is not dict
+                or self._cycle_terminal_payload_json(terminal) != terminal_json
+            ):
+                raise ValueError(
+                    "collector cycle terminal payload is not canonical JSON"
+                )
+            if terminal.get("status") != "SUCCESS":
+                raise ValueError(
+                    "collector cycle observation artifact is not SUCCESS-terminal evidence"
+                )
+            start_run_id = _text(row["run_id"], "run_id")
+            start_stream_epoch = _text(row["stream_epoch"], "stream_epoch")
+            start_attempted_at = _instant(
+                row["attempted_at"],
+                "attempted_at",
+            )
+            terminal_attempted_at = _instant(
+                terminal.get("attempted_at"),
+                "terminal attempted_at",
+            )
+            terminal_completed_at = _instant(
+                terminal.get("completed_at"),
+                "terminal completed_at",
+            )
+            if (
+                terminal.get("source_id") != source_id
+                or terminal.get("cycle_seq") != cycle_seq
+                or terminal.get("run_id") != start_run_id
+                or terminal.get("stream_epoch") != start_stream_epoch
+                or terminal_attempted_at != start_attempted_at
+                or terminal_completed_at < terminal_attempted_at
+            ):
+                raise ValueError(
+                    "collector cycle terminal chronology/identity conflicts with START"
+                )
+            artifact_id = self._schedule_authority_sha256(
+                row["artifact_id"],
+                "artifact_id",
+            )
+            expected_artifact = {
+                "artifact_id": artifact_id,
+                "artifact_kind": artifact_kind,
+                "artifact_sha256": artifact_sha256,
+            }
+            artifacts = terminal.get("observed_artifacts")
+            if type(artifacts) is not list or expected_artifact not in artifacts:
+                raise ValueError(
+                    "collector cycle terminal does not bind observation artifact"
+                )
+            if (
+                row["schedule_id"] is None
+                or row["slot_ordinal"] is None
+                or row["due_at"] is None
+                or row["gate_schedule_id"] is None
+                or row["gate_binding_sha256"] is None
+                or row["auth_schedule_id"] is None
+                or row["auth_gate_binding_sha256"] is None
+                or row["authorization_sha256"] is None
+            ):
+                raise ValueError(
+                    "collector cycle observation artifact is not bound to authorized schedule"
+                )
+            schedule_id = self._schedule_authority_sha256(
+                row["schedule_id"],
+                "schedule_id",
+            )
+            gate_schedule_id = self._schedule_authority_sha256(
+                row["gate_schedule_id"],
+                "gate schedule_id",
+            )
+            auth_schedule_id = self._schedule_authority_sha256(
+                row["auth_schedule_id"],
+                "authorization schedule_id",
+            )
+            gate_binding_sha256 = self._schedule_authority_sha256(
+                row["gate_binding_sha256"],
+                "gate_binding_sha256",
+            )
+            auth_gate_binding_sha256 = self._schedule_authority_sha256(
+                row["auth_gate_binding_sha256"],
+                "authorization gate_binding_sha256",
+            )
+            if (
+                schedule_id != gate_schedule_id
+                or schedule_id != auth_schedule_id
+                or gate_binding_sha256 != auth_gate_binding_sha256
+            ):
+                raise ValueError(
+                    "collector cycle schedule gate/authorization identity conflicts"
+                )
+            authorization_sha256 = self._schedule_authority_sha256(
+                row["authorization_sha256"],
+                "authorization_sha256",
+            )
+            payload: dict[str, object] = {
+                "schema_version": 1,
+                "source_id": source_id,
+                "cycle_seq": cycle_seq,
+                "run_id": start_run_id,
+                "stream_epoch": start_stream_epoch,
+                "attempted_at": start_attempted_at.isoformat(),
+                "completed_at": terminal_completed_at.isoformat(),
+                "schedule_id": schedule_id,
+                "gate_binding_sha256": gate_binding_sha256,
+                "slot_ordinal": int(row["slot_ordinal"]),
+                "due_at": _instant(row["due_at"], "due_at").isoformat(),
+                "authorization_sha256": authorization_sha256,
+                "artifact_id": artifact_id,
+                "artifact_kind": artifact_kind,
+                "artifact_sha256": artifact_sha256,
+                "terminal_sha256": terminal_sha256,
+            }
+            payload["evidence_sha256"] = hashlib.sha256(
+                self._cycle_terminal_payload_json(payload).encode("utf-8")
+            ).hexdigest()
+            return payload
+        except sqlite3.DatabaseError as exc:
+            raise ValueError(
+                "cannot resolve collector cycle observation artifact evidence"
+            ) from exc
         finally:
             connection.close()
 

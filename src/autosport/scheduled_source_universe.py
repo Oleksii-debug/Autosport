@@ -41,6 +41,32 @@ _CANONICAL_SCHEDULE_CLASS_READ_SEAMS = {
     for name in _CANONICAL_SCHEDULE_READ_SEAMS
 }
 _CANONICAL_PATH_EQUALITY = Path.__eq__
+_CANONICAL_PRESTART_ENSURE = CollectorDeltaStore._ensure_collector_schedule
+_CANONICAL_PRESTART_NEXT_SLOT = CollectorDeltaStore._next_collector_schedule_slot
+_CANONICAL_PRESTART_GATE_STATUS = (
+    CollectorDeltaStore._collector_schedule_start_gate_status
+)
+_CANONICAL_PRESTART_SEAMS = frozenset(
+    {
+        "_ensure_collector_schedule",
+        "_next_collector_schedule_slot",
+        "_collector_schedule_start_gate_status",
+        "_connect",
+        "_connect_path",
+        "_path_file_identity",
+        "_collector_schedule_id",
+        "_collector_schedule_due_at",
+        "_schedule_interval_text",
+        "_schedule_max_items",
+        "_schedule_evaluation_window",
+        "_schedule_authority_sha256",
+        "_cycle_terminal_payload_json",
+    }
+)
+_CANONICAL_PRESTART_CLASS_SEAMS = {
+    name: inspect.getattr_static(CollectorDeltaStore, name)
+    for name in _CANONICAL_PRESTART_SEAMS
+}
 _SCHEDULE_KEYS = frozenset(
     {
         "schema_version",
@@ -94,6 +120,21 @@ def _require_canonical_schedule_class_read_seams() -> None:
     if rebound:
         raise ScheduledSourceUniverseError(
             "store canonical schedule read seam is class-rebound: "
+            + ", ".join(rebound)
+        )
+
+
+def _require_canonical_prestart_class_seams() -> None:
+    """Reject runtime replacement of schedule preparation/gate authority."""
+
+    rebound = sorted(
+        name
+        for name, expected in _CANONICAL_PRESTART_CLASS_SEAMS.items()
+        if inspect.getattr_static(CollectorDeltaStore, name, None) is not expected
+    )
+    if rebound:
+        raise ScheduledSourceUniverseError(
+            "store canonical pre-START seam is class-rebound: "
             + ", ".join(rebound)
         )
 
@@ -160,6 +201,242 @@ def _require_expected_store_path(
             "collector store path does not match product-expected authority path"
         )
     return expected_store_path
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PreparedScheduledSourceUniverse:
+    """Resolver-issued durable schedule boundary proven before collector START."""
+
+    schema_version: int
+    source_id: str
+    run_id: str
+    stream_epoch: str
+    schedule_id: str
+    schedule_policy: str
+    anchor_at: str
+    interval_seconds: str
+    max_items: int
+    evaluation_start_slot_ordinal: int
+    evaluation_end_slot_ordinal: int
+    next_slot_ordinal: int
+    next_due_at: str
+    gate_binding_sha256: str
+    prestart_sha256: str
+
+    def __new__(
+        cls, *args: object, **kwargs: object
+    ) -> "PreparedScheduledSourceUniverse":
+        raise TypeError(
+            "PreparedScheduledSourceUniverse is resolver-issued; "
+            "call prepare_scheduled_source_universe"
+        )
+
+    @classmethod
+    def _issue(
+        cls, payload: dict[str, object]
+    ) -> "PreparedScheduledSourceUniverse":
+        instance = object.__new__(cls)
+        for field_name, value in payload.items():
+            object.__setattr__(instance, field_name, value)
+        return instance
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "source_id": self.source_id,
+            "run_id": self.run_id,
+            "stream_epoch": self.stream_epoch,
+            "schedule_id": self.schedule_id,
+            "schedule_policy": self.schedule_policy,
+            "anchor_at": self.anchor_at,
+            "interval_seconds": self.interval_seconds,
+            "max_items": self.max_items,
+            "evaluation_start_slot_ordinal": self.evaluation_start_slot_ordinal,
+            "evaluation_end_slot_ordinal": self.evaluation_end_slot_ordinal,
+            "next_slot_ordinal": self.next_slot_ordinal,
+            "next_due_at": self.next_due_at,
+            "gate_binding_sha256": self.gate_binding_sha256,
+            "prestart_sha256": self.prestart_sha256,
+        }
+
+
+def prepare_scheduled_source_universe(
+    store: CollectorDeltaStore,
+    *,
+    expected_store_path: Path,
+    expected_source_id: str,
+    expected_run_id: str,
+    expected_stream_epoch: str,
+    anchor_at: str,
+    interval_seconds: float,
+    max_items: int,
+    evaluation_start_slot_ordinal: int,
+    evaluation_end_slot_ordinal: int,
+    gate_binding_sha256: str,
+) -> PreparedScheduledSourceUniverse:
+    """Install/re-resolve an immutable schedule gate before any canonical START.
+
+    The gate is installed atomically by the existing collector store authority. This
+    function never authorizes the gate and therefore cannot itself permit provider
+    observation. It fails closed if any START already exists for the durable run.
+    """
+
+    if type(store) is not CollectorDeltaStore:
+        raise TypeError("store must be the exact canonical CollectorDeltaStore")
+    expected_path = _require_expected_store_path(store, expected_store_path)
+    source_id = _text(expected_source_id, "expected_source_id")
+    run_id = _text(expected_run_id, "expected_run_id")
+    stream_epoch = _text(expected_stream_epoch, "expected_stream_epoch")
+    canonical_gate = _sha256(gate_binding_sha256, "gate_binding_sha256")
+    start_slot = _ordinal(
+        evaluation_start_slot_ordinal,
+        "evaluation_start_slot_ordinal",
+    )
+    end_slot = _ordinal(
+        evaluation_end_slot_ordinal,
+        "evaluation_end_slot_ordinal",
+    )
+    if end_slot < start_slot:
+        raise ScheduledSourceUniverseError(
+            "evaluation_end_slot_ordinal cannot precede evaluation_start_slot_ordinal"
+        )
+
+    _require_canonical_prestart_class_seams()
+    instance_state = vars(store)
+    rebound = sorted(
+        name for name in _CANONICAL_PRESTART_SEAMS if name in instance_state
+    )
+    if rebound:
+        raise ScheduledSourceUniverseError(
+            "store canonical pre-START seam is instance-rebound: "
+            + ", ".join(rebound)
+        )
+
+    try:
+        schedule = _CANONICAL_PRESTART_ENSURE(
+            store,
+            source_id=source_id,
+            run_id=run_id,
+            stream_epoch=stream_epoch,
+            anchor_at=anchor_at,
+            interval_seconds=interval_seconds,
+            max_items=max_items,
+            evaluation_start_slot_ordinal=start_slot,
+            evaluation_end_slot_ordinal=end_slot,
+            start_gate_binding_sha256=canonical_gate,
+        )
+        gate = _CANONICAL_PRESTART_GATE_STATUS(
+            store,
+            source_id=source_id,
+            run_id=run_id,
+        )
+        slot = _CANONICAL_PRESTART_NEXT_SLOT(
+            store,
+            source_id=source_id,
+            run_id=run_id,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ScheduledSourceUniverseError(
+            "cannot establish canonical pre-START schedule gate"
+        ) from exc
+
+    _require_canonical_prestart_class_seams()
+    if type(schedule) is not dict:
+        raise ScheduledSourceUniverseError(
+            "collector schedule preparation returned noncanonical evidence"
+        )
+    required_schedule = {
+        "schema_version",
+        "schedule_id",
+        "policy",
+        "source_id",
+        "run_id",
+        "stream_epoch",
+        "anchor_at",
+        "interval_seconds",
+        "max_items",
+        "evaluation_start_slot_ordinal",
+        "evaluation_end_slot_ordinal",
+    }
+    if set(schedule) != required_schedule:
+        raise ScheduledSourceUniverseError(
+            "collector schedule preparation schema is not canonical"
+        )
+    if type(gate) is not dict or set(gate) != {
+        "schedule_id",
+        "gate_binding_sha256",
+        "authorization_sha256",
+    }:
+        raise ScheduledSourceUniverseError(
+            "collector schedule START gate evidence is not canonical"
+        )
+    if type(slot) is not dict or set(slot) != {
+        "schedule_id",
+        "stream_epoch",
+        "max_items",
+        "slot_ordinal",
+        "due_at",
+    }:
+        raise ScheduledSourceUniverseError(
+            "collector next-slot evidence is not canonical"
+        )
+
+    schedule_id = _sha256(schedule["schedule_id"], "schedule_id")
+    if (
+        schedule["schema_version"] != 4
+        or schedule["policy"] != "fixed_interval_v1"
+        or schedule["source_id"] != source_id
+        or schedule["run_id"] != run_id
+        or schedule["stream_epoch"] != stream_epoch
+        or schedule["evaluation_start_slot_ordinal"] != start_slot
+        or schedule["evaluation_end_slot_ordinal"] != end_slot
+        or gate["schedule_id"] != schedule_id
+        or gate["gate_binding_sha256"] != canonical_gate
+        or gate["authorization_sha256"] is not None
+        or slot["schedule_id"] != schedule_id
+        or slot["stream_epoch"] != stream_epoch
+        or slot["max_items"] != schedule["max_items"]
+        or slot["slot_ordinal"] != 0
+    ):
+        raise ScheduledSourceUniverseError(
+            "collector schedule is not a pristine unauthorized pre-START boundary"
+        )
+
+    interval_text = _text(schedule["interval_seconds"], "interval_seconds")
+    anchor_text = _text(schedule["anchor_at"], "anchor_at")
+    next_due_at = _text(slot["due_at"], "next_due_at")
+    if type(schedule["max_items"]) is not int or schedule["max_items"] <= 0:
+        raise ScheduledSourceUniverseError("max_items is not canonical")
+
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "source_id": source_id,
+        "run_id": run_id,
+        "stream_epoch": stream_epoch,
+        "schedule_id": schedule_id,
+        "schedule_policy": "fixed_interval_v1",
+        "anchor_at": anchor_text,
+        "interval_seconds": interval_text,
+        "max_items": schedule["max_items"],
+        "evaluation_start_slot_ordinal": start_slot,
+        "evaluation_end_slot_ordinal": end_slot,
+        "next_slot_ordinal": 0,
+        "next_due_at": next_due_at,
+        "gate_binding_sha256": canonical_gate,
+    }
+    payload["prestart_sha256"] = hashlib.sha256(
+        _canonical_json(payload)
+    ).hexdigest()
+    current_path = getattr(store, "path", None)
+    if (
+        type(current_path) is not type(expected_path)
+        or _CANONICAL_PATH_EQUALITY(current_path, expected_path) is not True
+    ):
+        raise ScheduledSourceUniverseError(
+            "collector store path changed during pre-START preparation"
+        )
+    _require_canonical_prestart_class_seams()
+    return PreparedScheduledSourceUniverse._issue(payload)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -1033,4 +1310,441 @@ def _seal_scheduled_source_universe_dispatch() -> None:
 
 _seal_scheduled_source_universe_dispatch()
 del _seal_scheduled_source_universe_dispatch
+def _seal_scheduled_source_universe_prestart_dispatch() -> None:
+    """Extend the canonical dispatch seal across pre-START gate preparation."""
+
+    module_globals = globals()
+    expected_store_type = CollectorDeltaStore
+    expected_prepared_type = PreparedScheduledSourceUniverse
+    expected_prepared_field_names = tuple(expected_prepared_type.__slots__)
+    expected_error_type = ScheduledSourceUniverseError
+    expected_path_type = Path
+    expected_hashlib = hashlib
+    expected_sha256_fn = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_json_dumps_code = getattr(expected_json_dumps, "__code__", None)
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_getattr_static_code = getattr(
+        expected_getattr_static, "__code__", None
+    )
+    expected_path_equality = _CANONICAL_PATH_EQUALITY
+    expected_path_equality_code = getattr(
+        expected_path_equality, "__code__", None
+    )
+    expected_ensure = _CANONICAL_PRESTART_ENSURE
+    expected_next_slot = _CANONICAL_PRESTART_NEXT_SLOT
+    expected_gate_status = _CANONICAL_PRESTART_GATE_STATUS
+    expected_prestart_names = _CANONICAL_PRESTART_SEAMS
+    expected_prestart_class_seams = _CANONICAL_PRESTART_CLASS_SEAMS
+    expected_prestart_class_witnesses = tuple(
+        (
+            name,
+            surface,
+            getattr(surface, "__func__", surface),
+            getattr(getattr(surface, "__func__", surface), "__code__", None),
+        )
+        for name, surface in sorted(expected_prestart_class_seams.items())
+    )
+    expected_prestart_globals = getattr(expected_ensure, "__globals__", None)
+    if (
+        type(expected_prestart_globals) is not dict
+        or getattr(expected_next_slot, "__globals__", None)
+        is not expected_prestart_globals
+        or getattr(expected_gate_status, "__globals__", None)
+        is not expected_prestart_globals
+    ):
+        raise RuntimeError("canonical pre-START collector globals are unavailable")
+    expected_prestart_text = expected_prestart_globals.get("_text")
+    expected_prestart_text_code = getattr(expected_prestart_text, "__code__", None)
+    expected_prestart_instant = expected_prestart_globals.get("_instant")
+    expected_prestart_instant_code = getattr(
+        expected_prestart_instant, "__code__", None
+    )
+    expected_prestart_policy = expected_prestart_globals.get("_SCHEDULE_POLICY")
+    expected_prestart_hashlib = expected_prestart_globals.get("hashlib")
+    expected_prestart_sha256 = getattr(expected_prestart_hashlib, "sha256", None)
+    expected_prestart_json = expected_prestart_globals.get("json")
+    expected_prestart_json_dumps = getattr(expected_prestart_json, "dumps", None)
+    expected_prestart_json_dumps_code = getattr(
+        expected_prestart_json_dumps, "__code__", None
+    )
+    expected_prestart_math = expected_prestart_globals.get("math")
+    expected_prestart_isfinite = getattr(expected_prestart_math, "isfinite", None)
+    expected_prestart_timedelta = expected_prestart_globals.get("timedelta")
+    expected_connect_path_surface = expected_prestart_class_seams["_connect_path"]
+    expected_connect_path_callable = getattr(
+        expected_connect_path_surface,
+        "__func__",
+        expected_connect_path_surface,
+    )
+    expected_connect_path_globals = getattr(
+        expected_connect_path_callable, "__globals__", None
+    )
+    expected_prestart_sqlite3 = (
+        expected_connect_path_globals.get("sqlite3")
+        if type(expected_connect_path_globals) is dict
+        else None
+    )
+    expected_prestart_sqlite_connect = getattr(
+        expected_prestart_sqlite3, "connect", None
+    )
+    expected_prestart_sqlite_row = getattr(expected_prestart_sqlite3, "Row", None)
+    expected_prestart_sqlite_database_error = getattr(
+        expected_prestart_sqlite3, "DatabaseError", None
+    )
+    expected_path_identity_surface = expected_prestart_class_seams[
+        "_path_file_identity"
+    ]
+    expected_path_identity_callable = getattr(
+        expected_path_identity_surface,
+        "__func__",
+        expected_path_identity_surface,
+    )
+    expected_path_identity_globals = getattr(
+        expected_path_identity_callable, "__globals__", None
+    )
+    expected_prestart_os = (
+        expected_path_identity_globals.get("os")
+        if type(expected_path_identity_globals) is dict
+        else None
+    )
+    expected_prestart_os_stat = getattr(expected_prestart_os, "stat", None)
+    if (
+        expected_prestart_text_code is None
+        or expected_prestart_instant_code is None
+        or expected_prestart_json_dumps is None
+        or expected_prestart_sqlite_connect is None
+        or expected_prestart_sqlite_row is None
+        or expected_prestart_sqlite_database_error is None
+        or expected_prestart_os_stat is None
+    ):
+        raise RuntimeError("canonical pre-START collector dependency graph is unavailable")
+    expected_hex = _HEX
+    expected_prepared_field_surfaces = tuple(
+        (
+            name,
+            expected_getattr_static(expected_prepared_type, name),
+        )
+        for name in expected_prepared_field_names
+    )
+    expected_prepared_issue_surface = expected_getattr_static(
+        expected_prepared_type, "_issue"
+    )
+    expected_prepared_issue_function = getattr(
+        expected_prepared_issue_surface, "__func__", None
+    )
+    expected_prepared_issue_function_code = getattr(
+        expected_prepared_issue_function, "__code__", None
+    )
+    alias_witnesses = tuple(
+        (
+            name,
+            value,
+            getattr(value, "__code__", None),
+        )
+        for name, value in (
+            ("_CANONICAL_PRESTART_ENSURE", expected_ensure),
+            ("_CANONICAL_PRESTART_NEXT_SLOT", expected_next_slot),
+            ("_CANONICAL_PRESTART_GATE_STATUS", expected_gate_status),
+        )
+    )
+    helper_witnesses = tuple(
+        (
+            name,
+            helper,
+            getattr(helper, "__code__", None),
+        )
+        for name, helper in (
+            (
+                "_require_canonical_prestart_class_seams",
+                _require_canonical_prestart_class_seams,
+            ),
+            ("_text", _text),
+            ("_ordinal", _ordinal),
+            ("_sha256", _sha256),
+            ("_canonical_json", _canonical_json),
+            ("_require_expected_store_path", _require_expected_store_path),
+        )
+    )
+    original_prepare = prepare_scheduled_source_universe
+    original_prepare_code = original_prepare.__code__
+
+    def require_prestart_dispatch_integrity() -> None:
+        if module_globals.get("CollectorDeltaStore") is not expected_store_type:
+            raise expected_error_type(
+                "scheduled pre-START collector type authority is rebound"
+            )
+        if (
+            module_globals.get("PreparedScheduledSourceUniverse")
+            is not expected_prepared_type
+        ):
+            raise expected_error_type(
+                "scheduled pre-START result type authority is rebound"
+            )
+        if module_globals.get("ScheduledSourceUniverseError") is not expected_error_type:
+            raise expected_error_type(
+                "scheduled pre-START error authority is rebound"
+            )
+        if module_globals.get("Path") is not expected_path_type:
+            raise expected_error_type(
+                "scheduled pre-START path authority is rebound"
+            )
+        if (
+            module_globals.get("_CANONICAL_PATH_EQUALITY")
+            is not expected_path_equality
+            or getattr(expected_path_equality, "__code__", None)
+            is not expected_path_equality_code
+        ):
+            raise expected_error_type(
+                "scheduled pre-START path comparison authority is rebound or mutated"
+            )
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256_fn
+        ):
+            raise expected_error_type(
+                "scheduled pre-START digest authority is rebound"
+            )
+        if (
+            module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+            or getattr(expected_json_dumps, "__code__", None)
+            is not expected_json_dumps_code
+        ):
+            raise expected_error_type(
+                "scheduled pre-START canonical JSON authority is rebound"
+            )
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+            or getattr(expected_getattr_static, "__code__", None)
+            is not expected_getattr_static_code
+        ):
+            raise expected_error_type(
+                "scheduled pre-START reflection authority is rebound"
+            )
+        if module_globals.get("_HEX") is not expected_hex:
+            raise expected_error_type(
+                "scheduled pre-START digest alphabet authority is rebound"
+            )
+        if module_globals.get("_CANONICAL_PRESTART_SEAMS") is not expected_prestart_names:
+            raise expected_error_type(
+                "scheduled pre-START seam-name authority is rebound"
+            )
+        current_class_seams = module_globals.get("_CANONICAL_PRESTART_CLASS_SEAMS")
+        if (
+            current_class_seams is not expected_prestart_class_seams
+            or type(current_class_seams) is not dict
+            or set(current_class_seams) != set(expected_prestart_names)
+        ):
+            raise expected_error_type(
+                "scheduled pre-START class seam witness map is rebound"
+            )
+        for name, expected_surface, expected_callable, expected_code in (
+            expected_prestart_class_witnesses
+        ):
+            current_surface = expected_getattr_static(expected_store_type, name, None)
+            current_callable = getattr(current_surface, "__func__", current_surface)
+            if (
+                current_class_seams.get(name) is not expected_surface
+                or current_surface is not expected_surface
+                or current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "scheduled pre-START canonical seam drifted: " + name
+                )
+        current_prestart_globals = getattr(expected_ensure, "__globals__", None)
+        if (
+            current_prestart_globals is not expected_prestart_globals
+            or getattr(expected_next_slot, "__globals__", None)
+            is not expected_prestart_globals
+            or getattr(expected_gate_status, "__globals__", None)
+            is not expected_prestart_globals
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector global authority drifted"
+            )
+        if (
+            current_prestart_globals.get("_text") is not expected_prestart_text
+            or getattr(expected_prestart_text, "__code__", None)
+            is not expected_prestart_text_code
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector text authority is rebound or mutated"
+            )
+        if (
+            current_prestart_globals.get("_instant") is not expected_prestart_instant
+            or getattr(expected_prestart_instant, "__code__", None)
+            is not expected_prestart_instant_code
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector time authority is rebound or mutated"
+            )
+        if (
+            current_prestart_globals.get("_SCHEDULE_POLICY")
+            is not expected_prestart_policy
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector schedule constants drifted"
+            )
+        if (
+            current_prestart_globals.get("hashlib") is not expected_prestart_hashlib
+            or getattr(expected_prestart_hashlib, "sha256", None)
+            is not expected_prestart_sha256
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector digest authority is rebound"
+            )
+        current_prestart_json = current_prestart_globals.get("json")
+        if (
+            current_prestart_json is not expected_prestart_json
+            or getattr(expected_prestart_json, "dumps", None)
+            is not expected_prestart_json_dumps
+            or getattr(expected_prestart_json_dumps, "__code__", None)
+            is not expected_prestart_json_dumps_code
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector JSON authority is rebound or mutated"
+            )
+        current_prestart_math = current_prestart_globals.get("math")
+        if (
+            current_prestart_math is not expected_prestart_math
+            or getattr(expected_prestart_math, "isfinite", None)
+            is not expected_prestart_isfinite
+            or current_prestart_globals.get("timedelta")
+            is not expected_prestart_timedelta
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector due-time authority is rebound"
+            )
+        if (
+            getattr(expected_connect_path_callable, "__globals__", None)
+            is not expected_connect_path_globals
+            or expected_connect_path_globals.get("sqlite3")
+            is not expected_prestart_sqlite3
+            or getattr(expected_prestart_sqlite3, "connect", None)
+            is not expected_prestart_sqlite_connect
+            or getattr(expected_prestart_sqlite3, "Row", None)
+            is not expected_prestart_sqlite_row
+            or getattr(expected_prestart_sqlite3, "DatabaseError", None)
+            is not expected_prestart_sqlite_database_error
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector SQLite connection authority drifted"
+            )
+        if (
+            getattr(expected_path_identity_callable, "__globals__", None)
+            is not expected_path_identity_globals
+            or expected_path_identity_globals.get("os")
+            is not expected_prestart_os
+            or getattr(expected_prestart_os, "stat", None)
+            is not expected_prestart_os_stat
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector path identity authority drifted"
+            )
+        for name, expected_alias, expected_code in alias_witnesses:
+            current_alias = module_globals.get(name)
+            if (
+                current_alias is not expected_alias
+                or getattr(expected_alias, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "scheduled pre-START canonical dispatch authority is rebound: "
+                    + name
+                )
+        for name, expected_surface in expected_prepared_field_surfaces:
+            if (
+                expected_getattr_static(expected_prepared_type, name, None)
+                is not expected_surface
+            ):
+                raise expected_error_type(
+                    "scheduled pre-START result field surface is rebound: " + name
+                )
+        current_issue_surface = expected_getattr_static(
+            expected_prepared_type, "_issue", None
+        )
+        if (
+            current_issue_surface is not expected_prepared_issue_surface
+            or getattr(current_issue_surface, "__func__", None)
+            is not expected_prepared_issue_function
+            or getattr(expected_prepared_issue_function, "__code__", None)
+            is not expected_prepared_issue_function_code
+        ):
+            raise expected_error_type(
+                "scheduled pre-START result issuance surface is rebound or mutated"
+            )
+        for name, expected_helper, expected_code in helper_witnesses:
+            current_helper = module_globals.get(name)
+            if (
+                current_helper is not expected_helper
+                or getattr(expected_helper, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "scheduled pre-START helper authority is rebound: " + name
+                )
+        if original_prepare.__code__ is not original_prepare_code:
+            raise expected_error_type(
+                "scheduled pre-START preparer implementation drifted"
+            )
+
+    def sealed_prepare_scheduled_source_universe(
+        store: CollectorDeltaStore,
+        *,
+        expected_store_path: Path,
+        expected_source_id: str,
+        expected_run_id: str,
+        expected_stream_epoch: str,
+        anchor_at: str,
+        interval_seconds: float,
+        max_items: int,
+        evaluation_start_slot_ordinal: int,
+        evaluation_end_slot_ordinal: int,
+        gate_binding_sha256: str,
+    ) -> PreparedScheduledSourceUniverse:
+        if (
+            module_globals.get("prepare_scheduled_source_universe")
+            is not sealed_prepare_scheduled_source_universe
+        ):
+            raise expected_error_type(
+                "scheduled pre-START public preparer authority is rebound"
+            )
+        require_prestart_dispatch_integrity()
+        result = original_prepare(
+            store,
+            expected_store_path=expected_store_path,
+            expected_source_id=expected_source_id,
+            expected_run_id=expected_run_id,
+            expected_stream_epoch=expected_stream_epoch,
+            anchor_at=anchor_at,
+            interval_seconds=interval_seconds,
+            max_items=max_items,
+            evaluation_start_slot_ordinal=evaluation_start_slot_ordinal,
+            evaluation_end_slot_ordinal=evaluation_end_slot_ordinal,
+            gate_binding_sha256=gate_binding_sha256,
+        )
+        require_prestart_dispatch_integrity()
+        if type(result) is not expected_prepared_type:
+            raise expected_error_type(
+                "scheduled pre-START preparer returned non-canonical result type"
+            )
+        return result
+
+    sealed_prepare_scheduled_source_universe.__name__ = original_prepare.__name__
+    sealed_prepare_scheduled_source_universe.__qualname__ = original_prepare.__qualname__
+    sealed_prepare_scheduled_source_universe.__doc__ = original_prepare.__doc__
+    sealed_prepare_scheduled_source_universe.__module__ = original_prepare.__module__
+    sealed_prepare_scheduled_source_universe.__annotations__ = dict(
+        original_prepare.__annotations__
+    )
+    module_globals["prepare_scheduled_source_universe"] = (
+        sealed_prepare_scheduled_source_universe
+    )
+
+
+_seal_scheduled_source_universe_prestart_dispatch()
+del _seal_scheduled_source_universe_prestart_dispatch
 

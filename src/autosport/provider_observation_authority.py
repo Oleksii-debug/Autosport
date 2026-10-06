@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 import hmac
+import inspect
 import json
 import math
 import os
 import secrets
 import weakref
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 from typing import Mapping
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -189,8 +194,8 @@ class CompleteGameBoardRequest:
                 "complete game-board request payload is incomplete"
             ) from exc
 
-    def sse_url(self) -> str:
-        query = urlencode(
+    def sse_url(self, *, _urlencode=urlencode) -> str:
+        query = _urlencode(
             {
                 "bookmakers": ",".join(self.bookmakers),
                 "kinds": self.kind,
@@ -374,43 +379,69 @@ class CompleteGameBoardSnapshot:
         return snapshot
 
 
-_ISSUED: dict[int, tuple[weakref.ReferenceType, str]] = {}
+def _build_ephemeral_issuance_registry():
+    issued: dict[int, tuple[weakref.ReferenceType, str, object]] = {}
+    issuance_token = object()
+    reference_factory = weakref.ref
+    snapshot_type = CompleteGameBoardSnapshot
 
+    def forget(snapshot_id: int, reference: weakref.ReferenceType) -> None:
+        current = issued.get(snapshot_id)
+        if current is not None and current[0] is reference:
+            issued.pop(snapshot_id, None)
 
-def _forget_issued(snapshot_id: int, reference: weakref.ReferenceType) -> None:
-    current = _ISSUED.get(snapshot_id)
-    if current is not None and current[0] is reference:
-        _ISSUED.pop(snapshot_id, None)
-
-
-def _remember(snapshot: CompleteGameBoardSnapshot) -> CompleteGameBoardSnapshot:
-    snapshot_id = id(snapshot)
-    reference = weakref.ref(
-        snapshot,
-        lambda current, snapshot_id=snapshot_id: _forget_issued(snapshot_id, current),
-    )
-    _ISSUED[snapshot_id] = (reference, snapshot.evidence_sha256)
-    return snapshot
-
-
-def assert_complete_game_board_authoritative(snapshot: CompleteGameBoardSnapshot) -> None:
-    if not isinstance(snapshot, CompleteGameBoardSnapshot):
-        raise ProviderObservationUnsupportedError(
-            "complete provider authority requires CompleteGameBoardSnapshot"
+    def remember(snapshot: CompleteGameBoardSnapshot) -> CompleteGameBoardSnapshot:
+        if type(snapshot) is not snapshot_type:
+            raise ProviderObservationUnsupportedError(
+                "complete provider authority requires exact CompleteGameBoardSnapshot"
+            )
+        snapshot_id = id(snapshot)
+        reference = reference_factory(
+            snapshot,
+            lambda current, snapshot_id=snapshot_id: forget(snapshot_id, current),
         )
-    issued = _ISSUED.get(id(snapshot))
-    if issued is None or issued[0]() is not snapshot or issued[1] != snapshot.evidence_sha256:
-        raise ProviderObservationUnsupportedError(
-            "snapshot was not issued by canonical provider acquisition evidence"
+        issued[snapshot_id] = (
+            reference,
+            snapshot.evidence_sha256,
+            issuance_token,
         )
+        return snapshot
+
+    def assert_authoritative(snapshot: CompleteGameBoardSnapshot) -> None:
+        if type(snapshot) is not snapshot_type:
+            raise ProviderObservationUnsupportedError(
+                "complete provider authority requires exact CompleteGameBoardSnapshot"
+            )
+        current = issued.get(id(snapshot))
+        if (
+            current is None
+            or current[0]() is not snapshot
+            or current[1] != snapshot.evidence_sha256
+            or current[2] is not issuance_token
+        ):
+            raise ProviderObservationUnsupportedError(
+                "snapshot was not issued by canonical provider acquisition evidence"
+            )
+
+    return remember, assert_authoritative
 
 
-def _parse_sse_event(event_name: str | None, data_lines: list[str]) -> Mapping[str, object] | None:
+_remember, assert_complete_game_board_authoritative = (
+    _build_ephemeral_issuance_registry()
+)
+
+
+def _parse_sse_event(
+    event_name: str | None,
+    data_lines: list[str],
+    *,
+    _loads=strict_json_loads,
+) -> Mapping[str, object] | None:
     if not data_lines:
         return None
     raw = "\n".join(data_lines)
     try:
-        payload = strict_json_loads(raw)
+        payload = _loads(raw)
     except (TypeError, ValueError) as exc:
         raise ProviderObservationIntegrityError("provider SSE returned invalid JSON") from exc
     if not isinstance(payload, dict):
@@ -430,11 +461,17 @@ def _read_production_initial_state(
     *,
     api_key: str,
     timeout_seconds: float,
+    _request_factory=Request,
+    _open_url=urlopen,
+    _parse_event=_parse_sse_event,
+    _sse_url=CompleteGameBoardRequest.sse_url,
+    _loads=strict_json_loads,
+    _max_sse_bytes=_MAX_SSE_BYTES,
 ) -> Mapping[str, object]:
     """Read one bounded initial_state from the fixed production ParlayAPI SSE origin."""
 
-    request = Request(
-        request_scope.sse_url(),
+    request = _request_factory(
+        _sse_url(request_scope),
         headers={
             "Accept": "text/event-stream",
             "X-API-Key": api_key,
@@ -446,7 +483,7 @@ def _read_production_initial_state(
     event_name: str | None = None
     data_lines: list[str] = []
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:  # nosec B310 - fixed HTTPS origin
+        with _open_url(request, timeout=timeout_seconds) as response:  # nosec B310 - fixed HTTPS origin
             if int(getattr(response, "status", 0)) != 200:
                 raise ProviderObservationUnsupportedError("provider SSE did not return HTTP 200")
             headers = getattr(response, "headers", None)
@@ -457,7 +494,7 @@ def _read_production_initial_state(
                 )
             for raw_line in response:
                 consumed += len(raw_line)
-                if consumed > _MAX_SSE_BYTES:
+                if consumed > _max_sse_bytes:
                     raise ProviderObservationUnsupportedError(
                         "provider SSE exceeded bounded initial-state evidence budget"
                     )
@@ -468,7 +505,7 @@ def _read_production_initial_state(
                         "provider SSE returned invalid UTF-8"
                     ) from exc
                 if not line:
-                    result = _parse_sse_event(event_name, data_lines)
+                    result = _parse_event(event_name, data_lines, _loads=_loads)
                     if result is not None:
                         return result
                     event_name = None
@@ -480,7 +517,7 @@ def _read_production_initial_state(
                     event_name = line[6:].strip()
                 elif line.startswith("data:"):
                     data_lines.append(line[5:].lstrip())
-            result = _parse_sse_event(event_name, data_lines)
+            result = _parse_event(event_name, data_lines, _loads=_loads)
             if result is not None:
                 return result
     except ProviderObservationAuthorityError:
@@ -492,6 +529,224 @@ def _read_production_initial_state(
     raise ProviderObservationUnsupportedError(
         "provider SSE ended before an initial_state frame was available"
     )
+
+
+_TEST_ACQUISITION_CAPABILITY = object()
+_TEST_ACQUISITION_ORIGIN = ContextVar(
+    "autosport_provider_observation_test_origin",
+    default=None,
+)
+
+_CANONICAL_MODULE_GLOBALS = globals()
+_CANONICAL_INSPECT = inspect
+_CANONICAL_GETATTR_STATIC = inspect.getattr_static
+_CANONICAL_GETATTR_STATIC_CODE = _CANONICAL_GETATTR_STATIC.__code__
+_CANONICAL_GETATTR_STATIC_GLOBALS = _CANONICAL_GETATTR_STATIC.__globals__
+_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS = tuple(
+    (
+        name,
+        _CANONICAL_GETATTR_STATIC_GLOBALS[name],
+        getattr(_CANONICAL_GETATTR_STATIC_GLOBALS[name], "__code__", None),
+    )
+    for name in _CANONICAL_GETATTR_STATIC_CODE.co_names
+    if name in _CANONICAL_GETATTR_STATIC_GLOBALS
+)
+_CANONICAL_MATH = math
+_CANONICAL_MATH_ISFINITE = math.isfinite
+_CANONICAL_HTTP_REQUEST = Request
+_CANONICAL_HTTP_REQUEST_INIT = inspect.getattr_static(Request, "__init__")
+_CANONICAL_HTTP_REQUEST_INIT_CODE = getattr(
+    _CANONICAL_HTTP_REQUEST_INIT,
+    "__code__",
+    None,
+)
+_CANONICAL_URLOPEN = urlopen
+_CANONICAL_URLOPEN_CODE = getattr(_CANONICAL_URLOPEN, "__code__", None)
+_CANONICAL_STRICT_JSON_LOADS = strict_json_loads
+_CANONICAL_STRICT_JSON_LOADS_CODE = getattr(
+    _CANONICAL_STRICT_JSON_LOADS,
+    "__code__",
+    None,
+)
+_CANONICAL_PARSE_SSE_EVENT = _parse_sse_event
+_CANONICAL_PARSE_SSE_EVENT_CODE = _CANONICAL_PARSE_SSE_EVENT.__code__
+_CANONICAL_READ_PRODUCTION_INITIAL_STATE = _read_production_initial_state
+_CANONICAL_READ_PRODUCTION_INITIAL_STATE_CODE = (
+    _CANONICAL_READ_PRODUCTION_INITIAL_STATE.__code__
+)
+_CANONICAL_DEFAULT_CLOCK = _default_clock
+_CANONICAL_DEFAULT_CLOCK_CODE = _CANONICAL_DEFAULT_CLOCK.__code__
+_CANONICAL_SNAPSHOT_CLASS = CompleteGameBoardSnapshot
+_CANONICAL_REQUEST_CLASS = CompleteGameBoardRequest
+_CANONICAL_REQUEST_SSE_URL = CompleteGameBoardRequest.sse_url
+_CANONICAL_REQUEST_SSE_URL_CODE = _CANONICAL_REQUEST_SSE_URL.__code__
+_CANONICAL_CANONICAL_JSON = _canonical_json
+_CANONICAL_CANONICAL_JSON_CODE = _CANONICAL_CANONICAL_JSON.__code__
+_CANONICAL_REMEMBER = _remember
+_CANONICAL_REMEMBER_CODE = _CANONICAL_REMEMBER.__code__
+_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE = (
+    assert_complete_game_board_authoritative
+)
+_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE = (
+    _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE.__code__
+)
+_CANONICAL_TEST_ACQUISITION_ORIGIN = _TEST_ACQUISITION_ORIGIN
+_CANONICAL_TEST_ACQUISITION_CAPABILITY = _TEST_ACQUISITION_CAPABILITY
+
+
+def _surface_code(surface: object) -> object:
+    target = getattr(surface, "__func__", None)
+    if target is None and isinstance(surface, property):
+        target = surface.fget
+    if target is None:
+        target = surface
+    return getattr(target, "__code__", None)
+
+
+_CANONICAL_SURFACE_CODE = _surface_code
+_CANONICAL_SURFACE_CODE_CODE = _surface_code.__code__
+_REQUEST_ORIGIN_SURFACE_NAMES = (
+    "__init__",
+    "__post_init__",
+    "source_id",
+    "to_payload",
+    "sse_url",
+)
+_SNAPSHOT_ORIGIN_SURFACE_NAMES = (
+    "__init__",
+    "__post_init__",
+    "_validate_frame",
+    "frame",
+    "frame_sha256",
+    "row_sha256s",
+    "evidence_sha256",
+    "to_payload",
+)
+_CANONICAL_REQUEST_ORIGIN_SURFACES = tuple(
+    (
+        name,
+        inspect.getattr_static(CompleteGameBoardRequest, name),
+        _surface_code(inspect.getattr_static(CompleteGameBoardRequest, name)),
+    )
+    for name in _REQUEST_ORIGIN_SURFACE_NAMES
+)
+_CANONICAL_SNAPSHOT_ORIGIN_SURFACES = tuple(
+    (
+        name,
+        inspect.getattr_static(CompleteGameBoardSnapshot, name),
+        _surface_code(inspect.getattr_static(CompleteGameBoardSnapshot, name)),
+    )
+    for name in _SNAPSHOT_ORIGIN_SURFACE_NAMES
+)
+
+
+def _require_production_capture_origin_integrity() -> None:
+    module_globals = _CANONICAL_MODULE_GLOBALS
+    if (
+        module_globals.get("_CANONICAL_MODULE_GLOBALS") is not module_globals
+        or "any" in module_globals
+        or "getattr" in module_globals
+        or "isinstance" in module_globals
+        or "type" in module_globals
+        or "str" in module_globals
+        or "bool" in module_globals
+        or "int" in module_globals
+        or "float" in module_globals
+        or "dict" in module_globals
+        or "ValueError" in module_globals
+        or "TypeError" in module_globals
+    ):
+        raise ProviderObservationIntegrityError(
+            "provider production acquisition builtin dispatch shadowed"
+        )
+    if (
+        inspect is not _CANONICAL_INSPECT
+        or _CANONICAL_INSPECT.getattr_static is not _CANONICAL_GETATTR_STATIC
+        or _CANONICAL_GETATTR_STATIC.__code__ is not _CANONICAL_GETATTR_STATIC_CODE
+        or _CANONICAL_GETATTR_STATIC.__globals__
+        is not _CANONICAL_GETATTR_STATIC_GLOBALS
+        or any(
+            _CANONICAL_GETATTR_STATIC_GLOBALS.get(name) is not target
+            or getattr(target, "__code__", None) is not code
+            for name, target, code in _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
+        )
+        or module_globals.get("math") is not _CANONICAL_MATH
+        or _CANONICAL_MATH.isfinite is not _CANONICAL_MATH_ISFINITE
+        or Request is not _CANONICAL_HTTP_REQUEST
+        or urlopen is not _CANONICAL_URLOPEN
+        or strict_json_loads is not _CANONICAL_STRICT_JSON_LOADS
+        or CompleteGameBoardRequest is not _CANONICAL_REQUEST_CLASS
+        or CompleteGameBoardSnapshot is not _CANONICAL_SNAPSHOT_CLASS
+        or _parse_sse_event is not _CANONICAL_PARSE_SSE_EVENT
+        or _read_production_initial_state
+        is not _CANONICAL_READ_PRODUCTION_INITIAL_STATE
+        or _default_clock is not _CANONICAL_DEFAULT_CLOCK
+        or _canonical_json is not _CANONICAL_CANONICAL_JSON
+        or _remember is not _CANONICAL_REMEMBER
+        or assert_complete_game_board_authoritative
+        is not _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE
+        or _TEST_ACQUISITION_ORIGIN is not _CANONICAL_TEST_ACQUISITION_ORIGIN
+        or _TEST_ACQUISITION_CAPABILITY
+        is not _CANONICAL_TEST_ACQUISITION_CAPABILITY
+        or _surface_code is not _CANONICAL_SURFACE_CODE
+        or _CANONICAL_SURFACE_CODE.__code__ is not _CANONICAL_SURFACE_CODE_CODE
+    ):
+        raise ProviderObservationIntegrityError(
+            "provider production acquisition origin is rebound"
+        )
+    if (
+        _CANONICAL_PARSE_SSE_EVENT.__code__
+        is not _CANONICAL_PARSE_SSE_EVENT_CODE
+        or _CANONICAL_READ_PRODUCTION_INITIAL_STATE.__code__
+        is not _CANONICAL_READ_PRODUCTION_INITIAL_STATE_CODE
+        or _CANONICAL_DEFAULT_CLOCK.__code__ is not _CANONICAL_DEFAULT_CLOCK_CODE
+        or _CANONICAL_REQUEST_SSE_URL.__code__
+        is not _CANONICAL_REQUEST_SSE_URL_CODE
+        or _CANONICAL_CANONICAL_JSON.__code__
+        is not _CANONICAL_CANONICAL_JSON_CODE
+        or _CANONICAL_REMEMBER.__code__ is not _CANONICAL_REMEMBER_CODE
+        or _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE.__code__
+        is not _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE
+        or CompleteGameBoardRequest.sse_url is not _CANONICAL_REQUEST_SSE_URL
+        or getattr(_CANONICAL_URLOPEN, "__code__", None)
+        is not _CANONICAL_URLOPEN_CODE
+        or getattr(_CANONICAL_STRICT_JSON_LOADS, "__code__", None)
+        is not _CANONICAL_STRICT_JSON_LOADS_CODE
+        or _CANONICAL_GETATTR_STATIC(Request, "__init__")
+        is not _CANONICAL_HTTP_REQUEST_INIT
+        or getattr(_CANONICAL_HTTP_REQUEST_INIT, "__code__", None)
+        is not _CANONICAL_HTTP_REQUEST_INIT_CODE
+        or any(
+            _CANONICAL_GETATTR_STATIC(_CANONICAL_REQUEST_CLASS, name)
+            is not descriptor
+            or _CANONICAL_SURFACE_CODE(descriptor) is not code
+            for name, descriptor, code in _CANONICAL_REQUEST_ORIGIN_SURFACES
+        )
+        or any(
+            _CANONICAL_GETATTR_STATIC(_CANONICAL_SNAPSHOT_CLASS, name)
+            is not descriptor
+            or _CANONICAL_SURFACE_CODE(descriptor) is not code
+            for name, descriptor, code in _CANONICAL_SNAPSHOT_ORIGIN_SURFACES
+        )
+    ):
+        raise ProviderObservationIntegrityError(
+            "provider production acquisition origin code changed"
+        )
+
+
+@contextmanager
+def _test_acquisition_origin(*, _capability: object):
+    """Enable live test transport/time only under the private test capability."""
+
+    if _capability is not _CANONICAL_TEST_ACQUISITION_CAPABILITY:
+        raise TypeError("provider test acquisition origin requires private capability")
+    token = _CANONICAL_TEST_ACQUISITION_ORIGIN.set(
+        _CANONICAL_TEST_ACQUISITION_CAPABILITY
+    )
+    try:
+        yield
+    finally:
+        _CANONICAL_TEST_ACQUISITION_ORIGIN.reset(token)
 
 
 def capture_parlay_complete_game_board(
@@ -506,24 +761,179 @@ def capture_parlay_complete_game_board(
         raise ValueError("api_key must be non-empty trimmed text")
     if any(character.isspace() for character in api_key):
         raise ValueError("api_key must not contain whitespace")
-    if not isinstance(request, CompleteGameBoardRequest):
-        raise TypeError("request must be CompleteGameBoardRequest")
+    if type(request) is not _CANONICAL_REQUEST_CLASS:
+        raise TypeError("request must be exact CompleteGameBoardRequest")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
         raise ValueError("timeout_seconds must be a positive finite number")
     timeout = float(timeout_seconds)
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout_seconds must be a positive finite number")
-    frame = _read_production_initial_state(
-        request,
-        api_key=api_key,
-        timeout_seconds=timeout,
+
+    test_origin = (
+        _CANONICAL_TEST_ACQUISITION_ORIGIN.get()
+        is _CANONICAL_TEST_ACQUISITION_CAPABILITY
     )
-    snapshot = CompleteGameBoardSnapshot(
+    if test_origin:
+        frame = _CANONICAL_READ_PRODUCTION_INITIAL_STATE(
+            request,
+            api_key=api_key,
+            timeout_seconds=timeout,
+            _request_factory=Request,
+            _open_url=urlopen,
+            _parse_event=_parse_sse_event,
+            _sse_url=CompleteGameBoardRequest.sse_url,
+            _loads=strict_json_loads,
+            _max_sse_bytes=_MAX_SSE_BYTES,
+        )
+        captured_at = _default_clock()
+    else:
+        _require_production_capture_origin_integrity()
+        frame = _CANONICAL_READ_PRODUCTION_INITIAL_STATE(
+            request,
+            api_key=api_key,
+            timeout_seconds=timeout,
+        )
+        captured_at = _CANONICAL_DEFAULT_CLOCK()
+        _require_production_capture_origin_integrity()
+
+    snapshot = _CANONICAL_SNAPSHOT_CLASS(
         request=request,
-        captured_at=_default_clock(),
-        frame_json=_canonical_json(dict(frame)),
+        captured_at=captured_at,
+        frame_json=_CANONICAL_CANONICAL_JSON(dict(frame)),
     )
-    return _remember(snapshot)
+    result = _CANONICAL_REMEMBER(snapshot)
+    if not test_origin:
+        _require_production_capture_origin_integrity()
+    return result
+
+
+def _seal_provider_observation_capture_dispatch() -> None:
+    module_globals = _CANONICAL_MODULE_GLOBALS
+    expected_error = ProviderObservationIntegrityError
+    expected_any = any
+    expected_math = _CANONICAL_MATH
+    expected_math_isfinite = _CANONICAL_MATH_ISFINITE
+    expected_capture = capture_parlay_complete_game_board
+    expected_capture_code = expected_capture.__code__
+    expected_guard = _require_production_capture_origin_integrity
+    expected_guard_code = expected_guard.__code__
+    expected_witnesses = {
+        "_CANONICAL_MODULE_GLOBALS": _CANONICAL_MODULE_GLOBALS,
+        "ProviderObservationIntegrityError": expected_error,
+        "_CANONICAL_INSPECT": _CANONICAL_INSPECT,
+        "_CANONICAL_MATH": _CANONICAL_MATH,
+        "_CANONICAL_MATH_ISFINITE": _CANONICAL_MATH_ISFINITE,
+        "_CANONICAL_GETATTR_STATIC": _CANONICAL_GETATTR_STATIC,
+        "_CANONICAL_GETATTR_STATIC_CODE": _CANONICAL_GETATTR_STATIC_CODE,
+        "_CANONICAL_GETATTR_STATIC_GLOBALS": _CANONICAL_GETATTR_STATIC_GLOBALS,
+        "_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS": _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS,
+        "_CANONICAL_HTTP_REQUEST": _CANONICAL_HTTP_REQUEST,
+        "_CANONICAL_HTTP_REQUEST_INIT": _CANONICAL_HTTP_REQUEST_INIT,
+        "_CANONICAL_HTTP_REQUEST_INIT_CODE": _CANONICAL_HTTP_REQUEST_INIT_CODE,
+        "_CANONICAL_URLOPEN": _CANONICAL_URLOPEN,
+        "_CANONICAL_URLOPEN_CODE": _CANONICAL_URLOPEN_CODE,
+        "_CANONICAL_STRICT_JSON_LOADS": _CANONICAL_STRICT_JSON_LOADS,
+        "_CANONICAL_STRICT_JSON_LOADS_CODE": _CANONICAL_STRICT_JSON_LOADS_CODE,
+        "_CANONICAL_PARSE_SSE_EVENT": _CANONICAL_PARSE_SSE_EVENT,
+        "_CANONICAL_PARSE_SSE_EVENT_CODE": _CANONICAL_PARSE_SSE_EVENT_CODE,
+        "_CANONICAL_READ_PRODUCTION_INITIAL_STATE": _CANONICAL_READ_PRODUCTION_INITIAL_STATE,
+        "_CANONICAL_READ_PRODUCTION_INITIAL_STATE_CODE": _CANONICAL_READ_PRODUCTION_INITIAL_STATE_CODE,
+        "_CANONICAL_DEFAULT_CLOCK": _CANONICAL_DEFAULT_CLOCK,
+        "_CANONICAL_DEFAULT_CLOCK_CODE": _CANONICAL_DEFAULT_CLOCK_CODE,
+        "_CANONICAL_SNAPSHOT_CLASS": _CANONICAL_SNAPSHOT_CLASS,
+        "_CANONICAL_REQUEST_CLASS": _CANONICAL_REQUEST_CLASS,
+        "_CANONICAL_REQUEST_SSE_URL": _CANONICAL_REQUEST_SSE_URL,
+        "_CANONICAL_REQUEST_SSE_URL_CODE": _CANONICAL_REQUEST_SSE_URL_CODE,
+        "_CANONICAL_CANONICAL_JSON": _CANONICAL_CANONICAL_JSON,
+        "_CANONICAL_CANONICAL_JSON_CODE": _CANONICAL_CANONICAL_JSON_CODE,
+        "_CANONICAL_REMEMBER": _CANONICAL_REMEMBER,
+        "_CANONICAL_REMEMBER_CODE": _CANONICAL_REMEMBER_CODE,
+        "_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE": _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE,
+        "_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE": _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE,
+        "_CANONICAL_TEST_ACQUISITION_ORIGIN": _CANONICAL_TEST_ACQUISITION_ORIGIN,
+        "_CANONICAL_TEST_ACQUISITION_CAPABILITY": _CANONICAL_TEST_ACQUISITION_CAPABILITY,
+        "_CANONICAL_SURFACE_CODE": _CANONICAL_SURFACE_CODE,
+        "_CANONICAL_SURFACE_CODE_CODE": _CANONICAL_SURFACE_CODE_CODE,
+        "_CANONICAL_REQUEST_ORIGIN_SURFACES": _CANONICAL_REQUEST_ORIGIN_SURFACES,
+        "_CANONICAL_SNAPSHOT_ORIGIN_SURFACES": _CANONICAL_SNAPSHOT_ORIGIN_SURFACES,
+    }
+    expected_witness_items = tuple(expected_witnesses.items())
+
+    def require_sealed_surface() -> None:
+        if expected_any(
+            name in module_globals
+            for name in (
+                "any",
+                "getattr",
+                "isinstance",
+                "type",
+                "str",
+                "bool",
+                "int",
+                "float",
+                "dict",
+                "ValueError",
+                "TypeError",
+            )
+        ):
+            raise expected_error(
+                "provider production acquisition builtin dispatch shadowed"
+            )
+        if (
+            module_globals.get("math") is not expected_math
+            or expected_math.isfinite is not expected_math_isfinite
+        ):
+            raise expected_error(
+                "provider production acquisition numeric validation changed"
+            )
+        if (
+            module_globals.get("_require_production_capture_origin_integrity")
+            is not expected_guard
+            or expected_guard.__code__ is not expected_guard_code
+            or expected_capture.__code__ is not expected_capture_code
+        ):
+            raise expected_error(
+                "provider production acquisition guard changed"
+            )
+        if expected_any(
+            module_globals.get(name) is not expected
+            for name, expected in expected_witness_items
+        ):
+            raise expected_error(
+                "provider production acquisition witness changed"
+            )
+
+    def require_public_capture_surface() -> None:
+        if (
+            module_globals.get("capture_parlay_complete_game_board")
+            is not sealed_capture_parlay_complete_game_board
+        ):
+            raise expected_error(
+                "provider production acquisition public surface changed"
+            )
+
+    def sealed_capture_parlay_complete_game_board(*args, **kwargs):
+        require_public_capture_surface()
+        require_sealed_surface()
+        result = expected_capture(*args, **kwargs)
+        require_sealed_surface()
+        require_public_capture_surface()
+        return result
+
+    sealed_capture_parlay_complete_game_board.__name__ = expected_capture.__name__
+    sealed_capture_parlay_complete_game_board.__qualname__ = expected_capture.__qualname__
+    sealed_capture_parlay_complete_game_board.__doc__ = expected_capture.__doc__
+    if hasattr(sealed_capture_parlay_complete_game_board, "__wrapped__"):
+        raise RuntimeError(
+            "provider acquisition seal must not expose unsealed delegate"
+        )
+
+    module_globals["capture_parlay_complete_game_board"] = (
+        sealed_capture_parlay_complete_game_board
+    )
+
+
+_seal_provider_observation_capture_dispatch()
 
 
 class CompleteGameBoardEvidenceStore:
@@ -735,7 +1145,7 @@ class CompleteGameBoardEvidenceStore:
     def save(self, snapshot: CompleteGameBoardSnapshot) -> Path:
         """Persist only a production capture and bind both independent trust roots."""
 
-        assert_complete_game_board_authoritative(snapshot)
+        _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE(snapshot)
         path = self._path(snapshot.evidence_sha256)
         authority = self._authority(snapshot.evidence_sha256)
         intended = self._state_sha256(snapshot)
@@ -807,4 +1217,682 @@ class CompleteGameBoardEvidenceStore:
             self._verify_receipt(snapshot)
             authority = self._authority(snapshot.evidence_sha256)
             self._recover_provenance(authority, snapshot)
-        return _remember(snapshot)
+        return _CANONICAL_REMEMBER(snapshot)
+
+
+
+_CANONICAL_EVIDENCE_STORE_SAVE_IMPLEMENTATION_CODE = (
+    CompleteGameBoardEvidenceStore.save.__code__
+)
+_CANONICAL_EVIDENCE_STORE_LOAD_IMPLEMENTATION_CODE = (
+    CompleteGameBoardEvidenceStore.load.__code__
+)
+
+
+def _seal_provider_evidence_store_dispatch() -> None:
+    """Seal the durable provider-evidence persistence graph against runtime retargeting."""
+
+    module_globals = globals()
+    store_type = CompleteGameBoardEvidenceStore
+    expected_error = ProviderObservationIntegrityError
+    expected_type = type
+    expected_type_error = TypeError
+    expected_getattr = getattr
+    expected_any = any
+    expected_dict = dict
+    expected_id = id
+    expected_object_getattribute = object.__getattribute__
+    expected_weakref_ref = weakref.ref
+    expected_unshadowed_builtins = (
+        "any",
+        "len",
+        "str",
+        "dict",
+        "set",
+        "isinstance",
+    )
+    expected_store_surface_reader = _CANONICAL_GETATTR_STATIC
+    expected_store_surface_reader_code = expected_getattr(
+        expected_store_surface_reader,
+        "__code__",
+        None,
+    )
+    expected_store_surface_reader_globals = expected_getattr(
+        expected_store_surface_reader,
+        "__globals__",
+        None,
+    )
+    expected_store_surface_reader_global_items = tuple(
+        (
+            name,
+            expected_store_surface_reader_globals[name],
+            expected_getattr(
+                expected_store_surface_reader_globals[name],
+                "__code__",
+                None,
+            ),
+        )
+        for name in expected_store_surface_reader_code.co_names
+        if name in expected_store_surface_reader_globals
+    )
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_init = store_type.__init__
+    expected_init_code = expected_getattr(expected_init, "__code__", None)
+    expected_save = store_type.save
+    expected_save_code = _CANONICAL_EVIDENCE_STORE_SAVE_IMPLEMENTATION_CODE
+    expected_load = store_type.load
+    expected_load_code = _CANONICAL_EVIDENCE_STORE_LOAD_IMPLEMENTATION_CODE
+    expected_directory = store_type.DIRECTORY
+    expected_authority_domain = store_type.AUTHORITY_DOMAIN
+    expected_assert = _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE
+    expected_assert_code = _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE
+    expected_remember = _CANONICAL_REMEMBER
+    expected_remember_code = _CANONICAL_REMEMBER_CODE
+
+    def _surface_witness(owner, name):
+        surface = expected_getattr_static(owner, name)
+        function = expected_getattr(
+            surface,
+            "__func__",
+            expected_getattr(surface, "fget", surface),
+        )
+        return (
+            name,
+            surface,
+            function,
+            expected_getattr(function, "__code__", None),
+        )
+
+    expected_store_internal = tuple(
+        _surface_witness(store_type, name)
+        for name in (
+            "_path",
+            "_authority",
+            "_workspace_sha256",
+            "_receipt_root",
+            "_receipt_path",
+            "_key_path",
+            "_read_receipt_key",
+            "_state_sha256",
+            "_semantic_binding_sha256",
+            "_read_path",
+            "_unsigned_receipt",
+            "_receipt_hmac",
+            "_write_receipt",
+            "_verify_receipt",
+            "_recover_provenance",
+            "_next_tx_id",
+        )
+    )
+    expected_authority_methods = tuple(
+        _surface_witness(MonotonicWorkspaceAuthority, name)
+        for name in (
+            "__init__",
+            "prepare",
+            "commit",
+            "abort",
+            "recover",
+            "read_history",
+            "_validate_authority_root_selection",
+            "_ensure_authority_root_bound",
+            "_validate_authority_root_activation",
+            "_ensure_authority_root_activated",
+            "_validate_workspace_binding",
+            "_ensure_workspace_bound",
+            "_load_bound_history",
+            "_latest_record_for_tx",
+            "_require_same_transaction",
+            "_validate_prepare_retry",
+            "_new_record",
+            "_new_terminal_record",
+            "_payload",
+            "_namespace_payload",
+            "_ensure_namespace_marker",
+            "_validate_namespace_marker",
+            "_append_record",
+            "_load_history",
+            "_decode_record",
+        )
+    )
+    expected_lock_methods = tuple(
+        _surface_witness(WorkspaceEconomicLock, name)
+        for name in (
+            "__init__",
+            "acquire",
+            "release",
+            "__enter__",
+            "__exit__",
+            "_open_lock_handle",
+            "_open_new_lock_handle",
+            "_validate_existing_lock_path",
+            "_validate_open_handle_identity",
+            "_require_regular_file",
+            "_require_single_link",
+            "_lock_handle",
+            "_unlock_handle",
+        )
+    )
+    expected_request_methods = tuple(
+        _surface_witness(CompleteGameBoardRequest, name)
+        for name in (
+            "__init__",
+            "__post_init__",
+            "sport_key",
+            "bookmakers",
+            "markets",
+            "kind",
+            "limit",
+            "max_age_s",
+            "source_id",
+            "to_payload",
+            "from_payload",
+        )
+    )
+    expected_snapshot_methods = tuple(
+        _surface_witness(CompleteGameBoardSnapshot, name)
+        for name in (
+            "__init__",
+            "__post_init__",
+            "_validate_frame",
+            "request",
+            "captured_at",
+            "frame_json",
+            "frame",
+            "frame_sha256",
+            "row_sha256s",
+            "evidence_sha256",
+            "to_payload",
+            "from_payload",
+        )
+    )
+    expected_path_type = type(Path("."))
+    expected_path_factory_methods = tuple(
+        _surface_witness(Path, name)
+        for name in ("__new__",)
+    )
+    expected_path_methods = tuple(
+        _surface_witness(expected_path_type, name)
+        for name in (
+            "__truediv__",
+            "__str__",
+            "__eq__",
+            "exists",
+            "read_text",
+            "mkdir",
+            "parent",
+            "expanduser",
+            "resolve",
+        )
+    )
+    expected_instance_shadow_names = tuple(
+        name for name, _surface, _function, _code in expected_store_internal
+    ) + (
+        "__init__",
+        "save",
+        "load",
+        "DIRECTORY",
+        "AUTHORITY_DOMAIN",
+    )
+    instance_bindings: dict[int, tuple[object, object, object, object]] = {}
+
+    expected_runtime_globals = {
+        "Path": Path,
+        "MonotonicWorkspaceAuthority": MonotonicWorkspaceAuthority,
+        "MonotonicWorkspaceAuthorityError": MonotonicWorkspaceAuthorityError,
+        "resolve_monotonic_authority_root": resolve_monotonic_authority_root,
+        "WorkspaceEconomicLock": WorkspaceEconomicLock,
+        "strict_json_loads": strict_json_loads,
+        "atomic_write_json": atomic_write_json,
+        "AuthorityPhase": AuthorityPhase,
+        "CompleteGameBoardRequest": CompleteGameBoardRequest,
+        "CompleteGameBoardSnapshot": CompleteGameBoardSnapshot,
+        "ProviderObservationIntegrityError": expected_error,
+        "_CANONICAL_GETATTR_STATIC": expected_store_surface_reader,
+        "_CANONICAL_EVIDENCE_STORE_SAVE_IMPLEMENTATION_CODE": expected_save_code,
+        "_CANONICAL_EVIDENCE_STORE_LOAD_IMPLEMENTATION_CODE": expected_load_code,
+        "hashlib": hashlib,
+        "hmac": hmac,
+        "os": os,
+        "secrets": secrets,
+        "_canonical_json": _canonical_json,
+        "_digest": _digest,
+        "_sha": _sha,
+    }
+    expected_runtime_global_items = tuple(expected_runtime_globals.items())
+    expected_runtime_callables = tuple(
+        (
+            name,
+            target,
+            expected_getattr(
+                expected_getattr(target, "__func__", target),
+                "__code__",
+                None,
+            ),
+        )
+        for name, target in (
+            ("resolve_monotonic_authority_root", resolve_monotonic_authority_root),
+            ("strict_json_loads", strict_json_loads),
+            ("atomic_write_json", atomic_write_json),
+            ("_canonical_json", _canonical_json),
+            ("_digest", _digest),
+            ("_sha", _sha),
+        )
+    )
+    expected_hashlib_sha256 = hashlib.sha256
+    expected_hmac_new = hmac.new
+    expected_hmac_compare_digest = hmac.compare_digest
+    expected_secrets_token_bytes = secrets.token_bytes
+    expected_os_open = os.open
+    expected_os_fdopen = os.fdopen
+    expected_os_fsync = os.fsync
+
+    expected_dependency_functions = (
+        (("store.__init__", expected_init, expected_init_code),)
+        + tuple(
+            ("store." + name, function, code)
+            for name, _surface, function, code in expected_store_internal
+            if code is not None
+        )
+        + tuple(
+            ("authority." + name, function, code)
+            for name, _surface, function, code in expected_authority_methods
+            if code is not None
+        )
+        + tuple(
+            ("lock." + name, function, code)
+            for name, _surface, function, code in expected_lock_methods
+            if code is not None
+        )
+        + tuple(
+            ("request." + name, function, code)
+            for name, _surface, function, code in expected_request_methods
+            if code is not None
+        )
+        + tuple(
+            ("snapshot." + name, function, code)
+            for name, _surface, function, code in expected_snapshot_methods
+            if code is not None
+        )
+        + tuple(
+            (
+                "runtime." + name,
+                expected_getattr(target, "__func__", target),
+                code,
+            )
+            for name, target, code in expected_runtime_callables
+            if code is not None
+        )
+    )
+    expected_dependency_global_witnesses = tuple(
+        (
+            name,
+            function,
+            function_globals,
+            tuple(
+                (
+                    dependency_name,
+                    function_globals[dependency_name],
+                    expected_getattr(
+                        function_globals[dependency_name],
+                        "__code__",
+                        None,
+                    ),
+                )
+                for dependency_name in code.co_names
+                if dependency_name in function_globals
+            ),
+        )
+        for name, function, code in expected_dependency_functions
+        for function_globals in (
+            expected_getattr(function, "__globals__", None),
+        )
+        if function_globals is not None
+    )
+    expected_dependency_module_attr_witnesses = tuple(
+        (
+            name,
+            dependency_name,
+            module,
+            attribute_name,
+            expected_getattr(module, attribute_name),
+            expected_getattr(
+                expected_getattr(module, attribute_name),
+                "__code__",
+                None,
+            ),
+        )
+        for name, function, _function_globals, global_items
+        in expected_dependency_global_witnesses
+        for dependency_name, module, _dependency_code in global_items
+        if expected_type(module) is ModuleType
+        for attribute_name in function.__code__.co_names
+        if hasattr(module, attribute_name)
+    )
+    expected_dependency_builtin_witnesses = tuple(
+        (
+            name,
+            function_globals,
+            builtins,
+            builtin_name,
+            expected_getattr(builtins, builtin_name),
+        )
+        for name, function, function_globals, _global_items
+        in expected_dependency_global_witnesses
+        for builtin_name in function.__code__.co_names
+        if (
+            builtin_name not in function_globals
+            and hasattr(builtins, builtin_name)
+        )
+    )
+
+    def _require_surface_witnesses(owner, witnesses) -> bool:
+        for name, surface, function, code in witnesses:
+            current = expected_getattr_static(owner, name)
+            if current is not surface:
+                return False
+            current_function = expected_getattr(
+                current,
+                "__func__",
+                expected_getattr(current, "fget", current),
+            )
+            if current_function is not function:
+                return False
+            if expected_getattr(current_function, "__code__", None) is not code:
+                return False
+        return True
+
+    def require_store_authority() -> None:
+        if expected_any(
+            name in module_globals for name in expected_unshadowed_builtins
+        ):
+            raise expected_error(
+                "provider evidence store builtin dispatch shadowed"
+            )
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+            or module_globals.get("_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE")
+            is not expected_assert
+            or module_globals.get(
+                "_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE"
+            )
+            is not expected_assert_code
+            or expected_assert.__code__ is not expected_assert_code
+            or module_globals.get("_CANONICAL_REMEMBER") is not expected_remember
+            or module_globals.get("_CANONICAL_REMEMBER_CODE")
+            is not expected_remember_code
+            or expected_remember.__code__ is not expected_remember_code
+            or expected_getattr(expected_store_surface_reader, "__code__", None)
+            is not expected_store_surface_reader_code
+            or expected_getattr(expected_store_surface_reader, "__globals__", None)
+            is not expected_store_surface_reader_globals
+            or expected_any(
+                expected_store_surface_reader_globals.get(name) is not target
+                or expected_getattr(target, "__code__", None) is not code
+                for name, target, code in expected_store_surface_reader_global_items
+            )
+            or expected_init.__code__ is not expected_init_code
+            or expected_save.__code__ is not expected_save_code
+            or expected_load.__code__ is not expected_load_code
+            or store_type.DIRECTORY is not expected_directory
+            or store_type.AUTHORITY_DOMAIN is not expected_authority_domain
+            or expected_any(
+                module_globals.get(name) is not expected
+                for name, expected in expected_runtime_global_items
+            )
+            or expected_hashlib.sha256 is not expected_hashlib_sha256
+            or expected_hmac.new is not expected_hmac_new
+            or expected_hmac.compare_digest is not expected_hmac_compare_digest
+            or expected_secrets.token_bytes is not expected_secrets_token_bytes
+            or expected_os.open is not expected_os_open
+            or expected_os.fdopen is not expected_os_fdopen
+            or expected_os.fsync is not expected_os_fsync
+        ):
+            raise expected_error(
+                "provider evidence store authority witness changed"
+            )
+        for name, target, code in expected_runtime_callables:
+            if module_globals.get(name) is not target:
+                raise expected_error(
+                    "provider evidence store authority witness changed"
+                )
+            function = expected_getattr(target, "__func__", target)
+            if expected_getattr(function, "__code__", None) is not code:
+                raise expected_error(
+                    "provider evidence store authority witness changed"
+                )
+        if expected_any(
+            (
+                expected_getattr(function, "__globals__", None)
+                is not function_globals
+                or expected_any(
+                    function_globals.get(dependency_name) is not expected
+                    or expected_getattr(expected, "__code__", None) is not code
+                    for dependency_name, expected, code in global_items
+                )
+            )
+            for (
+                _name,
+                function,
+                function_globals,
+                global_items,
+            ) in expected_dependency_global_witnesses
+        ):
+            raise expected_error(
+                "provider evidence store dependency globals changed"
+            )
+        if expected_any(
+            (
+                expected_getattr(module, attribute_name, None) is not expected
+                or expected_getattr(expected, "__code__", None) is not code
+            )
+            for (
+                _name,
+                _dependency_name,
+                module,
+                attribute_name,
+                expected,
+                code,
+            ) in expected_dependency_module_attr_witnesses
+        ):
+            raise expected_error(
+                "provider evidence store dependency module dispatch changed"
+            )
+        if expected_any(
+            (
+                builtin_name in function_globals
+                or expected_getattr(builtin_module, builtin_name, None)
+                is not expected
+            )
+            for (
+                _name,
+                function_globals,
+                builtin_module,
+                builtin_name,
+                expected,
+            ) in expected_dependency_builtin_witnesses
+        ):
+            raise expected_error(
+                "provider evidence store dependency builtin dispatch changed"
+            )
+        if not _require_surface_witnesses(store_type, expected_store_internal):
+            raise expected_error(
+                "provider evidence store internal dispatch changed"
+            )
+        if not _require_surface_witnesses(
+            MonotonicWorkspaceAuthority,
+            expected_authority_methods,
+        ):
+            raise expected_error(
+                "provider evidence monotonic authority dispatch changed"
+            )
+        if not _require_surface_witnesses(
+            WorkspaceEconomicLock,
+            expected_lock_methods,
+        ):
+            raise expected_error(
+                "provider evidence workspace lock dispatch changed"
+            )
+        if not _require_surface_witnesses(
+            CompleteGameBoardRequest,
+            expected_request_methods,
+        ):
+            raise expected_error(
+                "provider evidence request dispatch changed"
+            )
+        if not _require_surface_witnesses(
+            CompleteGameBoardSnapshot,
+            expected_snapshot_methods,
+        ):
+            raise expected_error(
+                "provider evidence snapshot dispatch changed"
+            )
+        if (
+            not _require_surface_witnesses(Path, expected_path_factory_methods)
+            or not _require_surface_witnesses(
+                expected_path_type,
+                expected_path_methods,
+            )
+        ):
+            raise expected_error(
+                "provider evidence filesystem path dispatch changed"
+            )
+
+    def _current_store_instance_state(self):
+        state = expected_object_getattribute(self, "__dict__")
+        if expected_type(state) is not expected_dict:
+            raise expected_error(
+                "provider evidence store instance state is not canonical"
+            )
+        if expected_any(name in state for name in expected_instance_shadow_names):
+            raise expected_error(
+                "provider evidence store instance dispatch shadowed"
+            )
+        workspace = state.get("workspace")
+        root = state.get("root")
+        authority_root = state.get("authority_root")
+        if (
+            expected_type(workspace) is not expected_path_type
+            or expected_type(root) is not expected_path_type
+            or root != workspace / expected_directory
+        ):
+            raise expected_error(
+                "provider evidence store instance routing changed"
+            )
+        return workspace, root, authority_root
+
+    def _forget_store_instance(instance_id: int, reference: object) -> None:
+        current = instance_bindings.get(instance_id)
+        if current is not None and current[0] is reference:
+            instance_bindings.pop(instance_id, None)
+
+    def _register_store_instance(self) -> None:
+        workspace, root, authority_root = _current_store_instance_state(self)
+        instance_id = expected_id(self)
+
+        def forget(reference, *, _instance_id=instance_id):
+            _forget_store_instance(_instance_id, reference)
+
+        reference = expected_weakref_ref(self, forget)
+        instance_bindings[instance_id] = (
+            reference,
+            workspace,
+            root,
+            authority_root,
+        )
+
+    def require_store_instance(self):
+        workspace, root, authority_root = _current_store_instance_state(self)
+        binding = instance_bindings.get(expected_id(self))
+        if (
+            binding is None
+            or binding[0]() is not self
+            or workspace is not binding[1]
+            or root is not binding[2]
+            or authority_root is not binding[3]
+        ):
+            raise expected_error(
+                "provider evidence store construction authority changed"
+            )
+        return workspace, root, authority_root
+
+    def require_store_public_surfaces() -> None:
+        if expected_store_surface_reader(store_type, "__init__") is not sealed_init:
+            raise expected_error(
+                "provider evidence store init surface changed"
+            )
+        if expected_store_surface_reader(store_type, "save") is not sealed_save:
+            raise expected_error(
+                "provider evidence store save surface changed"
+            )
+        if expected_store_surface_reader(store_type, "load") is not sealed_load:
+            raise expected_error(
+                "provider evidence store load surface changed"
+            )
+
+    def sealed_init(self, *args, **kwargs):
+        if expected_type(self) is not store_type:
+            return expected_init(self, *args, **kwargs)
+        require_store_authority()
+        expected_init(self, *args, **kwargs)
+        require_store_authority()
+        _register_store_instance(self)
+        require_store_public_surfaces()
+
+    def sealed_save(self, snapshot):
+        if expected_type(self) is not store_type:
+            raise expected_type_error(
+                "provider evidence save requires exact CompleteGameBoardEvidenceStore"
+            )
+        require_store_public_surfaces()
+        require_store_authority()
+        before_workspace, before_root, before_authority_root = require_store_instance(self)
+        result = expected_save(self, snapshot)
+        require_store_authority()
+        after_workspace, after_root, after_authority_root = require_store_instance(self)
+        if (
+            after_workspace is not before_workspace
+            or after_root is not before_root
+            or after_authority_root is not before_authority_root
+        ):
+            raise expected_error(
+                "provider evidence store construction authority changed during save"
+            )
+        require_store_public_surfaces()
+        return result
+
+    def sealed_load(self, evidence_sha256):
+        if expected_type(self) is not store_type:
+            raise expected_type_error(
+                "provider evidence load requires exact CompleteGameBoardEvidenceStore"
+            )
+        require_store_public_surfaces()
+        require_store_authority()
+        before_workspace, before_root, before_authority_root = require_store_instance(self)
+        result = expected_load(self, evidence_sha256)
+        require_store_authority()
+        after_workspace, after_root, after_authority_root = require_store_instance(self)
+        if (
+            after_workspace is not before_workspace
+            or after_root is not before_root
+            or after_authority_root is not before_authority_root
+        ):
+            raise expected_error(
+                "provider evidence store construction authority changed during load"
+            )
+        require_store_public_surfaces()
+        return result
+
+    if (
+        hasattr(sealed_init, "__wrapped__")
+        or hasattr(sealed_save, "__wrapped__")
+        or hasattr(sealed_load, "__wrapped__")
+    ):
+        raise RuntimeError("provider evidence store seal must not expose unsealed delegates")
+    store_type.__init__ = sealed_init
+    store_type.save = sealed_save
+    store_type.load = sealed_load
+
+
+_seal_provider_evidence_store_dispatch()

@@ -22,6 +22,14 @@ from autosport.provider_observation_authority import (
 CAPTURED_AT = "2026-09-20T08:00:00Z"
 
 
+@pytest.fixture(autouse=True)
+def _private_test_acquisition_origin():
+    with authority_module._test_acquisition_origin(
+        _capability=authority_module._TEST_ACQUISITION_CAPABILITY,
+    ):
+        yield
+
+
 class _FakeSseResponse:
     def __init__(
         self,
@@ -341,3 +349,1261 @@ def test_persisted_digest_tamper_is_rejected(tmp_path, monkeypatch):
         match="frame_sha256 does not bind exact provider frame",
     ):
         _store(tmp_path).load(snapshot.evidence_sha256)
+
+
+
+def test_test_acquisition_origin_rejects_wrong_capability():
+    with pytest.raises(TypeError, match="private capability"):
+        with authority_module._test_acquisition_origin(_capability=object()):
+            pass
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "urlopen",
+        "Request",
+        "strict_json_loads",
+        "_parse_sse_event",
+        "_read_production_initial_state",
+        "_default_clock",
+        "_canonical_json",
+        "_remember",
+    ],
+)
+def test_production_origin_guard_rejects_global_rebind(
+    monkeypatch,
+    name,
+):
+    monkeypatch.setattr(authority_module, name, object())
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="production acquisition origin is rebound",
+    ):
+        authority_module._require_production_capture_origin_integrity()
+
+
+def test_production_origin_guard_rejects_request_url_surface_rebind(monkeypatch):
+    monkeypatch.setattr(
+        CompleteGameBoardRequest,
+        "sse_url",
+        lambda _self: "https://attacker.invalid/",
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="production acquisition origin code changed",
+    ):
+        authority_module._require_production_capture_origin_integrity()
+
+
+def test_production_origin_guard_rejects_reader_code_mutation():
+    target = authority_module._CANONICAL_READ_PRODUCTION_INITIAL_STATE
+    original = target.__code__
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("hostile provider reader executed")
+
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            ProviderObservationIntegrityError,
+            match="production acquisition origin code changed",
+        ):
+            authority_module._require_production_capture_origin_integrity()
+    finally:
+        target.__code__ = original
+
+
+def test_production_reader_defaults_capture_transport_origin():
+    defaults = authority_module._CANONICAL_READ_PRODUCTION_INITIAL_STATE.__kwdefaults__
+    assert defaults is not None
+    assert defaults["_request_factory"] is authority_module._CANONICAL_HTTP_REQUEST
+    assert defaults["_open_url"] is authority_module._CANONICAL_URLOPEN
+    assert defaults["_parse_event"] is authority_module._CANONICAL_PARSE_SSE_EVENT
+    assert defaults["_sse_url"] is authority_module._CANONICAL_REQUEST_SSE_URL
+    assert defaults["_loads"] is authority_module._CANONICAL_STRICT_JSON_LOADS
+    assert defaults["_max_sse_bytes"] == authority_module._MAX_SSE_BYTES
+
+
+def test_public_capture_has_no_transport_or_clock_injection_parameters():
+    import inspect
+
+    parameters = inspect.signature(capture_parlay_complete_game_board).parameters
+    assert set(parameters) == {"api_key", "request", "timeout_seconds"}
+
+
+
+def test_capture_rejects_request_subclass_even_in_test_origin():
+    class HostileRequest(CompleteGameBoardRequest):
+        pass
+
+    with pytest.raises(TypeError, match="exact CompleteGameBoardRequest"):
+        capture_parlay_complete_game_board(
+            api_key="secret-value",
+            request=HostileRequest(
+                sport_key="table_tennis",
+                bookmakers=("bovada",),
+            ),
+        )
+
+
+def test_sealed_capture_rejects_clock_and_witness_double_rebind(monkeypatch):
+    hostile = lambda: "2200-01-01T00:00:00Z"
+    monkeypatch.setattr(authority_module, "_default_clock", hostile)
+    monkeypatch.setattr(authority_module, "_CANONICAL_DEFAULT_CLOCK", hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="production acquisition witness changed",
+    ):
+        capture_parlay_complete_game_board(
+            api_key="secret-value",
+            request=_request(),
+        )
+
+
+def test_sealed_capture_rejects_transport_and_witness_double_rebind(monkeypatch):
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("hostile transport executed")
+
+    monkeypatch.setattr(authority_module, "urlopen", hostile)
+    monkeypatch.setattr(authority_module, "_CANONICAL_URLOPEN", hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="production acquisition witness changed",
+    ):
+        capture_parlay_complete_game_board(
+            api_key="secret-value",
+            request=_request(),
+        )
+
+
+def test_sealed_capture_rejects_guard_rebind_before_execution(monkeypatch):
+    calls: list[str] = []
+
+    def hostile_guard():
+        calls.append("guard")
+        raise AssertionError("hostile guard executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "_require_production_capture_origin_integrity",
+        hostile_guard,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="production acquisition guard changed",
+    ):
+        capture_parlay_complete_game_board(
+            api_key="secret-value",
+            request=_request(),
+        )
+    assert calls == []
+
+
+def test_sealed_capture_does_not_expose_unsealed_delegate():
+    sealed = authority_module.capture_parlay_complete_game_board
+
+    assert not hasattr(sealed, "__wrapped__")
+    assert sealed.__name__ == "capture_parlay_complete_game_board"
+
+
+def test_sealed_capture_rejects_public_surface_rebind(monkeypatch):
+    saved = capture_parlay_complete_game_board
+    monkeypatch.setattr(
+        authority_module,
+        "capture_parlay_complete_game_board",
+        lambda **_kwargs: None,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="public surface changed",
+    ):
+        saved(api_key="secret-value", request=_request())
+
+
+
+def test_sealed_capture_rejects_mid_call_integrity_error_rebind(monkeypatch):
+    saved = capture_parlay_complete_game_board
+    hostile_calls: list[str] = []
+
+    def hostile_error(*_args, **_kwargs):
+        hostile_calls.append("error")
+        raise AssertionError("hostile provider integrity error executed")
+
+    def mutating_urlopen(_request, _timeout):
+        monkeypatch.setattr(
+            authority_module,
+            "ProviderObservationIntegrityError",
+            hostile_error,
+        )
+        return _FakeSseResponse(_complete_frame())
+
+    monkeypatch.setattr(authority_module, "urlopen", mutating_urlopen)
+    monkeypatch.setattr(authority_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider production acquisition witness changed",
+    ):
+        saved(
+            api_key="secret-value",
+            request=_request(),
+            timeout_seconds=3.0,
+        )
+
+    assert hostile_calls == []
+
+
+def test_sealed_capture_rejects_mid_call_public_surface_rebind(monkeypatch):
+    saved = capture_parlay_complete_game_board
+    hostile_calls: list[str] = []
+
+    def hostile_capture(**_kwargs):
+        hostile_calls.append("capture")
+        raise AssertionError("hostile public capture executed")
+
+    def mutating_urlopen(_request, _timeout):
+        monkeypatch.setattr(
+            authority_module,
+            "capture_parlay_complete_game_board",
+            hostile_capture,
+        )
+        return _FakeSseResponse(_complete_frame())
+
+    monkeypatch.setattr(authority_module, "urlopen", mutating_urlopen)
+    monkeypatch.setattr(authority_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="public surface changed",
+    ):
+        saved(
+            api_key="secret-value",
+            request=_request(),
+            timeout_seconds=3.0,
+        )
+
+    assert hostile_calls == []
+
+
+def test_ephemeral_issuance_registry_is_not_module_mutable():
+    assert not hasattr(authority_module, "_ISSUED")
+
+
+def test_store_save_uses_captured_assertion_not_live_public_alias(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_assert(_snapshot) -> None:
+        hostile_calls.append("assert")
+        raise AssertionError("hostile public assertion executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "assert_complete_game_board_authoritative",
+        hostile_assert,
+    )
+    path = _store(tmp_path).save(snapshot)
+    assert path.name == f"{snapshot.evidence_sha256}.json"
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_canonical_assert_witness_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_assert(_snapshot) -> None:
+        hostile_calls.append("assert")
+        raise AssertionError("hostile canonical assertion executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE",
+        hostile_assert,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+def test_store_save_requires_exact_store_type(tmp_path, monkeypatch):
+    snapshot = _capture(monkeypatch)
+
+    class HostileStore(CompleteGameBoardEvidenceStore):
+        pass
+
+    store = HostileStore(
+        tmp_path / "workspace",
+        authority_root=tmp_path / "machine-authority",
+    )
+    with pytest.raises(
+        TypeError,
+        match="save requires exact CompleteGameBoardEvidenceStore",
+    ):
+        store.save(snapshot)
+
+
+def test_store_load_requires_exact_store_type(tmp_path):
+    class HostileStore(CompleteGameBoardEvidenceStore):
+        pass
+
+    store = HostileStore(
+        tmp_path / "workspace",
+        authority_root=tmp_path / "machine-authority",
+    )
+    with pytest.raises(
+        TypeError,
+        match="load requires exact CompleteGameBoardEvidenceStore",
+    ):
+        store.load("a" * 64)
+
+
+def test_store_save_rejects_rebound_load_surface_before_persistence(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    saved_save = store.save
+    hostile_calls: list[str] = []
+
+    def hostile_load(*_args, **_kwargs):
+        hostile_calls.append("load")
+        raise AssertionError("hostile load executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardEvidenceStore,
+        "load",
+        hostile_load,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store load surface changed",
+    ):
+        saved_save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_load_rejects_rebound_save_surface_before_resolution(
+    tmp_path,
+    monkeypatch,
+):
+    store = _store(tmp_path)
+    saved_load = store.load
+    hostile_calls: list[str] = []
+
+    def hostile_save(*_args, **_kwargs):
+        hostile_calls.append("save")
+        raise AssertionError("hostile save executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardEvidenceStore,
+        "save",
+        hostile_save,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store save surface changed",
+    ):
+        saved_load("a" * 64)
+
+    assert hostile_calls == []
+
+
+def test_store_load_implementation_uses_canonical_remember_without_unsealed_delegate():
+    import inspect
+
+    load_descriptor = inspect.getattr_static(CompleteGameBoardEvidenceStore, "load")
+    save_descriptor = inspect.getattr_static(CompleteGameBoardEvidenceStore, "save")
+    assert not hasattr(load_descriptor, "__wrapped__")
+    assert not hasattr(save_descriptor, "__wrapped__")
+    original_code = authority_module._CANONICAL_EVIDENCE_STORE_LOAD_IMPLEMENTATION_CODE
+    assert "_CANONICAL_REMEMBER" in original_code.co_names
+    assert "_remember" not in original_code.co_names
+
+
+def test_store_save_rejects_atomic_writer_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_writer(*_args, **_kwargs):
+        hostile_calls.append("write")
+        raise AssertionError("hostile atomic writer executed")
+
+    monkeypatch.setattr(authority_module, "atomic_write_json", hostile_writer)
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_hmac_dispatch_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_hmac(*_args, **_kwargs):
+        hostile_calls.append("hmac")
+        raise AssertionError("hostile HMAC executed")
+
+    monkeypatch.setattr(authority_module.hmac, "new", hostile_hmac)
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    ("module_name", "attribute_name", "expected_message"),
+    [
+        ("json", "dumps", "provider evidence store dependency module dispatch changed"),
+        (
+            "hashlib",
+            "sha256",
+            "provider evidence store authority witness changed|"
+            "provider evidence store dependency module dispatch changed",
+        ),
+    ],
+)
+def test_store_save_rejects_nested_helper_module_dispatch_rebind(
+    tmp_path,
+    monkeypatch,
+    module_name: str,
+    attribute_name: str,
+    expected_message: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+    module = getattr(authority_module, module_name)
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(f"{module_name}.{attribute_name}")
+        raise AssertionError("hostile nested provider-store module dispatch executed")
+
+    monkeypatch.setattr(module, attribute_name, hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match=expected_message,
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_nested_helper_global_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    monkeypatch.setattr(authority_module, "_HEX", frozenset())
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store dependency globals changed",
+    ):
+        store.save(snapshot)
+
+
+def test_store_save_rejects_nested_helper_builtin_shadow(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_type_error(*_args, **_kwargs):
+        hostile_calls.append("TypeError")
+        raise AssertionError("hostile nested TypeError executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "TypeError",
+        hostile_type_error,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store dependency builtin dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_internal_receipt_writer_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_write_receipt(_self, _snapshot):
+        hostile_calls.append("receipt")
+        raise AssertionError("hostile receipt writer executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardEvidenceStore,
+        "_write_receipt",
+        hostile_write_receipt,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store internal dispatch changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["_path", "_authority", "_write_receipt", "_verify_receipt"],
+)
+def test_store_save_rejects_instance_internal_dispatch_shadow_before_dispatch(
+    tmp_path,
+    monkeypatch,
+    method_name: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(method_name)
+        raise AssertionError(f"hostile instance seam executed: {method_name}")
+
+    monkeypatch.setattr(store, method_name, hostile, raising=False)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store instance dispatch shadowed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("DIRECTORY", "hostile-provider-evidence"),
+        ("AUTHORITY_DOMAIN", "hostile-provider-authority"),
+    ],
+)
+def test_store_save_rejects_instance_routing_constant_shadow(
+    tmp_path,
+    monkeypatch,
+    name: str,
+    value: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    monkeypatch.setattr(store, name, value, raising=False)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store instance dispatch shadowed",
+    ):
+        store.save(snapshot)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("DIRECTORY", "hostile-provider-evidence"),
+        ("AUTHORITY_DOMAIN", "hostile-provider-authority"),
+    ],
+)
+def test_store_save_rejects_class_routing_constant_rebind(
+    tmp_path,
+    monkeypatch,
+    name: str,
+    value: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    monkeypatch.setattr(CompleteGameBoardEvidenceStore, name, value)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        store.save(snapshot)
+
+
+@pytest.mark.parametrize("field_name", ["workspace", "root", "authority_root"])
+def test_store_save_rejects_post_construction_routing_retarget(
+    tmp_path,
+    monkeypatch,
+    field_name: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    if field_name == "workspace":
+        value = type(store.workspace)(tmp_path / "hostile-workspace")
+    elif field_name == "root":
+        value = type(store.root)(tmp_path / "hostile-root")
+    else:
+        value = tmp_path / "hostile-authority"
+
+    monkeypatch.setattr(store, field_name, value)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match=(
+            "provider evidence store instance routing changed|"
+            "provider evidence store construction authority changed"
+        ),
+    ):
+        store.save(snapshot)
+
+
+def test_store_load_rejects_post_construction_authority_root_retarget(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    store.save(snapshot)
+    monkeypatch.setattr(store, "authority_root", tmp_path / "hostile-authority")
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store construction authority changed",
+    ):
+        store.load(snapshot.evidence_sha256)
+
+
+def test_store_save_rejects_constructor_surface_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_init(*_args, **_kwargs):
+        hostile_calls.append("init")
+        raise AssertionError("hostile evidence store constructor executed")
+
+    monkeypatch.setattr(CompleteGameBoardEvidenceStore, "__init__", hostile_init)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store init surface changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_monotonic_commit_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_commit(_self, **_kwargs):
+        hostile_calls.append("commit")
+        raise AssertionError("hostile monotonic commit executed")
+
+    monkeypatch.setattr(
+        authority_module.MonotonicWorkspaceAuthority,
+        "commit",
+        hostile_commit,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence monotonic authority dispatch changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize("method_name", ["acquire", "release"])
+def test_store_save_rejects_workspace_lock_virtual_dispatch_rebind(
+    tmp_path,
+    monkeypatch,
+    method_name: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(method_name)
+        raise AssertionError(f"hostile workspace lock {method_name} executed")
+
+    monkeypatch.setattr(
+        authority_module.WorkspaceEconomicLock,
+        method_name,
+        hostile,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence workspace lock dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["_load_bound_history", "_append_record", "_new_record"],
+)
+def test_store_save_rejects_monotonic_internal_virtual_dispatch_rebind(
+    tmp_path,
+    monkeypatch,
+    method_name: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(method_name)
+        raise AssertionError(f"hostile monotonic {method_name} executed")
+
+    monkeypatch.setattr(
+        authority_module.MonotonicWorkspaceAuthority,
+        method_name,
+        hostile,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence monotonic authority dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_workspace_lock_enter_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_enter(_self):
+        hostile_calls.append("lock")
+        raise AssertionError("hostile workspace lock executed")
+
+    monkeypatch.setattr(
+        authority_module.WorkspaceEconomicLock,
+        "__enter__",
+        hostile_enter,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence workspace lock dispatch changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    ("owner", "name", "expected_message"),
+    [
+        (
+            CompleteGameBoardSnapshot,
+            "evidence_sha256",
+            "provider evidence snapshot dispatch changed",
+        ),
+        (
+            CompleteGameBoardRequest,
+            "source_id",
+            "provider evidence request dispatch changed",
+        ),
+    ],
+)
+def test_store_save_rejects_identity_property_code_mutation(
+    tmp_path,
+    monkeypatch,
+    owner,
+    name: str,
+    expected_message: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    descriptor = getattr(owner, name)
+    original_getter = descriptor.fget
+
+    def hostile_getter(_self):
+        raise AssertionError("hostile identity property getter executed")
+
+    monkeypatch.setattr(original_getter, "__code__", hostile_getter.__code__)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match=expected_message,
+    ):
+        store.save(snapshot)
+
+
+def test_store_save_rejects_snapshot_evidence_identity_descriptor_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_evidence(_self):
+        hostile_calls.append("evidence_sha256")
+        raise AssertionError("hostile evidence identity executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardSnapshot,
+        "evidence_sha256",
+        property(hostile_evidence),
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence snapshot dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_request_source_identity_descriptor_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_source(_self):
+        hostile_calls.append("source_id")
+        raise AssertionError("hostile request source identity executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardRequest,
+        "source_id",
+        property(hostile_source),
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence request dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_snapshot_payload_dispatch_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_to_payload(_self):
+        hostile_calls.append("snapshot")
+        raise AssertionError("hostile snapshot payload executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardSnapshot,
+        "to_payload",
+        hostile_to_payload,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence snapshot dispatch changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    ("owner", "method_name", "expected_message"),
+    [
+        (
+            CompleteGameBoardSnapshot,
+            "__post_init__",
+            "provider evidence snapshot dispatch changed",
+        ),
+        (
+            CompleteGameBoardSnapshot,
+            "_validate_frame",
+            "provider evidence snapshot dispatch changed",
+        ),
+        (
+            CompleteGameBoardRequest,
+            "__post_init__",
+            "provider evidence request dispatch changed",
+        ),
+    ],
+)
+def test_store_load_rejects_deserialization_validator_rebind(
+    tmp_path,
+    monkeypatch,
+    owner,
+    method_name: str,
+    expected_message: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    store.save(snapshot)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(method_name)
+        raise AssertionError(f"hostile deserialization validator executed: {method_name}")
+
+    monkeypatch.setattr(owner, method_name, hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match=expected_message,
+    ):
+        store.load(snapshot.evidence_sha256)
+
+    assert hostile_calls == []
+
+
+def test_store_load_rejects_json_reader_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    store.save(snapshot)
+    hostile_calls: list[str] = []
+
+    def hostile_json_reader(_payload):
+        hostile_calls.append("json")
+        raise AssertionError("hostile JSON reader executed")
+
+    monkeypatch.setattr(authority_module, "strict_json_loads", hostile_json_reader)
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        store.load(snapshot.evidence_sha256)
+    assert hostile_calls == []
+
+def test_store_load_rejects_nested_json_decoder_dispatch_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    store.save(snapshot)
+    hostile_calls: list[str] = []
+    json_module = authority_module.strict_json_loads.__globals__["json"]
+
+    def hostile_loads(*_args, **_kwargs):
+        hostile_calls.append("json.loads")
+        raise AssertionError("hostile nested JSON decoder executed")
+
+    monkeypatch.setattr(json_module, "loads", hostile_loads)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store dependency module dispatch changed",
+    ):
+        store.load(snapshot.evidence_sha256)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_monotonic_authority_dependency_global_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    prepare = authority_module.MonotonicWorkspaceAuthority.prepare
+    dependency_name = next(
+        name
+        for name in prepare.__code__.co_names
+        if (
+            name in prepare.__globals__
+            and getattr(prepare.__globals__[name], "__code__", None) is not None
+        )
+    )
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(dependency_name)
+        raise AssertionError("hostile monotonic dependency executed")
+
+    monkeypatch.setitem(prepare.__globals__, dependency_name, hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store dependency globals changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_workspace_lock_builtin_shadow(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    exit_method = authority_module.WorkspaceEconomicLock.__exit__
+    assert "BaseException" in exit_method.__code__.co_names
+    assert "BaseException" not in exit_method.__globals__
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append("BaseException")
+        raise AssertionError("hostile workspace-lock builtin executed")
+
+    monkeypatch.setitem(exit_method.__globals__, "BaseException", hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store dependency builtin dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_surface_reader_rebind_before_hostile_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_getattr_static(*_args, **_kwargs):
+        hostile_calls.append("reflect")
+        raise AssertionError("hostile reflection reader executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "_CANONICAL_GETATTR_STATIC",
+        hostile_getattr_static,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        store.save(snapshot)
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_path_constructor_rebind_before_hostile_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+    original_new = authority_module.Path.__new__
+
+    def hostile_new(cls, *args, **kwargs):
+        hostile_calls.append("path-new")
+        return original_new(cls, *args, **kwargs)
+
+    monkeypatch.setattr(authority_module.Path, "__new__", hostile_new)
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence filesystem path dispatch changed",
+    ):
+        store.save(snapshot)
+    assert hostile_calls == []
+
+
+
+
+def test_store_save_rejects_shadowed_runtime_builtin_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_any(*_args, **_kwargs):
+        hostile_calls.append("any")
+        raise AssertionError("hostile any executed")
+
+    monkeypatch.setattr(authority_module, "any", hostile_any, raising=False)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store builtin dispatch shadowed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_uses_captured_type_and_getattr_primitives(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append("primitive")
+        raise AssertionError("hostile primitive executed")
+
+    monkeypatch.setattr(authority_module, "type", hostile, raising=False)
+    monkeypatch.setattr(authority_module, "getattr", hostile, raising=False)
+
+    path = store.save(snapshot)
+
+    assert path.name == f"{snapshot.evidence_sha256}.json"
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_getattr_static_helper_rebind_before_execution(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    reader = authority_module._CANONICAL_GETATTR_STATIC
+    helper_globals = reader.__globals__
+    name = next(
+        candidate
+        for candidate in reader.__code__.co_names
+        if candidate in helper_globals
+        and getattr(helper_globals[candidate], "__code__", None) is not None
+    )
+    original = helper_globals[name]
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(name)
+        raise AssertionError("hostile inspect helper executed")
+
+    helper_globals[name] = hostile
+    try:
+        with pytest.raises(
+            ProviderObservationIntegrityError,
+            match="provider evidence store authority witness changed",
+        ):
+            store.save(snapshot)
+    finally:
+        helper_globals[name] = original
+
+    assert hostile_calls == []
+
+
+
+def test_sealed_capture_rejects_shadowed_isinstance_before_execution(
+    monkeypatch,
+):
+    saved = authority_module.capture_parlay_complete_game_board
+    hostile_calls: list[str] = []
+
+    def hostile_isinstance(*_args, **_kwargs):
+        hostile_calls.append("isinstance")
+        raise AssertionError("hostile isinstance executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "isinstance",
+        hostile_isinstance,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider production acquisition builtin dispatch shadowed",
+    ):
+        saved(api_key="secret-value", request=_request())
+
+    assert hostile_calls == []
+
+
+def test_sealed_capture_rejects_math_rebind_before_isfinite_dispatch(
+    monkeypatch,
+):
+    saved = authority_module.capture_parlay_complete_game_board
+    hostile_calls: list[str] = []
+
+    class HostileMath:
+        @staticmethod
+        def isfinite(_value):
+            hostile_calls.append("isfinite")
+            raise AssertionError("hostile isfinite executed")
+
+    monkeypatch.setattr(authority_module, "math", HostileMath)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider production acquisition numeric validation changed",
+    ):
+        saved(api_key="secret-value", request=_request())
+
+    assert hostile_calls == []
+
+
+def test_production_origin_guard_rejects_getattr_static_helper_rebind(
+    monkeypatch,
+):
+    reader = authority_module._CANONICAL_GETATTR_STATIC
+    helper_globals = reader.__globals__
+    name = next(
+        candidate
+        for candidate in reader.__code__.co_names
+        if candidate in helper_globals
+        and getattr(helper_globals[candidate], "__code__", None) is not None
+    )
+    original = helper_globals[name]
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(name)
+        raise AssertionError("hostile inspect helper executed")
+
+    helper_globals[name] = hostile
+    try:
+        with pytest.raises(
+            ProviderObservationIntegrityError,
+            match="provider production acquisition origin is rebound",
+        ):
+            authority_module._require_production_capture_origin_integrity()
+    finally:
+        helper_globals[name] = original
+
+    assert hostile_calls == []

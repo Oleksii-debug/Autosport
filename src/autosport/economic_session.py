@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from types import MethodType
+from types import FunctionType, MethodType
 from typing import Final
 
 from .economic_goal_provenance import provenance_for
@@ -1398,6 +1398,57 @@ class ProductEconomicSessionStore:
             ),
         )
 
+
+
+_ECONOMIC_SESSION_CURRENT_BOUND = ProductEconomicSessionStore.current
+_ECONOMIC_SESSION_CURRENT_BOUND_CODE = getattr(
+    _ECONOMIC_SESSION_CURRENT_BOUND,
+    "__code__",
+    None,
+)
+_ECONOMIC_SESSION_REQUIRE_CURRENT_SOURCE = ProductEconomicSessionStore.require_current
+_ECONOMIC_SESSION_REQUIRE_CURRENT_SOURCE_CODE = getattr(
+    _ECONOMIC_SESSION_REQUIRE_CURRENT_SOURCE,
+    "__code__",
+    None,
+)
+
+
+def _sealed_require_current_session(
+    self: ProductEconomicSessionStore,
+    candidate: ProductEconomicSession,
+    *,
+    _current=_ECONOMIC_SESSION_CURRENT_BOUND,
+    _current_code=_ECONOMIC_SESSION_CURRENT_BOUND_CODE,
+    _source=_ECONOMIC_SESSION_REQUIRE_CURRENT_SOURCE,
+    _source_code=_ECONOMIC_SESSION_REQUIRE_CURRENT_SOURCE_CODE,
+) -> ProductEconomicSession:
+    if (
+        type(_current) is not FunctionType
+        or getattr(_current, "__code__", None) is not _current_code
+        or type(_source) is not FunctionType
+        or getattr(_source, "__code__", None) is not _source_code
+    ):
+        raise EconomicSessionIntegrityError(
+            "economic-session require-current executable authority changed"
+        )
+    if type(candidate) is not ProductEconomicSession:
+        raise EconomicSessionMismatchError(
+            "candidate must be exact ProductEconomicSession evidence"
+        )
+    current = _current(self)
+    if not current.product_clock_authoritative:
+        raise EconomicSessionIntegrityError(
+            "synthetic clock cannot mint positive economic-session authority"
+        )
+    if candidate != current:
+        raise EconomicSessionMismatchError(
+            "economic-session evidence does not match current durable authority"
+        )
+    return current
+
+
+ProductEconomicSessionStore.require_current = _sealed_require_current_session
 
 __all__ = [
     "EconomicSessionError",

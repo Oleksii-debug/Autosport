@@ -632,7 +632,6 @@ class MarketBookBatchAttemptExecution:
 def _install_transport_result_authority() -> None:
     issued: dict[int, tuple[object, str, bool]] = {}
     validate = MarketBookBatchTransportResult.__post_init__
-    validate_attempt_execution = MarketBookBatchAttemptExecution.__post_init__
     json_dumps = json.dumps
     hash_factory = sha256
 
@@ -661,7 +660,7 @@ def _install_transport_result_authority() -> None:
                 "receipt_id": receipt.receipt_id,
             },
             "structural_exact_response": (
-                receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+                receipt.status is exact_receipt_status
             ),
             "origin_authority_requires_assert_issued": True,
             "provider_observation_authenticated": False,
@@ -693,6 +692,17 @@ def _install_transport_result_authority() -> None:
     post_market_book_readonly = _transport._post_market_book_readonly
     receipt_from_response = MarketBookBatchReceipt.from_response
     result_factory = MarketBookBatchTransportResult
+    history_type = MarketBookAttemptHistory
+    execution_type = MarketBookBatchAttemptExecution
+    exact_receipt_status = BatchReceiptStatus.EXACT_RESPONSE
+    incomplete_receipt_status = BatchReceiptStatus.INCOMPLETE_RESPONSE
+    exact_response_outcome = MarketBookAttemptOutcome.EXACT_RESPONSE
+    incomplete_response_outcome = MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
+    response_outcomes = frozenset(
+        {exact_response_outcome, incomplete_response_outcome}
+    )
+    batch_transport_error_type = MarketBookBatchTransportError
+    validate_history = MarketBookAttemptHistory.__post_init__
     admission_error_type = MarketBookBatchAdmissionError
     post_dispatch_failure_type = MarketBookPostDispatchFailure
     protocol_error_type = _transport.BetfairMarketBookProtocolError
@@ -903,15 +913,63 @@ def _install_transport_result_authority() -> None:
     def validate_attempt_execution_bound(
         self: MarketBookBatchAttemptExecution,
     ) -> None:
-        # Response-bearing execution evidence must prove issuance through the
-        # closure-local registry too. Calling the mutable result class method
-        # alone would let a class rebound bless a copied/unissued result.
-        if self.outcome in {
-            MarketBookAttemptOutcome.EXACT_RESPONSE,
-            MarketBookAttemptOutcome.INCOMPLETE_RESPONSE,
-        } and type(self.result) is MarketBookBatchTransportResult:
+        if type(self.history) is not history_type:
+            raise TypeError("history must be an exact MarketBookAttemptHistory")
+        try:
+            validate_history(self.history)
+        except Exception as exc:
+            raise batch_transport_error_type(
+                "attempt execution history is not canonical"
+            ) from exc
+        if self.outcome not in frozenset(MarketBookAttemptOutcome):
+            raise TypeError("outcome must be MarketBookAttemptOutcome")
+        if not self.history.records:
+            raise batch_transport_error_type(
+                "attempt execution requires an appended canonical history record"
+            )
+        latest = self.history.records[-1]
+        if latest.outcome is not self.outcome:
+            raise batch_transport_error_type(
+                "attempt execution outcome does not match latest history record"
+            )
+        if self.outcome in response_outcomes:
+            if type(self.result) is not result_factory:
+                raise batch_transport_error_type(
+                    "response outcome requires canonical transport result"
+                )
             _record(self.result)
-        validate_attempt_execution(self)
+            if (
+                self.result.plan_id != self.history.plan.plan_id
+                or self.result.request_contract_id
+                != self.history.plan.request_contract_id
+            ):
+                raise batch_transport_error_type(
+                    "attempt execution result is bound to another history plan"
+                )
+            if latest.batch_id != self.result.batch_id:
+                raise batch_transport_error_type(
+                    "attempt execution result is bound to another history batch"
+                )
+            expected_receipt_status = (
+                exact_receipt_status
+                if self.outcome is exact_response_outcome
+                else incomplete_receipt_status
+            )
+            if self.result.receipt.status is not expected_receipt_status:
+                raise batch_transport_error_type(
+                    "attempt execution result receipt status contradicts outcome"
+                )
+            if (
+                self.outcome is exact_response_outcome
+                and latest.exact_receipt != self.result.receipt
+            ):
+                raise batch_transport_error_type(
+                    "attempt execution exact receipt does not match history"
+                )
+        elif self.result is not None:
+            raise batch_transport_error_type(
+                "nonresponse outcome cannot carry transport result"
+            )
 
     append_attempt_unbound = append_market_book_transport_attempt
 
@@ -925,7 +983,7 @@ def _install_transport_result_authority() -> None:
         # Consumer authority must not depend on mutable class dispatch.  Prove
         # canonical issuance through the closure-local registry before entering
         # the ordinary structural append path.
-        if type(result) is not MarketBookBatchTransportResult:
+        if type(result) is not result_factory:
             raise TypeError("result must be an exact MarketBookBatchTransportResult")
         _record(result)
         return append_attempt_unbound(
@@ -943,7 +1001,7 @@ def _install_transport_result_authority() -> None:
     MarketBookBatchTransportResult.assert_canonical_network_origin = (
         assert_canonical_network_origin
     )
-    MarketBookBatchAttemptExecution.__post_init__ = validate_attempt_execution_bound
+    execution_type.__post_init__ = validate_attempt_execution_bound
 
 
 _install_transport_result_authority()

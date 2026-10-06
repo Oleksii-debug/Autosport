@@ -191,10 +191,48 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _require_state_parent_directory(path: Path) -> None:
+    """Reject a symlink/reparse state directory before receipt IO."""
+
+    parent = path.parent
+    try:
+        metadata = os.stat(parent, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state directory is missing"
+        ) from exc
+    except OSError as exc:
+        raise CampaignInceptionIntegrityError(
+            "cannot inspect campaign inception state directory"
+        ) from exc
+
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or bool(reparse_flag and (file_attributes & reparse_flag))
+    ):
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state directory must be a real directory"
+        )
+
+
+def _prepare_state_parent_directory(path: Path) -> None:
+    """Create the product-owned state directory, then prove its final component."""
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise CampaignInceptionIntegrityError(
+            "cannot create campaign inception state directory"
+        ) from exc
+    _require_state_parent_directory(path)
+
+
 def _write_state(path: Path, payload: Mapping[str, object]) -> None:
     """Atomically publish one local receipt image under the campaign writer lock."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _require_state_parent_directory(path)
     encoded = _canonical_bytes(dict(payload)) + b"\n"
     if len(encoded) > _MAX_STATE_BYTES:
         raise CampaignInceptionIntegrityError(
@@ -231,6 +269,7 @@ def _write_state(path: Path, payload: Mapping[str, object]) -> None:
 def _read_stable_state_bytes(path: Path) -> bytes | None:
     """Read one bounded regular inception-state file from one stable identity."""
 
+    _require_state_parent_directory(path)
     try:
         before = os.stat(path, follow_symlinks=False)
     except FileNotFoundError:
@@ -1143,6 +1182,10 @@ def establish_campaign_inception(
     precommit = _precommit_payload(manifest, witness)
     gate_binding = _gate_binding_sha256(precommit=precommit, spec=source_spec)
     state_path = _state_path(precommit_locator.workspace, manifest.campaign_id)
+    # Validate the final state-directory component before WorkspaceEconomicLock can
+    # create its persistent lock file.  A pre-existing symlink/junction must never
+    # redirect receipt or lock IO outside the product workspace.
+    _prepare_state_parent_directory(state_path)
     authority = _authority(
         locator=precommit_locator,
         witness=witness,
@@ -1404,6 +1447,8 @@ def _seal_campaign_inception_dispatch() -> None:
     expected_os_read = os.read
     expected_stat = stat
     expected_stat_isreg = stat.S_ISREG
+    expected_stat_isdir = stat.S_ISDIR
+    expected_stat_reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     expected_uuid = uuid
     expected_uuid4 = uuid.uuid4
     expected_math = math
@@ -1459,6 +1504,8 @@ def _seal_campaign_inception_dispatch() -> None:
             ("_campaign_key", _campaign_key),
             ("_state_path", _state_path),
             ("_fsync_directory", _fsync_directory),
+            ("_require_state_parent_directory", _require_state_parent_directory),
+            ("_prepare_state_parent_directory", _prepare_state_parent_directory),
             ("_write_state", _write_state),
             ("_read_stable_state_bytes", _read_stable_state_bytes),
             ("_read_state", _read_state),
@@ -1675,6 +1722,9 @@ def _seal_campaign_inception_dispatch() -> None:
         if (
             module_globals.get("stat") is not expected_stat
             or expected_stat.S_ISREG is not expected_stat_isreg
+            or expected_stat.S_ISDIR is not expected_stat_isdir
+            or getattr(expected_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            != expected_stat_reparse_flag
         ):
             raise expected_error_type(
                 "campaign inception file-type dispatch authority is rebound"

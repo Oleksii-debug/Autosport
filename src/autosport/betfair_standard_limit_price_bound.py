@@ -541,9 +541,6 @@ def resolve_betfair_standard_limit_price_bound(
     action_id: str,
     _issue=_issue_evidence,
     _digest=_CANONICAL_INSTRUCTION_DIGEST,
-    *,
-    bound: BoundSupervisedExecutionPlan,
-    action_id: str,
 ) -> BetfairStandardLimitPriceBoundEvidence:
     """Re-resolve one exact current standard BACK LIMIT adverse-price bound.
 

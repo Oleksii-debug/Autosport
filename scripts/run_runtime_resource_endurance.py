@@ -30,6 +30,26 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _WORKER_JOIN_TIMEOUT_SECONDS = 10.0
 _BARRIER_TIMEOUT_SECONDS = 10.0
 
+# #1229 requires PASS to mean that every declared process-local resource class has
+# an actual census/probe, not merely that the thread and workspace-handle subset is
+# clean. Keep this list explicit in the evidence so missing instrumentation remains
+# fail-honest and cannot silently become release-grade PASS.
+_REQUIRED_RESOURCE_CLASSES = (
+    "owned_threads",
+    "workspace_handles",
+    "provider_transports",
+    "timers_scheduled_jobs",
+    "subscriptions_listeners",
+    "internal_queues",
+    "subprocesses",
+    "temporary_artifacts",
+    "persistence_handles",
+)
+_OBSERVED_RESOURCE_CLASSES = (
+    "owned_threads",
+    "workspace_handles",
+)
+
 
 class _ExpectedQualificationFailure(RuntimeError):
     pass
@@ -343,9 +363,22 @@ def main(argv: list[str] | None = None) -> int:
         else "FAIL"
     )
 
+    missing_resource_classes = tuple(
+        resource_class
+        for resource_class in _REQUIRED_RESOURCE_CLASSES
+        if resource_class not in _OBSERVED_RESOURCE_CLASSES
+    )
+    qualification_status = (
+        "FAIL"
+        if failures
+        else "INCONCLUSIVE"
+        if missing_resource_classes
+        else "PASS"
+    )
+
     report: dict[str, object] = {
-        "schema_version": 2,
-        "status": "PASS" if not failures else "FAIL",
+        "schema_version": 3,
+        "status": qualification_status,
         "source_sha": args.source_sha,
         "platform": platform_name,
         "os_name": os.name,
@@ -366,6 +399,10 @@ def main(argv: list[str] | None = None) -> int:
             item.to_dict() for item in final_comparison.growth
         ],
         "max_owned_thread_count_at_quiescent_checkpoint": max_owned_threads,
+        "required_resource_classes": list(_REQUIRED_RESOURCE_CLASSES),
+        "observed_resource_classes": list(_OBSERVED_RESOURCE_CLASSES),
+        "missing_resource_classes": list(missing_resource_classes),
+        "resource_coverage_complete": not missing_resource_classes,
         "workspace_move_round_trip_passes": move_round_trip_passes,
         "workspace_move_delete_passes": move_delete_passes,
         "windows_workspace_handle_semantics": windows_probe_status,
@@ -386,7 +423,11 @@ def main(argv: list[str] | None = None) -> int:
         f"windows_handle_semantics={windows_probe_status}"
     )
     print(f"evidence={args.output}")
-    return 0 if report["status"] == "PASS" else 5
+    if report["status"] == "PASS":
+        return 0
+    if report["status"] == "INCONCLUSIVE":
+        return 6
+    return 5
 
 
 if __name__ == "__main__":

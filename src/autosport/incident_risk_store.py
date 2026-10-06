@@ -769,10 +769,14 @@ class IncidentRiskStore:
             else:
                 history = histories[index]
                 latest = history[-1]
-                if entry.revision == latest.revision:
-                    if hmac.compare_digest(
-                        entry.fingerprint_sha256,
-                        latest.fingerprint_sha256,
+                if entry.revision <= latest.revision:
+                    existing = history[entry.revision - 1]
+                    if (
+                        existing.revision == entry.revision
+                        and hmac.compare_digest(
+                            entry.fingerprint_sha256,
+                            existing.fingerprint_sha256,
+                        )
                     ):
                         return before
                     raise IncidentRiskStoreError(

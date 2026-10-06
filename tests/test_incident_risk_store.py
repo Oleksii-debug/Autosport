@@ -339,6 +339,31 @@ class IncidentRiskStoreTests(unittest.TestCase):
             self.store.append(conflicting)
         self.assertEqual(self.store.load(), first)
 
+    def test_historical_revision_replay_is_idempotent_after_lifecycle_progress(self) -> None:
+        first = self._entry()
+        second = self._entry(
+            revision=2,
+            status=RiskStatus.ACKNOWLEDGED,
+        )
+        self.store.append(first)
+        current = self.store.append(second)
+        before_bytes = self.store.path.read_bytes()
+
+        replayed = self.store.append(first)
+
+        self.assertEqual(replayed, current)
+        self.assertEqual(replayed.history(first.entry_id), (first, second))
+        self.assertEqual(self.store.path.read_bytes(), before_bytes)
+        self.assertEqual(len(replayed.availability), 2)
+
+        conflicting_first = self._entry(title="Conflicting replay of revision one")
+        with self.assertRaisesRegex(
+            IncidentRiskStoreError,
+            "cannot be rebound",
+        ):
+            self.store.append(conflicting_first)
+        self.assertEqual(self.store.load(), current)
+
     def test_revision_sequence_fails_closed(self) -> None:
         with self.assertRaisesRegex(
             IncidentRiskStoreError,

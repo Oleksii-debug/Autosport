@@ -490,3 +490,53 @@ def test_session_rmw_rejects_class_rebound_reader_or_identity(
 
         assert path.read_bytes() == before
 
+def test_success_rejects_runtime_timestamp_validator_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        before = path.read_bytes()
+
+        def attacker_instant(_value: object, _field: str) -> object:
+            raise AssertionError("runtime-rebound success timestamp validator executed")
+
+        monkeypatch.setattr(continuous_session, "_instant", attacker_instant)
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical success timestamp authority changed",
+        ):
+            state.record_success(
+                at=_AT,
+                full_refresh=False,
+                settlement_evidence=(),
+            )
+
+        assert path.read_bytes() == before
+
+
+def test_settlement_evidence_normalizer_rejects_runtime_timestamp_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = continuous_session.SettlementResolution(
+        event_identity="event-1",
+        settlement_ref="settlement-1",
+        quote_outcomes={"quote-1": "win"},
+        evidence_id="evidence-1",
+        evidence_sha256="0" * 64,
+        available_at=_AT,
+    )
+
+    def attacker_instant(_value: object, _field: str) -> object:
+        raise AssertionError("runtime-rebound evidence timestamp validator executed")
+
+    monkeypatch.setattr(continuous_session, "_instant", attacker_instant)
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical settlement evidence timestamp authority changed",
+    ):
+        continuous_session._ContinuousSessionState._normalized_settlement_evidence(
+            evidence
+        )
+

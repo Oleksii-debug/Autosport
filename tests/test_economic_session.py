@@ -22,6 +22,7 @@ from autosport.monotonic_workspace_authority import (
     MonotonicAuthorityRollbackError,
 )
 from autosport.paper import PaperBook
+from autosport.workspace_lock import WorkspaceEconomicLock
 
 
 def _epoch_ns(value: str) -> int:
@@ -1101,6 +1102,67 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertTrue(evidence.product_clock_authoritative)
         self.assertEqual(store.require_current(evidence), evidence)
+
+    def test_under_lock_revalidation_accepts_exact_current_product_session(self) -> None:
+        store = ProductEconomicSessionStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+        evidence = store.current()
+
+        with WorkspaceEconomicLock(self.workspace) as workspace_lock:
+            current = store.require_current_under_lock(
+                evidence,
+                workspace_lock=workspace_lock,
+            )
+
+        self.assertEqual(current, evidence)
+        self.assertTrue(current.product_clock_authoritative)
+
+    def test_under_lock_revalidation_rejects_unheld_lock(self) -> None:
+        store = ProductEconomicSessionStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+        evidence = store.current()
+        workspace_lock = WorkspaceEconomicLock(self.workspace)
+
+        with self.assertRaisesRegex(
+            EconomicSessionIntegrityError,
+            "requires canonical held workspace lock",
+        ):
+            store.require_current_under_lock(
+                evidence,
+                workspace_lock=workspace_lock,
+            )
+
+    def test_under_lock_revalidation_rejects_stale_predecessor_after_transition(self) -> None:
+        store = ProductEconomicSessionStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+        first = store.current()
+        EconomicGoalStore(self.workspace).persist_automatic_successor(
+            _goal(revision=2, max_turnover="5")
+        )
+        successor = store.transition_to_current_goal(first)
+
+        with WorkspaceEconomicLock(self.workspace) as workspace_lock:
+            with self.assertRaisesRegex(
+                EconomicSessionMismatchError,
+                "does not match current durable authority",
+            ):
+                store.require_current_under_lock(
+                    first,
+                    workspace_lock=workspace_lock,
+                )
+            self.assertEqual(
+                store.require_current_under_lock(
+                    successor,
+                    workspace_lock=workspace_lock,
+                ),
+                successor,
+            )
 
 
 if __name__ == "__main__":

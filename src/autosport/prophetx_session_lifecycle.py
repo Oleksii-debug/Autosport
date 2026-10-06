@@ -2027,6 +2027,22 @@ class ProphetXSessionLifecycle:
 
             latest = history[-1]
             if local is None:
+                if latest.phase is AuthorityPhase.PREPARE:
+                    adoption_tx_id = self._monotonic_tx_id(
+                        operation="ADOPT_VALIDATED_BASELINE",
+                        observed_state_sha256=None,
+                        intended_state_sha256=latest.intended_state_sha256,
+                        semantic_binding_sha256=latest.semantic_binding_sha256,
+                        authority_tip_sha256=None,
+                    )
+                    if (
+                        latest.previous_committed_state_sha256 is None
+                        and latest.tx_id == adoption_tx_id
+                    ):
+                        raise ProphetXSessionLifecycleError(
+                            "validated legacy session state disappeared during "
+                            "monotonic baseline adoption"
+                        )
                 authority.recover(observed_state_sha256=None)
                 return
 

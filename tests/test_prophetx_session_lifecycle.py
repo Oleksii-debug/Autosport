@@ -3275,3 +3275,77 @@ def test_valid_legacy_state_is_adopted_once_then_deletion_fails_closed(tmp_path)
     ):
         restarted.read_snapshot()
 
+def test_interrupted_legacy_adoption_cannot_abort_into_pristine_pool(
+    tmp_path,
+    monkeypatch,
+):
+    lifecycle = _lifecycle(tmp_path)
+    state_path = lifecycle.state_path
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy = ProphetXSessionSnapshot(
+        state=ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+        generation=9,
+        credential_revision=lifecycle.scope.credential_revision,
+        integration_role=lifecycle.scope.integration_role,
+        last_transition_at=NOW,
+        slot_hold_started_at=NOW,
+        slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+        transient_failures=1,
+        last_failure_class=ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+    )
+    payload = legacy.to_json_dict(
+        environment=lifecycle.scope.environment,
+        access_key_identity_sha256=lifecycle.scope.access_key_identity_sha256,
+    )
+    state_path.write_text(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    original_commit = prophetx_session_lifecycle.MonotonicWorkspaceAuthority.commit
+
+    def interrupt_adoption_commit(self, **kwargs):
+        raise prophetx_session_lifecycle.MonotonicWorkspaceAuthorityError(
+            "simulated adoption crash"
+        )
+
+    monkeypatch.setattr(
+        prophetx_session_lifecycle.MonotonicWorkspaceAuthority,
+        "commit",
+        interrupt_adoption_commit,
+    )
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="monotonic session-state authority rejected local state",
+    ):
+        lifecycle.read_snapshot()
+
+    monkeypatch.setattr(
+        prophetx_session_lifecycle.MonotonicWorkspaceAuthority,
+        "commit",
+        original_commit,
+    )
+    state_path.unlink()
+
+    restarted = _lifecycle(tmp_path)
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="legacy session state disappeared during monotonic baseline adoption",
+    ):
+        restarted.read_snapshot()
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="legacy session state disappeared during monotonic baseline adoption",
+    ):
+        restarted.begin_login(
+            now=NOW + timedelta(seconds=1),
+            access_token_available=False,
+        )
+    assert not state_path.exists()
+

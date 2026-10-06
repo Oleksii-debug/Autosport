@@ -616,7 +616,16 @@ def _execute_handler_spooled_bounded(
     if not _close_process_handle(process):
         return finish(None, "HANDLER_PROCESS_HANDLE_CLOSE_FAILED")
 
-    result, error = _decode_handler_result_spool(spool_path)
+    try:
+        result, error = _decode_handler_result_spool(spool_path)
+    except BaseException:
+        # The child is already confirmed dead and its process handle is closed,
+        # but process-control interruption during parent-side decode must not
+        # strand the private result spool. Preserve the original interruption.
+        _remove_handler_result_spool(
+            spool_path, suppress_base_exceptions=True
+        )
+        raise
     return finish(result, error)
 
 

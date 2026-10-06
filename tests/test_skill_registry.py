@@ -551,6 +551,72 @@ def test_handler_partial_result_spool_write_remains_timeout_bounded():
     assert elapsed < 3
 
 
+def test_handler_spool_decode_baseexception_cleans_spool_before_reraise(
+    tmp_path, monkeypatch
+):
+    spool_path = tmp_path / "handler-result.json"
+
+    class FakeProcess:
+        def __init__(self):
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            assert timeout == 1
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_spooled_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert args[2] == str(spool_path)
+            assert daemon is True
+            return process
+
+    def fake_mkstemp(*, prefix, suffix):
+        assert prefix == "autosport-skill-result-"
+        assert suffix == ".json"
+        descriptor = skill_registry_module.os.open(
+            spool_path,
+            skill_registry_module.os.O_CREAT
+            | skill_registry_module.os.O_RDWR,
+        )
+        return descriptor, str(spool_path)
+
+    monkeypatch.setattr(skill_registry_module.tempfile, "mkstemp", fake_mkstemp)
+
+    def interrupt_decode(_path):
+        raise KeyboardInterrupt("simulated parent decode interruption")
+
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_decode_handler_result_spool",
+        interrupt_decode,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="simulated parent decode interruption"):
+        skill_registry_module._execute_handler_spooled_bounded(
+            FakeContext(),
+            _slow_handler,
+            {},
+            1,
+        )
+
+    assert process.closed is True
+    assert not spool_path.exists()
+
+
 def test_handler_timeout_cleanup_hard_kills_before_bounded_reap(monkeypatch):
     class FakeEndpoint:
         def close(self):

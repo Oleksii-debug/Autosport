@@ -610,3 +610,101 @@ def test_tick_reports_backlog_arriving_after_terminal_drain() -> None:
         result = coordinator.tick()
 
         assert result.invalidation_backlog is True
+
+
+@pytest.mark.parametrize(
+    "after_ids",
+    (
+        ("existing", "input-new", "collateral"),
+        ("input-new", "existing"),
+    ),
+)
+def test_register_rejects_canonical_but_nonatomic_identity_transition(
+    after_ids: tuple[str, ...],
+) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    class Index:
+        def __init__(self) -> None:
+            self.input_ids = ("existing",)
+
+        def register(self, input_id: str, **_selectors: object) -> None:
+            assert input_id == "input-new"
+            self.input_ids = after_ids
+
+    index = Index()
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="registration changed unrelated input identities",
+    ):
+        coordinator._register_input(
+            "input-new",
+            dependency_index=index,
+            register_input=index.register,
+        )
+
+
+@pytest.mark.parametrize(
+    ("before_ids", "after_ids", "removed"),
+    (
+        (("input-1", "keep"), ("input-1", "keep"), False),
+        (("keep",), ("keep",), True),
+    ),
+)
+def test_retire_rejects_receipt_that_conflicts_with_identity_transition(
+    before_ids: tuple[str, ...],
+    after_ids: tuple[str, ...],
+    removed: bool,
+) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    class Index:
+        def __init__(self) -> None:
+            self.input_ids = before_ids
+
+        def unregister(self, _input_id: str) -> bool:
+            self.input_ids = after_ids
+            return removed
+
+    index = Index()
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="retirement receipt conflicts with identity state",
+    ):
+        coordinator._retire_input(
+            "input-1",
+            dependency_index=index,
+            unregister_input=index.unregister,
+        )
+
+
+@pytest.mark.parametrize(
+    "after_ids",
+    (
+        (),
+        ("keep-b", "keep-a"),
+    ),
+)
+def test_retire_rejects_canonical_but_collateral_identity_transition(
+    after_ids: tuple[str, ...],
+) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    class Index:
+        def __init__(self) -> None:
+            self.input_ids = ("input-1", "keep-a", "keep-b")
+
+        def unregister(self, _input_id: str) -> bool:
+            self.input_ids = after_ids
+            return True
+
+    index = Index()
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="retirement changed unrelated input identities",
+    ):
+        coordinator._retire_input(
+            "input-1",
+            dependency_index=index,
+            unregister_input=index.unregister,
+        )

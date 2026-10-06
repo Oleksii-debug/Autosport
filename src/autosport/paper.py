@@ -734,6 +734,8 @@ def _guard_paperbook_runtime_authority(method):
         "TicketStatus": TicketStatus,
         "Underflow": Underflow,
         "_paper_decimal_context": _paper_decimal_context,
+        "_CANONICAL_MARKET_SEMANTICS_IDENTITY": _CANONICAL_MARKET_SEMANTICS_IDENTITY,
+        "_CANONICAL_LOCKED_CAPITAL_FOR_TICKET": _CANONICAL_LOCKED_CAPITAL_FOR_TICKET,
         "localcontext": localcontext,
         "parse_iso_timestamp": parse_iso_timestamp,
     }

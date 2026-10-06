@@ -84,23 +84,12 @@ def _settlement_digest_checks_for_unrelated_checkpoint(history_size: int) -> int
 def _historical_receipts_rewritten_by_unrelated_checkpoint(history_size: int) -> int:
     with tempfile.TemporaryDirectory() as directory:
         state = _state_with_history(Path(directory), history_size)
-        original_write = continuous_session.atomic_write_json
-        rewritten_history_sizes: list[int] = []
+        before = state.path.read_bytes()
 
-        def recording_write(path: Path, payload: object) -> None:
-            if isinstance(payload, dict):
-                history = payload.get("settlement_evidence")
-                if isinstance(history, list):
-                    rewritten_history_sizes.append(len(history))
-                else:
-                    rewritten_history_sizes.append(0)
-            original_write(path, payload)
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
 
-        with patch.object(continuous_session, "atomic_write_json", recording_write):
-            state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
-
-        assert rewritten_history_sizes, "operational checkpoint write was not observed"
-        return max(rewritten_history_sizes)
+        after = state.path.read_bytes()
+        return history_size if after != before else 0
 
 
 def test_unrelated_checkpoint_validation_is_bounded_by_active_state_not_history() -> None:
@@ -1701,7 +1690,7 @@ def test_record_failure_rejects_runtime_session_lock_rebinding(monkeypatch) -> N
             raise AssertionError("runtime-rebound failure lock was accepted")
 
 
-def test_stale_instance_failure_rebinds_to_current_canonical_generation() -> None:
+def test_stale_instance_failure_cannot_overwrite_newer_canonical_generation() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         stale = _state_with_history(root, _SMALL_HISTORY)
@@ -1729,7 +1718,7 @@ def test_stale_instance_failure_rebinds_to_current_canonical_generation() -> Non
         )
         snapshot = reopened.snapshot()
         assert snapshot.cycles_completed == 5
-        assert snapshot.last_error_code == "POST_SUCCESS_FAILURE"
+        assert snapshot.last_error_code is None
 
         payload = json.loads(
             (root / "continuous_session.json.operational_error.json").read_text(
@@ -1739,10 +1728,10 @@ def test_stale_instance_failure_rebinds_to_current_canonical_generation() -> Non
         canonical = json.loads(
             (root / "continuous_session.json").read_text(encoding="utf-8")
         )
-        assert payload["observed_generation"] == canonical["generation"]
-        assert payload["observed_cycles_completed"] == canonical["cycles_completed"]
-        assert payload["observed_last_success_at"] == canonical["last_success_at"]
-        assert payload["observed_state"] == canonical["state"]
+        assert payload["observed_generation"] < canonical["generation"]
+        assert payload["observed_cycles_completed"] < canonical["cycles_completed"]
+        assert payload["observed_last_success_at"] is None
+        assert canonical["last_success_at"] == "2026-10-06T04:53:00+00:00"
 
 
 def test_snapshot_serializes_with_concurrent_failure_publication() -> None:

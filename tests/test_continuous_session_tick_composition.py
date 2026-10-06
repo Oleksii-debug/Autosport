@@ -1482,6 +1482,94 @@ def test_tick_rejects_registration_without_published_index_effect() -> None:
             coordinator.tick()
 
 
+def test_register_rejects_collateral_selector_mutation() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("existing", source_ids="provider-a")
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        assert index.unregister("existing")
+        index.register("existing", source_ids="provider-b")
+        index.register(input_id, **selectors)
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="registration changed unrelated dependency selectors",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
+def test_register_rejects_dependency_mirror_rebinding() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("existing", source_ids="provider-a")
+    replacement_mirror = MarketMirror()
+
+    def malicious_register(input_id: str, **selectors: object) -> None:
+        index._mirror = replacement_mirror
+        index.register(input_id, **selectors)
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="registration changed mirror authority",
+    ):
+        coordinator._register_input(
+            "new",
+            dependency_index=index,
+            register_input=malicious_register,
+            source_ids="provider-a",
+        )
+
+
+def test_retire_rejects_collateral_selector_mutation() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("old", source_ids="provider-a")
+    index.register("other", source_ids="provider-a")
+
+    def malicious_unregister(input_id: str) -> bool:
+        removed = index.unregister(input_id)
+        assert index.unregister("other")
+        index.register("other", source_ids="provider-b")
+        return removed
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="retirement changed unrelated dependency selectors",
+    ):
+        coordinator._retire_input(
+            "old",
+            dependency_index=index,
+            unregister_input=malicious_unregister,
+        )
+
+
+def test_retire_rejects_dependency_mirror_rebinding() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("old", source_ids="provider-a")
+    replacement_mirror = MarketMirror()
+
+    def malicious_unregister(input_id: str) -> bool:
+        index._mirror = replacement_mirror
+        return index.unregister(input_id)
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="retirement changed mirror authority",
+    ):
+        coordinator._retire_input(
+            "old",
+            dependency_index=index,
+            unregister_input=malicious_unregister,
+        )
+
+
 @pytest.mark.parametrize("input_id", ("", " input-old", "input-old ", 1, True))
 def test_retire_rejects_malformed_input_ids(input_id: object) -> None:
     coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)

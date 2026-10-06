@@ -1874,7 +1874,12 @@ def test_stale_instance_failure_cannot_overwrite_newer_canonical_generation() ->
         )
         assert current.snapshot().cycles_completed == 5
 
-        stale.record_failure(code="POST_SUCCESS_FAILURE")
+        try:
+            stale.record_failure(code="POST_SUCCESS_FAILURE")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "canonical checkpoint changed" in str(exc)
+        else:
+            raise AssertionError("stale failure crossed a newer success generation")
 
         reopened = continuous_session._ContinuousSessionState(
             root / "continuous_session.json",
@@ -1894,9 +1899,10 @@ def test_stale_instance_failure_cannot_overwrite_newer_canonical_generation() ->
         canonical = json.loads(
             (root / "continuous_session.json").read_text(encoding="utf-8")
         )
-        assert payload["observed_generation"] < canonical["generation"]
-        assert payload["observed_cycles_completed"] < canonical["cycles_completed"]
-        assert payload["observed_last_success_at"] is None
+        assert payload["observed_generation"] == canonical["generation"]
+        assert payload["observed_cycles_completed"] == canonical["cycles_completed"]
+        assert payload["observed_last_success_at"] == canonical["last_success_at"]
+        assert payload["last_error_code"] is None
         assert canonical["last_success_at"] == "2026-10-06T04:53:00+00:00"
 
 
@@ -3172,7 +3178,12 @@ def test_stale_instance_failure_overlay_is_ignored_after_newer_generation() -> N
         )
         assert second.snapshot().cycles_completed == _SMALL_HISTORY + 1
 
-        first.record_failure(code="STALE_INSTANCE_FAILURE")
+        try:
+            first.record_failure(code="STALE_INSTANCE_FAILURE")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "canonical checkpoint changed" in str(exc)
+        else:
+            raise AssertionError("stale failure crossed a newer success generation")
 
         reopened = continuous_session._ContinuousSessionState(
             root / "continuous_session.json",

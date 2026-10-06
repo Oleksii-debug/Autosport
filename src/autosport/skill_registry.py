@@ -235,6 +235,23 @@ def _skill_handler_process(handler: SkillHandler, payload: dict[str, Any], sende
     finally:
         sender.close()
 
+
+def _close_process_handle(process: Any) -> bool:
+    """Best-effort close of a confirmed-stopped process handle.
+
+    A close failure is returned as infrastructure truth instead of escaping and
+    leaving the durable SkillRun stuck in RUNNING.
+    """
+    close = getattr(process, "close", None)
+    if close is None:
+        return True
+    try:
+        close()
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 class SkillRegistry:
     """Durable exact-version registry with fail-closed invocation semantics."""
     def __init__(self, path: str | Path) -> None:
@@ -465,23 +482,28 @@ class SkillRegistry:
             if process.is_alive():
                 receiver.close()
                 return None,"HANDLER_TIMEOUT_STOP_FAILED"
-            if hasattr(process, "close"):
-                process.close()
+            close_ok = _close_process_handle(process)
             receiver.close()
+            if not close_ok:
+                return None,"HANDLER_TIMEOUT_HANDLE_CLOSE_FAILED"
             return None,"HANDLER_TIMEOUT"
         if not receiver.poll():
-            if hasattr(process, "close"):
-                process.close()
+            close_ok = _close_process_handle(process)
             receiver.close()
+            if not close_ok:
+                return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
             return None,"HANDLER_PROCESS_EXITED"
         try:
             kind,value=receiver.recv()
         except (EOFError,OSError):
-            return None,"HANDLER_RESULT_UNAVAILABLE"
-        finally:
+            close_ok = _close_process_handle(process)
             receiver.close()
-            if hasattr(process, "close"):
-                process.close()
+            if not close_ok:
+                return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+            return None,"HANDLER_RESULT_UNAVAILABLE"
+        receiver.close()
+        if not _close_process_handle(process):
+            return None,"HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
         if kind=="ERROR":
             return None,"HANDLER_ERROR_"+_text(value,"handler error type").upper()
         if kind!="OK":

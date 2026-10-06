@@ -1057,3 +1057,10 @@ def test_payload_encoder_enforces_utf8_byte_envelope() -> None:
         match="persistence byte-size limit",
     ):
         economic_goal_to_payload(goal, _max_json_bytes=1)
+
+
+def test_json_decoder_normalizes_pathological_nesting() -> None:
+    nested = ("[" * 3000) + "0" + ("]" * 3000)
+
+    with pytest.raises(EconomicGoalContractError, match="invalid economic goal JSON"):
+        economic_goal_from_json(nested)

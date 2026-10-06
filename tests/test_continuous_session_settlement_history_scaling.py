@@ -3349,10 +3349,19 @@ def test_source_projection_rejects_invalid_expected_predecessor_identity() -> No
 
 
 class _ResolutionRecord:
-    def __init__(self, identity: str, settlement_ref: str) -> None:
+    def __init__(
+        self,
+        identity: str,
+        settlement_ref: str,
+        *,
+        completion_discovered_at: str | None = _AT,
+        settlement_discovered_at: str | None = _AT,
+    ) -> None:
         self.phase = continuous_session.EventPhase.COMPLETED
         self.settlement_ref = settlement_ref
         self.identity = identity
+        self.completion_discovered_at = completion_discovered_at
+        self.settlement_discovered_at = settlement_discovered_at
 
 
 class _ResolutionLifecycle:
@@ -3405,6 +3414,54 @@ def _resolution(
         evidence_sha256=digest_char * 64,
         available_at=available_at,
     )
+
+
+
+def test_settlement_resolution_collection_waits_for_causal_lifecycle_discovery() -> None:
+    future = "2026-09-22T06:21:00+00:00"
+    record = _ResolutionRecord(
+        "provider-a:event-1",
+        "settlement-1",
+        completion_discovered_at=future,
+        settlement_discovered_at=future,
+    )
+
+    class ForbiddenAuthority:
+        def resolve(self, _record: object, *, as_of: str):
+            raise AssertionError(
+                "outcome authority ran before lifecycle settlement discovery cutoff"
+            )
+
+    coordinator = object.__new__(
+        continuous_session.ContinuousSessionCoordinator
+    )
+    coordinator.lifecycle = _ResolutionLifecycle((record,))
+    coordinator.outcome_authority = ForbiddenAuthority()
+
+    assert coordinator._settlement_resolutions(as_of=_AT) == ()
+
+
+def test_settlement_resolution_collection_rejects_unproven_legacy_discovery() -> None:
+    record = _ResolutionRecord(
+        "provider-a:event-1",
+        "settlement-1",
+        completion_discovered_at=None,
+        settlement_discovered_at=None,
+    )
+
+    class ForbiddenAuthority:
+        def resolve(self, _record: object, *, as_of: str):
+            raise AssertionError(
+                "outcome authority ran without causal lifecycle discovery evidence"
+            )
+
+    coordinator = object.__new__(
+        continuous_session.ContinuousSessionCoordinator
+    )
+    coordinator.lifecycle = _ResolutionLifecycle((record,))
+    coordinator.outcome_authority = ForbiddenAuthority()
+
+    assert coordinator._settlement_resolutions(as_of=_AT) == ()
 
 
 def test_settlement_resolution_collection_deduplicates_identical_evidence() -> None:

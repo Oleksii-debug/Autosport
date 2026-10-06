@@ -276,6 +276,37 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(attempt.execution_odds, Decimal("2.40"))
         self.assertEqual(attempt.execution_stake, Decimal("10.00"))
 
+    def test_oversized_anchor_fails_before_json_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(ledger_path)
+            anchor_path = ledger_path.with_name(ledger_path.name + ".anchor.json")
+            anchor_path.write_text(
+                "x" * (legacy._MAX_DURABLE_ANCHOR_CHARS + 1),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "anchor exceeds resource limit",
+            ):
+                ledger.events()
+
+    def test_oversized_event_line_fails_before_json_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(ledger_path)
+            ledger_path.write_text(
+                "x" * (legacy._MAX_DURABLE_EVENT_LINE_CHARS + 2),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger event exceeds resource limit",
+            ):
+                ledger.events()
+
     def test_ledger_reload_ignores_rebound_json_object_parser(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

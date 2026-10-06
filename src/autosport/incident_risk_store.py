@@ -713,6 +713,12 @@ class IncidentRiskStore:
             raise IncidentRiskStoreError(
                 "persistence accepts exact IncidentRiskEntry values only"
             )
+        try:
+            entry.__post_init__()
+        except (IncidentRiskRegisterError, TypeError, ValueError) as exc:
+            raise IncidentRiskStoreError(
+                "persistence rejects an invalid IncidentRiskEntry snapshot"
+            ) from exc
 
         with durable_path_lock(self.path):
             before, observed_before = self._read_unlocked()

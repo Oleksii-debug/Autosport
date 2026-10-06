@@ -2959,3 +2959,50 @@ def test_each_learning_resolution_detach_has_independent_quote_mapping() -> None
 
     assert second[0].quote_outcomes == {"quote-1": "win"}
     assert canonical[0].quote_outcomes == {"quote-1": "win"}
+
+
+
+def test_stale_instance_failure_cannot_override_newer_state_transition_generation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        stale = _state_with_history(root, _SMALL_HISTORY)
+        current = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        current.set_state(
+            continuous_session.SessionState.PAUSED,
+            reason="OPERATOR_PAUSE",
+        )
+        assert current.snapshot().last_error_code == "OPERATOR_PAUSE"
+
+        # This instance intentionally retains the pre-transition generation.
+        # Its bounded failure publication must not become authoritative after
+        # the canonical state generation has advanced in another instance.
+        stale.record_failure(code="STALE_PROVIDER_FAILURE")
+
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        snapshot = reopened.snapshot()
+        assert snapshot.state is continuous_session.SessionState.PAUSED
+        assert snapshot.last_error_code == "OPERATOR_PAUSE"
+
+        canonical = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        sidecar = json.loads(
+            (root / "continuous_session.json.operational_error.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert sidecar["observed_generation"] < canonical["generation"]
+        assert sidecar["observed_state"] == "RUNNING"
+        assert canonical["state"] == "PAUSED"
+        assert canonical["last_error_code"] == "OPERATOR_PAUSE"

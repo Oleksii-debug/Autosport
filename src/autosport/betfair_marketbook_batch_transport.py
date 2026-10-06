@@ -344,6 +344,8 @@ def _read_market_book_batch(
     plan: MarketBookReadPlan,
     *,
     batch_id: str,
+    request_budget: Callable[[object], object],
+    post_readonly: Callable[..., _transport._MarketBookRpcResponse],
 ) -> MarketBookBatchTransportResult:
     batch = _canonical_batch(plan, batch_id)
     params = _params_for_batch(plan, batch)
@@ -354,13 +356,13 @@ def _read_market_book_batch(
             "MarketBook plan changed before provider dispatch"
         )
 
-    wire_budget = _transport._market_book_request_budget(params)
+    wire_budget = request_budget(params)
     if wire_budget.evidence_id != batch.budget_evidence_id:
         raise MarketBookBatchTransportError(
             "wire-derived request budget does not match the canonical planned batch"
         )
 
-    response = _transport._post_market_book_readonly(
+    response = post_readonly(
         client,
         params=params,
         resolve_application_context=False,
@@ -584,6 +586,9 @@ def _install_transport_result_authority() -> None:
     rate_reserve = BetfairMarketBookPerMarketRateGate.reserve
     concurrency_begin = BetfairMarketBookProjectionConcurrencyGate.begin
     concurrency_complete = BetfairMarketBookProjectionConcurrencyGate.complete
+    core_read_market_book_batch = _read_market_book_batch
+    market_book_request_budget = _transport._market_book_request_budget
+    post_market_book_readonly = _transport._post_market_book_readonly
 
     def read_market_book_batch(
         client: _base.BetfairReadOnlyClient,
@@ -608,7 +613,7 @@ def _install_transport_result_authority() -> None:
 
         batch = _canonical_batch(plan, batch_id)
         params = _params_for_batch(plan, batch)
-        wire_budget = _transport._market_book_request_budget(params)
+        wire_budget = market_book_request_budget(params)
         if wire_budget.evidence_id != batch.budget_evidence_id:
             raise MarketBookBatchTransportError(
                 "wire-derived request budget does not match the canonical planned batch"
@@ -681,7 +686,13 @@ def _install_transport_result_authority() -> None:
             raise denial
 
         try:
-            result = _read_market_book_batch(client, plan, batch_id=batch_id)
+            result = core_read_market_book_batch(
+                client,
+                plan,
+                batch_id=batch_id,
+                request_budget=market_book_request_budget,
+                post_readonly=post_market_book_readonly,
+            )
         except BaseException as exc:
             # Parent process-control interruption must not strand a locally
             # admitted projection lease. Cleanup is bounded/local and the

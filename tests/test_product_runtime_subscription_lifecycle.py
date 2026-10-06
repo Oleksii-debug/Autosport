@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gc
 import tempfile
 import unittest
+import weakref
 from pathlib import Path
 from unittest.mock import patch
 
@@ -73,6 +75,14 @@ class _TrackingMarketEventBus(MarketEventBus):
         type(self).instances.append(self)
 
 
+class _WeakTrackingMarketEventBus(MarketEventBus):
+    refs: list[weakref.ReferenceType["_WeakTrackingMarketEventBus"]] = []
+
+    def __init__(self, store) -> None:
+        super().__init__(store)
+        type(self).refs.append(weakref.ref(self))
+
+
 def _assert_single_runtime_subscription(bus: _TrackingMarketEventBus) -> None:
     count = len(bus.subscribers)
     if count != 1:
@@ -85,6 +95,7 @@ def _assert_single_runtime_subscription(bus: _TrackingMarketEventBus) -> None:
 class ProductRuntimeSubscriptionLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         _TrackingMarketEventBus.instances.clear()
+        _WeakTrackingMarketEventBus.refs.clear()
 
     def test_start_stop_restart_never_duplicates_runtime_subscription(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -389,6 +400,54 @@ class ProductRuntimeSubscriptionLifecycleTests(unittest.TestCase):
             self.assertEqual(reopened_source.delta_calls, 1)
             self.assertIsNone(reopened.status()["last_error_code"])
             self.assertEqual(reopened.status()["provider_failures"], 0)
+
+    def test_post_subscription_construction_failure_releases_unowned_bus_graph(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def fail_desktop_application(*_args, **_kwargs):
+                raise RuntimeError("seeded post-subscription construction failure")
+
+            with patch(
+                "autosport.product_runtime.MarketEventBus",
+                _WeakTrackingMarketEventBus,
+            ):
+                with patch(
+                    "autosport.product_runtime.CanonicalDesktopApplication",
+                    new=fail_desktop_application,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "seeded post-subscription construction failure",
+                    ):
+                        build_autonomous_product_runtime(
+                            workspace=root,
+                            source=_Source(),
+                            clock=_Clock(),
+                            sleep=lambda _: None,
+                            initial_bankroll="100",
+                        )
+
+            self.assertEqual(len(_WeakTrackingMarketEventBus.refs), 1)
+            gc.collect()
+            self.assertIsNone(
+                _WeakTrackingMarketEventBus.refs[0](),
+                "failed product construction retained the abandoned bus/subscriber graph",
+            )
+
+            # The same workspace must also be immediately reusable, proving the
+            # construction ExitStack released its durable market handle and runtime
+            # lease rather than merely making the Python objects unreachable.
+            restored = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            restored.close()
 
     def test_post_subscription_construction_failure_releases_runtime_graph(
         self,

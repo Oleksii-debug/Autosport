@@ -2390,6 +2390,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "outcome authority mutated lifecycle settlement identity"
                 )
+            if (
+                getattr(record, "completion_discovered_at", None)
+                != completion_discovered_at
+                or getattr(record, "settlement_discovered_at", None)
+                != settlement_discovered_at
+            ):
+                raise ContinuousSessionError(
+                    "outcome authority mutated lifecycle settlement causality"
+                )
             if resolution is None:
                 continue
             if type(resolution) is not SettlementResolution:

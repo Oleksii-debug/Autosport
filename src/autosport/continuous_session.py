@@ -669,11 +669,12 @@ class _ContinuousSessionState:
         *,
         _fields: frozenset[str] = _CONTINUOUS_SESSION_FIELDS,
         _strict_json_loads: Callable[..., Any] = strict_json_loads,
+        _path_read_text: Callable[..., str] = Path.read_text,
         _schema: str = _CONTINUOUS_SESSION_SCHEMA,
         _version: int = _CONTINUOUS_SESSION_VERSION,
     ) -> dict[str, Any]:
         try:
-            raw = _strict_json_loads(self.path.read_text(encoding="utf-8"))
+            raw = _strict_json_loads(_path_read_text(self.path, encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
             raise ContinuousSessionError(
                 "cannot verify continuous session state"

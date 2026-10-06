@@ -723,6 +723,27 @@ _PRODUCT_ECONOMIC_SESSION_POST_INIT_CODE: Final = getattr(
     "__code__",
     None,
 )
+_PRODUCT_ECONOMIC_SESSION_FIELD_NAMES: Final = (
+    "workspace_instance_id",
+    "session_id",
+    "goal_id",
+    "goal_revision",
+    "bankroll_id",
+    "currency",
+    "goal_contract_sha256",
+    "started_at",
+    "opening_paperbook_sha256",
+    "state_sha256",
+    "authority_generation",
+    "product_clock_authoritative",
+    "predecessor_session_id",
+    "predecessor_state_sha256",
+    "predecessor_ended_at",
+)
+_PRODUCT_ECONOMIC_SESSION_FIELD_DESCRIPTORS: Final = tuple(
+    (name, ProductEconomicSession.__dict__[name])
+    for name in _PRODUCT_ECONOMIC_SESSION_FIELD_NAMES
+)
 
 
 _DECODE_STATE_CODE: Final = _decode_state.__code__
@@ -843,6 +864,9 @@ class ProductEconomicSessionStore:
         self._product_economic_session_init_code_witness = _PRODUCT_ECONOMIC_SESSION_INIT_CODE
         self._product_economic_session_post_init_witness = _PRODUCT_ECONOMIC_SESSION_POST_INIT
         self._product_economic_session_post_init_code_witness = _PRODUCT_ECONOMIC_SESSION_POST_INIT_CODE
+        self._product_economic_session_field_descriptors_witness = (
+            _PRODUCT_ECONOMIC_SESSION_FIELD_DESCRIPTORS
+        )
         self._authority_new_witness = _AUTHORITY_NEW
         self._authority_init_witness = _AUTHORITY_INIT
         self._authority_constructor_witness = _construct_economic_authority
@@ -1000,6 +1024,10 @@ class ProductEconomicSessionStore:
             or PaperBook.load is not self._paperbook_load_witness
             or PaperBook._validate_loaded_state is not self._paperbook_validate_witness
             or ProductEconomicSession.__eq__ is not self._product_economic_session_eq_witness
+            or any(
+                ProductEconomicSession.__dict__[name] is not descriptor
+                for name, descriptor in self._product_economic_session_field_descriptors_witness
+            )
             or ProductEconomicSession.__init__ is not self._product_economic_session_init_witness
             or (
                 _PRODUCT_ECONOMIC_SESSION_INIT_CODE is not None

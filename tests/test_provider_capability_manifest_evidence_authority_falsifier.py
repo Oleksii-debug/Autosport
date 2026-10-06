@@ -16,6 +16,7 @@ from autosport.bookmaker_integration_boundary import (
 )
 from autosport.provider_capability_manifest import (
     ProviderCapabilityEvidenceRef,
+    ProviderCapabilityManifest,
     ProviderCapabilityManifestError,
     ProviderCapabilityManifestFact,
     ProviderManifestCapability,
@@ -568,4 +569,53 @@ def test_identity_surfaces_reject_dependency_validator_rebinding(
         match="canonical manifest validator changed|canonical manifest dependency validator changed",
     ):
         _ = manifest.manifest_id
+
+def test_manifest_authority_class_dispatch_cannot_be_rebound() -> None:
+    critical_names = (
+        "__init__",
+        "__post_init__",
+        "_validate_facts",
+        "_validate_dependencies",
+        "state_of",
+        "supports",
+        "integration_kind",
+        "manifest_sha256",
+        "manifest_id",
+        "provider_write_authorized",
+        "execution_authorized",
+        "real_money_execution",
+        "to_canonical_dict",
+        "__setattr__",
+        "__delattr__",
+    )
+
+    for name in critical_names:
+        original = ProviderCapabilityManifest.__dict__[name]
+        try:
+            with pytest.raises(TypeError, match="sealed provider-manifest authority"):
+                setattr(ProviderCapabilityManifest, name, lambda *args, **kwargs: True)
+        finally:
+            if ProviderCapabilityManifest.__dict__.get(name) is not original:
+                type.__setattr__(ProviderCapabilityManifest, name, original)
+
+
+def test_manifest_authority_class_dispatch_cannot_be_deleted() -> None:
+    critical_names = (
+        "__post_init__",
+        "_validate_facts",
+        "state_of",
+        "supports",
+        "execution_authorized",
+        "real_money_execution",
+        "to_canonical_dict",
+    )
+
+    for name in critical_names:
+        original = ProviderCapabilityManifest.__dict__[name]
+        try:
+            with pytest.raises(TypeError, match="sealed provider-manifest authority"):
+                delattr(ProviderCapabilityManifest, name)
+        finally:
+            if name not in ProviderCapabilityManifest.__dict__:
+                type.__setattr__(ProviderCapabilityManifest, name, original)
 

@@ -67,6 +67,12 @@ _METHOD_TYPE: Final = MethodType
 _PAPERBOOK_LOAD = PaperBook.load
 _PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
 _ECONOMIC_GOAL_LOAD = EconomicGoalStore.load
+_ECONOMIC_GOAL_STORE_TYPE: Final = EconomicGoalStore
+_ECONOMIC_GOAL_STORE_NEW: Final = EconomicGoalStore.__new__
+_ECONOMIC_GOAL_STORE_INIT: Final = EconomicGoalStore.__init__
+_AUTHORITY_TYPE: Final = MonotonicWorkspaceAuthority
+_AUTHORITY_NEW: Final = MonotonicWorkspaceAuthority.__new__
+_AUTHORITY_INIT: Final = MonotonicWorkspaceAuthority.__init__
 _AUTHORITY_RECOVER = MonotonicWorkspaceAuthority.recover
 _AUTHORITY_PREPARE = MonotonicWorkspaceAuthority.prepare
 _AUTHORITY_COMMIT = MonotonicWorkspaceAuthority.commit
@@ -100,6 +106,54 @@ def _economic_session_lock_scope(
         raise
     else:
         _exit(lock, None, None, None)
+
+def _construct_economic_goal_store(
+    workspace: Path,
+    _type=_ECONOMIC_GOAL_STORE_TYPE,
+    _new=_ECONOMIC_GOAL_STORE_NEW,
+    _init=_ECONOMIC_GOAL_STORE_INIT,
+):
+    if (
+        EconomicGoalStore is not _type
+        or _type.__new__ is not _new
+        or _type.__init__ is not _init
+    ):
+        raise EconomicSessionIntegrityError(
+            "economic-session EconomicGoalStore constructor authority changed"
+        )
+    instance = _new(_type)
+    _init(instance, workspace)
+    return instance
+
+
+def _construct_economic_authority(
+    *,
+    workspace: Path,
+    domain: str,
+    key: str,
+    authority_root: str | Path | None,
+    _type=_AUTHORITY_TYPE,
+    _new=_AUTHORITY_NEW,
+    _init=_AUTHORITY_INIT,
+):
+    if (
+        MonotonicWorkspaceAuthority is not _type
+        or _type.__new__ is not _new
+        or _type.__init__ is not _init
+    ):
+        raise EconomicSessionIntegrityError(
+            "economic-session monotonic authority constructor changed"
+        )
+    instance = _new(_type)
+    _init(
+        instance,
+        workspace=workspace,
+        domain=domain,
+        key=key,
+        authority_root=authority_root,
+    )
+    return instance
+
 
 
 _STATE_KEYS: Final = frozenset(
@@ -631,15 +685,15 @@ class ProductEconomicSessionStore:
             raise EconomicSessionIntegrityError("workspace must resolve to an absolute path")
         self.state_path = self.workspace / ".autosport" / _STATE_FILE_NAME
         self.paperbook_path = self.workspace / "paper_book.json"
-        self.goal_store = EconomicGoalStore(self.workspace)
+        self.goal_store = _construct_economic_goal_store(self.workspace)
         self._clock = _PRODUCT_TIME_NS if _test_clock is None else _test_clock
         if not callable(self._clock):
             raise EconomicSessionIntegrityError("_test_clock must be callable")
         self._product_clock = _test_clock is None
-        self._authority = MonotonicWorkspaceAuthority(
+        self._authority = _construct_economic_authority(
             workspace=self.workspace,
             domain=_AUTHORITY_DOMAIN,
-            key=str(Path(".autosport") / _STATE_FILE_NAME),
+            key=str(_PATH_FACTORY(".autosport") / _STATE_FILE_NAME),
             authority_root=authority_root,
         )
         # Capture the exact composition that owns this durable session boundary.
@@ -671,6 +725,14 @@ class ProductEconomicSessionStore:
         self._uuid4_witness = _UUID4
         self._opening_paperbook_sha256_witness = _opening_paperbook_sha256
         self._workspace_lock_type_witness = _WORKSPACE_LOCK_TYPE
+        self._economic_goal_store_type_witness = _ECONOMIC_GOAL_STORE_TYPE
+        self._economic_goal_store_new_witness = _ECONOMIC_GOAL_STORE_NEW
+        self._economic_goal_store_init_witness = _ECONOMIC_GOAL_STORE_INIT
+        self._economic_goal_store_constructor_witness = _construct_economic_goal_store
+        self._authority_type_witness = _AUTHORITY_TYPE
+        self._authority_new_witness = _AUTHORITY_NEW
+        self._authority_init_witness = _AUTHORITY_INIT
+        self._authority_constructor_witness = _construct_economic_authority
         self._workspace_lock_scope_witness = _economic_session_lock_scope
         self._workspace_lock_new_witness = _WORKSPACE_LOCK_NEW
         self._workspace_lock_init_witness = _WORKSPACE_LOCK_INIT
@@ -751,6 +813,18 @@ class ProductEconomicSessionStore:
             )
             or self._clock is not self._clock_witness
             or self._product_clock is not self._product_clock_witness
+            or _ECONOMIC_GOAL_STORE_TYPE is not self._economic_goal_store_type_witness
+            or _ECONOMIC_GOAL_STORE_NEW is not self._economic_goal_store_new_witness
+            or _ECONOMIC_GOAL_STORE_INIT is not self._economic_goal_store_init_witness
+            or _construct_economic_goal_store is not self._economic_goal_store_constructor_witness
+            or _ECONOMIC_GOAL_STORE_TYPE.__new__ is not self._economic_goal_store_new_witness
+            or _ECONOMIC_GOAL_STORE_TYPE.__init__ is not self._economic_goal_store_init_witness
+            or _AUTHORITY_TYPE is not self._authority_type_witness
+            or _AUTHORITY_NEW is not self._authority_new_witness
+            or _AUTHORITY_INIT is not self._authority_init_witness
+            or _construct_economic_authority is not self._authority_constructor_witness
+            or _AUTHORITY_TYPE.__new__ is not self._authority_new_witness
+            or _AUTHORITY_TYPE.__init__ is not self._authority_init_witness
             or _ECONOMIC_GOAL_LOAD is not self._economic_goal_load_witness
             or _AUTHORITY_RECOVER is not self._authority_recover_witness
             or _AUTHORITY_PREPARE is not self._authority_prepare_witness

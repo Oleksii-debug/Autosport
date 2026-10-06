@@ -194,6 +194,25 @@ class MarketBookRetryBatchState:
                 )
 
 
+def _copy_batch_state(
+    batch: MarketBookRetryBatchState,
+) -> MarketBookRetryBatchState:
+    if type(batch) is not MarketBookRetryBatchState:
+        raise MarketBookRetryBackoffError(
+            "retry batch copy requires exact MarketBookRetryBatchState"
+        )
+    batch.__post_init__()
+    return MarketBookRetryBatchState(
+        batch_id=batch.batch_id,
+        consecutive_retryable_failures=batch.consecutive_retryable_failures,
+        next_eligible_at_utc_us=batch.next_eligible_at_utc_us,
+        automatic_retry_exhausted=batch.automatic_retry_exhausted,
+        terminal_failure=batch.terminal_failure,
+        last_outcome=batch.last_outcome,
+        last_provider_error_code=batch.last_provider_error_code,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class MarketBookRetryBackoffState:
     policy_version: str
@@ -487,7 +506,10 @@ class MarketBookRetryBackoffGate:
                     raise MarketBookRetryBackoffError(
                         "retry state references an unknown planned batch"
                     )
-            self._entries = {batch.batch_id: batch for batch in state.batches}
+            self._entries = {
+                batch.batch_id: _copy_batch_state(batch)
+                for batch in state.batches
+            }
             self._last_observed_at_utc_us = state.last_observed_at_utc_us
 
     @property
@@ -522,7 +544,7 @@ class MarketBookRetryBackoffGate:
                 request_contract_id=self._request_contract_id,
                 last_observed_at_utc_us=self._last_observed_at_utc_us,
                 batches=tuple(
-                    self._entries[batch_id]
+                    _copy_batch_state(self._entries[batch_id])
                     for batch_id in sorted(self._entries)
                 ),
             )

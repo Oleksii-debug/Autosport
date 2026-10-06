@@ -30,6 +30,8 @@ class _EconomicGoalProvenanceMeta(type):
 
     _AUTHORITY_NAMES: Final = frozenset(
         {
+            "__init__",
+            "__post_init__",
             "decision_identity",
             "_authority_operations_sealed",
         }
@@ -411,6 +413,11 @@ def _bind_provenance_constructor(operation):
 _CANONICAL_PROVENANCE_INIT: Final = _bind_provenance_constructor(
     _provenance_init_authority
 )
+
+# Replace the dataclass-generated constructor with the captured canonical
+# constructor so construction cannot be redirected through a rebound
+# class-level __post_init__ implementation.
+EconomicGoalProvenance.__init__ = _CANONICAL_PROVENANCE_INIT
 
 
 def _build_provenance(

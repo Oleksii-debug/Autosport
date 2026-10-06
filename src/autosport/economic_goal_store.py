@@ -171,6 +171,8 @@ def economic_goal_to_payload(
     contract: EconomicGoalContract,
     _goal_type=EconomicGoalContract,
     _goal_validator=EconomicGoalContract.__post_init__,
+    _schema=ECONOMIC_GOAL_SCHEMA,
+    _schema_version=ECONOMIC_GOAL_SCHEMA_VERSION,
     _error_type=EconomicGoalContractError,
 ) -> dict[str, object]:
     """Return the canonical schema-v1 JSON payload for ``contract``."""
@@ -242,6 +244,8 @@ def economic_goal_from_payload(
     _contract_keys=_CONTRACT_KEYS,
     _decimal_fields=_DECIMAL_FIELDS,
     _restriction_fields=_RESTRICTION_FIELDS,
+    _schema=ECONOMIC_GOAL_SCHEMA,
+    _schema_version=ECONOMIC_GOAL_SCHEMA_VERSION,
 ) -> EconomicGoalContract:
     """Decode schema-v1 persistence input and fail closed on any ambiguity."""
 

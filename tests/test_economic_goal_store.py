@@ -517,6 +517,21 @@ def test_codec_ignores_rebound_size_bounds(monkeypatch) -> None:
         economic_goal_from_payload(oversized_member)
 
 
+def test_store_path_exists_witness_ignores_rebound_error(monkeypatch, tmp_path) -> None:
+    def forged_stat(self):
+        raise PermissionError("stat blocked")
+
+    monkeypatch.setattr(type(tmp_path), "stat", forged_stat)
+    store = EconomicGoalStore(tmp_path)
+    canonical_error = EconomicGoalContractError
+    monkeypatch.setattr(economic_goal_store_module, "EconomicGoalContractError", RuntimeError)
+
+    with pytest.raises(canonical_error) as excinfo:
+        store.initialize_owner(_goal())
+    assert type(excinfo.value) is not RuntimeError
+    assert type(excinfo.value) is EconomicGoalContractError
+
+
 def test_store_captures_transitive_path_witnesses(monkeypatch, tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
 

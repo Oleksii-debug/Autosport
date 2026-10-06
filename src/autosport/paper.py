@@ -588,6 +588,48 @@ class PaperBook:
 
     @property
     @_serialized_paperbook_operation
+    def committed_capital(self) -> Decimal:
+        if type(self) is not __class__:
+            raise TypeError("PaperBook economic authority requires the exact book type")
+        _CANONICAL_VALIDATE_LOADED_STATE(self)
+        _CANONICAL_REQUIRE_OPENING_AUTHORITY(self)
+        _CANONICAL_REQUIRE_CAUSAL_AUTHORITY(self)
+        try:
+            with _CANONICAL_LOCALCONTEXT(
+                _CANONICAL_PAPER_DECIMAL_CONTEXT_FACTORY()
+            ) as context:
+                total = _CANONICAL_PAPER_DECIMAL_TYPE("0")
+                for ticket in self.tickets.values():
+                    if ticket.status is not _CANONICAL_TICKET_STATUS_OPEN:
+                        continue
+                    if any(
+                        leg.exchange_side == "lay"
+                        for leg in ticket.legs
+                    ) and len(ticket.legs) != 1:
+                        raise ValueError(
+                            "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                        )
+                    total += (
+                        _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
+                            ticket.stake,
+                            ticket.legs[0],
+                        )
+                        if len(ticket.legs) == 1
+                        else ticket.stake
+                    )
+                if context.flags[_CANONICAL_INEXACT_SIGNAL]:
+                    raise ValueError(
+                        "PaperBook committed capital loses Decimal precision"
+                    )
+        except _CANONICAL_DECIMAL_EXCEPTION_TYPE as exc:
+            raise ValueError(
+                "PaperBook committed capital arithmetic is not representable"
+            ) from exc
+        _CANONICAL_REQUIRE_FINITE(total, "committed_capital")
+        return total
+
+    @property
+    @_serialized_paperbook_operation
     def committed_stake(self) -> Decimal:
         if type(self) is not __class__:
             raise TypeError("PaperBook economic authority requires the exact book type")

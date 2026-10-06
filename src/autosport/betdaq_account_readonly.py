@@ -20,7 +20,7 @@ from secrets import token_bytes, token_hex
 from threading import Lock, RLock
 from typing import Callable, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -43,9 +43,10 @@ _SECURE_ENDPOINT = "https://api.betdaq.com/v2.0/Secure/SecureService.asmx"
 _EXTERNAL_NS = "http://www.GlobalBettingExchange.com/ExternalAPI/"
 _SOAP11_NS = "http://schemas.xmlsoap.org/soap/envelope/"
 _SOAP12_NS = "http://www.w3.org/2003/05/soap-envelope"
-_ALLOWED_METHODS = frozenset(
-    {"GetAccountBalances", "ListBootstrapOrders", "ListOrdersChangedSince"}
-)
+_CANONICAL_SECURE_ENDPOINT = _SECURE_ENDPOINT
+_CANONICAL_EXTERNAL_NS = _EXTERNAL_NS
+_CANONICAL_SOAP11_NS = _SOAP11_NS
+_CANONICAL_SOAP12_NS = _SOAP12_NS
 _STATUS_NAMES = {
     1: "UNMATCHED",
     2: "MATCHED",
@@ -56,6 +57,9 @@ _STATUS_NAMES = {
 }
 _POLARITY_NAMES = {1: "BACK", 2: "LAY"}
 _TERMINAL_STATUS_CODES = frozenset({4, 5})
+_CANONICAL_REQUEST_TYPE = Request
+_CANONICAL_BUILD_OPENER = build_opener
+_CANONICAL_BUILD_OPENER_CODE = getattr(_CANONICAL_BUILD_OPENER, "__code__", None)
 _INTEGER_RE = re.compile(r"-?[0-9]+\Z")
 _ACCOUNT_CONTEXT_PREFIX = "betdaq-auth-context:"
 _ACCOUNT_CONTEXT_SCOPE = "AUTHENTICATED_CREDENTIAL_APPLICATION_CONTEXT"
@@ -65,6 +69,37 @@ _ACCOUNT_CONTEXT_LOCK = RLock()
 
 class BetdaqAccountReadOnlyError(RuntimeError):
     """BETDAQ read-only transport, protocol, or evidence error."""
+
+
+def _canonical_betdaq_protocol_authority(
+    *,
+    _secure_endpoint: str = _SECURE_ENDPOINT,
+    _external_ns: str = _EXTERNAL_NS,
+    _soap11_ns: str = _SOAP11_NS,
+    _soap12_ns: str = _SOAP12_NS,
+) -> tuple[str, str, str, str]:
+    expected = (_secure_endpoint, _external_ns, _soap11_ns, _soap12_ns)
+    live = (
+        globals().get("_SECURE_ENDPOINT"),
+        globals().get("_EXTERNAL_NS"),
+        globals().get("_SOAP11_NS"),
+        globals().get("_SOAP12_NS"),
+    )
+    aliases = (
+        globals().get("_CANONICAL_SECURE_ENDPOINT"),
+        globals().get("_CANONICAL_EXTERNAL_NS"),
+        globals().get("_CANONICAL_SOAP11_NS"),
+        globals().get("_CANONICAL_SOAP12_NS"),
+    )
+    if (
+        live != expected
+        or aliases != expected
+        or any(type(value) is not str for value in expected)
+    ):
+        raise BetdaqAccountReadOnlyError(
+            "canonical BETDAQ account protocol authority was replaced"
+        )
+    return expected
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -136,7 +171,11 @@ _ACCOUNT_CONTEXTS: dict[
 ] = {}
 
 
-def _credential_context_binding(credentials: BetdaqCredentials) -> bytes:
+def _credential_context_binding(
+    credentials: BetdaqCredentials,
+    _protocol_authority=_canonical_betdaq_protocol_authority,
+) -> bytes:
+    secure_endpoint, _, _, _ = _protocol_authority()
     if type(credentials) is not BetdaqCredentials:
         raise BetdaqAccountReadOnlyError(
             "authenticated account context requires canonical BetdaqCredentials"
@@ -146,7 +185,7 @@ def _credential_context_binding(credentials: BetdaqCredentials) -> bytes:
             "adapter_id": ADAPTER_ID,
             "adapter_version": ADAPTER_VERSION,
             "application_identifier": credentials.application_identifier,
-            "endpoint": _SECURE_ENDPOINT,
+            "endpoint": secure_endpoint,
             "language_code": credentials.language_code,
             "password": credentials.password,
             "username": credentials.username,
@@ -164,9 +203,10 @@ def _credential_context_binding(credentials: BetdaqCredentials) -> bytes:
 def _authenticated_account_context(
     credentials: BetdaqCredentials,
     venue_id: str,
+    _binding=_credential_context_binding,
 ) -> BetdaqAuthenticatedAccountContext:
     venue = _required_text(venue_id, "venue_id")
-    binding = _credential_context_binding(credentials)
+    binding = _binding(credentials)
     key = (venue, binding)
     with _ACCOUNT_CONTEXT_LOCK:
         existing = _ACCOUNT_CONTEXTS.get(key)
@@ -178,6 +218,62 @@ def _authenticated_account_context(
         )
         _ACCOUNT_CONTEXTS[key] = value
         return value
+
+
+_CANONICAL_CREDENTIAL_CONTEXT_BINDING = _credential_context_binding
+_CANONICAL_CREDENTIAL_CONTEXT_BINDING_CODE = getattr(
+    _CANONICAL_CREDENTIAL_CONTEXT_BINDING,
+    "__code__",
+    None,
+)
+_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT = _authenticated_account_context
+_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE = getattr(
+    _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT,
+    "__code__",
+    None,
+)
+_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE = BetdaqAuthenticatedAccountContext
+
+
+def _canonical_account_context_dispatch(
+    *,
+    _binding=_CANONICAL_CREDENTIAL_CONTEXT_BINDING,
+    _binding_code=_CANONICAL_CREDENTIAL_CONTEXT_BINDING_CODE,
+    _resolver=_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT,
+    _resolver_code=_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE,
+    _context_type=_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE,
+    _protocol_authority=_canonical_betdaq_protocol_authority,
+):
+    live_binding = globals().get("_credential_context_binding")
+    live_resolver = globals().get("_authenticated_account_context")
+    live_type = globals().get("BetdaqAuthenticatedAccountContext")
+    aliases = (
+        globals().get("_CANONICAL_CREDENTIAL_CONTEXT_BINDING"),
+        globals().get("_CANONICAL_CREDENTIAL_CONTEXT_BINDING_CODE"),
+        globals().get("_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT"),
+        globals().get("_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE"),
+        globals().get("_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE"),
+    )
+    expected_aliases = (
+        _binding,
+        _binding_code,
+        _resolver,
+        _resolver_code,
+        _context_type,
+    )
+    if (
+        live_binding is not _binding
+        or getattr(live_binding, "__code__", None) is not _binding_code
+        or live_resolver is not _resolver
+        or getattr(live_resolver, "__code__", None) is not _resolver_code
+        or live_type is not _context_type
+        or aliases != expected_aliases
+    ):
+        raise BetdaqAccountReadOnlyError(
+            "canonical BETDAQ authenticated account context authority was replaced"
+        )
+    _protocol_authority()
+    return _resolver
 
 
 @runtime_checkable
@@ -193,7 +289,16 @@ class BetdaqSoapTransport(Protocol):
 
 
 class UrllibBetdaqSoapTransport:
-    """Small HTTPS transport. Provider/network diagnostics intentionally omit secrets."""
+    """Small bounded HTTPS transport for authenticated BETDAQ reads."""
+
+    def __init__(self, *, max_response_bytes: int = 8 * 1024 * 1024) -> None:
+        if (
+            not isinstance(max_response_bytes, int)
+            or isinstance(max_response_bytes, bool)
+            or max_response_bytes <= 0
+        ):
+            raise ValueError("max_response_bytes must be a positive integer")
+        self._max_response_bytes = max_response_bytes
 
     def post(
         self,
@@ -202,34 +307,116 @@ class UrllibBetdaqSoapTransport:
         headers: dict[str, str],
         body: bytes,
         timeout_seconds: float,
+        _request_type=Request,
+        _build_opener=build_opener,
+        _build_opener_code=getattr(build_opener, "__code__", None),
     ) -> bytes:
-        request = Request(url, data=body, headers=headers, method="POST")
+        live_request_type = globals().get("Request")
+        live_build_opener = globals().get("build_opener")
+        canonical_request_type = globals().get("_CANONICAL_REQUEST_TYPE")
+        canonical_build_opener = globals().get("_CANONICAL_BUILD_OPENER")
+        canonical_build_opener_code = globals().get("_CANONICAL_BUILD_OPENER_CODE")
+        if (
+            live_request_type is not _request_type
+            or canonical_request_type is not _request_type
+            or live_build_opener is not _build_opener
+            or canonical_build_opener is not _build_opener
+            or canonical_build_opener_code is not _build_opener_code
+            or getattr(_build_opener, "__code__", None) is not _build_opener_code
+        ):
+            raise BetdaqAccountReadOnlyError(
+                "canonical BETDAQ HTTPS request/opener authority was replaced"
+            )
+        request = _request_type(
+            url,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
         try:
-            with urlopen(request, timeout=timeout_seconds) as response:
-                payload = response.read()
+            # Build an isolated opener for every credential-bearing provider request.
+            # urllib.request.urlopen() dereferences mutable process-global _opener;
+            # a fresh opener prevents caller-installed global opener state from
+            # servicing canonical authenticated BETDAQ acquisition.
+            opener = _build_opener()
+            with opener.open(request, timeout=timeout_seconds) as response:
+                payload = response.read(self._max_response_bytes + 1)
         except (HTTPError, URLError, OSError, TimeoutError) as exc:
             raise BetdaqAccountReadOnlyError("BETDAQ secure read transport failed") from None
         if type(payload) is not bytes:
             raise BetdaqAccountReadOnlyError("BETDAQ transport returned non-bytes payload")
+        if len(payload) > self._max_response_bytes:
+            raise BetdaqAccountReadOnlyError("BETDAQ response exceeded the size limit")
         return payload
 
 
 _CANONICAL_HTTPS_POST = UrllibBetdaqSoapTransport.post
 
 
-def _require_canonical_account_transport(transport: object) -> None:
-    if type(transport) is not UrllibBetdaqSoapTransport:
+def _require_canonical_account_transport(
+    transport: object,
+    *,
+    _transport_type=UrllibBetdaqSoapTransport,
+    _canonical_post=UrllibBetdaqSoapTransport.post,
+) -> None:
+    if type(transport) is not _transport_type:
         raise BetdaqAccountReadOnlyError(
             "canonical BETDAQ account evidence requires product-owned HTTPS transport"
         )
     bound_post = getattr(transport, "post", None)
     if (
-        getattr(bound_post, "__self__", None) is not transport
-        or getattr(bound_post, "__func__", None) is not _CANONICAL_HTTPS_POST
+        vars(_transport_type).get("post") is not _canonical_post
+        or globals().get("_CANONICAL_HTTPS_POST") is not _canonical_post
+        or getattr(bound_post, "__self__", None) is not transport
+        or getattr(bound_post, "__func__", None) is not _canonical_post
     ):
         raise BetdaqAccountReadOnlyError(
             "canonical BETDAQ account transport was replaced or shadowed"
         )
+
+
+def _bind_canonical_account_evidence_reader(
+    implementation,
+    *,
+    _require_transport=_require_canonical_account_transport,
+    _require_transport_code=getattr(_require_canonical_account_transport, "__code__", None),
+    _context_dispatch=_canonical_account_context_dispatch,
+    _context_dispatch_code=getattr(_canonical_account_context_dispatch, "__code__", None),
+    _https_post=UrllibBetdaqSoapTransport.post,
+    _https_post_code=getattr(UrllibBetdaqSoapTransport.post, "__code__", None),
+):
+    """Seal canonical account-publication authorities away from caller kwargs."""
+
+    def guarded(self, requested_capabilities, **authority_overrides):
+        if authority_overrides:
+            raise BetdaqAccountReadOnlyError(
+                "canonical BETDAQ account evidence does not accept caller authority overrides"
+            )
+        if (
+            globals().get("_require_canonical_account_transport") is not _require_transport
+            or getattr(_require_transport, "__code__", None) is not _require_transport_code
+            or globals().get("_canonical_account_context_dispatch") is not _context_dispatch
+            or getattr(_context_dispatch, "__code__", None) is not _context_dispatch_code
+            or vars(UrllibBetdaqSoapTransport).get("post") is not _https_post
+            or globals().get("_CANONICAL_HTTPS_POST") is not _https_post
+            or getattr(_https_post, "__code__", None) is not _https_post_code
+        ):
+            raise BetdaqAccountReadOnlyError(
+                "canonical BETDAQ account evidence authority was replaced"
+            )
+        return implementation(
+            self,
+            requested_capabilities,
+            _require_transport,
+            _context_dispatch,
+            _https_post,
+            _https_post_code,
+        )
+
+    guarded.__name__ = "read_account_evidence"
+    guarded.__qualname__ = "BetdaqAccountReadOnlyClient.read_account_evidence"
+    guarded.__doc__ = implementation.__doc__
+    return guarded
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +426,7 @@ class BetdaqSoapEvidence:
     source_payload_sha256: str
 
     def __post_init__(self) -> None:
-        if self.method not in _ALLOWED_METHODS:
+        if self.method not in ("GetAccountBalances", "ListBootstrapOrders", "ListOrdersChangedSince"):
             raise BetdaqAccountReadOnlyError("evidence method is outside the read-only allowlist")
         _timestamp(self.observed_at, "observed_at")
         _sha256_hex(self.source_payload_sha256, "source_payload_sha256")
@@ -475,8 +662,20 @@ class BetdaqAccountReadOnlyClient:
             f"adapter_version={ADAPTER_VERSION!r})"
         )
 
-    def read_account_balance(self) -> BetdaqBalanceObservation:
-        result, evidence = self._call("GetAccountBalances", {})
+    def read_account_balance(
+        self,
+        *,
+        _expected_transport: UrllibBetdaqSoapTransport | None = None,
+        _expected_https_post=None,
+        _expected_https_post_code=None,
+    ) -> BetdaqBalanceObservation:
+        result, evidence = self._call(
+            "GetAccountBalances",
+            {},
+            _expected_transport=_expected_transport,
+            _expected_https_post=_expected_https_post,
+            _expected_https_post_code=_expected_https_post_code,
+        )
         return BetdaqBalanceObservation(
             currency=_required_attr(result, "Currency"),
             balance=_decimal_attr(result, "Balance"),
@@ -491,6 +690,9 @@ class BetdaqAccountReadOnlyClient:
         sequence_number: int,
         *,
         want_settled_orders_on_unsettled_markets: bool = True,
+        _expected_transport: UrllibBetdaqSoapTransport | None = None,
+        _expected_https_post=None,
+        _expected_https_post_code=None,
     ) -> BetdaqBootstrapPage:
         if type(sequence_number) is not int or sequence_number < -1:
             raise BetdaqAccountReadOnlyError("sequence_number must be an integer >= -1")
@@ -506,24 +708,44 @@ class BetdaqAccountReadOnlyClient:
                     "true" if want_settled_orders_on_unsettled_markets else "false"
                 ),
             },
+            _expected_transport=_expected_transport,
+            _expected_https_post=_expected_https_post,
+            _expected_https_post_code=_expected_https_post_code,
         )
         maximum = _integer_attr(result, "MaximumSequenceNumber")
         orders = _parse_orders(result, evidence)
         _require_after_cursor(orders, sequence_number)
         return BetdaqBootstrapPage(maximum, orders, evidence)
 
-    def read_orders_changed_since(self, sequence_number: int) -> BetdaqChangedOrdersPage:
+    def read_orders_changed_since(
+        self,
+        sequence_number: int,
+        *,
+        _expected_transport: UrllibBetdaqSoapTransport | None = None,
+        _expected_https_post=None,
+        _expected_https_post_code=None,
+    ) -> BetdaqChangedOrdersPage:
         if type(sequence_number) is not int or sequence_number < -1:
             raise BetdaqAccountReadOnlyError("sequence_number must be an integer >= -1")
         result, evidence = self._call(
-            "ListOrdersChangedSince", {"SequenceNumber": str(sequence_number)}
+            "ListOrdersChangedSince",
+            {"SequenceNumber": str(sequence_number)},
+            _expected_transport=_expected_transport,
+            _expected_https_post=_expected_https_post,
+            _expected_https_post_code=_expected_https_post_code,
         )
         orders = _parse_orders(result, evidence)
         _require_after_cursor(orders, sequence_number)
         return BetdaqChangedOrdersPage(orders, evidence)
 
     def read_complete_current_orders(
-        self, *, max_bootstrap_pages: int = 100, max_changed_pages: int = 100
+        self,
+        *,
+        max_bootstrap_pages: int = 100,
+        max_changed_pages: int = 100,
+        _expected_transport: UrllibBetdaqSoapTransport | None = None,
+        _expected_https_post=None,
+        _expected_https_post_code=None,
     ) -> BetdaqCurrentOrderBook:
         _positive_int(max_bootstrap_pages, "max_bootstrap_pages")
         _positive_int(max_changed_pages, "max_changed_pages")
@@ -534,7 +756,12 @@ class BetdaqAccountReadOnlyClient:
         bootstrap_cutoff: int | None = None
 
         for _ in range(max_bootstrap_pages):
-            page = self.read_bootstrap_page(cursor)
+            page = self.read_bootstrap_page(
+                cursor,
+                _expected_transport=_expected_transport,
+                _expected_https_post=_expected_https_post,
+                _expected_https_post_code=_expected_https_post_code,
+            )
             evidence.append(page.evidence)
             if bootstrap_cutoff is None:
                 bootstrap_cutoff = page.maximum_sequence_number
@@ -562,7 +789,12 @@ class BetdaqAccountReadOnlyClient:
         assert bootstrap_cutoff is not None
         changed_cursor = bootstrap_cutoff
         for _ in range(max_changed_pages):
-            page = self.read_orders_changed_since(changed_cursor)
+            page = self.read_orders_changed_since(
+                changed_cursor,
+                _expected_transport=_expected_transport,
+                _expected_https_post=_expected_https_post,
+                _expected_https_post_code=_expected_https_post_code,
+            )
             evidence.append(page.evidence)
             if not page.orders:
                 break
@@ -599,9 +831,14 @@ class BetdaqAccountReadOnlyClient:
             evidence_sha256=digest,
         )
 
+    @_bind_canonical_account_evidence_reader
     def read_account_evidence(
         self,
         requested_capabilities: frozenset[BookmakerCapability],
+        _require_transport,
+        _context_dispatch,
+        _https_post,
+        _https_post_code,
     ) -> BetdaqAccountEvidence:
         if not isinstance(requested_capabilities, frozenset):
             raise TypeError("requested_capabilities must be a frozenset")
@@ -626,12 +863,21 @@ class BetdaqAccountReadOnlyClient:
                 f"BETDAQ read-only adapter cannot prove complete capability: {names}"
             )
 
-        _require_canonical_account_transport(self._transport)
-        context_before = _authenticated_account_context(
-            self._credentials,
-            self._venue_id,
+        transport = self._transport
+        _require_transport(transport)
+        credentials = self._credentials
+        venue_id = self._venue_id
+        context_resolver = _context_dispatch()
+        context_before = context_resolver(credentials, venue_id)
+        if type(context_before) is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ authenticated account context is not canonical"
+            )
+        balance = self.read_account_balance(
+            _expected_transport=transport,
+            _expected_https_post=_https_post,
+            _expected_https_post_code=_https_post_code,
         )
-        balance = self.read_account_balance()
         order_requested = bool(
             requested_capabilities
             & frozenset(
@@ -641,12 +887,32 @@ class BetdaqAccountReadOnlyClient:
                 }
             )
         )
-        order_book = self.read_complete_current_orders() if order_requested else None
-        context_after = _authenticated_account_context(
-            self._credentials,
-            self._venue_id,
+        order_book = (
+            self.read_complete_current_orders(
+                _expected_transport=transport,
+                _expected_https_post=_https_post,
+                _expected_https_post_code=_https_post_code,
+            )
+            if order_requested
+            else None
         )
-        if context_after.session_context_id != context_before.session_context_id:
+        if self._transport is not transport:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ canonical account transport changed during acquisition"
+            )
+        if self._credentials is not credentials or self._venue_id != venue_id:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ authenticated account context changed during acquisition"
+            )
+        if _context_dispatch() is not context_resolver:
+            raise BetdaqAccountReadOnlyError(
+                "canonical BETDAQ authenticated account context authority was replaced"
+            )
+        context_after = context_resolver(credentials, venue_id)
+        if (
+            type(context_after) is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE
+            or context_after is not context_before
+        ):
             raise BetdaqAccountReadOnlyError(
                 "BETDAQ authenticated account context changed during acquisition"
             )
@@ -734,26 +1000,63 @@ class BetdaqAccountReadOnlyClient:
         return self.read_account_evidence(requested_capabilities).snapshot
 
     def _call(
-        self, method: str, request_fields: dict[str, str]
+        self,
+        method: str,
+        request_fields: dict[str, str],
+        *,
+        _protocol_authority=_canonical_betdaq_protocol_authority,
+        _require_transport=_require_canonical_account_transport,
+        _expected_transport: UrllibBetdaqSoapTransport | None = None,
+        _expected_https_post=None,
+        _expected_https_post_code=None,
     ) -> tuple[ET.Element, BetdaqSoapEvidence]:
-        if method not in _ALLOWED_METHODS:
+        if method not in ("GetAccountBalances", "ListBootstrapOrders", "ListOrdersChangedSince"):
             raise BetdaqAccountReadOnlyError(
                 "BETDAQ SOAP method is outside the strict read-only allowlist"
             )
+        protocol_authority = _protocol_authority()
+        secure_endpoint, external_ns, _, _ = protocol_authority
         with self._call_lock:
             body = self._request_xml(method, request_fields)
             headers = {
                 "Accept": "text/xml",
                 "Content-Type": "text/xml; charset=utf-8",
-                "SOAPAction": f'"{_EXTERNAL_NS}{method}"',
+                "SOAPAction": f'"{external_ns}{method}"',
             }
+            transport = self._transport
+            canonical_dispatch = _expected_transport is not None
+            if canonical_dispatch:
+                _require_transport(_expected_transport)
+                expected_bound_post = getattr(_expected_transport, "post", None)
+                if (
+                    transport is not _expected_transport
+                    or _expected_https_post is None
+                    or getattr(expected_bound_post, "__self__", None)
+                    is not _expected_transport
+                    or getattr(expected_bound_post, "__func__", None)
+                    is not _expected_https_post
+                    or getattr(_expected_https_post, "__code__", None)
+                    is not _expected_https_post_code
+                ):
+                    raise BetdaqAccountReadOnlyError(
+                        "BETDAQ canonical account transport changed during acquisition"
+                    )
             try:
-                payload = self._transport.post(
-                    _SECURE_ENDPOINT,
-                    headers=headers,
-                    body=body,
-                    timeout_seconds=self._timeout_seconds,
-                )
+                if canonical_dispatch:
+                    payload = _expected_https_post(
+                        _expected_transport,
+                        secure_endpoint,
+                        headers=headers,
+                        body=body,
+                        timeout_seconds=self._timeout_seconds,
+                    )
+                else:
+                    payload = transport.post(
+                        secure_endpoint,
+                        headers=headers,
+                        body=body,
+                        timeout_seconds=self._timeout_seconds,
+                    )
             except Exception:
                 # Never propagate a provider/transport exception string: custom transports
                 # can accidentally embed credentials or raw secure request XML, even when
@@ -761,6 +1064,14 @@ class BetdaqAccountReadOnlyClient:
                 raise BetdaqAccountReadOnlyError(
                     "BETDAQ secure read transport failed"
                 ) from None
+        if canonical_dispatch and self._transport is not _expected_transport:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ canonical account transport changed during acquisition"
+            )
+        if _protocol_authority() != protocol_authority:
+            raise BetdaqAccountReadOnlyError(
+                "canonical BETDAQ account protocol authority was replaced"
+            )
         if type(payload) is not bytes:
             raise BetdaqAccountReadOnlyError("BETDAQ transport must return bytes")
         evidence = BetdaqSoapEvidence(
@@ -770,13 +1081,20 @@ class BetdaqAccountReadOnlyClient:
         )
         return _parse_soap_result(payload, method), evidence
 
-    def _request_xml(self, method: str, fields: dict[str, str]) -> bytes:
-        ET.register_namespace("soap", _SOAP11_NS)
-        envelope = ET.Element(f"{{{_SOAP11_NS}}}Envelope")
-        header = ET.SubElement(envelope, f"{{{_SOAP11_NS}}}Header")
+    def _request_xml(
+        self,
+        method: str,
+        fields: dict[str, str],
+        *,
+        _protocol_authority=_canonical_betdaq_protocol_authority,
+    ) -> bytes:
+        _, external_ns, soap11_ns, _ = _protocol_authority()
+        ET.register_namespace("soap", soap11_ns)
+        envelope = ET.Element(f"{{{soap11_ns}}}Envelope")
+        header = ET.SubElement(envelope, f"{{{soap11_ns}}}Header")
         ET.SubElement(
             header,
-            f"{{{_EXTERNAL_NS}}}ExternalApiHeader",
+            f"{{{external_ns}}}ExternalApiHeader",
             {
                 "version": self._credentials.version,
                 "languageCode": self._credentials.language_code,
@@ -785,18 +1103,23 @@ class BetdaqAccountReadOnlyClient:
                 "applicationIdentifier": self._credentials.application_identifier,
             },
         )
-        soap_body = ET.SubElement(envelope, f"{{{_SOAP11_NS}}}Body")
-        method_element = ET.SubElement(soap_body, f"{{{_EXTERNAL_NS}}}{method}")
-        request_names = {
-            "GetAccountBalances": "getAccountBalancesRequest",
-            "ListBootstrapOrders": "listBootstrapOrdersRequest",
-            "ListOrdersChangedSince": "listOrdersChangedSinceRequest",
-        }
+        soap_body = ET.SubElement(envelope, f"{{{soap11_ns}}}Body")
+        method_element = ET.SubElement(soap_body, f"{{{external_ns}}}{method}")
+        if method == "GetAccountBalances":
+            request_name = "getAccountBalancesRequest"
+        elif method == "ListBootstrapOrders":
+            request_name = "listBootstrapOrdersRequest"
+        elif method == "ListOrdersChangedSince":
+            request_name = "listOrdersChangedSinceRequest"
+        else:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ SOAP method is outside request-element allowlist"
+            )
         request_element = ET.SubElement(
-            method_element, f"{{{_EXTERNAL_NS}}}{request_names[method]}"
+            method_element, f"{{{external_ns}}}{request_name}"
         )
         for key, value in fields.items():
-            element = ET.SubElement(request_element, f"{{{_EXTERNAL_NS}}}{key}")
+            element = ET.SubElement(request_element, f"{{{external_ns}}}{key}")
             element.text = value
         return ET.tostring(envelope, encoding="utf-8", xml_declaration=True)
 
@@ -813,7 +1136,13 @@ class BetdaqAccountReadOnlyClient:
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _parse_soap_result(payload: bytes, method: str) -> ET.Element:
+def _parse_soap_result(
+    payload: bytes,
+    method: str,
+    *,
+    _protocol_authority=_canonical_betdaq_protocol_authority,
+) -> ET.Element:
+    _, external_ns, soap11_ns, soap12_ns = _protocol_authority()
     upper = payload.upper()
     if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
         raise BetdaqAccountReadOnlyError("BETDAQ SOAP payload contains forbidden DTD/entity")
@@ -822,7 +1151,7 @@ def _parse_soap_result(payload: bytes, method: str) -> ET.Element:
     except (ET.ParseError, UnicodeError):
         raise BetdaqAccountReadOnlyError("BETDAQ response is not valid SOAP XML") from None
     namespace, local = _split_tag(root.tag)
-    if local != "Envelope" or namespace not in {_SOAP11_NS, _SOAP12_NS}:
+    if local != "Envelope" or namespace not in {soap11_ns, soap12_ns}:
         raise BetdaqAccountReadOnlyError("BETDAQ response has invalid SOAP Envelope")
     bodies = [child for child in root if child.tag == f"{{{namespace}}}Body"]
     if len(bodies) != 1:
@@ -835,7 +1164,7 @@ def _parse_soap_result(payload: bytes, method: str) -> ET.Element:
     responses = [
         child
         for child in body
-        if child.tag == f"{{{_EXTERNAL_NS}}}{method}Response"
+        if child.tag == f"{{{external_ns}}}{method}Response"
     ]
     if len(responses) != 1:
         raise BetdaqAccountReadOnlyError(
@@ -844,23 +1173,27 @@ def _parse_soap_result(payload: bytes, method: str) -> ET.Element:
     results = [
         child
         for child in responses[0]
-        if child.tag == f"{{{_EXTERNAL_NS}}}{method}Result"
+        if child.tag == f"{{{external_ns}}}{method}Result"
     ]
     if len(results) != 1:
         raise BetdaqAccountReadOnlyError(
             f"BETDAQ response is missing exact {method}Result"
         )
-    _require_success_return_status(results[0])
+    _require_success_return_status(results[0], external_ns=external_ns)
     return results[0]
 
 
-def _require_success_return_status(result: ET.Element) -> None:
-    """Require provider-level success before any method payload can become evidence."""
+def _require_success_return_status(
+    result: ET.Element,
+    *,
+    external_ns: str,
+) -> None:
+    """Require provider-level success under the caller's validated protocol snapshot."""
 
     statuses = [
         child
         for child in result
-        if child.tag == f"{{{_EXTERNAL_NS}}}ReturnStatus"
+        if child.tag == f"{{{external_ns}}}ReturnStatus"
     ]
     if len(statuses) != 1:
         raise BetdaqAccountReadOnlyError(
@@ -883,14 +1216,15 @@ def _require_success_return_status(result: ET.Element) -> None:
 def _parse_orders(
     result: ET.Element, evidence: BetdaqSoapEvidence
 ) -> tuple[BetdaqOrderObservation, ...]:
+    _, external_ns, _, _ = _canonical_betdaq_protocol_authority()
     containers = [
-        child for child in result if child.tag == f"{{{_EXTERNAL_NS}}}Orders"
+        child for child in result if child.tag == f"{{{external_ns}}}Orders"
     ]
     if len(containers) != 1:
         raise BetdaqAccountReadOnlyError("BETDAQ order result must contain one Orders element")
     orders: list[BetdaqOrderObservation] = []
     for child in containers[0]:
-        if child.tag != f"{{{_EXTERNAL_NS}}}Order":
+        if child.tag != f"{{{external_ns}}}Order":
             raise BetdaqAccountReadOnlyError("BETDAQ Orders contains an unexpected element")
         status_code = _integer_attr(child, "Status")
         status_name = _STATUS_NAMES.get(status_code)

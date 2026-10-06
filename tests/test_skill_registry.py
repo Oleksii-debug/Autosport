@@ -413,6 +413,99 @@ def test_executable_builtin_definition_cannot_be_pre_registered_with_weaker_poli
         registry.register(forged)
 
 
+def test_handler_result_pipe_is_drained_before_process_exit_wait(monkeypatch):
+    expected = SkillExecutionResult(output={"payload": "x" * 4096})
+    events = []
+
+    class FakeReceiver:
+        def __init__(self):
+            self.ready = False
+            self.drained = False
+            self.closed = False
+
+        def poll(self):
+            events.append("poll")
+            return self.ready
+
+        def recv(self):
+            events.append("recv")
+            self.drained = True
+            process.alive = False
+            return "OK", expected
+
+        def close(self):
+            self.closed = True
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    receiver = FakeReceiver()
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+            self.join_timeouts = []
+
+        def start(self):
+            receiver.ready = True
+
+        def join(self, timeout=None):
+            self.join_timeouts.append(timeout)
+            events.append("join")
+            # Simulate a child whose handler has finished but whose result send
+            # fills the OS pipe. It cannot exit until the parent drains recv().
+            if receiver.drained:
+                self.alive = False
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, FakeSender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert error is None
+    assert result == expected
+    assert process.killed is False
+    assert process.closed is True
+    assert receiver.closed is True
+    assert "recv" in events
+    assert "join" not in events[: events.index("recv")]
+
+
 def test_handler_timeout_cleanup_hard_kills_before_bounded_reap(monkeypatch):
     class FakeEndpoint:
         def close(self):

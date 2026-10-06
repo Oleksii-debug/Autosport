@@ -921,9 +921,17 @@ class ProductEconomicSessionStore:
             _STATE_KEYS,
         )
 
-    def _require_configuration_authority(self) -> None:
-        if type(self) is not ProductEconomicSessionStore:
-            raise EconomicSessionIntegrityError(
+    def _require_configuration_authority(
+        self,
+        _type=type,
+        _error_type=EconomicSessionIntegrityError,
+        _any=any,
+        _tuple=tuple,
+        _getattr=getattr,
+        _callable=callable,
+    ) -> None:
+        if _type(self) is not ProductEconomicSessionStore:
+            raise _error_type(
                 "economic-session store must retain exact ProductEconomicSessionStore authority"
             )
         if (
@@ -955,7 +963,7 @@ class ProductEconomicSessionStore:
             or _PATH_TYPE.exists is not self._path_exists_witness
             or (
                 _PATH_EXISTS_CODE is not None
-                and getattr(self._path_exists_witness, "__code__", None) is not _PATH_EXISTS_CODE
+                and _getattr(self._path_exists_witness, "__code__", None) is not _PATH_EXISTS_CODE
             )
             or _PATH_FACTORY.__new__ is not self._path_new_witness
             or _PATH_TYPE.expanduser is not self._path_expanduser_witness
@@ -963,11 +971,11 @@ class ProductEconomicSessionStore:
             or self._path_factory_witness.__new__ is not self._path_new_witness
             or (
                 _PATH_EXPANDUSER_CODE is not None
-                and getattr(self._path_expanduser_witness, "__code__", None) is not _PATH_EXPANDUSER_CODE
+                and _getattr(self._path_expanduser_witness, "__code__", None) is not _PATH_EXPANDUSER_CODE
             )
             or (
                 _PATH_RESOLVE_CODE is not None
-                and getattr(self._path_resolve_witness, "__code__", None) is not _PATH_RESOLVE_CODE
+                and _getattr(self._path_resolve_witness, "__code__", None) is not _PATH_RESOLVE_CODE
             )
             or self._clock is not self._clock_witness
             or self._product_clock is not self._product_clock_witness
@@ -983,10 +991,10 @@ class ProductEconomicSessionStore:
             or _construct_economic_authority is not self._authority_constructor_witness
             or _AUTHORITY_TYPE.__new__ is not self._authority_new_witness
             or _AUTHORITY_TYPE.__init__ is not self._authority_init_witness
-            or _ECONOMIC_GOAL_STORE_NEW_CODE is not None and getattr(self._economic_goal_store_new_witness, "__code__", None) is not _ECONOMIC_GOAL_STORE_NEW_CODE
-            or _ECONOMIC_GOAL_STORE_INIT_CODE is not None and getattr(self._economic_goal_store_init_witness, "__code__", None) is not _ECONOMIC_GOAL_STORE_INIT_CODE
-            or _AUTHORITY_NEW_CODE is not None and getattr(self._authority_new_witness, "__code__", None) is not _AUTHORITY_NEW_CODE
-            or _AUTHORITY_INIT_CODE is not None and getattr(self._authority_init_witness, "__code__", None) is not _AUTHORITY_INIT_CODE
+            or _ECONOMIC_GOAL_STORE_NEW_CODE is not None and _getattr(self._economic_goal_store_new_witness, "__code__", None) is not _ECONOMIC_GOAL_STORE_NEW_CODE
+            or _ECONOMIC_GOAL_STORE_INIT_CODE is not None and _getattr(self._economic_goal_store_init_witness, "__code__", None) is not _ECONOMIC_GOAL_STORE_INIT_CODE
+            or _AUTHORITY_NEW_CODE is not None and _getattr(self._authority_new_witness, "__code__", None) is not _AUTHORITY_NEW_CODE
+            or _AUTHORITY_INIT_CODE is not None and _getattr(self._authority_init_witness, "__code__", None) is not _AUTHORITY_INIT_CODE
             or _construct_economic_goal_store.__code__ is not _CONSTRUCT_ECONOMIC_GOAL_STORE_CODE
             or _construct_economic_authority.__code__ is not _CONSTRUCT_ECONOMIC_AUTHORITY_CODE
             or _economic_session_lock_scope.__code__ is not _ECONOMIC_SESSION_LOCK_SCOPE_CODE
@@ -1004,12 +1012,12 @@ class ProductEconomicSessionStore:
             or _WORKSPACE_LOCK_EXIT is not self._workspace_lock_exit_witness
             or _WORKSPACE_LOCK_ACQUIRE is not self._workspace_lock_acquire_witness
             or _WORKSPACE_LOCK_RELEASE is not self._workspace_lock_release_witness
-            or _WORKSPACE_LOCK_NEW_CODE is not None and getattr(self._workspace_lock_new_witness, "__code__", None) is not _WORKSPACE_LOCK_NEW_CODE
-            or _WORKSPACE_LOCK_INIT_CODE is not None and getattr(self._workspace_lock_init_witness, "__code__", None) is not _WORKSPACE_LOCK_INIT_CODE
-            or _WORKSPACE_LOCK_ENTER_CODE is not None and getattr(self._workspace_lock_enter_witness, "__code__", None) is not _WORKSPACE_LOCK_ENTER_CODE
-            or _WORKSPACE_LOCK_EXIT_CODE is not None and getattr(self._workspace_lock_exit_witness, "__code__", None) is not _WORKSPACE_LOCK_EXIT_CODE
-            or _WORKSPACE_LOCK_ACQUIRE_CODE is not None and getattr(self._workspace_lock_acquire_witness, "__code__", None) is not _WORKSPACE_LOCK_ACQUIRE_CODE
-            or _WORKSPACE_LOCK_RELEASE_CODE is not None and getattr(self._workspace_lock_release_witness, "__code__", None) is not _WORKSPACE_LOCK_RELEASE_CODE
+            or _WORKSPACE_LOCK_NEW_CODE is not None and _getattr(self._workspace_lock_new_witness, "__code__", None) is not _WORKSPACE_LOCK_NEW_CODE
+            or _WORKSPACE_LOCK_INIT_CODE is not None and _getattr(self._workspace_lock_init_witness, "__code__", None) is not _WORKSPACE_LOCK_INIT_CODE
+            or _WORKSPACE_LOCK_ENTER_CODE is not None and _getattr(self._workspace_lock_enter_witness, "__code__", None) is not _WORKSPACE_LOCK_ENTER_CODE
+            or _WORKSPACE_LOCK_EXIT_CODE is not None and _getattr(self._workspace_lock_exit_witness, "__code__", None) is not _WORKSPACE_LOCK_EXIT_CODE
+            or _WORKSPACE_LOCK_ACQUIRE_CODE is not None and _getattr(self._workspace_lock_acquire_witness, "__code__", None) is not _WORKSPACE_LOCK_ACQUIRE_CODE
+            or _WORKSPACE_LOCK_RELEASE_CODE is not None and _getattr(self._workspace_lock_release_witness, "__code__", None) is not _WORKSPACE_LOCK_RELEASE_CODE
             or _WORKSPACE_LOCK_TYPE.__new__ is not self._workspace_lock_new_witness
             or _WORKSPACE_LOCK_TYPE.__init__ is not self._workspace_lock_init_witness
             or _WORKSPACE_LOCK_TYPE.__enter__ is not self._workspace_lock_enter_witness
@@ -1039,15 +1047,15 @@ class ProductEconomicSessionStore:
             or PaperBook.load is not self._paperbook_load_witness
             or PaperBook._validate_loaded_state is not self._paperbook_validate_witness
             or ProductEconomicSession.__eq__ is not self._product_economic_session_eq_witness
-            or any(
+            or _any(
                 ProductEconomicSession.__dict__[name] is not descriptor
                 for name, descriptor in self._product_economic_session_field_descriptors_witness
             )
             or ProductEconomicSession.__post_init__.__defaults__
             is not self._product_economic_session_post_init_defaults_witness
-            or tuple(
-                getattr(value, "__code__", None)
-                if callable(value)
+            or _tuple(
+                _getattr(value, "__code__", None)
+                if _callable(value)
                 else None
                 for value in (
                     self._product_economic_session_post_init_defaults_witness or ()
@@ -1057,18 +1065,18 @@ class ProductEconomicSessionStore:
             or ProductEconomicSession.__init__ is not self._product_economic_session_init_witness
             or (
                 _PRODUCT_ECONOMIC_SESSION_INIT_CODE is not None
-                and getattr(self._product_economic_session_init_witness, "__code__", None)
+                and _getattr(self._product_economic_session_init_witness, "__code__", None)
                 is not _PRODUCT_ECONOMIC_SESSION_INIT_CODE
             )
             or ProductEconomicSession.__post_init__ is not self._product_economic_session_post_init_witness
             or (
                 _PRODUCT_ECONOMIC_SESSION_POST_INIT_CODE is not None
-                and getattr(self._product_economic_session_post_init_witness, "__code__", None)
+                and _getattr(self._product_economic_session_post_init_witness, "__code__", None)
                 is not _PRODUCT_ECONOMIC_SESSION_POST_INIT_CODE
             )
             or (
                 _PRODUCT_ECONOMIC_SESSION_EQ_CODE is not None
-                and getattr(self._product_economic_session_eq_witness, "__code__", None)
+                and _getattr(self._product_economic_session_eq_witness, "__code__", None)
                 is not _PRODUCT_ECONOMIC_SESSION_EQ_CODE
             )
             or WorkspaceEconomicLock is not self._workspace_lock_type_witness
@@ -1083,7 +1091,7 @@ class ProductEconomicSessionStore:
                 _STATE_KEYS,
             ) != self._authority_schema_witness
         ):
-            raise EconomicSessionIntegrityError(
+            raise _error_type(
                 "economic-session authority composition changed after construction"
             )
 

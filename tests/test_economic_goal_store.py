@@ -861,6 +861,29 @@ def test_store_load_rejects_oversize_bytes_without_unbounded_read(tmp_path) -> N
         store.load()
 
 
+def test_verified_reader_ignores_rebound_os_authorities(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound OS read authority executed")
+
+    for name in (
+        "_open_read_only_descriptor",
+        "_CANONICAL_OPEN_READ_ONLY_DESCRIPTOR",
+        "_CANONICAL_OS_FSTAT",
+        "_CANONICAL_OS_STAT",
+        "_CANONICAL_OS_FDOPEN",
+        "_CANONICAL_OS_SAMEOPENFILE",
+        "_CANONICAL_OS_CLOSE",
+        "_CANONICAL_STAT_ISREG",
+    ):
+        if hasattr(economic_goal_store_module, name):
+            monkeypatch.setattr(economic_goal_store_module, name, forged)
+
+    assert economic_goal_store_module._read_economic_goal_text(store.path)
+
+
 def test_store_load_normalizes_invalid_utf8_to_contract_error(tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
     store.path.write_bytes(b"\xff")

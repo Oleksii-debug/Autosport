@@ -9,6 +9,7 @@ from autosport.bookmaker_capability import (
     BookmakerCapabilityState,
 )
 from autosport.bookmaker_integration_boundary import (
+    BookmakerIntegrationEvidence,
     BookmakerIntegrationEvidenceError,
     BookmakerIntegrationKind,
     bind_bookmaker_integration,
@@ -441,4 +442,130 @@ def test_state_of_rejects_inplace_authority_reader_code_mutation(monkeypatch) ->
         match="canonical manifest read authority changed",
     ):
         manifest.state_of(ProviderManifestCapability.STREAM)
+
+def test_manifest_identity_rejects_postconstruction_extension_mutation() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=18,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    stream = next(
+        fact
+        for fact in manifest.facts
+        if fact.capability is ProviderManifestCapability.STREAM
+    )
+    object.__setattr__(stream, "state", ProviderManifestState.PROVEN)
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="product-owned evidence authority",
+    ):
+        _ = manifest.manifest_id
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("manifest_version", 0, "positive integer"),
+        ("source_payload_sha256", "not-a-digest", "SHA-256"),
+    ),
+)
+def test_manifest_identity_revalidates_mutated_scalar_contract(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=19,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    object.__setattr__(manifest, field, value)
+
+    with pytest.raises(ProviderCapabilityManifestError, match=message):
+        _ = manifest.manifest_sha256
+
+
+def test_integration_kind_revalidates_mutated_integration_contract() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=20,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    object.__setattr__(integration, "integration_kind", "official_api")
+
+    with pytest.raises(
+        BookmakerIntegrationEvidenceError,
+        match="integration_kind",
+    ):
+        _ = manifest.integration_kind
+
+
+def test_identity_surfaces_reject_dependency_validator_rebinding(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=21,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+
+    monkeypatch.setattr(
+        BookmakerIntegrationEvidence,
+        "verify_profile",
+        lambda self, candidate: None,
+    )
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="canonical manifest validator changed|canonical manifest dependency validator changed",
+    ):
+        _ = manifest.manifest_id
 

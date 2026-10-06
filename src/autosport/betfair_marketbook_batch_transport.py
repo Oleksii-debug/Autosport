@@ -353,46 +353,60 @@ def _read_market_book_batch(
         params=params,
         resolve_application_context=False,
     )
-    if response.request_budget.evidence_id != batch.budget_evidence_id:
-        raise MarketBookPostDispatchFailure(
-            "transport request budget drifted from the canonical planned batch"
-        )
 
+    # From this point forward provider I/O has completed. Any ordinary internal
+    # finalization failure must remain an explicit failed observation interval
+    # rather than escaping the attempt-history coordinator unclassified.
     try:
-        current_batch = _canonical_batch(plan, batch_id)
-        current_plan_id = plan.plan_id
-        current_request_contract_id = plan.request_contract_id
+        if response.request_budget.evidence_id != batch.budget_evidence_id:
+            raise MarketBookPostDispatchFailure(
+                "transport request budget drifted from the canonical planned batch"
+            )
+
+        try:
+            current_batch = _canonical_batch(plan, batch_id)
+            current_plan_id = plan.plan_id
+            current_request_contract_id = plan.request_contract_id
+        except Exception as exc:
+            raise MarketBookPostDispatchFailure(
+                "MarketBook plan changed during provider dispatch"
+            ) from exc
+        if (
+            current_batch != batch
+            or current_plan_id != plan_id
+            or current_request_contract_id != request_contract_id
+        ):
+            raise MarketBookPostDispatchFailure(
+                "MarketBook plan changed during provider dispatch"
+            )
+
+        try:
+            receipt = MarketBookBatchReceipt.from_response(batch, list(response.rows))
+        except MarketBookCompletenessError as exc:
+            raise _transport.BetfairMarketBookProtocolError(
+                "MarketBook response cannot produce canonical structural receipt"
+            ) from exc
+
+        return MarketBookBatchTransportResult(
+            plan_id=plan_id,
+            request_contract_id=request_contract_id,
+            batch_id=batch.batch_id,
+            request_budget_evidence_id=response.request_budget.evidence_id,
+            request_payload_sha256=response.request_payload_sha256,
+            source_payload_sha256=response.source_payload_sha256,
+            observed_at=response.observed_at,
+            canonical_network_origin=response.network_origin,
+            receipt=receipt,
+        )
+    except (
+        MarketBookPostDispatchFailure,
+        _transport.BetfairMarketBookProtocolError,
+    ):
+        raise
     except Exception as exc:
         raise MarketBookPostDispatchFailure(
-            "MarketBook plan changed during provider dispatch"
+            "provider read completed but canonical MarketBook result finalization failed"
         ) from exc
-    if (
-        current_batch != batch
-        or current_plan_id != plan_id
-        or current_request_contract_id != request_contract_id
-    ):
-        raise MarketBookPostDispatchFailure(
-            "MarketBook plan changed during provider dispatch"
-        )
-
-    try:
-        receipt = MarketBookBatchReceipt.from_response(batch, list(response.rows))
-    except MarketBookCompletenessError as exc:
-        raise _transport.BetfairMarketBookProtocolError(
-            "MarketBook response cannot produce canonical structural receipt"
-        ) from exc
-
-    return MarketBookBatchTransportResult(
-        plan_id=plan_id,
-        request_contract_id=request_contract_id,
-        batch_id=batch.batch_id,
-        request_budget_evidence_id=response.request_budget.evidence_id,
-        request_payload_sha256=response.request_payload_sha256,
-        source_payload_sha256=response.source_payload_sha256,
-        observed_at=response.observed_at,
-        canonical_network_origin=response.network_origin,
-        receipt=receipt,
-    )
 
 
 def append_market_book_transport_attempt(

@@ -536,6 +536,67 @@ def test_provenance_constructor_ignores_rebound_object_writer(monkeypatch) -> No
         )
 
 
+def test_contract_hash_ignores_descriptor_laundering(monkeypatch) -> None:
+    goal = _goal(max_stake_fraction=Decimal("0.03"))
+    expected = economic_goal_provenance_module.contract_sha256(goal)
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return Decimal("0.02")
+
+    monkeypatch.setattr(
+        EconomicGoalContract,
+        "max_stake_fraction",
+        ForgedDescriptor(),
+    )
+
+    assert economic_goal_provenance_module.contract_sha256(goal) == expected
+
+
+
+
+def test_provenance_snapshot_covers_every_captured_field(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    field_names = economic_goal_provenance_module._PROVENANCE_FIELD_NAMES
+    expected = economic_goal_provenance_module._canonical_provenance_snapshot(
+        evidence
+    )
+
+    for index, name in enumerate(field_names):
+        class ForgedDescriptor:
+            def __get__(self, instance, owner=None):
+                return object()
+
+        monkeypatch.setattr(EconomicGoalProvenance, name, ForgedDescriptor())
+        snapshot = economic_goal_provenance_module._canonical_provenance_snapshot(
+            evidence
+        )
+        assert snapshot[index] == expected[index]
+        monkeypatch.undo()
+
+
+
+
+def test_snapshot_provenance_ignores_rebound_field_descriptors(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    expected_sha = evidence.contract_sha256
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return "0" * 64
+
+    monkeypatch.setattr(
+        EconomicGoalProvenance,
+        "contract_sha256",
+        ForgedDescriptor(),
+    )
+
+    snapshot = economic_goal_provenance_module._snapshot_provenance(evidence)
+    assert snapshot.contract_sha256 == expected_sha
+
+
+
+
 def test_provenance_creation_and_identity_ignore_rebound_constructor(monkeypatch) -> None:
     goal = _goal()
     expected = provenance_for(goal)

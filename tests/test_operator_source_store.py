@@ -245,3 +245,57 @@ def test_invalid_admin_override_does_not_modify_persisted_choice(tmp_path: Path)
     result = store.resolve(admin_override_source_id="pkg.mod:factory")
     assert result.state is OperatorSourceSelectionState.INVALID
     assert store.read() == original
+
+def test_store_read_does_not_use_unbounded_path_read_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "operator-source.json"
+    store = OperatorSourceConfigStore(path)
+    expected = store.write_source_id("betfair-exchange")
+
+    def forbidden_read_bytes(self):
+        raise AssertionError("operator source store must not use unbounded Path.read_bytes")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read_bytes)
+    assert store.read() == expected
+
+
+def test_oversized_store_allocation_is_capped_at_max_plus_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "operator-source.json"
+    path.write_bytes(b"x" * 10000)
+    store = OperatorSourceConfigStore(path)
+    original_open = Path.open
+    requested_sizes: list[int] = []
+
+    class TrackedBinaryReader:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self._handle.close()
+            return False
+
+        def read(self, size=-1):
+            requested_sizes.append(size)
+            return self._handle.read(size)
+
+    def tracked_open(self, *args, **kwargs):
+        handle = original_open(self, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if self == path and mode == "rb":
+            return TrackedBinaryReader(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+    with pytest.raises(OperatorSourceStoreError, match="size"):
+        store.read()
+
+    assert requested_sizes == [operator_source_store._MAX_PERSISTED_BYTES + 1]
+

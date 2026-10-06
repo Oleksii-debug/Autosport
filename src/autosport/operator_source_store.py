@@ -50,7 +50,8 @@ class OperatorSourceConfigStore:
         if not self.path.exists():
             return None
         try:
-            raw = self.path.read_bytes()
+            with self.path.open("rb") as handle:
+                raw = handle.read(_MAX_PERSISTED_BYTES + 1)
         except OSError as exc:
             raise OperatorSourceStoreError(
                 "operator source configuration cannot be read"

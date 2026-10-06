@@ -39,6 +39,9 @@ _RECOVERY_NO_EXPOSURE = RecoveryDecision.NO_EXPOSURE
 _RECOVERY_HEDGE_REVIEW_REQUIRED = RecoveryDecision.HEDGE_REVIEW_REQUIRED
 _CANONICAL_DECIMAL_TYPE = Decimal
 _CANONICAL_DECIMAL_TYPE_IDENTITY = _CANONICAL_DECIMAL_TYPE
+_CANONICAL_DECIMAL_RESOURCE_VALIDATOR = _impl._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+_CANONICAL_DECIMAL_RESOURCE_VALIDATOR_IDENTITY = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+_CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR.__code__
 _CANONICAL_TEXT_VALIDATOR = _impl._CANONICAL_TEXT_VALIDATOR
 _CANONICAL_DECIMAL_PARSER = _impl._CANONICAL_DECIMAL_PARSER
 _CANONICAL_DECIMAL_PARSER_IDENTITY = _CANONICAL_DECIMAL_PARSER
@@ -76,12 +79,21 @@ def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
 
 def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
     decimal_type = _CANONICAL_DECIMAL_TYPE
+    resource_validator = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR
     if decimal_type is not _CANONICAL_DECIMAL_TYPE_IDENTITY:
         raise ValueError("PAPER Decimal type authority changed")
+    if (
+        resource_validator is not _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_IDENTITY
+        or resource_validator.__code__
+        is not _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE
+    ):
+        raise ValueError("PAPER Decimal resource authority changed")
     sign = 1 if coefficient < 0 else 0
     magnitude = decimal_type(abs(coefficient))
     digits = magnitude.as_tuple().digits
-    return decimal_type((sign, digits, exponent))
+    result = decimal_type((sign, digits, exponent))
+    resource_validator(result)
+    return result
 
 
 _CANONICAL_DECIMAL_COEFFICIENT = _decimal_coefficient

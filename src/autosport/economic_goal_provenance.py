@@ -85,6 +85,40 @@ _CANONICAL_PROVENANCE_TYPE: Final = EconomicGoalProvenance
 _CANONICAL_PROVENANCE_VALIDATOR: Final = EconomicGoalProvenance.__post_init__
 
 
+def _snapshot_provenance(
+    provenance: EconomicGoalProvenance,
+    _provenance_type=_CANONICAL_PROVENANCE_TYPE,
+    _validator=_CANONICAL_PROVENANCE_VALIDATOR,
+    _error_type=EconomicGoalProvenanceError,
+) -> EconomicGoalProvenance:
+    if type(provenance) is not _provenance_type:
+        raise _error_type("provenance must be EconomicGoalProvenance")
+    snapshot = _provenance_type(
+        schema=provenance.schema,
+        schema_version=provenance.schema_version,
+        goal_id=provenance.goal_id,
+        revision=provenance.revision,
+        bankroll_id=provenance.bankroll_id,
+        contract_sha256=provenance.contract_sha256,
+    )
+    _validator(snapshot)
+    return snapshot
+
+
+def _decision_identity_bound(
+    self: EconomicGoalProvenance,
+    _snapshotter=_snapshot_provenance,
+) -> str:
+    snapshot = _snapshotter(self)
+    return (
+        f"{snapshot.goal_id}@{snapshot.revision}:"
+        f"{snapshot.contract_sha256}"
+    )
+
+
+EconomicGoalProvenance.decision_identity = property(_decision_identity_bound)
+
+
 def _canonical_json(
     payload: object,
     _dumps=json.dumps,
@@ -171,16 +205,7 @@ def _verify_provenance_bound(
         raise _provenance_error("provenance must be EconomicGoalProvenance")
     _goal_validator(contract)
     contract_snapshot = _payload_decoder(_payload_encoder(contract))
-    _provenance_validator(provenance)
-    evidence = _provenance_type(
-        schema=provenance.schema,
-        schema_version=provenance.schema_version,
-        goal_id=provenance.goal_id,
-        revision=provenance.revision,
-        bankroll_id=provenance.bankroll_id,
-        contract_sha256=provenance.contract_sha256,
-    )
-    _provenance_validator(evidence)
+    evidence = _snapshot_provenance(provenance)
     if evidence.goal_id != contract_snapshot.goal_id:
         raise _provenance_error("provenance goal_id mismatch")
     if evidence.revision != contract_snapshot.revision:

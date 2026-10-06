@@ -1455,6 +1455,8 @@ class _ContinuousSessionState:
         _normalized_settlement_evidence_code: object = (
             _normalized_settlement_evidence.__func__.__code__
         ),
+        _read_method: Callable[["_ContinuousSessionState"], dict[str, Any]] = _read,
+        _read_method_code: object = _read.__code__,
     ) -> None:
         if (
             getattr(
@@ -1467,7 +1469,14 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "canonical settlement evidence normalizer code identity changed"
             )
-        raw = self._read()
+        if (
+            type(self)._read is not _read_method
+            or getattr(_read_method, "__code__", None) is not _read_method_code
+        ):
+            raise ContinuousSessionError(
+                "canonical settlement evidence history authority changed"
+            )
+        raw = _read_method(self)
         known = {
             item["evidence_id"]: item
             for item in raw["settlement_evidence"]

@@ -2073,20 +2073,6 @@ class PaperBook:
         _debit_balance=None,
     ) -> PaperTicket:
         amount = _canonical_decimal(type(self), stake, "stake")
-        if any(
-            type(leg) is TicketLeg and leg.exchange_side == "lay"
-            for leg in ticket_legs
-        ) and (len(ticket_legs) != 1):
-            raise ValueError(
-                "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
-            )
-        economic_leg = ticket_legs[0] if len(ticket_legs) == 1 else None
-        locked_capital = (
-            amount
-            if economic_leg is None
-            else _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(amount, economic_leg)
-        )
-        new_balance = _debit_balance(type(self), self.balance, locked_capital)
 
         ticket_placed_at = self._validate_placed_at(
             placed_at if placed_at is not None else _placed_at_now()
@@ -2113,6 +2099,20 @@ class PaperBook:
         quote_keys = [leg.quote_key for leg in ticket_legs]
         if len(quote_keys) != len(set(quote_keys)):
             raise ValueError("ticket contains duplicate quote_key leg")
+        if any(
+            type(leg) is TicketLeg and leg.exchange_side == "lay"
+            for leg in ticket_legs
+        ) and (len(ticket_legs) != 1):
+            raise ValueError(
+                "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+            )
+        economic_leg = ticket_legs[0] if len(ticket_legs) == 1 else None
+        locked_capital = (
+            amount
+            if economic_leg is None
+            else _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(amount, economic_leg)
+        )
+        new_balance = _debit_balance(type(self), self.balance, locked_capital)
         ticket = _ticket_factory(
             ticket_id=_ticket_id_factory(),
             stake=amount,

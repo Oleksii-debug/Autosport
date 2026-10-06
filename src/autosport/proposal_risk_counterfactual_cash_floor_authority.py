@@ -952,9 +952,10 @@ def _resolve_values(
 
     book = _current_base_book(workspace, target)
     base_balance = _decimal(book.balance, "base cash balance")
+    capital_at_risk = _target_capital_vector(target)
     opening_balances, post_open_balance = _open_target_stakes(
         base_balance,
-        target.evaluated_stakes,
+        capital_at_risk,
     )
 
     if (
@@ -979,7 +980,7 @@ def _resolve_values(
         payouts, terminal_balance, minimum_floor = _member_cash_path(
             base_balance=base_balance,
             post_open_balance=post_open_balance,
-            stakes=target.evaluated_stakes,
+            capital_at_risk=capital_at_risk,
             candidate_profits=profits,
             total_profit=total_profit,
             member_index=member_index,
@@ -1004,6 +1005,10 @@ def _resolve_values(
         "evaluated_stakes": [
             _decimal_text(value, "evaluated_stake")
             for value in target.evaluated_stakes
+        ],
+        "evaluated_capital_at_risk": [
+            _decimal_text(value, "evaluated_capital_at_risk")
+            for value in capital_at_risk
         ],
         "base_cash_balance": _decimal_text(base_balance, "base_cash_balance"),
         "candidate_open_cash_balances": [
@@ -1047,6 +1052,7 @@ def _resolve_values(
         ],
         "base_portfolio_identity_proven": True,
         "counterfactual_target_stake_reservation_proven": True,
+        "counterfactual_target_capital_reservation_proven": True,
         "terminal_payout_reconstruction_proven": True,
         "counterfactual_minimum_cash_floor_proven": True,
         "product_scenario_source_provenance_proven": False,
@@ -1080,6 +1086,7 @@ def _resolve_values(
         "path_protocol": _PATH_PROTOCOL,
         "candidate_sha256s": target.candidate_sha256s,
         "evaluated_stakes": target.evaluated_stakes,
+        "evaluated_capital_at_risk": capital_at_risk,
         "base_cash_balance": base_balance,
         "candidate_open_cash_balances": opening_balances,
         "post_open_cash_balance": post_open_balance,

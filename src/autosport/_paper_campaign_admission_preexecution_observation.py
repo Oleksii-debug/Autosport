@@ -234,11 +234,6 @@ def _install() -> None:
         (name, campaign_cycle_receipt_type.__dict__[name])
         for name in cycle_receipt_field_names
     )
-    protocol_field_names = ("campaign_id", "protocol_sha256")
-    protocol_field_descriptors = tuple(
-        (name, campaign_protocol_type.__dict__[name])
-        for name in protocol_field_names
-    )
 
     def read_authority_fields(
         value: object,
@@ -371,13 +366,7 @@ def _install() -> None:
                 descriptors=cycle_receipt_field_descriptors,
                 label="campaign cycle receipt",
             )
-            protocol_fields = read_authority_fields(
-                campaign_forward_protocol,
-                expected_type=campaign_protocol_type,
-                descriptors=protocol_field_descriptors,
-                label="forward protocol",
-            )
-            if protocol_fields["campaign_id"] != receipt_fields["campaign_id"]:
+            if campaign_forward_protocol.campaign_id != receipt_fields["campaign_id"]:
                 raise _origin.PaperExecutionDecisionOriginError(
                     "forward protocol campaign differs from campaign inception"
                 )
@@ -405,7 +394,7 @@ def _install() -> None:
                 )
             cycle_provider_captured_at = cycle_fields["provider_captured_at"]
             _utc(cycle_provider_captured_at, "forward cycle provider_captured_at")
-            protocol_sha256 = protocol_fields["protocol_sha256"]
+            protocol_sha256 = campaign_forward_protocol.protocol_sha256
             if (
                 type(protocol_sha256) is not str
                 or len(protocol_sha256) != 64
@@ -526,12 +515,6 @@ def _install() -> None:
                 descriptors=cycle_receipt_field_descriptors,
                 label="campaign cycle receipt",
             )
-            current_protocol_fields = read_authority_fields(
-                campaign_forward_protocol,
-                expected_type=campaign_protocol_type,
-                descriptors=protocol_field_descriptors,
-                label="forward protocol",
-            )
             if (
                 stable_establish_campaign_inception.__code__
                 is not stable_establish_campaign_inception_code
@@ -552,8 +535,9 @@ def _install() -> None:
                 != expected_cycle_receipt_sha256
                 or current_cycle_fields["provider_captured_at"]
                 != expected_cycle_provider_captured_at
-                or current_protocol_fields["campaign_id"] != expected_campaign_id
-                or current_protocol_fields["protocol_sha256"]
+                or type(campaign_forward_protocol) is not campaign_protocol_type
+                or campaign_forward_protocol.campaign_id != expected_campaign_id
+                or campaign_forward_protocol.protocol_sha256
                 != expected_protocol_sha256
             ):
                 raise _origin.PaperExecutionDecisionOriginError(

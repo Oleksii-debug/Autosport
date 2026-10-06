@@ -1113,10 +1113,7 @@ class _ContinuousSessionState:
 
     @property
     def session_id(self) -> str:
-        # Session identity is fixed by the serialized bootstrap transaction and
-        # cached immutably for the lifetime of this state object. Reading it does
-        # not require reparsing retained settlement history.
-        return self._session_id
+        return self._read()["session_id"]
 
     def _update(
         self,

@@ -474,6 +474,31 @@ def test_decision_identity_ignores_rebound_snapshotter_alias(monkeypatch) -> Non
     assert evidence.decision_identity == expected
 
 
+def test_provenance_constructor_rejects_code_rebinding(monkeypatch) -> None:
+    operation = economic_goal_provenance_module._provenance_init_authority
+    original_code = operation.__code__
+
+    def forged(self):
+        return None
+
+    operation.__code__ = forged.__code__
+    try:
+        with pytest.raises(
+            EconomicGoalProvenanceError,
+            match="constructor authority changed",
+        ):
+            EconomicGoalProvenance(
+                schema="autosport.economic_goal_provenance",
+                schema_version=1,
+                goal_id="owner-goal-v1",
+                revision=1,
+                bankroll_id="paper-main",
+                contract_sha256="not-a-sha",
+            )
+    finally:
+        operation.__code__ = original_code
+
+
 def test_provenance_constructor_ignores_rebound_post_init(monkeypatch) -> None:
     monkeypatch.setattr(
         EconomicGoalProvenance,

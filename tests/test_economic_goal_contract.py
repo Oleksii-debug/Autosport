@@ -415,6 +415,27 @@ def test_contract_successor_ignores_rebound_canonical_transition_alias(monkeypat
     previous.validate_automatic_successor(candidate)
 
 
+def test_contract_constructor_rejects_bound_default_rebinding() -> None:
+    operation = economic_goal_module._contract_init_authority
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+
+    forged_defaults = (
+        original_defaults[0],
+        Decimal("2"),
+        *original_defaults[2:],
+    )
+    operation.__defaults__ = forged_defaults
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="constructor defaults authority changed",
+        ):
+            _goal()
+    finally:
+        operation.__defaults__ = original_defaults
+
+
 def test_contract_constructor_ignores_rebound_post_init(monkeypatch) -> None:
     def forged_post_init(self) -> None:
         raise AssertionError("rebound contract post-init executed")

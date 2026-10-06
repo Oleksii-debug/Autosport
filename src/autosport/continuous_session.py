@@ -379,8 +379,6 @@ class _ContinuousSessionState:
         )
         if self._error_path.exists():
             self._read_error_checkpoint()
-        else:
-            self._write_error_checkpoint(raw["last_error_code"])
 
     def _read_error_checkpoint(self) -> dict[str, Any]:
         try:
@@ -554,19 +552,20 @@ class _ContinuousSessionState:
 
     def snapshot(self) -> ContinuousSessionStatus:
         raw = self._read()
-        error_checkpoint = self._read_error_checkpoint()
-        marker_matches = (
-            error_checkpoint["observed_cycles_completed"] == raw["cycles_completed"]
-            and error_checkpoint["observed_last_success_at"] == raw["last_success_at"]
-        )
-        if marker_matches and error_checkpoint["last_error_code"] is not None:
-            durable_error = raw["last_error_code"]
-            checkpoint_error = error_checkpoint["last_error_code"]
-            if durable_error is not None and durable_error != checkpoint_error:
-                raise ContinuousSessionError(
-                    "continuous session error authorities conflict"
-                )
-            raw["last_error_code"] = checkpoint_error
+        if self._error_path.exists():
+            error_checkpoint = self._read_error_checkpoint()
+            marker_matches = (
+                error_checkpoint["observed_cycles_completed"] == raw["cycles_completed"]
+                and error_checkpoint["observed_last_success_at"] == raw["last_success_at"]
+            )
+            if marker_matches and error_checkpoint["last_error_code"] is not None:
+                durable_error = raw["last_error_code"]
+                checkpoint_error = error_checkpoint["last_error_code"]
+                if durable_error is not None and durable_error != checkpoint_error:
+                    raise ContinuousSessionError(
+                        "continuous session error authorities conflict"
+                    )
+                raw["last_error_code"] = checkpoint_error
         return ContinuousSessionStatus(
             session_id=raw["session_id"],
             source_id=raw["source_id"],
@@ -608,7 +607,7 @@ class _ContinuousSessionState:
                 raw["last_error_code"] = _text(reason, "reason")
 
         self._update(mutate)
-        if reason is not None:
+        if reason is not None and self._error_path.exists():
             self._write_error_checkpoint(None)
 
     @staticmethod
@@ -731,7 +730,8 @@ class _ContinuousSessionState:
         updated = self._update(mutate)
         self._cycles_completed = updated["cycles_completed"]
         self._last_success_at = updated["last_success_at"]
-        self._write_error_checkpoint(None)
+        if self._error_path.exists():
+            self._write_error_checkpoint(None)
 
     def record_failure(self, *, code: str) -> None:
         code = _text(code, "code")

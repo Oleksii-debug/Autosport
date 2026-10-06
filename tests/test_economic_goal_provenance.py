@@ -297,3 +297,15 @@ def test_provenance_validation_ignores_rebound_schema_bounds_and_error(monkeypat
             bankroll_id="paper-main",
             contract_sha256="0" * 64,
         )
+
+
+def test_provenance_for_revalidates_when_class_post_init_is_rebound(monkeypatch) -> None:
+    goal = _goal()
+
+    monkeypatch.setattr(EconomicGoalProvenance, "__post_init__", lambda self: None)
+
+    evidence = provenance_for(goal)
+    object.__setattr__(evidence, "goal_id", "")
+
+    with pytest.raises(EconomicGoalProvenanceError):
+        verify_provenance(goal, evidence)

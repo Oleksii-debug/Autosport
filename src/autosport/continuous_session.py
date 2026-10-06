@@ -2410,8 +2410,29 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if register_input is None
             else register_input
         )
+        dependency_index_was_canonical = (
+            type(dependency_index) is _dependency_index_type
+        )
+
+        def require_dependency_index_type_authority() -> None:
+            if (
+                dependency_index_was_canonical
+                and type(dependency_index) is not _dependency_index_type
+            ):
+                try:
+                    object.__setattr__(
+                        dependency_index,
+                        "__class__",
+                        _dependency_index_type,
+                    )
+                except (AttributeError, TypeError):
+                    pass
+                raise ContinuousSessionError(
+                    "canonical dependency index type changed during lifecycle registration"
+                )
 
         def read_input_ids() -> tuple[str, ...] | object:
+            require_dependency_index_type_authority()
             if type(dependency_index) is _dependency_index_type:
                 return _input_ids_getter(dependency_index)
             return dependency_index.input_ids
@@ -2539,6 +2560,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "dependency index registration authority is unavailable"
             )
         register_input(input_id, **selectors)
+        require_dependency_index_type_authority()
         require_canonical_dependency_helpers()
         if before_dependencies is not None and (
             dependency_index._dependencies is not dependency_storage
@@ -2682,8 +2704,29 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if unregister_input is None
             else unregister_input
         )
+        dependency_index_was_canonical = (
+            type(dependency_index) is _dependency_index_type
+        )
+
+        def require_dependency_index_type_authority() -> None:
+            if (
+                dependency_index_was_canonical
+                and type(dependency_index) is not _dependency_index_type
+            ):
+                try:
+                    object.__setattr__(
+                        dependency_index,
+                        "__class__",
+                        _dependency_index_type,
+                    )
+                except (AttributeError, TypeError):
+                    pass
+                raise ContinuousSessionError(
+                    "canonical dependency index type changed during lifecycle retirement"
+                )
 
         def read_input_ids() -> tuple[str, ...] | object:
+            require_dependency_index_type_authority()
             if type(dependency_index) is _dependency_index_type:
                 return _input_ids_getter(dependency_index)
             return dependency_index.input_ids
@@ -2761,6 +2804,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             matched_keys_storage = dependency_index._matched_keys
             dependency_lock = dependency_index._lock
         removed = unregister_input(input_id)
+        require_dependency_index_type_authority()
         require_canonical_dependency_helpers()
         if before_dependencies is not None and (
             dependency_index._dependencies is not dependency_storage
@@ -4142,6 +4186,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "canonical event lifecycle subtype is not supported"
             )
+        lifecycle_was_canonical = type(lifecycle) is _lifecycle_type
         lifecycle_register_eligible = getattr(lifecycle, "register_eligible", None)
         lifecycle_records = getattr(lifecycle, "records", None)
         market_store = self.market_store
@@ -4155,6 +4200,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "canonical invalidation buffer subtype is not supported"
             )
+        invalidation_buffer_was_canonical = (
+            type(invalidation_buffer) is _invalidation_buffer_type
+        )
         invalidation_drain = getattr(invalidation_buffer, "drain", None)
         invalidation_buffer_mirror: object | None = None
         invalidation_dirty_storage: object | None = None
@@ -4174,6 +4222,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "canonical dependency index subtype is not supported"
             )
+        dependency_index_was_canonical = (
+            type(dependency_index) is _dependency_index_type
+        )
         dependency_affected_inputs = getattr(
             dependency_index,
             "affected_inputs",
@@ -4292,6 +4343,51 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "continuous session state authority changed during tick"
                 )
 
+        def restore_dependency_index_type_authority() -> bool:
+            if (
+                not dependency_index_was_canonical
+                or type(dependency_index) is _dependency_index_type
+            ):
+                return False
+            try:
+                object.__setattr__(
+                    dependency_index,
+                    "__class__",
+                    _dependency_index_type,
+                )
+            except (AttributeError, TypeError):
+                pass
+            return True
+
+        def restore_lifecycle_type_authority() -> bool:
+            if not lifecycle_was_canonical or type(lifecycle) is _lifecycle_type:
+                return False
+            try:
+                object.__setattr__(
+                    lifecycle,
+                    "__class__",
+                    _lifecycle_type,
+                )
+            except (AttributeError, TypeError):
+                pass
+            return True
+
+        def restore_invalidation_buffer_type_authority() -> bool:
+            if (
+                not invalidation_buffer_was_canonical
+                or type(invalidation_buffer) is _invalidation_buffer_type
+            ):
+                return False
+            try:
+                object.__setattr__(
+                    invalidation_buffer,
+                    "__class__",
+                    _invalidation_buffer_type,
+                )
+            except (AttributeError, TypeError):
+                pass
+            return True
+
         def restore_dependency_index_identity() -> bool:
             if self.dependency_index is dependency_index:
                 return False
@@ -4299,7 +4395,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             return True
 
         def require_dependency_index_identity() -> None:
-            if restore_dependency_index_identity():
+            type_changed = restore_dependency_index_type_authority()
+            identity_changed = restore_dependency_index_identity()
+            if type_changed or identity_changed:
                 raise ContinuousSessionError(
                     "continuous-session dependency index authority changed during tick"
                 )
@@ -4311,15 +4409,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             return True
 
         def require_invalidation_buffer_identity() -> None:
-            if restore_invalidation_buffer_identity():
+            type_changed = restore_invalidation_buffer_type_authority()
+            identity_changed = restore_invalidation_buffer_identity()
+            if type_changed or identity_changed:
                 raise ContinuousSessionError(
                     "continuous-session invalidation buffer authority changed during tick"
                 )
 
         def restore_invalidation_buffer_structure_authority() -> bool:
+            type_changed = restore_invalidation_buffer_type_authority()
             if type(invalidation_buffer) is not _invalidation_buffer_type:
-                return False
-            changed = (
+                return type_changed
+            changed = type_changed or (
                 invalidation_buffer._mirror is not invalidation_buffer_mirror
                 or invalidation_buffer._dirty is not invalidation_dirty_storage
                 or invalidation_buffer._lock is not invalidation_buffer_lock
@@ -4387,6 +4488,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
 
         def require_lifecycle_dispatch_authority() -> None:
+            if restore_dependency_index_type_authority():
+                raise ContinuousSessionError(
+                    "canonical dependency index type changed during tick"
+                )
+            if restore_lifecycle_type_authority():
+                raise ContinuousSessionError(
+                    "canonical event lifecycle type changed during tick"
+                )
             if type(dependency_index) is _dependency_index_type:
                 descriptor = _dependency_index_type.__dict__.get("input_ids")
                 if (

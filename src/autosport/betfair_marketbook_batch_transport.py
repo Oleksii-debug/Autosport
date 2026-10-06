@@ -717,7 +717,7 @@ def execute_market_book_batch_attempt(
     updated = append_market_book_transport_attempt(
         history,
         result,
-        attempt_id=attempt_id,
+        attempt_id=attempt,
         required=required,
     )
     outcome = (

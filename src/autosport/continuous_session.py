@@ -1499,6 +1499,15 @@ class _ContinuousSessionState:
                         "stale continuous session instance cannot overwrite "
                         "newer operational error checkpoint"
                     )
+                if existing["observed_generation"] == self._generation and (
+                    existing["observed_cycles_completed"] != self._cycles_completed
+                    or existing["observed_last_success_at"] != self._last_success_at
+                    or existing["observed_state"] != self._state
+                ):
+                    raise ContinuousSessionError(
+                        "same-generation operational error checkpoint markers "
+                        "conflict with cached canonical session state"
+                    )
             self._write_error_checkpoint(code)
 
 

@@ -309,8 +309,124 @@ class EconomicGoalContract:
 
         _CANONICAL_TRANSITION_VALIDATOR(self, candidate)
 
-_CANONICAL_CONTRACT_TYPE: Final = EconomicGoalContract
-_CANONICAL_CONTRACT_VALIDATOR: Final = EconomicGoalContract.__post_init__
+_RAW_CONTRACT_POST_INIT: Final = EconomicGoalContract.__post_init__
+
+
+def _make_contract_post_init_authority(operation):
+    operation_code = operation.__code__
+    operation_defaults = operation.__defaults__
+    nested_callables = tuple(
+        value
+        for value in (operation_defaults or ())
+        if callable(value)
+    )
+    nested_authority = tuple(
+        (
+            callable_object,
+            getattr(callable_object, "__code__", None),
+            getattr(callable_object, "__defaults__", None),
+            getattr(callable_object, "__kwdefaults__", None),
+        )
+        for callable_object in nested_callables
+    )
+    error_type = EconomicGoalContractError
+
+    def require_authority() -> None:
+        if operation.__code__ is not operation_code:
+            raise error_type("economic-goal contract validator authority changed")
+        if operation.__defaults__ is not operation_defaults:
+            raise error_type("economic-goal contract validator defaults authority changed")
+        for callable_object, expected_code, expected_defaults, expected_kwdefaults in nested_authority:
+            if getattr(callable_object, "__code__", None) is not expected_code:
+                raise error_type("economic-goal contract nested validator authority changed")
+            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                raise error_type("economic-goal contract nested validator defaults authority changed")
+            if getattr(callable_object, "__kwdefaults__", None) is not expected_kwdefaults:
+                raise error_type(
+                    "economic-goal contract nested validator keyword defaults authority changed"
+                )
+
+    def bound(self: EconomicGoalContract) -> None:
+        require_authority()
+        operation(self)
+        require_authority()
+
+    return bound
+
+
+_CANONICAL_CONTRACT_VALIDATOR: Final = _make_contract_post_init_authority(
+    _RAW_CONTRACT_POST_INIT
+)
+EconomicGoalContract.__post_init__ = _CANONICAL_CONTRACT_VALIDATOR
+
+
+# The dataclass-generated initializer dispatches through self.__post_init__.
+# Replace that generated initializer with an authority-fixed constructor so a later
+# class-level __post_init__ rebinding cannot create an unvalidated contract.
+def _contract_init_authority(
+    self: EconomicGoalContract,
+    goal_id: str,
+    revision: int,
+    bankroll_id: str,
+    currency: str,
+    objective: EconomicObjective = EconomicObjective.LONG_RUN_RISK_ADJUSTED_BANKROLL_GROWTH,
+    max_stake_fraction: Decimal = Decimal("0.02"),
+    max_stake_amount: Decimal | None = None,
+    max_session_loss_fraction: Decimal = Decimal("0.05"),
+    max_day_loss_fraction: Decimal = Decimal("0.05"),
+    max_drawdown_fraction: Decimal = Decimal("0.20"),
+    max_capital_at_risk_fraction: Decimal = Decimal("0.20"),
+    max_event_concentration_fraction: Decimal = Decimal("1"),
+    max_market_concentration_fraction: Decimal = Decimal("1"),
+    max_provider_concentration_fraction: Decimal = Decimal("1"),
+    max_sport_concentration_fraction: Decimal = Decimal("1"),
+    max_turnover_fraction: Decimal = Decimal("1"),
+    max_risk_of_ruin: Decimal = Decimal("0.01"),
+    max_execution_slippage_fraction: Decimal = Decimal("0.01"),
+    max_quote_age_seconds: Decimal = Decimal("5"),
+    minimum_data_quality: Decimal = Decimal("0"),
+    max_concurrent_positions: int = 1,
+    max_parlay_legs: int = 1,
+    automation_level: AutomationLevel = AutomationLevel.ANALYSIS_ONLY,
+    emergency_stop: bool = False,
+    blocked_sports: frozenset[str] = frozenset(),
+    blocked_providers: frozenset[str] = frozenset(),
+    blocked_markets: frozenset[str] = frozenset(),
+) -> None:
+    for name, value in (
+        ("goal_id", goal_id),
+        ("revision", revision),
+        ("bankroll_id", bankroll_id),
+        ("currency", currency),
+        ("objective", objective),
+        ("max_stake_fraction", max_stake_fraction),
+        ("max_stake_amount", max_stake_amount),
+        ("max_session_loss_fraction", max_session_loss_fraction),
+        ("max_day_loss_fraction", max_day_loss_fraction),
+        ("max_drawdown_fraction", max_drawdown_fraction),
+        ("max_capital_at_risk_fraction", max_capital_at_risk_fraction),
+        ("max_event_concentration_fraction", max_event_concentration_fraction),
+        ("max_market_concentration_fraction", max_market_concentration_fraction),
+        ("max_provider_concentration_fraction", max_provider_concentration_fraction),
+        ("max_sport_concentration_fraction", max_sport_concentration_fraction),
+        ("max_turnover_fraction", max_turnover_fraction),
+        ("max_risk_of_ruin", max_risk_of_ruin),
+        ("max_execution_slippage_fraction", max_execution_slippage_fraction),
+        ("max_quote_age_seconds", max_quote_age_seconds),
+        ("minimum_data_quality", minimum_data_quality),
+        ("max_concurrent_positions", max_concurrent_positions),
+        ("max_parlay_legs", max_parlay_legs),
+        ("automation_level", automation_level),
+        ("emergency_stop", emergency_stop),
+        ("blocked_sports", blocked_sports),
+        ("blocked_providers", blocked_providers),
+        ("blocked_markets", blocked_markets),
+    ):
+        object.__setattr__(self, name, value)
+    _CANONICAL_CONTRACT_VALIDATOR(self)
+
+
+EconomicGoalContract.__init__ = _contract_init_authority
 
 
 def _snapshot_transition_contract(

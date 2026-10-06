@@ -461,6 +461,15 @@ def test_direct_manifest_cannot_omit_or_reorder_fact_vocabulary() -> None:
         )
 
 
+
+def test_fact_authority_vocabulary_is_complete_and_exact() -> None:
+    assert tuple(ProviderManifestFactAuthority) == (
+        ProviderManifestFactAuthority.CANONICAL_PROFILE,
+        ProviderManifestFactAuthority.EXPLICIT_EVIDENCE,
+        ProviderManifestFactAuthority.NOT_PROVEN,
+    )
+
+
 def test_raw_string_enums_fail_closed() -> None:
     with pytest.raises(ProviderCapabilityManifestError, match="capability"):
         ProviderCapabilityManifestFact(

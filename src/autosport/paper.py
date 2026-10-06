@@ -1662,6 +1662,7 @@ def _seal_paperbook_open_transition_authority(method):
     """Inject closure-captured write authorities into open_ticket."""
     method_code = method.__code__
     frame = _getframe
+    text_type = str
     bind_opening_record = _bind_ticket_opening_record_caller
     bind_causal_open = _bind_paperbook_causal_open_caller
     opening_record = _record_ticket_opening_authority
@@ -1683,7 +1684,7 @@ def _seal_paperbook_open_transition_authority(method):
     def issue_ticket_id() -> str:
         if ticket_id_factory.__code__ is not ticket_id_factory_code:
             raise ValueError("PaperBook ticket id authority changed")
-        ticket_id = str(ticket_id_factory())
+        ticket_id = text_type(ticket_id_factory())
         if ticket_id_factory.__code__ is not ticket_id_factory_code:
             raise ValueError("PaperBook ticket id authority changed")
         return ticket_id

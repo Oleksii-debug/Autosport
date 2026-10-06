@@ -26,9 +26,12 @@ def _make_locked_capital_authority():
     calculator = locked_capital_for_exchange_side
     calculator_code = calculator.__code__
 
-    def calculate(ticket: PaperTicket) -> Decimal:
+    def require_calculator() -> None:
         if calculator.__code__ is not calculator_code:
             raise ValueError("risk locked-capital exposure authority changed")
+
+    def calculate(ticket: PaperTicket) -> Decimal:
+        require_calculator()
         if type(ticket) is not PaperTicket or type(ticket.legs) is not tuple:
             raise ValueError("risk ticket must be canonical")
         if any(leg.exchange_side == "lay" for leg in ticket.legs):
@@ -43,10 +46,41 @@ def _make_locked_capital_authority():
             )
         return ticket.stake
 
-    return calculate
+    def calculate_proposal(
+        stake: Decimal,
+        legs: tuple[TicketLeg, ...],
+    ) -> Decimal:
+        require_calculator()
+        if type(stake) is not Decimal or type(legs) is not tuple or not legs:
+            raise ValueError("risk proposal exposure must use canonical stake and legs")
+        for leg in legs:
+            if (
+                type(leg) is not TicketLeg
+                or type(leg.locked_odds) is not Decimal
+                or not leg.locked_odds.is_finite()
+                or leg.locked_odds <= Decimal("1")
+                or leg.exchange_side not in {None, "back", "lay"}
+            ):
+                raise ValueError("risk proposal exposure leg is not canonical")
+        if any(leg.exchange_side == "lay" for leg in legs):
+            if len(legs) != 1:
+                raise ValueError(
+                    "risk LAY exposure requires exactly one canonical single-leg proposal"
+                )
+            return calculator(
+                stake=stake,
+                odds=legs[0].locked_odds,
+                exchange_side="LAY",
+            )
+        return stake
+
+    return calculate, calculate_proposal
 
 
-_CANONICAL_LOCKED_CAPITAL_FOR_TICKET = _make_locked_capital_authority()
+(
+    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET,
+    _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL,
+) = _make_locked_capital_authority()
 del _make_locked_capital_authority
 
 
@@ -1322,7 +1356,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         dimension: str,
         limit: Decimal,
     ) -> RiskDecision | None:
-        """Enforce exact whole-open-portfolio event/market stake concentration."""
+        """Enforce exact whole-open-portfolio event/market/provider locked-capital concentration."""
         if limit >= Decimal("1"):
             return None
         if dimension == "event":
@@ -1354,7 +1388,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         _, _, committed_stake, _ = state
 
         try:
-            total_exposure = cls._exact_positive_sum((committed_stake, amount))
+            proposed_locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                amount,
+                context.legs,
+            )
+            total_exposure = cls._exact_positive_sum(
+                (committed_stake, proposed_locked_capital)
+            )
             exposure_by_identity: dict[str, Decimal] = {}
             for ticket in book.tickets.values():
                 if ticket.status is not TicketStatus.OPEN:
@@ -1385,7 +1425,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     exposure_by_identity[identity] = cls._exact_positive_sum(
                         (
                             exposure_by_identity.get(identity, Decimal("0")),
-                            ticket.stake,
+                            _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket),
                         )
                     )
 
@@ -1393,7 +1433,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 proposed_exposure = cls._exact_positive_sum(
                     (
                         exposure_by_identity.get(identity, Decimal("0")),
-                        amount,
+                        proposed_locked_capital,
                     )
                 )
                 if cls._fraction_exceeds(

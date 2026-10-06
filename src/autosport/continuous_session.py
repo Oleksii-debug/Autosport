@@ -2211,12 +2211,24 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "canonical invalidation status authority changed"
                 )
-            invalidation_pending_count = _pending_count_getter(
-                invalidation_buffer
-            )
-            invalidation_full_refresh_required = _full_refresh_getter(
-                invalidation_buffer
-            )
+            invalidation_lock = invalidation_buffer._lock
+            with invalidation_lock:
+                if (
+                    type(invalidation_buffer) is not _invalidation_buffer_type
+                    or invalidation_buffer._lock is not invalidation_lock
+                ):
+                    raise ContinuousSessionError(
+                        "canonical invalidation status state authority changed"
+                    )
+                _invalidation_state_validator(invalidation_buffer)
+                invalidation_pending_count = len(invalidation_buffer._dirty)
+                invalidation_full_refresh_required = (
+                    invalidation_buffer._full_refresh_required
+                )
+                if invalidation_buffer._lock is not invalidation_lock:
+                    raise ContinuousSessionError(
+                        "canonical invalidation status state authority changed"
+                    )
         else:
             invalidation_pending_count = invalidation_buffer.pending_count
             invalidation_full_refresh_required = (

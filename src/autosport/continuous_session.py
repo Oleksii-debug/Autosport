@@ -3834,6 +3834,104 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 dependency.selection_ids,
             )
 
+        tick_dependency_mirror: object | None = None
+        tick_dependency_storage: object | None = None
+        tick_matched_keys_storage: object | None = None
+        tick_dependency_lock: object | None = None
+        tick_dependency_input_ids: tuple[str, ...] | None = None
+        tick_dependency_fingerprints: tuple[
+            tuple[str, tuple[object, ...]], ...
+        ] | None = None
+        tick_matching_keys: tuple[
+            tuple[str, tuple[object, ...]], ...
+        ] | None = None
+
+        if type(dependency_index) is _dependency_index_type:
+            tick_dependency_mirror = dependency_index._mirror
+            tick_dependency_storage = dependency_index._dependencies
+            tick_matched_keys_storage = dependency_index._matched_keys
+            tick_dependency_lock = dependency_index._lock
+
+        def refresh_tick_dependency_routing_authority() -> None:
+            nonlocal tick_dependency_input_ids
+            nonlocal tick_dependency_fingerprints
+            nonlocal tick_matching_keys
+            require_lifecycle_dispatch_authority()
+            if type(dependency_index) is not _dependency_index_type:
+                tick_dependency_input_ids = None
+                tick_dependency_fingerprints = None
+                tick_matching_keys = None
+                return
+            input_ids = dependency_index.input_ids
+            if (
+                type(input_ids) is not tuple
+                or any(
+                    type(input_id) is not str
+                    or not input_id
+                    or input_id.strip() != input_id
+                    for input_id in input_ids
+                )
+                or len(set(input_ids)) != len(input_ids)
+            ):
+                raise ContinuousSessionError(
+                    "dependency index input identity state is invalid"
+                )
+            tick_dependency_input_ids = input_ids
+            tick_dependency_fingerprints = tuple(
+                (
+                    input_id,
+                    dependency_fingerprint(
+                        _dependency_reader(dependency_index, input_id)
+                    ),
+                )
+                for input_id in input_ids
+            )
+            tick_matching_keys = tuple(
+                (
+                    input_id,
+                    _matching_keys_reader(dependency_index, input_id),
+                )
+                for input_id in input_ids
+            )
+
+        def require_tick_dependency_routing_authority(message: str) -> None:
+            require_lifecycle_dispatch_authority()
+            if type(dependency_index) is not _dependency_index_type:
+                return
+            if (
+                dependency_index._mirror is not tick_dependency_mirror
+                or dependency_index._dependencies is not tick_dependency_storage
+                or dependency_index._matched_keys is not tick_matched_keys_storage
+                or dependency_index._lock is not tick_dependency_lock
+            ):
+                raise ContinuousSessionError(message)
+            input_ids = dependency_index.input_ids
+            if input_ids != tick_dependency_input_ids:
+                raise ContinuousSessionError(message)
+            current_dependencies = tuple(
+                (
+                    input_id,
+                    dependency_fingerprint(
+                        _dependency_reader(dependency_index, input_id)
+                    ),
+                )
+                for input_id in input_ids
+            )
+            current_matching_keys = tuple(
+                (
+                    input_id,
+                    _matching_keys_reader(dependency_index, input_id),
+                )
+                for input_id in input_ids
+            )
+            if (
+                current_dependencies != tick_dependency_fingerprints
+                or current_matching_keys != tick_matching_keys
+            ):
+                raise ContinuousSessionError(message)
+
+        refresh_tick_dependency_routing_authority()
+
         def require_economic_context() -> None:
             if (
                 self.workspace != workspace
@@ -3878,6 +3976,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             require_state_identity()
             require_dependency_index_identity()
             require_lifecycle_dispatch_authority()
+            require_tick_dependency_routing_authority(
+                "dependency routing authority changed during collector observation"
+            )
         except Exception as exc:
             state_was_rebound = restore_state_identity()
             dependency_index_was_rebound = restore_dependency_index_identity()
@@ -4020,6 +4121,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     read_deltas=collector_delta_reader,
                     max_items=collector_max_items,
                 )
+                require_tick_dependency_routing_authority(
+                    "dependency routing authority changed during source projection"
+                )
                 source_gap_states = (
                     ()
                     if source_snapshot.source_gap_state is None
@@ -4038,6 +4142,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
                 require_state_identity()
                 require_dependency_index_identity()
+                require_tick_dependency_routing_authority(
+                    "dependency routing authority changed during desktop delivery"
+                )
                 if (
                     type(delivered) is not tuple
                     or any(
@@ -4063,6 +4170,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
                 require_state_identity()
                 require_dependency_index_identity()
+                refresh_tick_dependency_routing_authority()
 
                 lifecycle_index_before = dependency_index.input_ids
                 if (
@@ -4272,6 +4380,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         "lifecycle registration receipt conflicts with coordinator callbacks"
                     )
 
+                refresh_tick_dependency_routing_authority()
                 require_lifecycle_dispatch_authority()
                 resolutions = _settlement_resolutions_method(
                     self,
@@ -4283,6 +4392,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
                 require_state_identity()
                 require_dependency_index_identity()
+                require_tick_dependency_routing_authority(
+                    "dependency routing authority changed during settlement resolution"
+                )
                 _validate_settlement_evidence_method(
                     state,
                     settlement_evidence=resolutions,
@@ -4298,6 +4410,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     )
                     require_state_identity()
                     require_dependency_index_identity()
+                    require_tick_dependency_routing_authority(
+                        "dependency routing authority changed during settlement preparation"
+                    )
                     require_economic_context()
                 settled, evidence_ids = self._settle(
                     resolutions=resolutions,
@@ -4307,6 +4422,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
                 require_state_identity()
                 require_dependency_index_identity()
+                require_tick_dependency_routing_authority(
+                    "dependency routing authority changed during settlement application"
+                )
                 require_economic_context()
                 if reconcile_after_settlement is not None:
                     reconcile_after_settlement(
@@ -4319,6 +4437,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     )
                     require_state_identity()
                     require_dependency_index_identity()
+                    require_tick_dependency_routing_authority(
+                        "dependency routing authority changed during settlement reconciliation"
+                    )
                     require_economic_context()
 
                 cycle_index = _record_success_method(

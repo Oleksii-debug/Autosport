@@ -15,7 +15,6 @@ from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import MethodType
-import sys
 from typing import Final
 
 from .economic_goal import (
@@ -492,14 +491,17 @@ def _read_economic_goal_text(
             raise _error_type(
                 "persisted economic goal changed after verified read"
             )
-    except _error_type:
-        primary_error = sys.exc_info()[1]
+    except _error_type as exc:
+        primary_error = exc
         raise
     except OSError as exc:
         primary_error = _error_type(
             f"cannot safely read persisted economic goal: {exc}"
         )
         raise primary_error from exc
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
         cleanup_error: OSError | None = None
         for candidate in (

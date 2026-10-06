@@ -65,6 +65,7 @@ def _build_guard():
         router_store_cls,
     ) = _cost_source._SEALED_CANONICAL_TYPES
     component_fields = tuple(_COMPONENT_FIELDS)
+    canonical_getattribute = object.__getattribute__
     resolution_fields = tuple(_RESOLUTION_FIELDS)
 
     def sealed_validate_component(value: object) -> None:
@@ -83,7 +84,7 @@ def _build_guard():
 
     def slot_value(value: object, name: str) -> object:
         try:
-            return object.__getattribute__(value, name)
+            return canonical_getattribute(value, name)
         except (AttributeError, TypeError) as exc:
             raise error_cls(
                 f"prospective applicable-cost assertion is missing canonical field {name}"

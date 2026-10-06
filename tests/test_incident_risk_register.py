@@ -67,6 +67,12 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         self.assertEqual(projection.severity_key, "ui.risk_register.severity.high")
         self.assertEqual(projection.status_key, "ui.risk_register.status.open")
         self.assertEqual(projection.evidence_key, "ui.risk_register.evidence.partial")
+        self.assertEqual(projection.opened_at, entry.opened_at)
+        self.assertEqual(projection.updated_at, entry.updated_at)
+        self.assertEqual(
+            projection.next_action_key,
+            "ui.risk_register.next_action.review",
+        )
         self.assertEqual(projection.title, entry.title)
         self.assertEqual(
             projection.occurrence_evidence_refs,
@@ -474,6 +480,46 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         self.assertEqual(
             ordered,
             (critical_action, low_action, high_no_action, medium_no_action_newer),
+        )
+
+    def test_operator_projection_next_action_key_is_safe_and_status_bounded(self) -> None:
+        monitor = self._entry(
+            occurrence_tag="monitor",
+            requires_operator_action=False,
+        )
+        mitigating = self._entry(
+            occurrence_tag="mitigating",
+            revision=2,
+            updated_at="2026-09-21T07:06:00+00:00",
+            status=RiskStatus.MITIGATING,
+            mitigation="Keep the canonical protection active.",
+            requires_operator_action=False,
+        )
+        resolved = self._entry(
+            occurrence_tag="resolved",
+            revision=2,
+            updated_at="2026-09-21T07:06:00+00:00",
+            status=RiskStatus.RESOLVED,
+            evidence_state=RiskEvidenceState.VERIFIED,
+            evidence_refs=(
+                "evidence://provider-gap/resolved",
+                "evidence://resolution/resolved",
+            ),
+            mitigation="Canonical recovery evidence is verified.",
+            requires_operator_action=False,
+        )
+
+        self.assertEqual(
+            operator_projection(monitor).next_action_key,
+            "ui.risk_register.next_action.monitor",
+        )
+        self.assertEqual(
+            operator_projection(mitigating).next_action_key,
+            "ui.risk_register.next_action.verify_mitigation",
+        )
+        self.assertEqual(
+            operator_projection(resolved).next_action_key,
+            "ui.risk_register.next_action.none",
         )
 
     def test_operator_projection_redacts_credential_bearing_text_deterministically(self) -> None:

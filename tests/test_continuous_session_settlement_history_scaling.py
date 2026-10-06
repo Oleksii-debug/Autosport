@@ -2567,6 +2567,68 @@ def test_source_projection_rejects_equal_position_revision_number_jump() -> None
         assert state.path.read_bytes() == before
 
 
+def test_source_projection_rejects_first_revision_of_unexpected_predecessor() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_source_projection(
+            deltas=(
+                _projection_delta(1, delta_id="base-delta", position=5),
+            ),
+            backlog=False,
+        )
+        before = state.path.read_bytes()
+
+        try:
+            state.record_source_projection(
+                deltas=(
+                    _projection_delta(
+                        2,
+                        delta_id="revision-delta",
+                        position=5,
+                        revision_of="other-delta",
+                        revision_number=1,
+                    ),
+                ),
+                backlog=False,
+                expected_after_delta_id="base-delta",
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "must target the expected predecessor" in str(exc)
+        else:
+            raise AssertionError("revision of unexpected durable predecessor was accepted")
+
+        assert state.path.read_bytes() == before
+
+
+def test_source_projection_allows_first_revision_of_expected_predecessor() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_source_projection(
+            deltas=(
+                _projection_delta(1, delta_id="base-delta", position=5),
+            ),
+            backlog=False,
+        )
+
+        state.record_source_projection(
+            deltas=(
+                _projection_delta(
+                    2,
+                    delta_id="revision-delta",
+                    position=5,
+                    revision_of="base-delta",
+                    revision_number=1,
+                ),
+            ),
+            backlog=False,
+            expected_after_delta_id="base-delta",
+        )
+
+        assert state.snapshot().source_state_delta_id == "revision-delta"
+
+
 def test_record_failure_does_not_enter_full_history_reader() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

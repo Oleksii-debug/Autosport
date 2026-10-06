@@ -389,3 +389,38 @@ def test_resolver_identity_mismatch_and_duplicate_request_fail_closed() -> None:
             resolver=lambda _: facts("a"),
             evaluated_at_ns=1000,
         )
+
+@pytest.mark.parametrize(
+    ("location", "replacement"),
+    (
+        (("schema_version",), True),
+        (("payload", "schema_version"), True),
+        (("payload", "slots", 0, "eligible_for_evaluation"), 1),
+        (("payload", "summary", "candidate_count"), True),
+    ),
+)
+def test_store_rejects_bool_int_semantic_replay_aliases(
+    tmp_path: Path,
+    location: tuple[object, ...],
+    replacement: object,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s1",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    store.save(evidence)
+    raw = json.loads(store.path.read_text(encoding="utf-8"))
+
+    target = raw
+    for key in location[:-1]:
+        target = target[key]
+    target[location[-1]] = replacement
+    store.path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        store.load()
+

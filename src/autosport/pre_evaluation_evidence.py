@@ -553,7 +553,10 @@ class PreEvaluationEvidenceStore:
         }
         if set(envelope) != expected:
             raise ValueError("pre-evaluation evidence envelope has unexpected fields")
-        if envelope["schema_version"] != SCHEMA_VERSION:
+        if (
+            type(envelope["schema_version"]) is not int
+            or envelope["schema_version"] != SCHEMA_VERSION
+        ):
             raise ValueError("unsupported pre-evaluation evidence schema")
         if envelope["authority_family"] != AUTHORITY_FAMILY:
             raise ValueError("unexpected pre-evaluation authority family")
@@ -561,7 +564,7 @@ class PreEvaluationEvidenceStore:
         if not isinstance(payload, dict):
             raise ValueError("pre-evaluation evidence payload must be an object")
         evidence = self._from_payload(payload)
-        if evidence.to_payload() != payload:
+        if _canonical_json(evidence.to_payload()) != _canonical_json(payload):
             raise ValueError("pre-evaluation evidence semantic replay mismatch")
         if envelope["authority_digest"] != evidence.authority_digest:
             raise ValueError("pre-evaluation authority digest mismatch")
@@ -583,7 +586,10 @@ class PreEvaluationEvidenceStore:
         }
         if set(payload) != expected:
             raise ValueError("pre-evaluation session payload has unexpected fields")
-        if payload["schema_version"] != SCHEMA_VERSION:
+        if (
+            type(payload["schema_version"]) is not int
+            or payload["schema_version"] != SCHEMA_VERSION
+        ):
             raise ValueError("unsupported pre-evaluation session schema")
         if payload["authority_family"] != AUTHORITY_FAMILY:
             raise ValueError("unexpected pre-evaluation session authority family")
@@ -619,7 +625,7 @@ class PreEvaluationEvidenceStore:
                 policy_digest=str(stored.get("policy_digest")),
                 facts=facts,
             )
-            if slot.to_payload() != stored:
+            if _canonical_json(slot.to_payload()) != _canonical_json(stored):
                 raise ValueError("slot semantic replay mismatch")
             if stored_digest != slot.evidence_digest:
                 raise ValueError("slot evidence digest mismatch")
@@ -632,6 +638,6 @@ class PreEvaluationEvidenceStore:
             policy_digest=policy_digest,
             slots=tuple(slots),
         )
-        if payload["summary"] != evidence._summary():
+        if _canonical_json(payload["summary"]) != _canonical_json(evidence._summary()):
             raise ValueError("session summary does not replay exactly")
         return evidence

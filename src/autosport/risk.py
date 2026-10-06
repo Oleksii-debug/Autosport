@@ -495,13 +495,17 @@ class ProposedTicketRiskContext:
                 raise ValueError(
                     "risk_of_ruin_upper_bound must be an exact Decimal between 0 and 1"
                 )
-        if (
-            self.risk_of_ruin_evidence is not None
-            and type(self.risk_of_ruin_evidence) is not RiskOfRuinEvidence
-        ):
-            raise ValueError(
-                "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"
-            )
+        if self.risk_of_ruin_evidence is not None:
+            if type(self.risk_of_ruin_evidence) is not RiskOfRuinEvidence:
+                raise ValueError(
+                    "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"
+                )
+            try:
+                RiskOfRuinEvidence.__post_init__(self.risk_of_ruin_evidence)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"
+                ) from exc
 
     @property
     def parlay_leg_count(self) -> int:
@@ -893,6 +897,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 False,
                 "portfolio risk-of-ruin evidence is invalid",
             )
+        try:
+            RiskOfRuinEvidence.__post_init__(evidence)
+        except (AttributeError, TypeError, ValueError):
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin evidence is invalid",
+            )
         if evidence.upper_bound > goal.max_risk_of_ruin:
             return RiskDecision(
                 False,
@@ -964,6 +975,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 "multi-candidate portfolio risk-of-ruin requires vector-bound evidence",
             )
         if type(evidence) is not RiskOfRuinVectorEvidence:
+            return RiskDecision(
+                False,
+                "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
+            )
+        try:
+            RiskOfRuinVectorEvidence.__post_init__(evidence)
+        except (AttributeError, TypeError, ValueError):
             return RiskDecision(
                 False,
                 "multi-candidate portfolio risk-of-ruin vector evidence is invalid",

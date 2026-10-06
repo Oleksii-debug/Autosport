@@ -658,6 +658,48 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             "market-semantics-v1",
         )
 
+    def test_legacy_v1_target_is_chain_history_only_not_current_authority(self) -> None:
+        issued = self._issue()
+        ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
+        records = ledger.verified_records()
+        current = next(
+            record
+            for record in records
+            if record.action == "PROPOSAL_RISK_TARGET_PRECOMMIT"
+            and record.context_hash == issued.target_sha256
+        )
+        legacy_payload = dict(current.payload)
+        legacy_payload["schema"] = "autosport.proposal-risk-target-precommit.v1"
+        legacy = replace(current, payload=legacy_payload)
+
+        with patch.object(
+            proposal_target_authority,
+            "_LEDGER_RECORDS",
+            lambda _ledger: (legacy,),
+        ):
+            historical = proposal_target_authority._verified_chain_target_record(
+                ledger,
+                issued.workspace_instance_id,
+                issued.target_sha256,
+            )
+        self.assertIs(historical, legacy)
+
+        goal, policy, book, _ = proposal_target_authority._current_product_state(
+            self.workspace
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "persisted proposal-risk target identity is invalid",
+        ):
+            proposal_target_authority._build_target(
+                workspace_instance_id=issued.workspace_instance_id,
+                record=legacy,
+                goal=goal,
+                policy=policy,
+                book=book,
+                expected_target_sha256=issued.target_sha256,
+            )
+
     def test_retry_is_idempotent_and_does_not_append_duplicate_target(self) -> None:
         first = self._issue()
         second = self._issue()

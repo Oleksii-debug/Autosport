@@ -1243,7 +1243,16 @@ def _decode_json(payload: bytes) -> object:
         return json.loads(payload.decode("utf-8"), parse_float=Decimal, object_pairs_hook=reject_duplicate_pairs, parse_constant=reject_constant)
     except BetfairReadOnlyError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        RecursionError,
+    ):
+        # CPython's bounded integer conversion can raise ValueError for a JSON
+        # integer with an extreme digit count, and a deeply nested but otherwise
+        # syntactically valid payload can raise RecursionError. Both are
+        # untrusted provider-response failures, not process-level exceptions.
         raise BetfairReadOnlyError("Betfair response is not valid UTF-8 JSON") from None
 
 

@@ -844,8 +844,13 @@ class _ContinuousSessionState:
         if legacy_shape:
             raw["schema_version"] = _version
             raw["generation"] = 0
-        _text(raw["session_id"], "session_id")
-        _instant(raw["started_at"], "started_at")
+        try:
+            _text(raw["session_id"], "session_id")
+            _instant(raw["started_at"], "started_at")
+        except (TypeError, ValueError) as exc:
+            raise ContinuousSessionError(
+                "continuous session state contains invalid identity/timestamp field"
+            ) from exc
         try:
             state = SessionState(raw["state"])
         except ValueError as exc:
@@ -856,12 +861,19 @@ class _ContinuousSessionState:
         cycles = raw["cycles_completed"]
         if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 0:
             raise ContinuousSessionError("cycles_completed must be a non-negative integer")
-        for name in ("last_success_at", "last_full_refresh_at"):
-            if raw[name] is not None:
-                _instant(raw[name], name)
-        if raw["last_error_code"] is not None:
-            _text(raw["last_error_code"], "last_error_code")
-        evidence = _validate_settlement_evidence(raw["settlement_evidence"])
+        try:
+            for name in ("last_success_at", "last_full_refresh_at"):
+                if raw[name] is not None:
+                    _instant(raw[name], name)
+            if raw["last_error_code"] is not None:
+                _text(raw["last_error_code"], "last_error_code")
+            evidence = _validate_settlement_evidence(raw["settlement_evidence"])
+        except ContinuousSessionError:
+            raise
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise ContinuousSessionError(
+                "continuous session state contains invalid durable field"
+            ) from exc
         gap_state = raw["source_gap_state"]
         sync_state = raw["source_sync_state"]
         if (gap_state is None) != (sync_state is None):
@@ -876,10 +888,18 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "source gap/sync projection contains an unsupported state"
                 ) from exc
-        if raw["source_state_delta_id"] is not None:
-            _text(raw["source_state_delta_id"], "source_state_delta_id")
-        if raw["source_projection_stream_epoch"] is not None:
-            _text(raw["source_projection_stream_epoch"], "source_projection_stream_epoch")
+        try:
+            if raw["source_state_delta_id"] is not None:
+                _text(raw["source_state_delta_id"], "source_state_delta_id")
+            if raw["source_projection_stream_epoch"] is not None:
+                _text(
+                    raw["source_projection_stream_epoch"],
+                    "source_projection_stream_epoch",
+                )
+        except (TypeError, ValueError) as exc:
+            raise ContinuousSessionError(
+                "continuous session source projection contains invalid identity"
+            ) from exc
         if (raw["source_state_delta_id"] is None) != (
             raw["source_projection_stream_epoch"] is None
         ):

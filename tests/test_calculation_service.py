@@ -185,6 +185,20 @@ class CalculationServiceTests(unittest.TestCase):
         self.assertNotEqual(first.result.result_hash, second.result.result_hash)
         self.assertNotEqual(first.evidence_sha256, second.evidence_sha256)
 
+    def test_causal_cutoff_rejects_str_subclass_before_virtual_methods(self) -> None:
+        class _ExplosiveCutoff(str):
+            def strip(self, *args: object, **kwargs: object) -> str:
+                raise AssertionError("causal cutoff validation must reject str subclasses before strip")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "causal_cutoff_ts must be a non-empty trimmed timezone-aware ISO timestamp",
+        ):
+            self.service.implied_probability_for_event(
+                self._event(),
+                causal_cutoff_ts=_ExplosiveCutoff("2026-09-14T12:00:00Z"),  # type: ignore[arg-type]
+            )
+
     def test_future_quote_is_rejected_instead_of_substituted(self) -> None:
         cutoff = "2026-09-14T12:00:30+00:00"
         accepted = self.service.implied_probability_for_event(

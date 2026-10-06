@@ -307,7 +307,7 @@ def _causal_cutoff(value: str) -> tuple[datetime, str]:
 
 
 def _timestamp(value: object, *, field: str) -> datetime:
-    if not isinstance(value, str) or not value or value.strip() != value:
+    if type(value) is not str or not value or value.strip() != value:
         raise ValueError(f"{field} must be a non-empty trimmed timezone-aware ISO timestamp")
     try:
         return parse_iso_timestamp(value)

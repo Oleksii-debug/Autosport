@@ -16,7 +16,9 @@ from typing import Callable, Protocol
 from . import _paperbook_preload_authority_guard as _paperbook_authority
 from .decision_ledger import (
     ECONOMIC_DECISION_KIND,
+    ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY,
     MATERIAL_ACTION_ID_PAYLOAD_KEY,
+    RISK_POLICY_PROVENANCE_PAYLOAD_KEY,
     DecisionLedgerIntegrityError,
     DecisionRecord,
     EconomicDecisionAuthority,
@@ -5847,6 +5849,8 @@ class PersistentLiveDecisionLoop:
                 "plan_sha256",
                 "plan",
                 MATERIAL_ACTION_ID_PAYLOAD_KEY,
+                ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY,
+                RISK_POLICY_PROVENANCE_PAYLOAD_KEY,
             }
             if payload_version in {3, 4, 5}:
                 expected_payload_keys.add("health_boundaries")

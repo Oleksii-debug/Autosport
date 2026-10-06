@@ -402,16 +402,14 @@ def test_supports_rejects_state_reader_rebinding(monkeypatch) -> None:
         source_payload_sha256=_HASH_C,
     )
 
-    monkeypatch.setattr(
-        type(manifest),
-        "state_of",
-        lambda self, capability: ProviderManifestState.PROVEN,
-    )
-    with pytest.raises(
-        ProviderCapabilityManifestError,
-        match="canonical manifest state reader changed",
-    ):
-        manifest.supports(ProviderManifestCapability.STREAM)
+    with pytest.raises(TypeError, match="sealed provider-manifest authority"):
+        monkeypatch.setattr(
+            type(manifest),
+            "state_of",
+            lambda self, capability: ProviderManifestState.PROVEN,
+        )
+
+    assert manifest.supports(ProviderManifestCapability.STREAM) is False
 
 
 def test_state_of_rejects_inplace_authority_reader_code_mutation(monkeypatch) -> None:

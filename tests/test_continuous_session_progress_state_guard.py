@@ -1207,14 +1207,28 @@ def test_tick_ignores_instance_shadowed_success_publication() -> None:
         coordinator.collector = Collector()
         coordinator.desktop_consumer = DesktopConsumer()
         coordinator.lifecycle = Lifecycle()
-        coordinator.dependency_index = type(
-            "DependencyIndexStub",
-            (),
-            {"input_ids": frozenset()},
-        )()
-        coordinator._drain_invalidations = (  # type: ignore[method-assign]
-            lambda: ((), False, False)
-        )
+        class InvalidationBuffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class DependencyIndex:
+            input_ids = ()
+
+            def affected_inputs(self, _batch):
+                return ()
+
+        coordinator.invalidation_buffer = InvalidationBuffer()
+        coordinator.max_invalidation_batches_per_tick = 4
+        coordinator.max_invalidation_items_per_batch = 250
+        coordinator.dependency_index = DependencyIndex()
 
         def attacker_record_success(**_kwargs):
             return 999999
@@ -1349,14 +1363,28 @@ def test_tick_ignores_instance_shadowed_settlement_history_validator() -> None:
         coordinator.collector = Collector()
         coordinator.desktop_consumer = DesktopConsumer()
         coordinator.lifecycle = Lifecycle()
-        coordinator.dependency_index = type(
-            "DependencyIndexStub",
-            (),
-            {"input_ids": frozenset()},
-        )()
-        coordinator._drain_invalidations = (  # type: ignore[method-assign]
-            lambda: ((), False, False)
-        )
+        class InvalidationBuffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class DependencyIndex:
+            input_ids = ()
+
+            def affected_inputs(self, _batch):
+                return ()
+
+        coordinator.invalidation_buffer = InvalidationBuffer()
+        coordinator.max_invalidation_batches_per_tick = 4
+        coordinator.max_invalidation_items_per_batch = 250
+        coordinator.dependency_index = DependencyIndex()
 
         def attacker_validate_settlement_evidence(**_kwargs) -> None:
             return None
@@ -1453,14 +1481,28 @@ def test_tick_ignores_instance_shadowed_source_projection_refresh() -> None:
         coordinator.collector = Collector()
         coordinator.desktop_consumer = DesktopConsumer()
         coordinator.lifecycle = Lifecycle()
-        coordinator.dependency_index = type(
-            "DependencyIndexStub",
-            (),
-            {"input_ids": frozenset()},
-        )()
-        coordinator._drain_invalidations = (  # type: ignore[method-assign]
-            lambda: ((), False, False)
-        )
+        class InvalidationBuffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class DependencyIndex:
+            input_ids = ()
+
+            def affected_inputs(self, _batch):
+                return ()
+
+        coordinator.invalidation_buffer = InvalidationBuffer()
+        coordinator.max_invalidation_batches_per_tick = 4
+        coordinator.max_invalidation_items_per_batch = 250
+        coordinator.dependency_index = DependencyIndex()
 
         def attacker_refresh():
             raise AssertionError("instance-shadowed source projection refresh executed")
@@ -1519,14 +1561,28 @@ def test_tick_ignores_instance_shadowed_settlement_resolver() -> None:
         coordinator.collector = Collector()
         coordinator.desktop_consumer = DesktopConsumer()
         coordinator.lifecycle = Lifecycle()
-        coordinator.dependency_index = type(
-            "DependencyIndexStub",
-            (),
-            {"input_ids": frozenset()},
-        )()
-        coordinator._drain_invalidations = (  # type: ignore[method-assign]
-            lambda: ((), False, False)
-        )
+        class InvalidationBuffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class DependencyIndex:
+            input_ids = ()
+
+            def affected_inputs(self, _batch):
+                return ()
+
+        coordinator.invalidation_buffer = InvalidationBuffer()
+        coordinator.max_invalidation_batches_per_tick = 4
+        coordinator.max_invalidation_items_per_batch = 250
+        coordinator.dependency_index = DependencyIndex()
 
         def attacker_resolver(**_kwargs):
             raise AssertionError("instance-shadowed settlement resolver executed")
@@ -1569,6 +1625,309 @@ def test_tick_rejects_class_rebound_canonical_composition(
         def attacker(*_args, **_kwargs):
             raise AssertionError(
                 f"class-rebound canonical composition executed: {method_name}"
+            )
+
+        monkeypatch.setattr(
+            continuous_session.ContinuousSessionCoordinator,
+            method_name,
+            attacker,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical coordinator running-fence authority changed",
+        ):
+            coordinator.tick()
+
+
+def test_tick_ignores_instance_shadowed_invalidation_drain() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _, state = _state(root)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+        coordinator.causal_view = continuous_session.CausalView.AS_KNOWN_AT_DECISION
+        coordinator.required_history = None
+        coordinator.market_store = object()
+        coordinator.settlement_learning_handoff = None
+        coordinator.outcome_authority = None
+        coordinator.max_invalidation_batches_per_tick = 4
+        coordinator.max_invalidation_items_per_batch = 250
+
+        class SuccessfulCycle:
+            provider_unavailable = False
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+        class DeltaStore:
+            def deltas_after_commit(self, **_kwargs):
+                return ()
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = DeltaStore()
+
+            def run_cycle(self):
+                return SuccessfulCycle()
+
+        class DesktopConsumer:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        class InvalidationBuffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=True,
+                    has_more=False,
+                )
+
+        class DependencyIndex:
+            input_ids = ()
+
+            def affected_inputs(self, batch):
+                assert batch.full_refresh_required is True
+                return ("input-full-refresh",)
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = DesktopConsumer()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.invalidation_buffer = InvalidationBuffer()
+        coordinator.dependency_index = DependencyIndex()
+
+        def attacker_drain():
+            raise AssertionError("instance-shadowed invalidation drain executed")
+
+        coordinator._drain_invalidations = attacker_drain  # type: ignore[method-assign]
+
+        result = coordinator.tick()
+
+        assert result.affected_input_ids == ("input-full-refresh",)
+        assert result.full_refresh_required is True
+
+
+def test_tick_ignores_instance_shadowed_register_input() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _, state = _state(root)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+        coordinator.causal_view = continuous_session.CausalView.AS_KNOWN_AT_DECISION
+        coordinator.required_history = None
+        coordinator.market_store = object()
+        coordinator.settlement_learning_handoff = None
+        coordinator.outcome_authority = None
+        coordinator.max_invalidation_batches_per_tick = 4
+        coordinator.max_invalidation_items_per_batch = 250
+
+        class SuccessfulCycle:
+            provider_unavailable = False
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+        class DeltaStore:
+            def deltas_after_commit(self, **_kwargs):
+                return ()
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = DeltaStore()
+
+            def run_cycle(self):
+                return SuccessfulCycle()
+
+        class DesktopConsumer:
+            def drain(self, **_kwargs):
+                return ()
+
+        class InvalidationBuffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class DependencyIndex:
+            def __init__(self):
+                self.ids = set()
+
+            @property
+            def input_ids(self):
+                return tuple(sorted(self.ids))
+
+            def affected_inputs(self, _batch):
+                return ()
+
+            def register(self, input_id: str, **_selectors):
+                self.ids.add(input_id)
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                register_input,
+                **_kwargs,
+            ):
+                register_input("input-new", source_ids="provider-a")
+                return ("input-new",)
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = DesktopConsumer()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.invalidation_buffer = InvalidationBuffer()
+        coordinator.dependency_index = DependencyIndex()
+
+        def attacker_register(_input_id: str, **_selectors) -> None:
+            raise AssertionError("instance-shadowed register-input executed")
+
+        coordinator._register_input = attacker_register  # type: ignore[method-assign]
+
+        result = coordinator.tick()
+
+        assert result.registered_input_ids == ("input-new",)
+        assert coordinator.dependency_index.input_ids == ("input-new",)
+
+
+def test_tick_ignores_instance_shadowed_retire_input() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _, state = _state(root)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+        coordinator.causal_view = continuous_session.CausalView.AS_KNOWN_AT_DECISION
+        coordinator.required_history = None
+        coordinator.market_store = object()
+        coordinator.settlement_learning_handoff = None
+        coordinator.outcome_authority = None
+        coordinator.max_invalidation_batches_per_tick = 4
+        coordinator.max_invalidation_items_per_batch = 250
+
+        class SuccessfulCycle:
+            provider_unavailable = False
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+        class DeltaStore:
+            def deltas_after_commit(self, **_kwargs):
+                return ()
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = DeltaStore()
+
+            def run_cycle(self):
+                return SuccessfulCycle()
+
+        class DesktopConsumer:
+            def drain(self, **_kwargs):
+                return ()
+
+        class InvalidationBuffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class DependencyIndex:
+            def __init__(self):
+                self.ids = {"input-old"}
+
+            @property
+            def input_ids(self):
+                return tuple(sorted(self.ids))
+
+            def affected_inputs(self, _batch):
+                return ()
+
+            def unregister(self, input_id: str):
+                self.ids.discard(input_id)
+                return True
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                retire_input,
+                **_kwargs,
+            ):
+                retire_input("input-old")
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = DesktopConsumer()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.invalidation_buffer = InvalidationBuffer()
+        coordinator.dependency_index = DependencyIndex()
+
+        def attacker_retire(_input_id: str) -> None:
+            raise AssertionError("instance-shadowed retire-input executed")
+
+        coordinator._retire_input = attacker_retire  # type: ignore[method-assign]
+
+        result = coordinator.tick()
+
+        assert result.retired_input_ids == ("input-old",)
+        assert coordinator.dependency_index.input_ids == ()
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ("_drain_invalidations", "_register_input", "_retire_input"),
+)
+def test_tick_rejects_class_rebound_routing_composition(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+
+        class Collector:
+            def run_cycle(self):
+                raise AssertionError(
+                    "collector ran after routing composition authority changed"
+                )
+
+        coordinator.collector = Collector()
+
+        def attacker(*_args, **_kwargs):
+            raise AssertionError(
+                f"class-rebound routing composition executed: {method_name}"
             )
 
         monkeypatch.setattr(

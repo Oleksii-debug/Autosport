@@ -2671,6 +2671,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             ..., tuple[SettlementResolution, ...]
         ] = _settlement_resolutions,
         _settlement_resolutions_method_code: object = _settlement_resolutions.__code__,
+        _drain_invalidations_method: Callable[
+            ["ContinuousSessionCoordinator"],
+            tuple[tuple[str, ...], bool, bool],
+        ] = _drain_invalidations,
+        _drain_invalidations_method_code: object = _drain_invalidations.__code__,
+        _register_input_method: Callable[..., None] = _register_input,
+        _register_input_method_code: object = _register_input.__code__,
+        _retire_input_method: Callable[..., None] = _retire_input,
+        _retire_input_method_code: object = _retire_input.__code__,
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
     ) -> ContinuousTickResult:
@@ -2697,6 +2706,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             or type(self)._settlement_resolutions is not _settlement_resolutions_method
             or getattr(_settlement_resolutions_method, "__code__", None)
             is not _settlement_resolutions_method_code
+            or type(self)._drain_invalidations is not _drain_invalidations_method
+            or getattr(_drain_invalidations_method, "__code__", None)
+            is not _drain_invalidations_method_code
+            or type(self)._register_input is not _register_input_method
+            or getattr(_register_input_method, "__code__", None)
+            is not _register_input_method_code
+            or type(self)._retire_input is not _retire_input_method
+            or getattr(_retire_input_method, "__code__", None)
+            is not _retire_input_method_code
             or _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
@@ -2805,20 +2823,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     as_of=now,
                     view=self.causal_view,
                 )
-                affected, full_refresh, backlog = self._drain_invalidations()
+                affected, full_refresh, backlog = _drain_invalidations_method(self)
 
                 newly_registered: list[str] = []
                 retired: list[str] = []
 
                 def register(input_id: str, **selectors: object) -> None:
                     before = input_id in self.dependency_index.input_ids
-                    self._register_input(input_id, **selectors)
+                    _register_input_method(self, input_id, **selectors)
                     if not before:
                         newly_registered.append(input_id)
 
                 def retire(input_id: str) -> None:
                     before = input_id in self.dependency_index.input_ids
-                    self._retire_input(input_id)
+                    _retire_input_method(self, input_id)
                     if before:
                         retired.append(input_id)
 

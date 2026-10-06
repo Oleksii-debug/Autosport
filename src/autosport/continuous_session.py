@@ -3200,10 +3200,6 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # so there is no new source projection to publish. Avoid the full
                 # continuous-session snapshot path here: retained settlement history
                 # must not amplify an operational provider failure into O(history).
-                failure = _record_failure_method(
-                    state,
-                    code="ProviderUnavailableError",
-                )
                 pending_count = invalidation_buffer.pending_count
                 pending_full_refresh = invalidation_buffer.full_refresh_required
                 if (
@@ -3215,6 +3211,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         "invalidation buffer backlog state is invalid"
                     )
                 require_state_identity()
+                failure = _record_failure_method(
+                    state,
+                    code="ProviderUnavailableError",
+                )
             return ContinuousTickResult(
                 session_id=failure.session_id,
                 cycle_index=failure.cycles_completed,

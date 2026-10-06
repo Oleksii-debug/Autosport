@@ -424,3 +424,33 @@ def test_store_rejects_bool_int_semantic_replay_aliases(
     with pytest.raises(ValueError):
         store.load()
 
+def test_store_rejects_duplicate_json_keys_at_any_depth(tmp_path: Path) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s1",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    store.save(evidence)
+    canonical = store.path.read_text(encoding="utf-8")
+
+    top_level = '{"schema_version":1,' + canonical[1:]
+    store.path.write_text(top_level, encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid pre-evaluation evidence file"):
+        store.load()
+
+    store.save(evidence)
+    canonical = store.path.read_text(encoding="utf-8")
+    marker = '"candidate_id":"c1"'
+    assert marker in canonical
+    nested = canonical.replace(
+        marker,
+        '"candidate_id":"c1","candidate_id":"c1"',
+        1,
+    )
+    store.path.write_text(nested, encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid pre-evaluation evidence file"):
+        store.load()
+

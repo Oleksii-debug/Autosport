@@ -17,6 +17,8 @@ import tempfile
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
+from .json_integrity import strict_json_loads
+
 
 SCHEMA_VERSION = 1
 AUTHORITY_FAMILY = "research.pre-evaluation-slot-decision-session-authority-v1"
@@ -539,8 +541,8 @@ class PreEvaluationEvidenceStore:
 
     def load(self) -> PreEvaluationSessionEvidence:
         try:
-            envelope = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            envelope = strict_json_loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
             raise ValueError("invalid pre-evaluation evidence file") from exc
         if not isinstance(envelope, dict):
             raise ValueError("pre-evaluation evidence envelope must be an object")

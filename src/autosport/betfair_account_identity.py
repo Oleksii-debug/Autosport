@@ -250,8 +250,14 @@ def _make_account_identity_authority():
         for owner, name, expected in (
             (client_type, "__getattribute__", client_type.__getattribute__),
             (transport_type, "__getattribute__", transport_type.__getattribute__),
+            (_urllib_request.OpenerDirector, "__getattribute__", _urllib_request.OpenerDirector.__getattribute__),
             (_urllib_request.OpenerDirector, "open", _urllib_request.OpenerDirector.open),
             (_urllib_request.OpenerDirector, "error", _urllib_request.OpenerDirector.error),
+            (
+                _urllib_request.HTTPSHandler,
+                "__getattribute__",
+                _urllib_request.HTTPSHandler.__getattribute__,
+            ),
             (
                 _urllib_request.HTTPSHandler,
                 "__init__",
@@ -264,8 +270,18 @@ def _make_account_identity_authority():
             ),
             (
                 _urllib_request.AbstractHTTPHandler,
+                "__getattribute__",
+                _urllib_request.AbstractHTTPHandler.__getattribute__,
+            ),
+            (
+                _urllib_request.AbstractHTTPHandler,
                 "do_open",
                 _urllib_request.AbstractHTTPHandler.do_open,
+            ),
+            (
+                _urllib_request.HTTPErrorProcessor,
+                "__getattribute__",
+                _urllib_request.HTTPErrorProcessor.__getattribute__,
             ),
             (
                 _urllib_request.HTTPErrorProcessor,
@@ -276,6 +292,11 @@ def _make_account_identity_authority():
                 _urllib_request.HTTPErrorProcessor,
                 "https_response",
                 _urllib_request.HTTPErrorProcessor.https_response,
+            ),
+            (
+                _urllib_request.HTTPRedirectHandler,
+                "__getattribute__",
+                _urllib_request.HTTPRedirectHandler.__getattribute__,
             ),
             (
                 _urllib_request.HTTPRedirectHandler,
@@ -309,6 +330,11 @@ def _make_account_identity_authority():
             ),
             (
                 _http_client.HTTPSConnection,
+                "__getattribute__",
+                _http_client.HTTPSConnection.__getattribute__,
+            ),
+            (
+                _http_client.HTTPSConnection,
                 "__init__",
                 _http_client.HTTPSConnection.__init__,
             ),
@@ -316,6 +342,11 @@ def _make_account_identity_authority():
                 _http_client.HTTPSConnection,
                 "connect",
                 _http_client.HTTPSConnection.connect,
+            ),
+            (
+                _http_client.HTTPConnection,
+                "__getattribute__",
+                _http_client.HTTPConnection.__getattribute__,
             ),
             (
                 _http_client.HTTPConnection,
@@ -342,10 +373,13 @@ def _make_account_identity_authority():
                 "getresponse",
                 _http_client.HTTPConnection.getresponse,
             ),
+            (_ssl.SSLContext, "__getattribute__", _ssl.SSLContext.__getattribute__),
             (_ssl.SSLContext, "wrap_socket", _ssl.SSLContext.wrap_socket),
+            (_ssl.SSLSocket, "__getattribute__", _ssl.SSLSocket.__getattribute__),
             (_ssl.SSLSocket, "_create", getattr(_ssl.SSLSocket, "_create", None)),
             (_socket, "create_connection", _socket.create_connection),
             (_socket, "getaddrinfo", _socket.getaddrinfo),
+            (_socket.socket, "__getattribute__", _socket.socket.__getattribute__),
             (_socket.socket, "connect", _socket.socket.connect),
             (_socket.socket, "sendall", _socket.socket.sendall),
             (_socket.socket, "makefile", _socket.socket.makefile),

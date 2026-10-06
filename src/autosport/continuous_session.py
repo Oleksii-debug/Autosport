@@ -417,7 +417,7 @@ class _ContinuousSessionState:
         # then silently adopt the winner's identity.
         with _durable_path_lock(self.path):
             if _path_exists(self.path):
-                raw = self._read()
+                raw = _read_method(self)
             else:
                 resolved_id = _text(
                     session_id or str(uuid.uuid4()),
@@ -1246,12 +1246,24 @@ class _ContinuousSessionState:
         _atomic_write_json_code: object = atomic_write_json.__code__,
         _durable_path_lock: Callable[..., Any] = durable_path_lock,
         _durable_path_lock_code: object = durable_path_lock.__code__,
+        _read_method: Callable[["_ContinuousSessionState"], dict[str, Any]] = _read,
+        _read_method_code: object = _read.__code__,
+        _checkpoint_identity_token_method: Callable[
+            ["_ContinuousSessionState"], tuple[int, int, int, int, int]
+        ] = _checkpoint_identity_token,
+        _checkpoint_identity_token_method_code: object = _checkpoint_identity_token.__code__,
     ) -> dict[str, Any]:
         if (
             getattr(_atomic_write_json, "__code__", None) is not _atomic_write_json_code
             or durable_path_lock is not _durable_path_lock
             or getattr(_durable_path_lock, "__code__", None)
             is not _durable_path_lock_code
+            or type(self)._read is not _read_method
+            or getattr(_read_method, "__code__", None) is not _read_method_code
+            or type(self)._checkpoint_identity_token
+            is not _checkpoint_identity_token_method
+            or getattr(_checkpoint_identity_token_method, "__code__", None)
+            is not _checkpoint_identity_token_method_code
         ):
             raise ContinuousSessionError(
                 "canonical session read-modify-write authority changed"
@@ -1274,7 +1286,7 @@ class _ContinuousSessionState:
                 if advance_generation:
                     raw["generation"] = int(raw["generation"]) + 1
                 _atomic_write_json(self.path, raw)
-                updated = self._read()
+                updated = _read_method(self)
             # Cache the committed canonical image before any post-commit sidecar
             # finalization. If finalization fails after the main checkpoint was
             # durably published, this in-process state must still represent the
@@ -1287,7 +1299,7 @@ class _ContinuousSessionState:
             self._last_error_code = updated["last_error_code"]
             self._source_gap_state = updated["source_gap_state"]
             self._source_sync_state = updated["source_sync_state"]
-            self._checkpoint_token = self._checkpoint_identity_token()
+            self._checkpoint_token = _checkpoint_identity_token_method(self)
             if mutation_result is not False and finalize_under_lock is not None:
                 finalize_under_lock(updated)
         return updated

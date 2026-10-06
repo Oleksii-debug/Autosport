@@ -619,3 +619,128 @@ def test_manifest_authority_class_dispatch_cannot_be_deleted() -> None:
             if name not in ProviderCapabilityManifest.__dict__:
                 type.__setattr__(ProviderCapabilityManifest, name, original)
 
+def test_coordinated_profile_integration_fact_mutation_cannot_rebind_manifest() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=22,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    live_profile_fact = next(
+        fact
+        for fact in profile.facts
+        if fact.capability is BookmakerCapability.LIVE_QUOTES_READ
+    )
+    live_manifest_fact = next(
+        fact
+        for fact in manifest.facts
+        if fact.capability is ProviderManifestCapability.LIVE_QUOTES
+    )
+
+    object.__setattr__(
+        live_profile_fact,
+        "state",
+        BookmakerCapabilityState.UNSUPPORTED,
+    )
+    object.__setattr__(integration, "profile_id", profile.profile_id)
+    object.__setattr__(
+        live_manifest_fact,
+        "state",
+        ProviderManifestState.UNSUPPORTED,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="bound capability profile identity changed after validation",
+    ):
+        manifest.state_of(ProviderManifestCapability.LIVE_QUOTES)
+
+
+def test_valid_integration_kind_mutation_cannot_rebind_manifest_identity() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=23,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    object.__setattr__(
+        integration,
+        "integration_kind",
+        BookmakerIntegrationKind.BROWSER_AUTOMATION,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="bound integration evidence identity changed after validation",
+    ):
+        _ = manifest.integration_kind
+
+
+def test_manifest_identity_rejects_coordinated_dependency_rebinding() -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    manifest = build_provider_capability_manifest(
+        profile,
+        integration,
+        manifest_ref="provider-capability-manifest",
+        manifest_version=24,
+        observed_at=_T2,
+        source_ref="product-provider-capability-projection",
+        source_payload_sha256=_HASH_C,
+    )
+    live_profile_fact = next(
+        fact
+        for fact in profile.facts
+        if fact.capability is BookmakerCapability.LIVE_QUOTES_READ
+    )
+    live_manifest_fact = next(
+        fact
+        for fact in manifest.facts
+        if fact.capability is ProviderManifestCapability.LIVE_QUOTES
+    )
+    object.__setattr__(
+        live_profile_fact,
+        "state",
+        BookmakerCapabilityState.UNSUPPORTED,
+    )
+    object.__setattr__(integration, "profile_id", profile.profile_id)
+    object.__setattr__(
+        live_manifest_fact,
+        "state",
+        ProviderManifestState.UNSUPPORTED,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="bound capability profile identity changed after validation",
+    ):
+        _ = manifest.manifest_id
+

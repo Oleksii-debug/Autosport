@@ -252,6 +252,77 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         finally:
             validator.__code__ = original_code
 
+    def test_in_place_decimal_parser_code_mutation_fails_closed(self) -> None:
+        parser = legacy._CANONICAL_DECIMAL_PARSER
+        original_code = parser.__code__
+
+        def forged_parser(value, name, *, allow_zero=False):
+            raise AssertionError("mutated Decimal parser executed")
+
+        parser.__code__ = forged_parser.__code__
+        try:
+            with self.assertRaisesRegex(ValueError, "decimal parser authority changed"):
+                evidence()
+            with self.assertRaisesRegex(ValueError, "decimal parser authority changed"):
+                PaperExecutionRun(
+                    run_id="run-parser-mutation",
+                    trigger_id="trigger-parser-mutation",
+                    plan_id="plan-parser-mutation",
+                    plan_fingerprint="a" * 64,
+                    model_fingerprint="b" * 64,
+                    started_at="2026-10-05T00:00:00.100000+00:00",
+                    attempts=(),
+                    pending_action_ids=(),
+                    recovery_decision=RecoveryDecision.NONE,
+                    worst_case_exposure=Decimal("0"),
+                    completed=True,
+                )
+        finally:
+            parser.__code__ = original_code
+
+    def test_in_place_decimal_preflight_code_mutation_fails_closed(self) -> None:
+        record = evidence()
+        preflight = legacy._CANONICAL_DECIMAL_PREFLIGHT
+        original_code = preflight.__code__
+
+        def forged_preflight(*values):
+            raise AssertionError("mutated Decimal preflight executed")
+
+        preflight.__code__ = forged_preflight.__code__
+        try:
+            with self.assertRaisesRegex(ValueError, "decimal preflight authority changed"):
+                record.to_dict()
+        finally:
+            preflight.__code__ = original_code
+
+    def test_in_place_decimal_formatter_code_mutation_fails_closed(self) -> None:
+        record = evidence()
+        formatter = legacy._CANONICAL_DECIMAL_TEXT_FORMATTER
+        original_code = formatter.__code__
+
+        def forged_formatter(value):
+            raise AssertionError("mutated Decimal formatter executed")
+
+        formatter.__code__ = forged_formatter.__code__
+        try:
+            with self.assertRaisesRegex(ValueError, "decimal formatter authority changed"):
+                record.to_dict()
+            with tempfile.TemporaryDirectory() as tmp:
+                ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "decimal formatter authority changed",
+                ):
+                    ledger.complete_run(
+                        run_id="run-formatter-mutation",
+                        pending_action_ids=(),
+                        recovery_decision=RecoveryDecision.NONE,
+                        worst_case_exposure=Decimal("1.00"),
+                    )
+                self.assertFalse((Path(tmp) / "paper-execution.jsonl").exists())
+        finally:
+            formatter.__code__ = original_code
+
     def test_durable_decimal_serializers_ignore_rebound_module_helpers(self) -> None:
         record = evidence()
         attempt = PaperLegAttempt(

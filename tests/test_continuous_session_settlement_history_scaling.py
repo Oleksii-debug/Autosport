@@ -888,7 +888,7 @@ def test_durable_session_writer_ignores_runtime_rebinding(monkeypatch) -> None:
         )
 
         snapshot = state.snapshot()
-        assert snapshot.cycles_completed == 1
+        assert snapshot.cycles_completed == _SMALL_HISTORY + 1
         assert snapshot.last_success_at == _AT
 
 
@@ -922,7 +922,7 @@ def test_durable_session_path_reader_ignores_runtime_rebinding(monkeypatch) -> N
 
         monkeypatch.setattr(Path, "read_text", attacker_read_text)
 
-        assert state.snapshot().cycles_completed == 0
+        assert state.snapshot().cycles_completed == _SMALL_HISTORY
 
 
 def test_state_round_trip_does_not_resurrect_superseded_failure() -> None:
@@ -1107,7 +1107,7 @@ def test_settlement_evidence_validator_ignores_runtime_class_rebinding(monkeypat
             staticmethod(attacker_validator),
         )
 
-        assert state.snapshot().cycles_completed == 0
+        assert state.snapshot().cycles_completed == _SMALL_HISTORY
 
 
 def test_settlement_evidence_validator_code_identity_is_immutable() -> None:

@@ -1000,5 +1000,52 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 store.close()
 
 
+    def test_tick_preserves_primary_failure_when_checkpoint_persistence_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                primary = RuntimeError("primary failure")
+
+                def fail_cycle():
+                    raise primary
+
+                coordinator.collector.run_cycle = fail_cycle
+                original_record_failure = coordinator._state.record_failure
+
+                def fail_checkpoint(*, code: str) -> None:
+                    raise OSError("checkpoint persistence failure")
+
+                coordinator._state.record_failure = fail_checkpoint
+                try:
+                    coordinator.tick()
+                except RuntimeError as exc:
+                    self.assertIs(exc, primary)
+                    self.assertTrue(
+                        any(
+                            "operational failure checkpoint could not be persisted: OSError"
+                            in note
+                            for note in (exc.__notes__ or [])
+                        )
+                    )
+                else:
+                    raise AssertionError(
+                        "primary tick failure was not re-raised after checkpoint failure"
+                    )
+                finally:
+                    coordinator._state.record_failure = original_record_failure
+            finally:
+                store.close()
+
 if __name__ == "__main__":
     unittest.main()

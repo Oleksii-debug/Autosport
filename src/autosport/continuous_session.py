@@ -697,12 +697,20 @@ class _ContinuousSessionState:
         _strict_json_loads_code: object = strict_json_loads.__code__,
         _path_read_text: Callable[..., str] = Path.read_text,
         _path_read_text_code: object = Path.read_text.__code__,
+        _validate_settlement_evidence: Callable[
+            [object], tuple[dict[str, str], ...]
+        ] = _validate_settlement_evidence.__func__,
+        _validate_settlement_evidence_code: object = (
+            _validate_settlement_evidence.__func__.__code__
+        ),
         _schema: str = _CONTINUOUS_SESSION_SCHEMA,
         _version: int = _CONTINUOUS_SESSION_VERSION,
     ) -> dict[str, Any]:
         if (
             getattr(_strict_json_loads, "__code__", None) is not _strict_json_loads_code
             or getattr(_path_read_text, "__code__", None) is not _path_read_text_code
+            or getattr(_validate_settlement_evidence, "__code__", None)
+            is not _validate_settlement_evidence_code
         ):
             raise ContinuousSessionError(
                 "canonical session-reader code identity changed"
@@ -735,7 +743,7 @@ class _ContinuousSessionState:
                 _instant(raw[name], name)
         if raw["last_error_code"] is not None:
             _text(raw["last_error_code"], "last_error_code")
-        evidence = self._validate_settlement_evidence(raw["settlement_evidence"])
+        evidence = _validate_settlement_evidence(raw["settlement_evidence"])
         gap_state = raw["source_gap_state"]
         sync_state = raw["source_sync_state"]
         if (gap_state is None) != (sync_state is None):
@@ -883,14 +891,31 @@ class _ContinuousSessionState:
         self,
         *,
         settlement_evidence: tuple[SettlementResolution, ...],
+        _normalized_settlement_evidence: Callable[
+            [SettlementResolution], dict[str, str]
+        ] = _normalized_settlement_evidence.__func__,
+        _normalized_settlement_evidence_code: object = (
+            _normalized_settlement_evidence.__func__.__code__
+        ),
     ) -> None:
+        if (
+            getattr(
+                _normalized_settlement_evidence,
+                "__code__",
+                None,
+            )
+            is not _normalized_settlement_evidence_code
+        ):
+            raise ContinuousSessionError(
+                "canonical settlement evidence normalizer code identity changed"
+            )
         raw = self._read()
         known = {
             item["evidence_id"]: item
             for item in raw["settlement_evidence"]
         }
         for evidence in settlement_evidence:
-            normalized = self._normalized_settlement_evidence(evidence)
+            normalized = _normalized_settlement_evidence(evidence)
             existing = known.get(evidence.evidence_id)
             if existing is not None and existing != normalized:
                 raise ContinuousSessionError(
@@ -953,7 +978,24 @@ class _ContinuousSessionState:
         at: str,
         full_refresh: bool,
         settlement_evidence: tuple[SettlementResolution, ...],
+        _normalized_settlement_evidence: Callable[
+            [SettlementResolution], dict[str, str]
+        ] = _normalized_settlement_evidence.__func__,
+        _normalized_settlement_evidence_code: object = (
+            _normalized_settlement_evidence.__func__.__code__
+        ),
     ) -> None:
+        if (
+            getattr(
+                _normalized_settlement_evidence,
+                "__code__",
+                None,
+            )
+            is not _normalized_settlement_evidence_code
+        ):
+            raise ContinuousSessionError(
+                "canonical settlement evidence normalizer code identity changed"
+            )
         timestamp = _instant(at, "at")
 
         def mutate(raw: dict[str, Any]) -> None:
@@ -969,7 +1011,7 @@ class _ContinuousSessionState:
             }
             for evidence in settlement_evidence:
                 existing = known.get(evidence.evidence_id)
-                normalized = self._normalized_settlement_evidence(evidence)
+                normalized = _normalized_settlement_evidence(evidence)
                 if existing is not None:
                     if existing != normalized:
                         raise ContinuousSessionError(

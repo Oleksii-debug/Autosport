@@ -783,7 +783,7 @@ def test_store_ignores_rebound_module_authorities(monkeypatch, tmp_path) -> None
     assert store.load() == candidate
 
 
-def test_successor_does_not_dispatch_rebound_instance_load(monkeypatch, tmp_path) -> None:
+def test_successor_rejects_rebound_instance_load_and_preserves_canonical_write(tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
     store.initialize_owner(_goal())
 
@@ -797,10 +797,15 @@ def test_successor_does_not_dispatch_rebound_instance_load(monkeypatch, tmp_path
     def forged(*args, **kwargs):
         raise AssertionError("rebound instance load executed")
 
-    monkeypatch.setattr(store, "load", forged)
+    with pytest.raises(
+        TypeError,
+        match="economic goal store authority operation binding is immutable",
+    ):
+        store.load = forged  # type: ignore[method-assign]
+
     store.persist_automatic_successor(candidate)
 
-    assert store.load is forged
+    assert store.load() == candidate
     assert EconomicGoalStore(tmp_path).load() == candidate
 
 

@@ -3785,22 +3785,48 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # so there is no new source projection to publish. Avoid the full
                 # continuous-session snapshot path here: retained settlement history
                 # must not amplify an operational provider failure into O(history).
-                pending_count = invalidation_buffer.pending_count
-                pending_full_refresh = invalidation_buffer.full_refresh_required
-                if (
-                    type(pending_count) is not int
-                    or pending_count < 0
-                    or type(pending_full_refresh) is not bool
-                ):
-                    raise ContinuousSessionError(
-                        "invalidation buffer backlog state is invalid"
+                try:
+                    pending_count = invalidation_buffer.pending_count
+                    pending_full_refresh = invalidation_buffer.full_refresh_required
+                    if (
+                        type(pending_count) is not int
+                        or pending_count < 0
+                        or type(pending_full_refresh) is not bool
+                    ):
+                        raise ContinuousSessionError(
+                            "invalidation buffer backlog state is invalid"
+                        )
+                    require_state_identity()
+                    require_dependency_index_identity()
+                    failure = _record_failure_method(
+                        state,
+                        code="ProviderUnavailableError",
                     )
-                require_state_identity()
-                require_dependency_index_identity()
-                failure = _record_failure_method(
-                    state,
-                    code="ProviderUnavailableError",
-                )
+                except Exception as exc:
+                    # This fast path intentionally does not replace malformed local
+                    # backlog truth with ProviderUnavailableError. It must still
+                    # restore coordinator authority if a backlog accessor mutates
+                    # state while the provider-unavailable result is being handled.
+                    state_was_rebound = restore_state_identity()
+                    dependency_index_was_rebound = restore_dependency_index_identity()
+                    if dependency_index_was_rebound:
+                        try:
+                            exc.add_note(
+                                "continuous-session dependency index authority was "
+                                "rebound during provider-unavailable backlog inspection "
+                                "and was restored"
+                            )
+                        except BaseException:
+                            pass
+                    if state_was_rebound:
+                        try:
+                            exc.add_note(
+                                "continuous session state authority was rebound during "
+                                "provider-unavailable backlog inspection and was restored"
+                            )
+                        except BaseException:
+                            pass
+                    raise
             return ContinuousTickResult(
                 session_id=failure.session_id,
                 cycle_index=failure.cycles_completed,

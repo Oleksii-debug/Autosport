@@ -45,9 +45,8 @@ _REQUIRED_RESOURCE_CLASSES = (
     "temporary_artifacts",
     "persistence_handles",
 )
-_OBSERVED_RESOURCE_CLASSES = (
+_BASE_OBSERVED_RESOURCE_CLASSES = (
     "owned_threads",
-    "workspace_handles",
     "internal_queues",
     "temporary_artifacts",
 )
@@ -401,10 +400,22 @@ def main(argv: list[str] | None = None) -> int:
         else "FAIL"
     )
 
-    missing_resource_classes = tuple(
+    platform_not_applicable_resource_classes = (
+        () if os.name == "nt" else ("workspace_handles",)
+    )
+    observed_resource_classes = list(_BASE_OBSERVED_RESOURCE_CLASSES)
+    if windows_probe_status == "PASS":
+        observed_resource_classes.append("workspace_handles")
+    observed_resource_classes = tuple(sorted(observed_resource_classes))
+    applicable_required_resource_classes = tuple(
         resource_class
         for resource_class in _REQUIRED_RESOURCE_CLASSES
-        if resource_class not in _OBSERVED_RESOURCE_CLASSES
+        if resource_class not in platform_not_applicable_resource_classes
+    )
+    missing_resource_classes = tuple(
+        resource_class
+        for resource_class in applicable_required_resource_classes
+        if resource_class not in observed_resource_classes
     )
     qualification_status = _qualification_status(
         failures,
@@ -435,7 +446,13 @@ def main(argv: list[str] | None = None) -> int:
         ],
         "max_owned_thread_count_at_quiescent_checkpoint": max_owned_threads,
         "required_resource_classes": list(_REQUIRED_RESOURCE_CLASSES),
-        "observed_resource_classes": list(_OBSERVED_RESOURCE_CLASSES),
+        "applicable_required_resource_classes": list(
+            applicable_required_resource_classes
+        ),
+        "observed_resource_classes": list(observed_resource_classes),
+        "platform_not_applicable_resource_classes": list(
+            platform_not_applicable_resource_classes
+        ),
         "missing_resource_classes": list(missing_resource_classes),
         "resource_coverage_complete": not missing_resource_classes,
         "internal_queue_owners_checked_per_cycle": 3,

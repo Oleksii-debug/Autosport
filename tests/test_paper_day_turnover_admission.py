@@ -17,6 +17,7 @@ from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_admission import admit_paper_ticket
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
+from autosport.economic_session import ProductEconomicSessionStore
 from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskOfRuinEvidence
@@ -3061,3 +3062,63 @@ def test_live_resume_helper_rebind_cannot_replace_positive_risk_suffix(tmp_path)
     assert baseline.reason == "economic goal turnover limit exceeded"
     assert result.admitted is True
     assert result.risk.allowed is True
+
+
+def test_explicit_new_session_cannot_reset_same_day_turnover_cap(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    goal_store = EconomicGoalStore(tmp_path)
+    goal_store.initialize_owner(goal)
+    canonical = _book_with_settled_turnover(
+        workspace=tmp_path,
+        placed_at=_timestamp(old),
+        stake="50",
+    )
+    canonical.save(tmp_path / "paper_book.json")
+    policy = _policy(goal)
+
+    first_leg = _leg("session-reset-first")
+    first_context = _context(first_leg, _timestamp(now))
+    first = admit_paper_ticket(
+        workspace=tmp_path,
+        book=PaperBook.load(tmp_path / "paper_book.json"),
+        risk_policy=policy,
+        stake=Decimal("3"),
+        legs=(first_leg,),
+        reason="consume same-day room before explicit session successor",
+        placed_at=_timestamp(now),
+        context=first_context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+    assert first.admitted is True
+
+    session_store = ProductEconomicSessionStore(tmp_path)
+    predecessor = session_store.current()
+    successor_goal = replace(goal, revision=goal.revision + 1)
+    goal_store.persist_automatic_successor(successor_goal)
+    successor = session_store.transition_to_current_goal(predecessor)
+    assert successor.session_id != predecessor.session_id
+
+    second_leg = _leg("session-reset-second")
+    second_context = _context(second_leg, _timestamp(now))
+    second = admit_paper_ticket(
+        workspace=tmp_path,
+        book=PaperBook.load(tmp_path / "paper_book.json"),
+        risk_policy=_policy(successor_goal),
+        stake=Decimal("3"),
+        legs=(second_leg,),
+        reason="new session must not reset same-day owner cap",
+        placed_at=_timestamp(now),
+        context=second_context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert second.admitted is False
+    assert second.risk.reason == "economic goal turnover limit exceeded"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert len(persisted.tickets) == 2

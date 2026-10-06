@@ -1568,18 +1568,35 @@ def _execute_market_book_batch_attempt(
         )
         return make_execution(updated, outcome, None)
 
-    updated = append_response(
-        frozen_history,
-        result,
-        attempt_id=attempt,
-        required=required,
-    )
-    outcome = (
-        exact_response_outcome
-        if result.receipt.status is exact_response_status
-        else incomplete_response_outcome
-    )
-    return make_execution(updated, outcome, result)
+    try:
+        updated = append_response(
+            frozen_history,
+            result,
+            attempt_id=attempt,
+            required=required,
+        )
+        outcome = (
+            exact_response_outcome
+            if result.receipt.status is exact_response_status
+            else incomplete_response_outcome
+        )
+        return make_execution(updated, outcome, result)
+    except BaseException as exc:
+        if not isinstance(exc, Exception):
+            raise
+        # Provider I/O already completed and returned an issued result. If local
+        # response-history/execution finalization cannot complete canonically,
+        # preserve the attempt interval as a transport/finalization gap rather
+        # than leaking an unclassified ordinary exception.
+        outcome = transport_failure_outcome
+        updated = append_nonresponse(
+            frozen_history,
+            batch_id=batch_id,
+            attempt_id=attempt,
+            required=required,
+            outcome=outcome,
+        )
+        return make_execution(updated, outcome, None)
 
 
 def _install_attempt_executor() -> None:

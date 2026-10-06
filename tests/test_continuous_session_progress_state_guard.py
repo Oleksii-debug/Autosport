@@ -199,3 +199,40 @@ def test_operator_state_transition_does_not_resurrect_stale_failure_overlay() ->
         assert durable["last_error_code"] is None
         assert state.snapshot().last_error_code is None
 
+
+
+@pytest.mark.parametrize(
+    ("method_name", "replacement"),
+    (
+        ("_error_checkpoint_present", lambda self: False),
+        ("_read_error_checkpoint", lambda self: {}),
+    ),
+)
+def test_record_failure_rejects_rebound_checkpoint_reader_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    replacement: object,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path, state = _state(Path(directory))
+        sidecar_path = path.with_name(f"{path.name}.operational_error.json")
+        canonical_before = path.read_bytes()
+        sidecar_before = sidecar_path.read_bytes() if sidecar_path.exists() else None
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            method_name,
+            replacement,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical failure publication lock authority changed",
+        ):
+            state.record_failure(code="ProviderUnavailableError")
+
+        assert path.read_bytes() == canonical_before
+        if sidecar_before is None:
+            assert not sidecar_path.exists()
+        else:
+            assert sidecar_path.read_bytes() == sidecar_before

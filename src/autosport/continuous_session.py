@@ -513,7 +513,6 @@ class _ContinuousSessionState:
         _version: int = _CONTINUOUS_SESSION_ERROR_VERSION,
         _max_bytes: int = _CONTINUOUS_SESSION_ERROR_MAX_BYTES,
         _max_code_chars: int = _CONTINUOUS_SESSION_ERROR_MAX_CODE_CHARS,
-        _strict_json_loads: Callable[[str], Any] = strict_json_loads,
     ) -> dict[str, Any]:
         try:
             encoded = self._read_error_checkpoint_bytes(_max_bytes=_max_bytes)
@@ -796,10 +795,15 @@ class _ContinuousSessionState:
     def session_id(self) -> str:
         return self._read()["session_id"]
 
-    def _update(self, mutate: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+    def _update(
+        self,
+        mutate: Callable[[dict[str, Any]], None],
+        *,
+        _atomic_write_json: Callable[[str | Path, dict[str, Any]], None] = atomic_write_json,
+    ) -> dict[str, Any]:
         raw = self._read()
         mutate(raw)
-        atomic_write_json(self.path, raw)
+        _atomic_write_json(self.path, raw)
         return self._read()
 
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:

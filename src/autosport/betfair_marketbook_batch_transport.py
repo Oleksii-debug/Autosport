@@ -92,14 +92,18 @@ def _sha256_token(value: object, field: str) -> str:
     return token
 
 
-def _transport_now(client: _base.BetfairReadOnlyClient) -> datetime:
+def _transport_now(
+    client: _base.BetfairReadOnlyClient,
+    *,
+    canonical_network_transport: Callable[[_base.BetfairReadOnlyClient], bool] = _transport._canonical_network_transport,
+) -> datetime:
     if type(client) is not _base.BetfairReadOnlyClient:
         raise TypeError("client must be an exact BetfairReadOnlyClient")
     # Mirror the canonical physical MarketBook transport's time-origin rule.
     # The unmodified production network transport is always measured by real
     # UTC; injected transports use the client's validated clock so replay and
     # deterministic tests do not acquire a second wall-clock authority.
-    if _transport._canonical_network_transport(client):
+    if canonical_network_transport(client):
         return datetime.now(timezone.utc)
     return datetime.fromisoformat(client._observed_at()).astimezone(timezone.utc)
 
@@ -107,13 +111,15 @@ def _transport_now(client: _base.BetfairReadOnlyClient) -> datetime:
 def _dispatch_instant(
     client: _base.BetfairReadOnlyClient,
     value: object,
+    *,
+    transport_now: Callable[[_base.BetfairReadOnlyClient], datetime] = _transport_now,
 ) -> datetime:
     if type(value) is not datetime:
         raise TypeError("scheduled_at must be an exact datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("scheduled_at must be timezone-aware")
     normalized = value.astimezone(timezone.utc)
-    dispatch_now = _transport_now(client)
+    dispatch_now = transport_now(client)
 
     if normalized > dispatch_now:
         raise ValueError("scheduled_at must not be in the future")
@@ -586,8 +592,57 @@ class MarketBookBatchAttemptExecution:
 def _install_transport_result_authority() -> None:
     issued: dict[int, tuple[object, str, bool]] = {}
     validate = MarketBookBatchTransportResult.__post_init__
-    authority_fingerprint = MarketBookBatchTransportResult._authority_fingerprint
     validate_attempt_execution = MarketBookBatchAttemptExecution.__post_init__
+    json_dumps = json.dumps
+    hash_factory = sha256
+
+    def authority_fingerprint(self: MarketBookBatchTransportResult) -> str:
+        receipt = self.receipt
+        payload = {
+            "schema": "betfair-marketbook-batch-transport-v1",
+            "plan_id": self.plan_id,
+            "request_contract_id": self.request_contract_id,
+            "batch_id": self.batch_id,
+            "request_budget_evidence_id": self.request_budget_evidence_id,
+            "request_payload_sha256": self.request_payload_sha256,
+            "source_payload_sha256": self.source_payload_sha256,
+            "observed_at": self.observed_at,
+            "canonical_network_origin_diagnostic": self.canonical_network_origin,
+            "receipt": {
+                "batch_id": receipt.batch_id,
+                "expected_market_ids": list(receipt.expected_market_ids),
+                "observed_market_ids": list(receipt.observed_market_ids),
+                "missing_market_ids": list(receipt.missing_market_ids),
+                "unexpected_market_ids": list(receipt.unexpected_market_ids),
+                "status": receipt.status.value,
+                "failure_kind": receipt.failure_kind,
+                "failure_code": receipt.failure_code,
+                "payload_sha256": receipt.payload_sha256,
+                "receipt_id": receipt.receipt_id,
+            },
+            "structural_exact_response": (
+                receipt.status is BatchReceiptStatus.EXACT_RESPONSE
+            ),
+            "origin_authority_requires_assert_issued": True,
+            "provider_observation_authenticated": False,
+            "provider_freshness_proven": False,
+            "provider_dispatch_authorized": False,
+            "provider_write_authorized": False,
+            "execution_authorized": False,
+        }
+        try:
+            encoded = json_dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise MarketBookBatchTransportError(
+                "MarketBook transport authority fingerprint is noncanonical"
+            ) from exc
+        return hash_factory(encoded).hexdigest()
     rate_reserve = BetfairMarketBookPerMarketRateGate.reserve
     concurrency_begin = BetfairMarketBookProjectionConcurrencyGate.begin
     concurrency_complete = BetfairMarketBookProjectionConcurrencyGate.complete
@@ -598,6 +653,10 @@ def _install_transport_result_authority() -> None:
     post_market_book_readonly = _transport._post_market_book_readonly
     receipt_from_response = MarketBookBatchReceipt.from_response
     result_factory = MarketBookBatchTransportResult
+    dispatch_instant = _dispatch_instant
+    token = _token
+    release_projection_lease = _release_projection_lease
+    release_projection_lease_after_failure = _release_projection_lease_after_failure
 
     def read_market_book_batch(
         client: _base.BetfairReadOnlyClient,
@@ -617,8 +676,8 @@ def _install_transport_result_authority() -> None:
             raise TypeError(
                 "concurrency_gate must be exact BetfairMarketBookProjectionConcurrencyGate"
             )
-        request = _token(request_id, "request_id")
-        instant = _dispatch_instant(client, scheduled_at)
+        request = token(request_id, "request_id")
+        instant = dispatch_instant(client, scheduled_at)
 
         batch = canonical_batch(plan, batch_id)
         params = params_for_batch(plan, batch)
@@ -657,7 +716,7 @@ def _install_transport_result_authority() -> None:
             )
         except BaseException as exc:
             if not isinstance(exc, Exception):
-                _release_projection_lease_after_failure(
+                release_projection_lease_after_failure(
                     client,
                     concurrency_gate,
                     request,
@@ -670,7 +729,7 @@ def _install_transport_result_authority() -> None:
                 MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
                 "MarketBook per-market rate gate could not establish local admission",
             )
-            _release_projection_lease_after_failure(
+            release_projection_lease_after_failure(
                 client,
                 concurrency_gate,
                 request,
@@ -684,7 +743,7 @@ def _install_transport_result_authority() -> None:
                 MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
                 "MarketBook per-market rate gate denied local admission",
             )
-            _release_projection_lease_after_failure(
+            release_projection_lease_after_failure(
                 client,
                 concurrency_gate,
                 request,
@@ -710,7 +769,7 @@ def _install_transport_result_authority() -> None:
             # Parent process-control interruption must not strand a locally
             # admitted projection lease. Cleanup is bounded/local and the
             # original BaseException is re-raised unchanged.
-            _release_projection_lease_after_failure(
+            release_projection_lease_after_failure(
                 client,
                 concurrency_gate,
                 request,
@@ -721,7 +780,7 @@ def _install_transport_result_authority() -> None:
             raise
         else:
             try:
-                _release_projection_lease(
+                release_projection_lease(
                     client,
                     concurrency_gate,
                     request,
@@ -736,7 +795,7 @@ def _install_transport_result_authority() -> None:
                 # Process control may land after the provider response but
                 # before local lease release completes. Retry that local cleanup
                 # once, then preserve the original interruption unchanged.
-                _release_projection_lease_after_failure(
+                release_projection_lease_after_failure(
                     client,
                     concurrency_gate,
                     request,

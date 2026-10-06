@@ -940,12 +940,17 @@ class PaperExecutionLedger:
             "ledger_root_sha256": root,
         }
         anchor = {**body, "anchor_sha256": _CANONICAL_DIGEST(body)}
+        encoded_anchor = _CANONICAL_CANONICALIZER(anchor) + "\n"
+        if len(encoded_anchor) > _MAX_DURABLE_ANCHOR_CHARS:
+            raise PaperExecutionIntegrityError(
+                "PAPER execution anchor exceeds resource limit"
+            )
         tmp = self._anchor_path.with_name(
             self._anchor_path.name + f".tmp-{_CANONICAL_OS_GETPID()}-{_CANONICAL_THREAD_IDENT()}"
         )
         try:
             with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-                handle.write(_CANONICAL_CANONICALIZER(anchor) + "\n")
+                handle.write(encoded_anchor)
                 handle.flush()
                 _CANONICAL_OS_FSYNC(handle.fileno())
             _CANONICAL_OS_REPLACE(tmp, self._anchor_path)
@@ -1080,6 +1085,10 @@ class PaperExecutionLedger:
                     )
                 return
             encoded = _CANONICAL_CANONICALIZER(event) + "\n"
+            if len(encoded) > _MAX_DURABLE_EVENT_LINE_CHARS + 1:
+                raise PaperExecutionIntegrityError(
+                    "PAPER execution ledger event exceeds resource limit"
+                )
             path_existed_before = self.path.exists()
             try:
                 with self.path.open("a", encoding="utf-8", newline="\n") as handle:

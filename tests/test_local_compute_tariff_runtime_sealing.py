@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -150,3 +152,27 @@ def test_basis_resolve_dispatch_rebind_fails_closed(tmp_path, monkeypatch):
     with pytest.raises(subject.LocalComputeTariffError, match="basis authority dispatch changed"):
         store._basis_authority()
     assert calls == []
+
+def test_private_first_import_receives_canonical_runtime_seal() -> None:
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    script = f"""
+import sys
+sys.path.insert(0, {str(source_root)!r})
+import autosport._local_compute_tariff_authority_impl as subject
+
+store = subject.LocalComputeTariffAuthorityStore
+assert store.__init__.__name__ == "_sealed_init"
+assert store.__init__.__module__ == "autosport.local_compute_tariff_authority"
+assert store.publish_owner_tariff.__name__ == "_publish_owner_tariff"
+assert store.publish_owner_tariff.__module__ == "autosport.local_compute_tariff_authority"
+assert store.resolve_current.__name__ == "_resolve_current"
+assert store.resolve_current.__module__ == "autosport.local_compute_tariff_authority"
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+

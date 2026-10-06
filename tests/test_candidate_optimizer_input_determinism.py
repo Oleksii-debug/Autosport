@@ -125,6 +125,150 @@ class _ExternalCollectionMutationEngine(ScenarioSearchEngine):
 
 
 class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
+    def test_candidate_economic_dtos_require_exact_runtime_types(self) -> None:
+        leg = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        canonical = _candidate("e1")
+        group = _groups()[0]
+        optimizer = PortfolioAwareCandidateOptimizer()
+
+        class CandidateSubclass(ParlayCandidate):
+            pass
+
+        class LegSubclass(CandidateLeg):
+            pass
+
+        class DecimalSubclass(Decimal):
+            pass
+
+        candidate_subclass = CandidateSubclass(
+            canonical.legs,
+            canonical.combined_odds,
+            canonical.independent_probability,
+            canonical.expected_profit_per_unit,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact canonical ParlayCandidate type",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [candidate_subclass],
+                [group],
+                stake="1",
+            )
+
+        list_backed = ParlayCandidate(
+            [leg],  # type: ignore[arg-type]
+            Decimal("2"),
+            Decimal("0.5"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "canonical non-empty leg tuple",
+        ):
+            optimizer.evaluate_candidates([], [list_backed], [group], stake="1")
+
+        subclass_leg = LegSubclass(
+            leg.quote_key,
+            leg.event_id,
+            leg.decimal_odds,
+            leg.probability,
+        )
+        subclass_leg_candidate = ParlayCandidate(
+            (subclass_leg,),
+            Decimal("2"),
+            Decimal("0.5"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact canonical CandidateLeg type",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [subclass_leg_candidate],
+                [group],
+                stake="1",
+            )
+
+        odds_subclass_leg = CandidateLeg(
+            leg.quote_key,
+            leg.event_id,
+            DecimalSubclass("2"),
+            Decimal("0.5"),
+        )
+        odds_subclass_candidate = ParlayCandidate(
+            (odds_subclass_leg,),
+            Decimal("2"),
+            Decimal("0.5"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal odds must be an exact Decimal",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [odds_subclass_candidate],
+                [group],
+                stake="1",
+            )
+
+        probability_subclass_leg = CandidateLeg(
+            leg.quote_key,
+            leg.event_id,
+            Decimal("2"),
+            DecimalSubclass("0.5"),
+        )
+        probability_subclass_candidate = ParlayCandidate(
+            (probability_subclass_leg,),
+            Decimal("2"),
+            Decimal("0.5"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "leg probability must be an exact Decimal",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [probability_subclass_candidate],
+                [group],
+                stake="1",
+            )
+
+        summary_subclass = ParlayCandidate(
+            (leg,),
+            DecimalSubclass("2"),
+            Decimal("0.5"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "combined_odds must be an exact finite Decimal",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [summary_subclass],
+                [group],
+                stake="1",
+            )
+
+        impact = optimizer.evaluate_candidates(
+            [],
+            [canonical],
+            [group],
+            stake=Decimal("1"),
+        )[0]
+        self.assertEqual(impact.candidate, canonical)
+        self.assertEqual(impact.stake, Decimal("1"))
+
     def test_result_limit_requires_positive_non_boolean_integer(self) -> None:
         for invalid in (True, False, 1.5, Decimal("2"), "2", None):
             with self.subTest(value=repr(invalid)):

@@ -3799,9 +3799,15 @@ def test_stale_instance_failure_cannot_override_newer_state_transition_generatio
         assert current.snapshot().last_error_code == "OPERATOR_PAUSE"
 
         # This instance intentionally retains the pre-transition generation.
-        # Its bounded failure publication must not become authoritative after
-        # the canonical state generation has advanced in another instance.
-        stale.record_failure(code="STALE_PROVIDER_FAILURE")
+        # The transition cleanup now publishes a bounded same-generation tombstone,
+        # so a stale process must be rejected before it can return a misleading
+        # publication receipt for a generation that canonical state superseded.
+        try:
+            stale.record_failure(code="STALE_PROVIDER_FAILURE")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "stale continuous session instance" in str(exc)
+        else:
+            raise AssertionError("stale instance returned a failure publication")
 
         reopened = continuous_session._ContinuousSessionState(
             root / "continuous_session.json",
@@ -3821,8 +3827,9 @@ def test_stale_instance_failure_cannot_override_newer_state_transition_generatio
                 encoding="utf-8"
             )
         )
-        assert sidecar["observed_generation"] < canonical["generation"]
-        assert sidecar["observed_state"] == "RUNNING"
+        assert sidecar["observed_generation"] == canonical["generation"]
+        assert sidecar["observed_state"] == "PAUSED"
+        assert sidecar["last_error_code"] is None
         assert canonical["state"] == "PAUSED"
         assert canonical["last_error_code"] == "OPERATOR_PAUSE"
 

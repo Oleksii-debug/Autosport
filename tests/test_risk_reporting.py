@@ -116,6 +116,7 @@ class PaperRiskReportingTests(unittest.TestCase):
         goal = self._goal()
         entered = threading.Event()
         release = threading.Event()
+        probe_started = threading.Event()
         probe_acquired = threading.Event()
         build_errors: list[BaseException] = []
         original = risk_reporting._paper_equity_source_state_sha256
@@ -137,6 +138,7 @@ class PaperRiskReportingTests(unittest.TestCase):
                 build_errors.append(exc)
 
         def probe() -> None:
+            probe_started.set()
             with paper_module._require_paperbook_operation_lock(book):
                 probe_acquired.set()
 
@@ -151,7 +153,8 @@ class PaperRiskReportingTests(unittest.TestCase):
 
             probe_worker = threading.Thread(target=probe)
             probe_worker.start()
-            self.assertFalse(probe_acquired.wait(timeout=0.1))
+            self.assertTrue(probe_started.wait(timeout=2))
+            self.assertFalse(probe_acquired.is_set())
 
             release.set()
             worker.join(timeout=2)

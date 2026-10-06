@@ -3465,10 +3465,6 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     raise ContinuousSessionError(
                         "lifecycle returned invalid registered input ids"
                     )
-                if registered != tuple(registration_callback_ids):
-                    raise ContinuousSessionError(
-                        "lifecycle registration receipt conflicts with coordinator callbacks"
-                    )
                 # The lifecycle is canonical about eligibility; the index is canonical
                 # about dependency routing. Keep both outputs for auditability, but never
                 # report a lifecycle registration that is absent from the routing index.
@@ -3497,6 +3493,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         )
                     if input_id not in newly_registered:
                         newly_registered.append(input_id)
+                if registered != tuple(registration_callback_ids):
+                    raise ContinuousSessionError(
+                        "lifecycle registration receipt conflicts with coordinator callbacks"
+                    )
 
                 resolutions = _settlement_resolutions_method(
                     self,

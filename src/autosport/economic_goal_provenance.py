@@ -179,9 +179,17 @@ _PROVENANCE_FIELD_NAMES: Final = (
     "contract_sha256",
 )
 
-_CANONICAL_PROVENANCE_FIELD_GETTERS: Final = tuple(
-    (name, EconomicGoalProvenance.__dict__[name].__get__)
+_CANONICAL_PROVENANCE_FIELD_DESCRIPTORS: Final = tuple(
+    (name, EconomicGoalProvenance.__dict__[name])
     for name in _PROVENANCE_FIELD_NAMES
+)
+_CANONICAL_PROVENANCE_FIELD_GETTERS: Final = tuple(
+    (name, descriptor.__get__)
+    for name, descriptor in _CANONICAL_PROVENANCE_FIELD_DESCRIPTORS
+)
+_CANONICAL_PROVENANCE_FIELD_SETTERS: Final = tuple(
+    descriptor.__set__
+    for _, descriptor in _CANONICAL_PROVENANCE_FIELD_DESCRIPTORS
 )
 
 def _canonical_provenance_snapshot(
@@ -327,17 +335,21 @@ def _provenance_init_authority(
     bankroll_id: str,
     contract_sha256: str,
     _validator=_CANONICAL_PROVENANCE_VALIDATOR,
-    _setattr=_PROVENANCE_OBJECT_SETATTR,
+    _field_setters=_CANONICAL_PROVENANCE_FIELD_SETTERS,
+    _zip=zip,
 ) -> None:
-    for name, value in (
-        ("schema", schema),
-        ("schema_version", schema_version),
-        ("goal_id", goal_id),
-        ("revision", revision),
-        ("bankroll_id", bankroll_id),
-        ("contract_sha256", contract_sha256),
+    for setter, value in _zip(
+        _field_setters,
+        (
+            schema,
+            schema_version,
+            goal_id,
+            revision,
+            bankroll_id,
+            contract_sha256,
+        ),
     ):
-        _setattr(self, name, value)
+        setter(self, value)
     _validator(self)
 
 
@@ -432,18 +444,22 @@ def _build_provenance(
     _provenance_type=_CANONICAL_PROVENANCE_TYPE,
     _validator=_CANONICAL_PROVENANCE_VALIDATOR,
     _object_new=object.__new__,
-    _object_setattr=object.__setattr__,
+    _field_setters=_CANONICAL_PROVENANCE_FIELD_SETTERS,
+    _zip=zip,
 ) -> EconomicGoalProvenance:
     evidence = _object_new(_provenance_type)
-    for name, value in (
-        ("schema", schema),
-        ("schema_version", schema_version),
-        ("goal_id", goal_id),
-        ("revision", revision),
-        ("bankroll_id", bankroll_id),
-        ("contract_sha256", contract_sha256),
+    for setter, value in _zip(
+        _field_setters,
+        (
+            schema,
+            schema_version,
+            goal_id,
+            revision,
+            bankroll_id,
+            contract_sha256,
+        ),
     ):
-        _object_setattr(evidence, name, value)
+        setter(evidence, value)
     _validator(evidence)
     return evidence
 

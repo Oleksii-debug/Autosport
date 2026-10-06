@@ -661,6 +661,43 @@ def test_provenance_constructor_rejects_code_rebinding(monkeypatch) -> None:
         operation.__code__ = original_code
 
 
+def test_provenance_construction_uses_captured_slot_setters(monkeypatch) -> None:
+    expected = provenance_for(_goal())
+    expected_snapshot = economic_goal_provenance_module._canonical_provenance_snapshot(
+        expected
+    )
+
+    for name in economic_goal_provenance_module._PROVENANCE_FIELD_NAMES:
+        class HostileDescriptor:
+            def __get__(self, instance, owner=None):
+                raise AssertionError("rebound provenance descriptor getter executed")
+
+            def __set__(self, instance, value):
+                raise AssertionError("rebound provenance descriptor setter executed")
+
+        monkeypatch.setattr(EconomicGoalProvenance, name, HostileDescriptor())
+
+        direct = EconomicGoalProvenance(
+            schema=expected_snapshot[0],
+            schema_version=expected_snapshot[1],
+            goal_id=expected_snapshot[2],
+            revision=expected_snapshot[3],
+            bankroll_id=expected_snapshot[4],
+            contract_sha256=expected_snapshot[5],
+        )
+        assert (
+            economic_goal_provenance_module._canonical_provenance_snapshot(direct)
+            == expected_snapshot
+        )
+
+        derived = provenance_for(_goal())
+        assert (
+            economic_goal_provenance_module._canonical_provenance_snapshot(derived)
+            == expected_snapshot
+        )
+        monkeypatch.undo()
+
+
 def test_provenance_constructor_and_post_init_bindings_are_sealed() -> None:
     def forged(*args, **kwargs):
         raise AssertionError("rebound provenance constructor authority executed")

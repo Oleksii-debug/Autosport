@@ -396,6 +396,54 @@ def test_manifest_digest_is_deterministic_with_fail_closed_extensions() -> None:
     assert len(one.manifest_sha256) == 64
 
 
+
+def test_every_extension_conclusive_state_requires_product_owned_issuer() -> None:
+    extension_capabilities = (
+        ProviderManifestCapability.SPORTS,
+        ProviderManifestCapability.MARKETS,
+        ProviderManifestCapability.POLL,
+        ProviderManifestCapability.STREAM,
+        ProviderManifestCapability.PROVIDER_TIMESTAMPS,
+        ProviderManifestCapability.IMMEDIATE_ACK,
+        ProviderManifestCapability.IDEMPOTENCY,
+        ProviderManifestCapability.SETTLEMENT,
+    )
+    baseline = _manifest()
+
+    for capability in extension_capabilities:
+        for state in (
+            ProviderManifestState.PROVEN,
+            ProviderManifestState.UNSUPPORTED,
+        ):
+            values = (
+                ("football",)
+                if state is ProviderManifestState.PROVEN
+                and capability
+                in {
+                    ProviderManifestCapability.SPORTS,
+                    ProviderManifestCapability.MARKETS,
+                }
+                else ()
+            )
+            fact = _fact(capability, state=state, values=values)
+
+            with pytest.raises(
+                ProviderCapabilityManifestError,
+                match="product-owned evidence authority",
+            ):
+                _manifest(extension_facts=(fact,))
+
+            direct_facts = tuple(
+                fact if item.capability is capability else item
+                for item in baseline.facts
+            )
+            with pytest.raises(
+                ProviderCapabilityManifestError,
+                match="product-owned evidence authority",
+            ):
+                replace(baseline, facts=direct_facts)
+
+
 def test_duplicate_extension_fact_is_rejected() -> None:
     stream = _fact(ProviderManifestCapability.STREAM)
     with pytest.raises(ProviderCapabilityManifestError, match="duplicate extension"):

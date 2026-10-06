@@ -26,29 +26,34 @@ _HELPERS = runpy.run_path(
     str(Path(__file__).with_name("test_betfair_supervised_execution.py"))
 )
 _prepared = _HELPERS["_prepared"]
-_response = _HELPERS["_response"]
 READBACK_AT = _HELPERS["READBACK_AT"]
 SUBMITTED_AT = _HELPERS["SUBMITTED_AT"]
 
 
-class _ForgedUrlopenResponse:
-    def __init__(self, payload: bytes) -> None:
-        self._payload = payload
+def test_canonical_transport_authority_tracks_real_build_opener_graph() -> None:
+    """The supervised seal must match the actual account transport dependencies."""
 
-    def __enter__(self):
-        return self
+    post_globals = UrllibBetfairHttpTransport.post.__globals__
+    assert "urlopen" not in post_globals
+    assert (
+        post_globals["Request"]
+        is betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_REQUEST
+    )
+    assert (
+        post_globals["build_opener"]
+        is betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_BUILD_OPENER
+    )
+    assert (
+        post_globals["HTTPRedirectHandler"]
+        is betfair_supervised_execution
+        ._CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER
+    )
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return False
 
-    def read(self, max_bytes: int) -> bytes:
-        return self._payload[:max_bytes]
-
-
-def test_rebound_urlopen_cannot_mint_terminal_provider_truth(
+def test_rebound_build_opener_cannot_mint_terminal_provider_truth(
     monkeypatch,
 ) -> None:
-    """The canonical write authority must bind its real network primitive."""
+    """A rebound account transport factory must fail before a durable attempt."""
 
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
@@ -63,40 +68,21 @@ def test_rebound_urlopen_cannot_mint_terminal_provider_truth(
             gate=gate,
             clock=lambda: READBACK_AT,
         )
-        forged_calls: list[dict[str, object]] = []
+        forged_calls: list[object] = []
 
-        def forged_urlopen(request, timeout):
-            decoded = json.loads((request.data or b"").decode("utf-8"))
-            forged_calls.append(
-                {
-                    "url": request.full_url,
-                    "request": decoded,
-                    "timeout": timeout,
-                }
-            )
-            return _ForgedUrlopenResponse(
-                _response(
-                    decoded,
-                    matched=action.requested_stake,
-                    average=action.requested_odds,
-                    bet_id="bet-forged-network-origin",
-                    order_status="EXECUTION_COMPLETE",
-                )
-            )
+        def forged_build_opener(*handlers):
+            forged_calls.append(handlers)
+            raise AssertionError("rebound build_opener must never be invoked")
 
         assert type(client._transport) is UrllibBetfairHttpTransport
         assert (
             UrllibBetfairHttpTransport.post
             is betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_HTTP_POST
         )
-        assert (
-            betfair_supervised_execution._parse_place_orders_response
-            is betfair_supervised_execution._CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
-        )
         monkeypatch.setattr(
             betfair_account_readonly,
-            "urlopen",
-            forged_urlopen,
+            "build_opener",
+            forged_build_opener,
         )
 
         with pytest.raises(
@@ -108,7 +94,7 @@ def test_rebound_urlopen_cannot_mint_terminal_provider_truth(
                 bound,
                 approval,
                 action_id=action.action_id,
-                attempt_id="attempt-forged-network-origin",
+                attempt_id="attempt-forged-build-opener",
                 profile=profile,
                 client=client,
                 clock=lambda: SUBMITTED_AT,
@@ -118,7 +104,7 @@ def test_rebound_urlopen_cannot_mint_terminal_provider_truth(
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
-def test_rebound_request_constructor_cannot_redirect_canonical_urlopen_to_forged_bytes(
+def test_rebound_request_constructor_cannot_redirect_private_opener_to_forged_bytes(
     monkeypatch,
 ) -> None:
     """Canonical provider truth must bind the Request constructor origin too."""
@@ -148,14 +134,7 @@ def test_rebound_request_constructor_cannot_redirect_canonical_urlopen_to_forged
                     "method": method,
                 }
             )
-            payload = _response(
-                decoded,
-                matched=action.requested_stake,
-                average=action.requested_odds,
-                bet_id="bet-forged-request-origin",
-                order_status="EXECUTION_COMPLETE",
-            )
-            return "data:application/json," + quote_from_bytes(payload)
+            return "data:application/json," + quote_from_bytes(b"{}")
 
         assert type(client._transport) is UrllibBetfairHttpTransport
         assert (
@@ -163,8 +142,8 @@ def test_rebound_request_constructor_cannot_redirect_canonical_urlopen_to_forged
             is betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_HTTP_POST
         )
         assert (
-            betfair_account_readonly.urlopen
-            is betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_URLOPEN
+            betfair_account_readonly.build_opener
+            is betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_BUILD_OPENER
         )
         assert (
             betfair_supervised_execution._parse_place_orders_response
@@ -194,10 +173,11 @@ def test_rebound_request_constructor_cannot_redirect_canonical_urlopen_to_forged
         assert forged_calls == []
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
-def test_dual_rebound_urlopen_and_canonical_alias_cannot_mint_provider_truth(
+
+def test_dual_rebound_build_opener_and_canonical_alias_cannot_mint_provider_truth(
     monkeypatch,
 ) -> None:
-    """A mutable test alias must never select terminal production provider bytes."""
+    """Rebinding both mutable aliases cannot replace the captured opener graph."""
 
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
@@ -212,36 +192,21 @@ def test_dual_rebound_urlopen_and_canonical_alias_cannot_mint_provider_truth(
             gate=gate,
             clock=lambda: READBACK_AT,
         )
-        forged_calls: list[dict[str, object]] = []
+        forged_calls: list[object] = []
 
-        def forged_urlopen(request, timeout):
-            decoded = json.loads((request.data or b"").decode("utf-8"))
-            forged_calls.append(
-                {
-                    "url": request.full_url,
-                    "request": decoded,
-                    "timeout": timeout,
-                }
-            )
-            return _ForgedUrlopenResponse(
-                _response(
-                    decoded,
-                    matched=action.requested_stake,
-                    average=action.requested_odds,
-                    bet_id="bet-forged-dual-rebind",
-                    order_status="EXECUTION_COMPLETE",
-                )
-            )
+        def forged_build_opener(*handlers):
+            forged_calls.append(handlers)
+            raise AssertionError("forged build_opener must never be invoked")
 
         monkeypatch.setattr(
             betfair_account_readonly,
-            "urlopen",
-            forged_urlopen,
+            "build_opener",
+            forged_build_opener,
         )
         monkeypatch.setattr(
             betfair_supervised_execution,
-            "_CANONICAL_URLLIB_BETFAIR_URLOPEN",
-            forged_urlopen,
+            "_CANONICAL_URLLIB_BETFAIR_BUILD_OPENER",
+            forged_build_opener,
         )
 
         with pytest.raises(
@@ -261,4 +226,3 @@ def test_dual_rebound_urlopen_and_canonical_alias_cannot_mint_provider_truth(
 
         assert forged_calls == []
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
-

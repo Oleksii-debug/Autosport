@@ -240,36 +240,55 @@ def _make_provenance_constructor_authority(operation):
     operation_kwdefaults = operation.__kwdefaults__
     error_type = EconomicGoalProvenanceError
 
-    @wraps(operation)
+    def require_authority() -> None:
+        if operation.__code__ is not operation_code:
+            raise error_type("economic-goal provenance constructor authority changed")
+        if operation.__defaults__ is not operation_defaults:
+            raise error_type(
+                "economic-goal provenance constructor defaults authority changed"
+            )
+        if operation.__kwdefaults__ is not operation_kwdefaults:
+            raise error_type(
+                "economic-goal provenance constructor keyword defaults authority changed"
+            )
+
     def bound(*args, **kwargs):
-        if operation.__code__ is not operation_code:
-            raise error_type("economic-goal provenance constructor authority changed")
-        if operation.__defaults__ is not operation_defaults:
-            raise error_type(
-                "economic-goal provenance constructor defaults authority changed"
-            )
-        if operation.__kwdefaults__ is not operation_kwdefaults:
-            raise error_type(
-                "economic-goal provenance constructor keyword defaults authority changed"
-            )
+        require_authority()
         result = operation(*args, **kwargs)
-        if operation.__code__ is not operation_code:
-            raise error_type("economic-goal provenance constructor authority changed")
-        if operation.__defaults__ is not operation_defaults:
-            raise error_type(
-                "economic-goal provenance constructor defaults authority changed"
-            )
-        if operation.__kwdefaults__ is not operation_kwdefaults:
-            raise error_type(
-                "economic-goal provenance constructor keyword defaults authority changed"
-            )
+        require_authority()
         return result
 
+    return bound
 
-_CANONICAL_PROVENANCE_INIT: Final = _make_provenance_constructor_authority(
+
+def _bind_provenance_constructor(operation):
+    bound_operation = _make_provenance_constructor_authority(operation)
+
+    def bound(
+        self: EconomicGoalProvenance,
+        schema: str,
+        schema_version: int,
+        goal_id: str,
+        revision: int,
+        bankroll_id: str,
+        contract_sha256: str,
+    ) -> None:
+        bound_operation(
+            self,
+            schema,
+            schema_version,
+            goal_id,
+            revision,
+            bankroll_id,
+            contract_sha256,
+        )
+
+    return bound
+
+
+_CANONICAL_PROVENANCE_INIT: Final = _bind_provenance_constructor(
     _provenance_init_authority
 )
-EconomicGoalProvenance.__init__ = _CANONICAL_PROVENANCE_INIT
 
 
 def _build_provenance(

@@ -215,3 +215,68 @@ def test_successor_boundary_equal_admission_fails_closed_without_session_binding
             session_store=session_store,
             session_evidence=successor,
         )
+
+
+def test_session_turnover_require_current_rejects_stale_book_projection(tmp_path):
+    EconomicGoalStore(tmp_path).initialize_owner(_goal())
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    session_store = ProductEconomicSessionStore(tmp_path)
+    session = session_store.current()
+    current = PaperBook.load(tmp_path / "paper_book.json")
+    first = PaperSessionTurnoverResolver.resolve(
+        book=current,
+        goal_store=EconomicGoalStore(tmp_path),
+        session_store=session_store,
+        session_evidence=session,
+    )
+
+    changed = PaperBook.load(tmp_path / "paper_book.json")
+    _add_current_admission(tmp_path, changed, stake="2", suffix="stale-projection")
+    changed.save(tmp_path / "paper_book.json")
+    durable = PaperBook.load(tmp_path / "paper_book.json")
+
+    import pytest
+    from autosport.risk_turnover_evidence import (
+        PaperSessionTurnoverEvidenceMismatchError,
+    )
+
+    with pytest.raises(PaperSessionTurnoverEvidenceMismatchError):
+        PaperSessionTurnoverResolver.require_current(
+            first,
+            book=durable,
+            goal_store=EconomicGoalStore(tmp_path),
+            session_store=ProductEconomicSessionStore(tmp_path),
+            session_evidence=ProductEconomicSessionStore(tmp_path).current(),
+        )
+
+
+def test_session_turnover_require_current_rejects_predecessor_after_goal_transition(tmp_path):
+    goal_store = EconomicGoalStore(tmp_path)
+    goal_store.initialize_owner(_goal())
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    session_store = ProductEconomicSessionStore(tmp_path)
+    predecessor = session_store.current()
+    evidence = PaperSessionTurnoverResolver.resolve(
+        book=PaperBook.load(tmp_path / "paper_book.json"),
+        goal_store=goal_store,
+        session_store=session_store,
+        session_evidence=predecessor,
+    )
+    goal_store.persist_automatic_successor(_goal(revision=2))
+    successor = session_store.transition_to_current_goal(predecessor)
+
+    import pytest
+    from autosport.risk_turnover_evidence import (
+        PaperSessionTurnoverEvidenceIncompleteError,
+    )
+
+    with pytest.raises(PaperSessionTurnoverEvidenceIncompleteError):
+        PaperSessionTurnoverResolver.require_current(
+            evidence,
+            book=PaperBook.load(tmp_path / "paper_book.json"),
+            goal_store=EconomicGoalStore(tmp_path),
+            session_store=session_store,
+            session_evidence=successor,
+        )

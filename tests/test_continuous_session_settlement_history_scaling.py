@@ -2032,3 +2032,42 @@ def test_conflicting_duplicate_settlement_evidence_id_fails_closed() -> None:
             assert "evidence_id values must be unique" in str(exc)
         else:
             raise AssertionError("conflicting duplicate evidence id was accepted")
+
+
+def test_concurrent_successes_return_distinct_committed_cycle_indexes() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        first = _state_with_history(root, _SMALL_HISTORY)
+        second = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        barrier = threading.Barrier(2)
+        results: list[int] = []
+        results_lock = threading.Lock()
+
+        def succeed(state: continuous_session._ContinuousSessionState) -> None:
+            barrier.wait()
+            cycle_index = state.record_success(
+                at="2026-10-06T04:59:00+00:00",
+                full_refresh=False,
+                settlement_evidence=(),
+            )
+            with results_lock:
+                results.append(cycle_index)
+
+        threads = [
+            threading.Thread(target=succeed, args=(first,), daemon=True),
+            threading.Thread(target=succeed, args=(second,), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2.0)
+            assert not thread.is_alive()
+
+        assert sorted(results) == [5, 6]
+        assert first.snapshot().cycles_completed == 6

@@ -675,13 +675,17 @@ def _first_execution_risk_authority(
         )
     provider_account = authority["provider_account"]
     assert isinstance(provider_account, list)
+    if durable_event.market_semantics_id is not None:
+        raise PaperExecutionAdoptionError(
+            "durable paper-value restart cannot prove market-semantics risk identity "
+            "until canonical TicketLeg binds market_semantics_id"
+        )
     leg = TicketLeg(
         durable_event.event_id,
         durable_event.market_id,
         durable_event.selection_id,
         durable_event.decimal_odds,
         sport=durable_event.sport,
-        market_semantics_id=durable_event.market_semantics_id,
         exchange_side=durable_event.exchange_side,
     )
     proposal_context = ProposedTicketRiskContext(

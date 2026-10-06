@@ -847,14 +847,8 @@ class HeadlessCollectorService:
     def stop(self, reason: str = "operator_stop") -> None:
         self._state.stop(at=self.clock(), reason=reason)
 
-    def run(self, *, max_cycles: int | None = None) -> CollectorRunResult:
-        """Run against one frozen prospective cadence without shifting missed slots."""
-        if max_cycles is not None and (
-            isinstance(max_cycles, bool)
-            or not isinstance(max_cycles, int)
-            or max_cycles <= 0
-        ):
-            raise ValueError("max_cycles must be a positive integer or None")
+    def _ensure_prospective_schedule(self) -> None:
+        """Create or re-resolve the one durable prospective schedule for this run."""
 
         schedule_anchor = self.clock()
         _CollectorServiceState._instant(schedule_anchor, "schedule_anchor")
@@ -882,40 +876,66 @@ class HeadlessCollectorService:
                 "cannot establish prospective collector schedule authority"
             ) from exc
 
-        cycles_executed = 0
-        last_cycle: CollectorCycleResult | None = None
-        while max_cycles is None or cycles_executed < max_cycles:
+    def _wait_for_next_scheduled_slot(self) -> dict[str, object]:
+        """Resolve the next canonical due slot and wait until it is due."""
+
+        reason = self._requested_stop_reason()
+        if reason is not None:
+            self.stop(reason)
+            raise _StopRequested(reason)
+        try:
+            schedule_slot = self.delta_store._next_collector_schedule_slot(
+                source_id=self.source_id,
+                run_id=self._state.run_id,
+            )
+        except (TypeError, ValueError) as exc:
+            raise CollectorServiceError(
+                "cannot resolve next canonical collector due slot"
+            ) from exc
+
+        due_at = _CollectorServiceState._instant(
+            schedule_slot.get("due_at"),
+            "due_at",
+        )
+        now = _CollectorServiceState._instant(self.clock(), "clock")
+        while now < due_at:
+            self.sleep((due_at - now).total_seconds())
             reason = self._requested_stop_reason()
             if reason is not None:
                 self.stop(reason)
-                break
-            try:
-                schedule_slot = self.delta_store._next_collector_schedule_slot(
-                    source_id=self.source_id,
-                    run_id=self._state.run_id,
-                )
-            except (TypeError, ValueError) as exc:
-                raise CollectorServiceError(
-                    "cannot resolve next canonical collector due slot"
-                ) from exc
-
-            due_at = _CollectorServiceState._instant(
-                schedule_slot.get("due_at"),
-                "due_at",
-            )
+                raise _StopRequested(reason)
             now = _CollectorServiceState._instant(self.clock(), "clock")
-            while now < due_at:
-                self.sleep((due_at - now).total_seconds())
-                reason = self._requested_stop_reason()
-                if reason is not None:
-                    self.stop(reason)
-                    break
-                now = _CollectorServiceState._instant(self.clock(), "clock")
-            if reason is not None:
-                break
+        return schedule_slot
 
+    def _run_scheduled_cycle(self) -> CollectorCycleResult:
+        self._ensure_prospective_schedule()
+        schedule_slot = self._wait_for_next_scheduled_slot()
+        return self.run_cycle(_schedule_slot=schedule_slot)
+
+    def run_scheduled_cycle(self) -> CollectorCycleResult:
+        """Run one provider-facing cycle bound to the frozen prospective schedule."""
+
+        try:
+            return self._run_scheduled_cycle()
+        except _StopRequested as exc:
+            raise CollectorServiceStoppedError(
+                "collector STOP requested before scheduled cycle completed"
+            ) from exc
+
+    def run(self, *, max_cycles: int | None = None) -> CollectorRunResult:
+        """Run against one frozen prospective cadence without shifting missed slots."""
+        if max_cycles is not None and (
+            isinstance(max_cycles, bool)
+            or not isinstance(max_cycles, int)
+            or max_cycles <= 0
+        ):
+            raise ValueError("max_cycles must be a positive integer or None")
+
+        cycles_executed = 0
+        last_cycle: CollectorCycleResult | None = None
+        while max_cycles is None or cycles_executed < max_cycles:
             try:
-                last_cycle = self.run_cycle(_schedule_slot=schedule_slot)
+                last_cycle = self._run_scheduled_cycle()
             except _StopRequested:
                 break
             cycles_executed += 1

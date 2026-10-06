@@ -1039,3 +1039,42 @@ def test_profile_validator_and_type_substitution_cannot_replace_canonical_profil
             source_payload_sha256=_HASH_C,
         )
 
+def test_dependency_identity_descriptor_rebinding_fails_closed(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=_T1,
+        source_ref="integration-manifest",
+        source_payload_sha256=_HASH_B,
+    )
+    original_profile_id = profile.profile_id
+    original_evidence_id = integration.evidence_id
+
+    monkeypatch.setattr(
+        BookmakerCapabilityProfile,
+        "profile_id",
+        property(lambda self: original_profile_id),
+    )
+    monkeypatch.setattr(
+        BookmakerIntegrationEvidence,
+        "evidence_id",
+        property(lambda self: original_evidence_id),
+    )
+
+    with pytest.raises(
+        ProviderCapabilityManifestError,
+        match="dependency identity surface changed",
+    ):
+        build_provider_capability_manifest(
+            profile,
+            integration,
+            manifest_ref="provider-capability-manifest",
+            manifest_version=30,
+            observed_at=_T2,
+            source_ref="product-provider-capability-projection",
+            source_payload_sha256=_HASH_C,
+        )
+

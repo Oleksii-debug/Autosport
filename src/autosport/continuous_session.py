@@ -49,14 +49,18 @@ def _bind_canonical_settlement_engine(method):
 
     canonical_engine_type = SettlementEngine
     canonical_resolution_validate = SettlementResolution.validate
+    canonical_replace = replace
 
     def guarded(self, *args, **kwargs):
         if "_settlement_engine_type" in kwargs:
             raise TypeError("settlement engine origin is internal product authority")
         if "_resolution_validate" in kwargs:
             raise TypeError("settlement validator origin is internal product authority")
+        if "_replace" in kwargs:
+            raise TypeError("settlement copy authority is internal product authority")
         kwargs["_settlement_engine_type"] = canonical_engine_type
         kwargs["_resolution_validate"] = canonical_resolution_validate
+        kwargs["_replace"] = canonical_replace
         return method(self, *args, **kwargs)
 
     guarded.__name__ = method.__name__
@@ -1687,11 +1691,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         as_of: str,
         _resolution_validate: Callable[..., None] = SettlementResolution.validate,
         _resolution_validate_code: object = SettlementResolution.validate.__code__,
+        _replace: Callable[..., SettlementResolution] = replace,
+        _replace_code: object = replace.__code__,
     ) -> tuple[SettlementResolution, ...]:
         if (
             SettlementResolution.validate is not _resolution_validate
             or getattr(_resolution_validate, "__code__", None)
             is not _resolution_validate_code
+            or replace is not _replace
+            or getattr(_replace, "__code__", None) is not _replace_code
         ):
             raise ContinuousSessionError(
                 "canonical settlement resolution validator authority changed"
@@ -1756,7 +1764,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             # authority-owned mapping and copying it afterwards leaves a TOCTOU
             # window where external mutation can change already-validated
             # settlement truth before product state takes ownership.
-            resolution = replace(
+            resolution = _replace(
                 resolution,
                 quote_outcomes=resolution.quote_outcomes.copy(),
             )
@@ -1818,6 +1826,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         resolutions: tuple[SettlementResolution, ...],
         _settlement_engine_type: type[SettlementEngine],
         _resolution_validate: Callable[..., None],
+        _replace: Callable[..., SettlementResolution],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if not resolutions:
             return (), ()
@@ -1828,6 +1837,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         if SettlementResolution.validate is not _resolution_validate:
             raise ContinuousSessionError(
                 "settlement consumer validator authority changed"
+            )
+        if replace is not _replace:
+            raise ContinuousSessionError(
+                "settlement consumer copy authority changed"
             )
         if type(resolutions) is not tuple:
             raise TypeError("resolutions must be an exact tuple")
@@ -1845,7 +1858,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             # Take ownership of the only mutable field before any economic I/O.
             # A caller retaining the input resolution must not be able to alter
             # outcomes after the consumer has accepted the batch.
-            resolution = replace(
+            resolution = _replace(
                 resolution,
                 quote_outcomes=resolution.quote_outcomes.copy(),
             )

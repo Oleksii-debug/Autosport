@@ -371,6 +371,24 @@ class _ManifestStore:
                 )
         return raw
 
+    def load_existing(self) -> ProductCompositionManifest | None:
+        """Return verified durable composition without creating product state."""
+
+        if not self.path.exists():
+            return None
+        raw = self._read_raw()
+        source_id = raw["source_id"]
+        initial_bankroll = raw["initial_bankroll"]
+        authority_identity = raw["settlement_authority_identity"]
+        assert type(source_id) is str
+        assert type(initial_bankroll) is str
+        assert authority_identity is None or type(authority_identity) is str
+        return ProductCompositionManifest(
+            source_id=source_id,
+            initial_bankroll=initial_bankroll,
+            settlement_authority_identity=authority_identity,
+        )
+
     def load_or_create(
         self,
         *,
@@ -415,6 +433,20 @@ class _ManifestStore:
             initial_bankroll=initial_bankroll,
             settlement_authority_identity=settlement_authority_identity,
         )
+
+
+def read_product_composition_manifest(
+    workspace: str | Path,
+) -> ProductCompositionManifest | None:
+    """Read existing durable product composition through its canonical verifier."""
+
+    try:
+        root = Path(workspace).expanduser().resolve(strict=False)
+    except (TypeError, ValueError, OSError, RuntimeError) as exc:
+        raise ProductCompositionError(
+            "product composition workspace cannot be resolved"
+        ) from exc
+    return _ManifestStore(root / "product_composition.json").load_existing()
 
 
 def _settlement_authority_identity(

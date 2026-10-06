@@ -3884,7 +3884,7 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
         self.assertFalse(result.joint_terminal_space_exact)
         self.assertEqual(
             result.path_protocol,
-            "paperbook.cash-floor.open-all-before-settlement.v1",
+            "paperbook.cash-floor.open-all-capital-before-settlement.v2",
         )
         self.assertEqual(result.base_cash_balance, base)
         self.assertEqual(

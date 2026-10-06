@@ -3,6 +3,11 @@ import unittest
 from autosport.evidence import EvidenceItem, ResearchPacket
 
 
+class _TrapStr(str):
+    def strip(self, *args: object, **kwargs: object) -> str:
+        raise AssertionError("nested evidence identity must reject str subclass before virtual methods")
+
+
 class EvidenceIdentitySchemaTests(unittest.TestCase):
     def _item(self, *, evidence_id: str = "evidence-1", as_of_ts: str = "2026-10-07T00:00:00+00:00"):
         return EvidenceItem(
@@ -90,6 +95,24 @@ class EvidenceIdentitySchemaTests(unittest.TestCase):
                 generated_at="2026-10-07T00:01:00+00:00",
                 evidence=(object(),),
             )
+
+    def test_research_packet_revalidates_nested_evidence_identity_after_tamper(self):
+        item = self._item()
+        object.__setattr__(item, "evidence_id", _TrapStr("evidence-1"))
+
+        with self.assertRaisesRegex(ValueError, "evidence_id.*canonical string"):
+            ResearchPacket(
+                event_id="event-1",
+                generated_at="2026-10-07T00:01:00+00:00",
+                evidence=(item,),
+            )
+
+    def test_canonical_hash_revalidates_identity_after_tamper(self):
+        item = self._item()
+        object.__setattr__(item, "source", " provider:test")
+
+        with self.assertRaisesRegex(ValueError, "source.*canonical string"):
+            _ = item.canonical_hash
 
     def test_research_packet_rejects_duplicate_evidence_identity(self):
         first = self._item(evidence_id="same-evidence")

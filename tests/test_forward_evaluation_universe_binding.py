@@ -28,6 +28,7 @@ from autosport.forward_evaluation_universe_binding import (
     ForwardEvaluationUniverseBindingError,
     ForwardUniversePrecommitLocator,
     authorize_forward_source_receipts as _authorize_forward_source_receipts,
+    resolve_forward_universe_authority_identity as _resolve_forward_universe_authority_identity,
     resolve_forward_universe_members as _resolve_forward_universe_members,
 )
 from autosport.forward_evidence_completeness import (
@@ -85,6 +86,14 @@ def authorize_forward_source_receipts(*, store, protocol, opportunities):
         protocol=protocol,
         precommit=getattr(store, "_test_forward_precommit_locator", object()),
         opportunities=opportunities,
+    )
+
+
+def resolve_forward_universe_authority_identity(*, store, protocol):
+    return _resolve_forward_universe_authority_identity(
+        store=store,
+        protocol=protocol,
+        precommit=getattr(store, "_test_forward_precommit_locator", object()),
     )
 
 
@@ -392,6 +401,46 @@ def test_empty_complete_board_becomes_authoritative_excluded_receipt_after_resta
     assert receipts[0].receipt_sha256 == opportunities[0].source_receipt_sha256
     assert receipts[0].opportunity_id == opportunities[0].opportunity_id
     assert receipts[0].universe_rule_result is UniverseResult.EXCLUDED
+
+
+def test_post_observation_identity_projects_exact_guarded_universe(
+    tmp_path, monkeypatch
+):
+    store = _stored_universe(tmp_path, monkeypatch, empty=False)
+    protocol = _protocol()
+
+    expectations = resolve_forward_universe_members(store=store, protocol=protocol)
+    identity = resolve_forward_universe_authority_identity(
+        store=store,
+        protocol=protocol,
+    )
+    ledger = ProviderEvaluationUniverseStore.load(store)
+    assert ledger is not None
+
+    assert identity.prospective_evaluation_plan_sha256 == PROSPECTIVE_PLAN_SHA
+    assert identity.prospective_evaluation_plan_sha256 != ledger.universe.universe_sha256
+    assert identity.universe_sha256 == ledger.universe.universe_sha256
+    assert identity.membership_sha256 == ledger.universe.membership_sha256
+    assert identity.member_count == len(expectations) == len(ledger.universe.rows)
+    assert identity.precommit_authority_sha256 == expectations[0].precommit_authority_sha256
+    assert identity.backing_locator_sha256 == expectations[0].backing_locator_sha256
+    assert len(identity.authority_sha256) == 64
+
+
+def test_post_observation_identity_rejects_fake_store(
+    tmp_path, monkeypatch
+):
+    store = _stored_universe(tmp_path, monkeypatch, empty=True)
+
+    class FakeStore:
+        source_id = store.source_id
+
+    with pytest.raises(TypeError, match="exact ProviderEvaluationUniverseStore"):
+        _resolve_forward_universe_authority_identity(
+            store=FakeStore(),
+            protocol=_protocol(),
+            precommit=store._test_forward_precommit_locator,
+        )
 
 
 def test_provider_present_members_are_admitted_from_exact_durable_universe(

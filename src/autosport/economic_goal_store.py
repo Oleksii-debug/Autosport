@@ -11,6 +11,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final
+import weakref
 
 from .economic_goal import (
     AutomationLevel,
@@ -168,6 +169,25 @@ _CANONICAL_STRICT_JSON_LOADS: Final = strict_json_loads
 _CANONICAL_ATOMIC_WRITE_JSON: Final = atomic_write_json
 _CANONICAL_WORKSPACE_LOCK_TYPE: Final = WorkspaceEconomicLock
 _CANONICAL_PATH_TYPE: Final = Path
+
+_STORE_BINDINGS_BY_ID: Final = {}
+
+def _resolve_store_binding(
+    store: object,
+    _bindings=_STORE_BINDINGS_BY_ID,
+    _error_type=EconomicGoalContractError,
+):
+    entry = _bindings.get(id(store))
+    if entry is None or entry[0]() is not store:
+        raise _error_type("economic goal store binding is unavailable")
+    workspace, path, path_exists, path_read_text = entry[1:]
+    if type(getattr(store, "workspace", None)) is not type(workspace):
+        raise _error_type("economic goal store workspace binding was rebound")
+    if type(getattr(store, "path", None)) is not type(path):
+        raise _error_type("economic goal store path binding was rebound")
+    if store.workspace != workspace or store.path != path:
+        raise _error_type("economic goal store path/workspace binding was rebound")
+    return workspace, path, path_exists, path_read_text
 
 
 def economic_goal_to_payload(
@@ -343,16 +363,29 @@ class EconomicGoalStore:
         self,
         workspace: str | Path,
         _path_type=_CANONICAL_PATH_TYPE,
+        _bindings=_STORE_BINDINGS_BY_ID,
+        _weakref_ref=weakref.ref,
     ) -> None:
-        self.workspace = _path_type(workspace)
-        self.path = self.workspace / self.FILE_NAME
+        workspace_path = _path_type(workspace)
+        path = workspace_path / self.FILE_NAME
+        self.workspace = workspace_path
+        self.path = path
+        _bindings[id(self)] = (
+            _weakref_ref(self),
+            workspace_path,
+            path,
+            path.exists,
+            path.read_text,
+        )
 
     def load(
         self,
         _json_decoder=economic_goal_from_json,
+        _binding_resolver=_resolve_store_binding,
     ) -> EconomicGoalContract:
+        _, _, _, path_read_text = _binding_resolver(self)
         try:
-            text = self.path.read_text(encoding="utf-8")
+            text = path_read_text(encoding="utf-8")
         except OSError as exc:
             raise EconomicGoalContractError(
                 f"cannot read persisted economic goal: {exc}"
@@ -365,16 +398,18 @@ class EconomicGoalStore:
         _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
         _payload_encoder=economic_goal_to_payload,
         _writer=_CANONICAL_ATOMIC_WRITE_JSON,
+        _binding_resolver=_resolve_store_binding,
     ) -> None:
         """Create the first owner contract while holding the economic writer lock."""
 
-        with _lock_type(self.workspace):
-            if self.path.exists():
+        workspace, path, path_exists, _ = _binding_resolver(self)
+        with _lock_type(workspace):
+            if path_exists():
                 raise EconomicGoalContractError(
                     "persisted economic goal already exists; owner replacement requires "
                     "a separate authority boundary"
                 )
-            _writer(self.path, _payload_encoder(contract))
+            _writer(path, _payload_encoder(contract))
 
     def persist_automatic_successor(
         self,
@@ -383,10 +418,19 @@ class EconomicGoalStore:
         _transition_validator=_CANONICAL_TRANSITION_VALIDATOR,
         _payload_encoder=economic_goal_to_payload,
         _writer=_CANONICAL_ATOMIC_WRITE_JSON,
+        _json_decoder=economic_goal_from_json,
+        _binding_resolver=_resolve_store_binding,
     ) -> None:
         """Publish one machine revision only when durable authority cannot expand."""
 
-        with _lock_type(self.workspace):
-            previous = self.load()
+        workspace, path, _, path_read_text = _binding_resolver(self)
+        with _lock_type(workspace):
+            try:
+                previous_text = path_read_text(encoding="utf-8")
+            except OSError as exc:
+                raise EconomicGoalContractError(
+                    f"cannot read persisted economic goal: {exc}"
+                ) from exc
+            previous = _json_decoder(previous_text)
             _transition_validator(previous, candidate)
-            _writer(self.path, _payload_encoder(candidate))
+            _writer(path, _payload_encoder(candidate))

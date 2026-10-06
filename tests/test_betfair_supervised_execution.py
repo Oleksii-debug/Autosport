@@ -829,8 +829,10 @@ def test_owner_tightening_cannot_commit_before_attempt_or_transport(
 
         assert begin_interleaving_attempted
         assert transport_interleaving_attempted
-        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
-        assert result.attempt_state is AttemptState.ACCEPTED
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
         assert goal_store.load().revision == 1
         assert len(transport.calls) == 1
 
@@ -838,7 +840,7 @@ def test_owner_tightening_cannot_commit_before_attempt_or_transport(
         assert goal_store.load().emergency_stop is True
 
 
-def test_full_match_persists_provider_report_and_canonical_ack() -> None:
+def test_structural_full_match_requires_authenticated_provider_origin() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
@@ -861,15 +863,14 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
             clock=lambda: SUBMITTED_AT,
         )
 
-        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
-        assert result.attempt_state is AttemptState.ACCEPTED
-        assert result.external_receipt_id == "bet-123"
-        assert result.evidence_id is not None
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.external_receipt_id is None
+        assert result.evidence_id is None
         binding = ledger.provider_evidence_binding(
             "attempt-accepted"
         )
-        assert binding is not None
-        assert binding["evidence_id"] == result.evidence_id
+        assert binding is None
         request = transport.calls[0]["request"]
         assert request["method"] == "SportsAPING/v1.0/placeOrders"
         assert request["params"]["async"] is False
@@ -890,7 +891,7 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
         assert ledger.verify_integrity() > 0
 
 
-def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
+def test_structural_partial_response_requires_authenticated_provider_origin() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
@@ -917,15 +918,18 @@ def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
             clock=lambda: SUBMITTED_AT,
         )
 
-        assert result.outcome is PlaceOrdersOutcome.PARTIAL
-        assert result.attempt_state is AttemptState.PARTIAL
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert ledger.provider_evidence_binding("attempt-partial") is None
         assert not ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         )
 
 
-def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None:
+def test_structural_failure_response_requires_authenticated_provider_origin() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
@@ -951,15 +955,16 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
             clock=lambda: SUBMITTED_AT,
         )
 
-        assert result.outcome is PlaceOrdersOutcome.REJECTED
-        assert result.attempt_state is AttemptState.REJECTED
-        assert result.evidence_id is not None
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert ledger.provider_evidence_binding("attempt-rejected") is None
         provider_ref = ledger.provider_order_reference(
             attempt_id="attempt-rejected",
             provider_id="betfair",
         )
         assert provider_ref is not None
-        assert result.external_receipt_id == provider_ref
 
 
 def test_transport_timeout_mocked_readback_stays_non_authoritative_for_retry(

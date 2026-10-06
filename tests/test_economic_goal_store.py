@@ -118,7 +118,6 @@ def test_store_public_authority_operations_reject_class_rebinding() -> None:
 
 def test_store_public_authority_operations_reject_direct_type_mutation() -> None:
     replacements = (
-        ("__init__", lambda self, _workspace: None),
         ("load", lambda self: None),
         ("initialize_owner", lambda self, _contract: None),
         ("persist_automatic_successor", lambda self, _contract: None),

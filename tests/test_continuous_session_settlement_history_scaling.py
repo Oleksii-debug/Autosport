@@ -4151,4 +4151,47 @@ def test_sidecar_writer_rejects_runtime_text_validator_rebinding_before_publicat
 
         assert not error_path.exists()
 
+def test_post_commit_cleanup_failure_keeps_success_generation_authoritative() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="PRE_SUCCESS_FAILURE")
+
+        original_write_error = state._write_error_checkpoint
+
+        def crash_during_cleanup(code: str | None) -> None:
+            if code is None:
+                raise RuntimeError("simulated cleanup failure after success commit")
+            original_write_error(code)
+
+        before = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        with patch.object(state, "_write_error_checkpoint", crash_during_cleanup):
+            try:
+                state.record_success(
+                    at="2026-09-22T06:21:00+00:00",
+                    full_refresh=False,
+                    settlement_evidence=(),
+                )
+            except RuntimeError as exc:
+                assert "cleanup failure" in str(exc)
+            else:
+                raise AssertionError("post-commit cleanup failure was not simulated")
+
+        committed = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        assert committed["generation"] == before["generation"] + 1
+        assert committed["cycles_completed"] == before["cycles_completed"] + 1
+        assert state._generation == committed["generation"]
+        assert state._cycles_completed == committed["cycles_completed"]
+        assert state._last_success_at == committed["last_success_at"]
+        assert state._state == committed["state"]
+
+        publication = state.record_failure(code="POST_SUCCESS_FAILURE")
+        assert publication.generation == committed["generation"]
+        assert publication.cycles_completed == committed["cycles_completed"]
+        assert publication.last_success_at == committed["last_success_at"]
+        assert state.snapshot().last_error_code == "POST_SUCCESS_FAILURE"
 

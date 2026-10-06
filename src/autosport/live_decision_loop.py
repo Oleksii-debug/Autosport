@@ -2813,6 +2813,9 @@ class PersistentLiveDecisionLoop:
                 "actionability snapshots must be canonical mirror snapshots"
             )
         trigger_by_reason = {
+            LiveInputWaitReason.NO_COMPONENTS: (
+                LiveInputRecheckTrigger.MATCHING_COMPONENT_CHANGE.value
+            ),
             LiveInputWaitReason.NON_OPEN_STATUS: (
                 LiveInputRecheckTrigger.MARKET_STATUS_CHANGE.value
             ),

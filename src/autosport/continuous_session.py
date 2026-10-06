@@ -1681,7 +1681,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self,
         *,
         as_of: str,
+        _resolution_validate: Callable[..., None] = SettlementResolution.validate,
+        _resolution_validate_code: object = SettlementResolution.validate.__code__,
     ) -> tuple[SettlementResolution, ...]:
+        if (
+            SettlementResolution.validate is not _resolution_validate
+            or getattr(_resolution_validate, "__code__", None)
+            is not _resolution_validate_code
+        ):
+            raise ContinuousSessionError(
+                "canonical settlement resolution validator authority changed"
+            )
         if self.outcome_authority is None:
             return ()
         resolutions: list[SettlementResolution] = []
@@ -1730,7 +1740,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 quote_outcomes=dict(resolution.quote_outcomes),
             )
             try:
-                resolution.validate(as_of=as_of)
+                _resolution_validate(resolution, as_of=as_of)
             except (TypeError, ValueError) as exc:
                 raise ContinuousSessionError(
                     "outcome authority returned invalid settlement resolution"

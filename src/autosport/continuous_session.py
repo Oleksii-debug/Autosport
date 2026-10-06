@@ -2814,6 +2814,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
 
         dependency_authority: tuple[tuple[object, ...], ...] | None = None
+        dependency_entries: tuple[
+            tuple[str, FocusedMirrorDependency, tuple[object, ...]], ...
+        ] | None = None
         dependency_mirror: object | None = None
         dependency_storage: object | None = None
         matched_keys_storage: object | None = None
@@ -2831,16 +2834,53 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "canonical dependency routing reader authority changed"
                 )
-            dependency_authority = tuple(
-                dependency_fingerprint(
-                    _dependency_reader(dependency_index, input_id)
+            dependency_entries = tuple(
+                (
+                    input_id,
+                    _dependency_reader(dependency_index, input_id),
+                    dependency_fingerprint(
+                        _dependency_reader(dependency_index, input_id)
+                    ),
                 )
                 for input_id in indexed_input_ids
+            )
+            dependency_authority = tuple(
+                fingerprint
+                for _input_id, _dependency, fingerprint in dependency_entries
             )
             dependency_mirror = dependency_index._mirror
             dependency_storage = dependency_index._dependencies
             matched_keys_storage = dependency_index._matched_keys
             dependency_lock = dependency_index._lock
+
+        def restore_dependency_authority() -> None:
+            if (
+                dependency_entries is None
+                or dependency_storage is None
+                or matched_keys_storage is None
+                or dependency_lock is None
+            ):
+                return
+            object.__setattr__(dependency_index, "_mirror", dependency_mirror)
+            object.__setattr__(dependency_index, "_dependencies", dependency_storage)
+            object.__setattr__(dependency_index, "_matched_keys", matched_keys_storage)
+            object.__setattr__(dependency_index, "_lock", dependency_lock)
+            with dependency_lock:
+                dependency_storage.clear()
+                for input_id, dependency, fingerprint in dependency_entries:
+                    for field_name, value in zip(
+                        (
+                            "input_id",
+                            "source_ids",
+                            "sports",
+                            "event_ids",
+                            "market_ids",
+                            "selection_ids",
+                        ),
+                        fingerprint,
+                    ):
+                        object.__setattr__(dependency, field_name, value)
+                    dependency_storage[input_id] = dependency
 
         def require_dependency_authority(message: str) -> None:
             require_dependency_model_dispatch(message)
@@ -2852,14 +2892,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 or dependency_index._matched_keys is not matched_keys_storage
                 or dependency_index._lock is not dependency_lock
             ):
+                restore_dependency_authority()
                 raise ContinuousSessionError(message)
-            current = tuple(
-                dependency_fingerprint(
-                    _dependency_reader(dependency_index, input_id)
+            try:
+                current = tuple(
+                    dependency_fingerprint(
+                        _dependency_reader(dependency_index, input_id)
+                    )
+                    for input_id in indexed_input_ids
                 )
-                for input_id in indexed_input_ids
-            )
+            except Exception as exc:
+                restore_dependency_authority()
+                raise ContinuousSessionError(message) from exc
             if current != dependency_authority:
+                restore_dependency_authority()
                 raise ContinuousSessionError(message)
 
         def matching_keys_authority() -> tuple[
@@ -2875,6 +2921,46 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 for input_id in indexed_input_ids
             )
 
+        def capture_matching_key_state() -> tuple[
+            tuple[str, set[object], tuple[object, ...]], ...
+        ] | None:
+            if dependency_authority is None or matched_keys_storage is None:
+                return None
+            state: list[tuple[str, set[object], tuple[object, ...]]] = []
+            for input_id in indexed_input_ids:
+                matched_set = matched_keys_storage.get(input_id)
+                if type(matched_set) is not set:
+                    raise ContinuousSessionError(
+                        "dependency index matched-key storage is invalid"
+                    )
+                state.append(
+                    (
+                        input_id,
+                        matched_set,
+                        _matching_keys_reader(dependency_index, input_id),
+                    )
+                )
+            return tuple(state)
+
+        def restore_matching_key_state(
+            snapshot: tuple[
+                tuple[str, set[object], tuple[object, ...]], ...
+            ] | None,
+        ) -> None:
+            if (
+                snapshot is None
+                or matched_keys_storage is None
+                or dependency_lock is None
+            ):
+                return
+            object.__setattr__(dependency_index, "_matched_keys", matched_keys_storage)
+            with dependency_lock:
+                matched_keys_storage.clear()
+                for input_id, matched_set, keys in snapshot:
+                    matched_set.clear()
+                    matched_set.update(keys)
+                    matched_keys_storage[input_id] = matched_set
+
         affected: list[str] = []
         full_refresh_required = False
         last_has_more = False
@@ -2884,16 +2970,25 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "dependency index input identity state changed between invalidation batches"
                 )
+            matching_state_before_drain = capture_matching_key_state()
             matching_keys_before_drain = matching_keys_authority()
             batch = drain_invalidation(max_items=max_items)
             if dependency_index.input_ids != indexed_input_ids:
+                restore_dependency_authority()
+                restore_matching_key_state(matching_state_before_drain)
                 raise ContinuousSessionError(
                     "invalidation drain mutated dependency index input identity state"
                 )
-            require_dependency_authority(
-                "dependency index routing authority changed during invalidation drain"
-            )
-            if matching_keys_authority() != matching_keys_before_drain:
+            try:
+                require_dependency_authority(
+                    "dependency index routing authority changed during invalidation drain"
+                )
+                current_matching_keys = matching_keys_authority()
+            except Exception:
+                restore_matching_key_state(matching_state_before_drain)
+                raise
+            if current_matching_keys != matching_keys_before_drain:
+                restore_matching_key_state(matching_state_before_drain)
                 raise ContinuousSessionError(
                     "dependency index matched-key routing changed during invalidation drain"
                 )
@@ -2984,6 +3079,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if not batch_has_more:
                 break
 
+        matching_state_before_backlog = capture_matching_key_state()
         matching_keys_before_backlog = matching_keys_authority()
         pending_count = invalidation_buffer.pending_count
         pending_full_refresh = invalidation_buffer.full_refresh_required
@@ -2996,13 +3092,21 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "invalidation buffer backlog state is invalid"
             )
         if dependency_index.input_ids != indexed_input_ids:
+            restore_dependency_authority()
+            restore_matching_key_state(matching_state_before_backlog)
             raise ContinuousSessionError(
                 "invalidation backlog inspection mutated dependency index input identity state"
             )
-        require_dependency_authority(
-            "dependency index routing authority changed during invalidation backlog inspection"
-        )
-        if matching_keys_authority() != matching_keys_before_backlog:
+        try:
+            require_dependency_authority(
+                "dependency index routing authority changed during invalidation backlog inspection"
+            )
+            current_matching_keys = matching_keys_authority()
+        except Exception:
+            restore_matching_key_state(matching_state_before_backlog)
+            raise
+        if current_matching_keys != matching_keys_before_backlog:
+            restore_matching_key_state(matching_state_before_backlog)
             raise ContinuousSessionError(
                 "dependency index matched-key routing changed during invalidation backlog inspection"
             )

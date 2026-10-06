@@ -1217,6 +1217,7 @@ def _place_action_with_final_durable_authority(
 
         _require_durable_approval(ledger, bound, approval)
         _validate_betfair_place_action(action)
+        _canonical_place_client_preflight(client)
         client._gate.require(
             action=action,
             profile=profile,
@@ -1322,7 +1323,6 @@ def execute_betfair_supervised_action(
     # API compatibility only: execution-authority time is product-owned.
     _ = clock
     trusted_now = _supervised_execution_runtime._trusted_now
-    _canonical_place_client_preflight(client)
     execution_workspace = ledger.path.parent.resolve()
 
     # Serialize the current owner authority through the actual provider-write
@@ -1335,6 +1335,7 @@ def execute_betfair_supervised_action(
     # held. This prevents a known local authority denial from being mislabeled
     # as provider-effect uncertainty.
     with WorkspaceEconomicLock(execution_workspace):
+        _canonical_place_client_preflight(client)
         client._gate.require(
             action=action,
             profile=profile,

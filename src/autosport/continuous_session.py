@@ -2314,6 +2314,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             except (SessionPausedError, SessionStoppedError):
                 # An operator transition supersedes the in-flight observation error.
                 pass
+            except Exception as checkpoint_exc:
+                try:
+                    exc.add_note(
+                        "operational failure checkpoint could not be persisted: "
+                        f"{type(checkpoint_exc).__name__}: {checkpoint_exc}"
+                    )
+                except BaseException:
+                    pass
             raise
 
         if cycle.provider_unavailable:

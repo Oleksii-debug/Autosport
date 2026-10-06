@@ -586,6 +586,25 @@ def test_store_binding_registry_releases_dead_store_entries(tmp_path) -> None:
     assert store_id not in economic_goal_store_module._STORE_BINDINGS_BY_ID
 
 
+def test_store_path_exists_ignores_rebound_error_authority(monkeypatch, tmp_path) -> None:
+    def forged_stat(*args, **kwargs):
+        raise OSError("stat failure")
+
+    monkeypatch.setattr(type(tmp_path), "stat", forged_stat)
+
+    store = EconomicGoalStore(tmp_path)
+    binding = economic_goal_store_module._STORE_BINDINGS_BY_ID[id(store)]
+    path_exists = binding[3]
+
+    monkeypatch.setattr(economic_goal_store_module, "EconomicGoalContractError", RuntimeError)
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="cannot inspect persisted economic goal path",
+    ):
+        path_exists()
+
+
 def test_store_failure_paths_ignore_rebound_error_authority(monkeypatch, tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
     store.initialize_owner(_goal())

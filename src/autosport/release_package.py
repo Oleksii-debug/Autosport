@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterable
 
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
@@ -41,6 +42,68 @@ _ZIP_VOLUME = 0
 _ZIP_UTF8_FLAG = 0x800
 _ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
 _ZIP_LOCAL_HEADER_SIGNATURE = 0x04034B50
+_SECRET_KEY_PATTERN = (
+    rb"(?:x[._ -]?)?(?:"
+    rb"api(?:[._ -]?(?:key|secret|token|hash))|"
+    rb"access[._ -]?token|refresh[._ -]?token|auth[._ -]?token|bearer[._ -]?token|"
+    rb"oauth2?(?:[._ -]?(?:(?:access|refresh)[._ -]?token|token|secret))|"
+    rb"client[._ -]?secret|consumer[._ -]?secret|"
+    rb"session(?:[._ -]?(?:token|id))|bot[._ -]?token|password|passwd|authorization|"
+    rb"cookie|set[._ -]?cookie"
+    rb")"
+)
+_SECRET_KEY_FULL_PATTERN = re.compile(
+    rb"^(?:" + _SECRET_KEY_PATTERN + rb")$",
+    re.IGNORECASE,
+)
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    rb"(?ix)"
+    rb"(?:^|[,{;&#|\t ]|//)"
+    rb"(?P<keyquote>[\"']?)"
+    rb"(?P<key>" + _SECRET_KEY_PATTERN + rb")"
+    rb"(?P=keyquote)"
+    rb"[\t ]*[:=][\t ]*"
+    rb"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\t \r\n,;]+)"
+)
+_SECRET_AUTH_HEADER_PATTERN = re.compile(
+    rb"(?ix)^\s*authorization\s*:\s*(?P<value>(?:bearer|basic)\s+[^\r\n,;]+?)\s*$"
+)
+_SECRET_COOKIE_HEADER_PATTERN = re.compile(
+    rb"(?ix)^\s*(?P<key>cookie|set[._ -]?cookie)\s*:\s*(?P<value>[^\r\n]+?)\s*$"
+)
+_ENV_SECRET_REFERENCE_PATTERN = re.compile(
+    rb"(?ix)^(?:"
+    rb"\$\{[A-Z_][A-Z0-9_]*\}|"
+    rb"%[A-Z_][A-Z0-9_]*%|"
+    rb"![A-Z_][A-Z0-9_]*!|"
+    rb"\$env:[A-Z_][A-Z0-9_]*|"
+    rb"\$\{env:[A-Z_][A-Z0-9_]*\}|"
+    rb"\$\{\{[ \t]*secrets\.[A-Z_][A-Z0-9_]*[ \t]*\}\}|"
+    rb"\$[A-Z_][A-Z0-9_]*"
+    rb")$"
+)
+_PRIVATE_KEY_PATTERN = re.compile(
+    rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----",
+    re.IGNORECASE,
+)
+_GITHUB_TOKEN_PATTERN = re.compile(
+    rb"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])"
+)
+_AWS_ACCESS_KEY_PATTERN = re.compile(
+    rb"(?<![A-Za-z0-9_])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9_])"
+)
+_YAML_SECRET_BLOCK_PATTERN = re.compile(
+    rb"(?ix)^"
+    rb"(?P<indent>[ \t]*)"
+    rb"(?:-[ \t]+)?"
+    rb"(?P<keyquote>[\"']?)"
+    rb"(?P<key>" + _SECRET_KEY_PATTERN + rb")"
+    rb"(?P=keyquote)[ \t]*:[ \t]*"
+    rb"(?P<style>[>|])"
+    rb"(?:(?:[1-9][+-]?)|(?:[+-][1-9]?)|[+-]?)?"
+    rb"[ \t]*(?:\#.*)?$"
+)
+_MIN_CONCRETE_SECRET_BYTES = 24
 
 
 class _DuplicateJsonKeyError(ValueError):
@@ -165,6 +228,215 @@ def _write_canonical_zip(package_zip: Path, members: dict[str, bytes]) -> str:
             if publication.exists():
                 publication.unlink()
 
+
+def _normalized_secret_key(value: bytes) -> bytes:
+    return re.sub(rb"[\s._-]+", b"", value.strip().lower())
+
+
+def _normalized_secret_value(value: bytes) -> bytes:
+    value = value.strip(b" \t")
+    if (
+        len(value) >= 2
+        and value[:1] == value[-1:]
+        and value[:1] in {b'"', b"'"}
+    ):
+        value = value[1:-1].strip(b" \t")
+    return value
+
+
+def _is_secret_reference(value: bytes) -> bool:
+    return _ENV_SECRET_REFERENCE_PATTERN.fullmatch(value) is not None
+
+
+def _is_concrete_secret_value(key: bytes, value: bytes) -> bool:
+    value = _normalized_secret_value(value)
+    if not value:
+        return False
+
+    normalized_key = _normalized_secret_key(key)
+    if normalized_key == b"authorization":
+        match = re.fullmatch(
+            rb"(?i)(?:bearer|basic)[ \t]+(?P<token>.+)",
+            value,
+        )
+        if match is not None:
+            token = match.group("token").strip(b" \t")
+            return bool(token) and not _is_secret_reference(token)
+
+    if _is_secret_reference(value):
+        return False
+    if normalized_key in {b"cookie", b"setcookie"}:
+        return True
+    return len(value) >= _MIN_CONCRETE_SECRET_BYTES
+
+
+def _secret_line_candidates(line: bytes) -> Iterable[bytes]:
+    yield line
+
+    for marker in (b";", b"&", b"|"):
+        start = 0
+        while True:
+            index = line.find(marker, start)
+            if index < 0:
+                break
+            candidate = line[index + 1 :].lstrip(b" \t")
+            if candidate:
+                yield candidate
+            start = index + 1
+
+    comment_boundaries = b" \t;&|"
+    for marker in (b"#", b"//"):
+        start = 0
+        while True:
+            index = line.find(marker, start)
+            if index < 0:
+                break
+            if index == 0 or line[index - 1] in comment_boundaries:
+                candidate = line[index + len(marker) :].lstrip(b" \t")
+                if candidate:
+                    yield candidate
+            start = index + len(marker)
+
+
+def _secret_text_projection(payload: bytes) -> bytes | None:
+    if payload.startswith(b"\xff\xfe\x00\x00"):
+        return payload[4:].decode("utf-32-le", errors="replace").encode("utf-8")
+    if payload.startswith(b"\x00\x00\xfe\xff"):
+        return payload[4:].decode("utf-32-be", errors="replace").encode("utf-8")
+    if payload.startswith(b"\xef\xbb\xbf"):
+        return payload[3:]
+    if payload.startswith(b"\xff\xfe"):
+        return payload[2:].decode("utf-16-le", errors="replace").encode("utf-8")
+    if payload.startswith(b"\xfe\xff"):
+        return payload[2:].decode("utf-16-be", errors="replace").encode("utf-8")
+    return None
+
+
+def _json_contains_secret(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str) and isinstance(item, str):
+                try:
+                    key_bytes = key.encode("ascii")
+                except UnicodeEncodeError:
+                    key_bytes = b""
+                if (
+                    _SECRET_KEY_FULL_PATTERN.fullmatch(key_bytes) is not None
+                    and _is_concrete_secret_value(key_bytes, item.encode("utf-8"))
+                ):
+                    return True
+            if _json_contains_secret(item):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_json_contains_secret(item) for item in value)
+    return False
+
+
+def _structured_json_contains_secret(payload: bytes) -> bool:
+    stripped = payload.lstrip(b" \t\r\n")
+    if not stripped.startswith((b"{", b"[")):
+        return False
+    try:
+        decoded = json.loads(stripped.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return _json_contains_secret(decoded)
+
+
+def _yaml_block_contains_secret(payload: bytes) -> bool:
+    lines = payload.split(b"\n")
+    for index, physical in enumerate(lines):
+        line = physical[:-1] if physical.endswith(b"\r") else physical
+        match = _YAML_SECRET_BLOCK_PATTERN.fullmatch(line)
+        if match is None:
+            continue
+
+        base_indent = len(match.group("indent"))
+        chunks: list[bytes] = []
+        for continuation in lines[index + 1 :]:
+            current = (
+                continuation[:-1]
+                if continuation.endswith(b"\r")
+                else continuation
+            )
+            if not current.strip(b" \t"):
+                chunks.append(b"")
+                continue
+            indent = len(current) - len(current.lstrip(b" \t"))
+            if indent <= base_indent:
+                break
+            chunks.append(current.lstrip(b" \t"))
+
+        if not chunks:
+            continue
+        separator = b" " if match.group("style") == b">" else b"\n"
+        value = separator.join(chunks).strip(b" \t\r\n")
+        if _is_concrete_secret_value(match.group("key"), value):
+            return True
+    return False
+
+
+def _projection_contains_secret(payload: bytes) -> bool:
+    for pattern in (
+        _PRIVATE_KEY_PATTERN,
+        _GITHUB_TOKEN_PATTERN,
+        _AWS_ACCESS_KEY_PATTERN,
+    ):
+        if pattern.search(payload):
+            return True
+
+    if _structured_json_contains_secret(payload) or _yaml_block_contains_secret(payload):
+        return True
+
+    for physical in payload.split(b"\n"):
+        line = physical[:-1] if physical.endswith(b"\r") else physical
+        for candidate in _secret_line_candidates(line):
+            auth = _SECRET_AUTH_HEADER_PATTERN.fullmatch(candidate)
+            if (
+                auth is not None
+                and _is_concrete_secret_value(
+                    b"authorization",
+                    auth.group("value"),
+                )
+            ):
+                return True
+
+            cookie = _SECRET_COOKIE_HEADER_PATTERN.fullmatch(candidate)
+            if (
+                cookie is not None
+                and _is_concrete_secret_value(
+                    cookie.group("key"),
+                    cookie.group("value"),
+                )
+            ):
+                return True
+
+            for match in _SECRET_ASSIGNMENT_PATTERN.finditer(candidate):
+                if _is_concrete_secret_value(
+                    match.group("key"),
+                    match.group("value"),
+                ):
+                    return True
+    return False
+
+
+def _require_no_packaged_secret_content(relative: str, payload: bytes) -> None:
+    """Reject credential-shaped payload content at the canonical release boundary."""
+
+    if relative == "Autosport.exe":
+        return
+
+    if _projection_contains_secret(payload):
+        raise ValueError(
+            f"release package contains secret or credential content: {relative}"
+        )
+
+    projection = _secret_text_projection(payload)
+    if projection is not None and _projection_contains_secret(projection):
+        raise ValueError(
+            f"release package contains secret or credential content: {relative}"
+        )
 
 def _require_canonical_zip_metadata(
     infos: list[zipfile.ZipInfo],
@@ -467,6 +739,8 @@ def build_windows_package(
         "real_money_execution": False,
         "human_tested": False,
         "nvda_verified": False,
+        "v1_ready": False,
+        "whole_product_complete": False,
     }
     _write_json(package_dir / "BUILD_INFO.json", build_info)
 
@@ -530,6 +804,8 @@ def verify_windows_package(
             names = [item.filename for item in infos]
             if len(names) != len(set(names)):
                 raise ValueError("release package contains duplicate member names")
+            _require_canonical_zip_metadata(infos, archive_comment)
+            _require_canonical_zip_local_headers(snapshot, infos)
             members: dict[str, bytes] = {}
             windows_keys: dict[str, str] = {}
             for name in names:
@@ -541,8 +817,9 @@ def verify_windows_package(
                         f"{previous} vs {name}"
                     )
                 windows_keys[windows_key] = name
-                members[relative] = archive.read(name)
-            _require_canonical_zip_local_headers(snapshot, infos)
+                payload = archive.read(name)
+                _require_no_packaged_secret_content(relative, payload)
+                members[relative] = payload
 
     required = {
         "Autosport.exe",
@@ -565,6 +842,10 @@ def verify_windows_package(
     if build_info.get("source_sha") != expected_source_sha:
         raise ValueError("BUILD_INFO source_sha does not match exact candidate head")
     _require_false_truth_labels(build_info, "BUILD_INFO.json")
+    if build_info.get("v1_ready") is not False:
+        raise ValueError("BUILD_INFO.json must record v1_ready=false")
+    if build_info.get("whole_product_complete") is not False:
+        raise ValueError("BUILD_INFO.json must record whole_product_complete=false")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")
@@ -663,8 +944,6 @@ def verify_windows_package(
     ).encode("utf-8")
     if members["SHA256SUMS.txt"] != canonical_sums:
         raise ValueError("SHA256SUMS.txt is not in canonical sorted representation")
-    _require_canonical_zip_metadata(infos, archive_comment)
-
     return {
         "status": "PASS",
         "source_sha": expected_source_sha,
@@ -674,6 +953,8 @@ def verify_windows_package(
         "real_money_execution": False,
         "human_tested": False,
         "nvda_verified": False,
+        "v1_ready": False,
+        "whole_product_complete": False,
     }
 
 

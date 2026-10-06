@@ -2286,6 +2286,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index registration did not publish the input"
             )
+        if after_ids != (*before_ids, input_id):
+            raise ContinuousSessionError(
+                "dependency index registration changed unrelated input identities"
+            )
         return True
 
     def _retire_input(
@@ -2343,6 +2347,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         if removed and input_id in after_ids:
             raise ContinuousSessionError(
                 "dependency index retirement did not remove the input"
+            )
+        was_present = input_id in before_ids
+        if removed is not was_present:
+            raise ContinuousSessionError(
+                "dependency index retirement receipt conflicts with identity state"
+            )
+        expected_after_ids = tuple(
+            value for value in before_ids if value != input_id
+        )
+        if after_ids != expected_after_ids:
+            raise ContinuousSessionError(
+                "dependency index retirement changed unrelated input identities"
             )
         return removed
 

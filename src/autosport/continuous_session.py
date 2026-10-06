@@ -459,7 +459,10 @@ class _ContinuousSessionState:
                     "operational error checkpoint generation is ahead of "
                     "canonical session bootstrap state"
                 )
-            if error_checkpoint["observed_generation"] == self._generation and (
+            same_generation = (
+                error_checkpoint["observed_generation"] == self._generation
+            )
+            if same_generation and (
                 error_checkpoint["observed_cycles_completed"] != self._cycles_completed
                 or error_checkpoint["observed_last_success_at"] != self._last_success_at
                 or error_checkpoint["observed_state"] != self._state
@@ -468,6 +471,13 @@ class _ContinuousSessionState:
                     "same-generation operational error checkpoint markers "
                     "conflict with canonical session bootstrap state"
                 )
+            if same_generation and error_checkpoint["last_error_code"] is not None:
+                durable_error = raw["last_error_code"]
+                checkpoint_error = error_checkpoint["last_error_code"]
+                if durable_error is not None and durable_error != checkpoint_error:
+                    raise ContinuousSessionError(
+                        "continuous session error authorities conflict at bootstrap"
+                    )
 
     @staticmethod
     def _file_identity(info: os.stat_result) -> tuple[int, int]:

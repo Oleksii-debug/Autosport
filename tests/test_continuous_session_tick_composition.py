@@ -3962,3 +3962,113 @@ def test_tick_rejects_backlog_accessor_selector_mutation() -> None:
 
         assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
 
+@pytest.mark.parametrize("method_name", ("matches", "__eq__"))
+def test_tick_rejects_dependency_model_dispatch_rebinding_during_invalidation_drain(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+        hostile_called = False
+
+        def hostile(*_args, **_kwargs):
+            nonlocal hostile_called
+            hostile_called = True
+            raise AssertionError("hostile dependency model dispatch executed")
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                monkeypatch.setattr(
+                    continuous_session.FocusedMirrorDependency,
+                    method_name,
+                    hostile,
+                )
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.invalidation_buffer = Buffer()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="routing authority changed during invalidation drain",
+        ):
+            coordinator.tick()
+
+        assert not hostile_called
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_dependency_matches_code_mutation_during_invalidation_drain() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a", source_ids="provider-a")
+        coordinator.dependency_index = index
+        canonical_matches = continuous_session.FocusedMirrorDependency.matches
+        canonical_code = canonical_matches.__code__
+
+        def hostile_matches(self, event):
+            raise AssertionError(
+                f"hostile dependency matches executed for {self!r} / {event!r}"
+            )
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                canonical_matches.__code__ = hostile_matches.__code__
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.invalidation_buffer = Buffer()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        try:
+            with pytest.raises(
+                continuous_session.ContinuousSessionError,
+                match="routing authority changed during invalidation drain",
+            ):
+                coordinator.tick()
+        finally:
+            canonical_matches.__code__ = canonical_code
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+

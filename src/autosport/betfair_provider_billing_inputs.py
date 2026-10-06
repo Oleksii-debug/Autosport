@@ -684,6 +684,7 @@ def _build_capability():
 
     def transaction_charge_signal(
         *,
+        ref_id: str,
         item_class: str,
         amount: Decimal,
         item_class_data: Mapping[str, object],
@@ -696,7 +697,7 @@ def _build_capability():
         is therefore never evidence that no provider charge exists.
         """
 
-        if item_class != "UNKNOWN" or amount >= 0:
+        if ref_id != "0" or item_class != "UNKNOWN" or amount >= 0:
             return None, None
         raw_unknown = item_class_data.get("unknownStatementItem")
         if type(raw_unknown) is not str:
@@ -756,15 +757,17 @@ def _build_capability():
             type(key) is not str for key in item_class_data
         ):
             raise error_cls("statement itemClassData must be a JSON object")
+        ref_id = provider_text(row, "refId", "ref_id")
         amount = provider_decimal(row, "amount", "amount")
         item_class = provider_text(row, "itemClass", "item_class")
         provider_charge_class, provider_transaction_id = transaction_charge_signal(
+            ref_id=ref_id,
             item_class=item_class,
             amount=amount,
             item_class_data=item_class_data,
         )
         return AccountStatementItemObservation(
-            ref_id=provider_text(row, "refId", "ref_id"),
+            ref_id=ref_id,
             item_date=provider_text(row, "itemDate", "item_date"),
             amount=amount,
             balance=provider_decimal(row, "balance", "balance"),

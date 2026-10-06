@@ -1043,3 +1043,122 @@ def test_source_projection_refresh_rejects_class_rebound_state_authority(
         ):
             coordinator._refresh_source_state_projection()
 
+
+
+def test_tick_ignores_instance_shadowed_failure_publication_on_provider_unavailable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path, state = _state(root)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+
+        class ProviderUnavailableCycle:
+            provider_unavailable = True
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+        class Collector:
+            def run_cycle(self):
+                return ProviderUnavailableCycle()
+
+        coordinator.collector = Collector()
+        coordinator.invalidation_buffer = type(
+            "InvalidationBufferStub",
+            (),
+            {"pending_count": 0, "full_refresh_required": False},
+        )()
+
+        def attacker_record_failure(*, code: str):
+            raise AssertionError(
+                f"instance-shadowed failure publisher executed for {code}"
+            )
+
+        state.record_failure = attacker_record_failure  # type: ignore[method-assign]
+
+        result = coordinator.tick()
+
+        assert result.source_provider_unavailable is True
+        sidecar = json.loads(
+            path.with_name(f"{path.name}.operational_error.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert sidecar["last_error_code"] == "ProviderUnavailableError"
+
+
+def test_tick_ignores_instance_shadowed_failure_publication_on_collector_exception() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path, state = _state(root)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+
+        class Collector:
+            def run_cycle(self):
+                raise RuntimeError("collector failure")
+
+        coordinator.collector = Collector()
+
+        def attacker_record_failure(*, code: str):
+            raise AssertionError(
+                f"instance-shadowed failure publisher executed for {code}"
+            )
+
+        state.record_failure = attacker_record_failure  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="collector failure"):
+            coordinator.tick()
+
+        sidecar = json.loads(
+            path.with_name(f"{path.name}.operational_error.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert sidecar["last_error_code"] == "RuntimeError"
+
+
+def test_tick_rejects_class_rebound_failure_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+
+        class Collector:
+            def run_cycle(self):
+                raise AssertionError(
+                    "collector ran after failure publication authority changed"
+                )
+
+        coordinator.collector = Collector()
+
+        def attacker_record_failure(
+            _self: continuous_session._ContinuousSessionState,
+            *,
+            code: str,
+        ) -> object:
+            raise AssertionError(
+                f"class-rebound failure publisher executed for {code}"
+            )
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "record_failure",
+            attacker_record_failure,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical coordinator running-fence authority changed",
+        ):
+            coordinator.tick()

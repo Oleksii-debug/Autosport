@@ -2649,6 +2649,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             _require_running
         ),
         _require_running_method_code: object = _require_running.__code__,
+        _record_failure_method: Callable[
+            ["_ContinuousSessionState"], _ContinuousSessionFailurePublication
+        ] = _ContinuousSessionState.record_failure,
+        _record_failure_method_code: object = _ContinuousSessionState.record_failure.__code__,
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
     ) -> ContinuousTickResult:
@@ -2658,6 +2662,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             or type(self)._require_running is not _require_running_method
             or getattr(_require_running_method, "__code__", None)
             is not _require_running_method_code
+            or type(self._state).record_failure is not _record_failure_method
+            or getattr(_record_failure_method, "__code__", None)
+            is not _record_failure_method_code
             or _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
@@ -2680,7 +2687,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     # Publish its failure only if no newer canonical generation won
                     # while that observation was in flight.
                     if self._state._checkpoint_token == observation_token:
-                        self._state.record_failure(code=type(exc).__name__)
+                        _record_failure_method(
+                            self._state,
+                            code=type(exc).__name__,
+                        )
             except (SessionPausedError, SessionStoppedError):
                 # An operator transition supersedes the in-flight observation error.
                 pass
@@ -2705,8 +2715,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # so there is no new source projection to publish. Avoid the full
                 # continuous-session snapshot path here: retained settlement history
                 # must not amplify an operational provider failure into O(history).
-                failure = self._state.record_failure(
-                    code="ProviderUnavailableError"
+                failure = _record_failure_method(
+                    self._state,
+                    code="ProviderUnavailableError",
                 )
             return ContinuousTickResult(
                 session_id=failure.session_id,
@@ -2833,7 +2844,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 # The running fence is still held here, so no other canonical
                 # generation can overtake this failure publication.
                 try:
-                    self._state.record_failure(code=type(exc).__name__)
+                    _record_failure_method(
+                        self._state,
+                        code=type(exc).__name__,
+                    )
                 except Exception as publication_error:
                     try:
                         exc.add_note(

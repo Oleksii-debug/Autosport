@@ -2718,6 +2718,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         dependency_authority: tuple[FocusedMirrorDependency, ...] | None = None
         dependency_mirror: object | None = None
+        dependency_storage: object | None = None
+        matched_keys_storage: object | None = None
+        dependency_lock: object | None = None
         if isinstance(dependency_index, FocusedMirrorDependencyIndex):
             if (
                 FocusedMirrorDependencyIndex._dependency is not _dependency_reader
@@ -2732,11 +2735,19 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 for input_id in indexed_input_ids
             )
             dependency_mirror = dependency_index._mirror
+            dependency_storage = dependency_index._dependencies
+            matched_keys_storage = dependency_index._matched_keys
+            dependency_lock = dependency_index._lock
 
         def require_dependency_authority(message: str) -> None:
             if dependency_authority is None:
                 return
-            if dependency_index._mirror is not dependency_mirror:
+            if (
+                dependency_index._mirror is not dependency_mirror
+                or dependency_index._dependencies is not dependency_storage
+                or dependency_index._matched_keys is not matched_keys_storage
+                or dependency_index._lock is not dependency_lock
+            ):
                 raise ContinuousSessionError(message)
             current = tuple(
                 _dependency_reader(dependency_index, input_id)
@@ -2846,6 +2857,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "invalidation buffer backlog state is invalid"
             )
+        if dependency_index.input_ids != indexed_input_ids:
+            raise ContinuousSessionError(
+                "invalidation backlog inspection mutated dependency index input identity state"
+            )
+        require_dependency_authority(
+            "dependency index routing authority changed during invalidation backlog inspection"
+        )
         backlog = last_has_more or pending_count > 0 or pending_full_refresh
         affected_ids = set(affected)
         ordered_affected = tuple(

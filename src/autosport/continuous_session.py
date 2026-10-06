@@ -2071,17 +2071,60 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             ),
         )
 
-    def pause(self) -> None:
-        self._state.set_state(SessionState.PAUSED)
+    def pause(
+        self,
+        *,
+        _set_state: Callable[..., None] = _ContinuousSessionState.set_state,
+        _set_state_code: object = _ContinuousSessionState.set_state.__code__,
+    ) -> None:
+        if (
+            type(self._state).set_state is not _set_state
+            or getattr(_set_state, "__code__", None) is not _set_state_code
+        ):
+            raise ContinuousSessionError(
+                "canonical coordinator operator-control authority changed"
+            )
+        _set_state(self._state, SessionState.PAUSED)
 
-    def stop(self, reason: str = "operator_stop") -> None:
-        self._state.set_state(SessionState.STOPPED, reason=reason)
+    def stop(
+        self,
+        reason: str = "operator_stop",
+        *,
+        _set_state: Callable[..., None] = _ContinuousSessionState.set_state,
+        _set_state_code: object = _ContinuousSessionState.set_state.__code__,
+    ) -> None:
+        if (
+            type(self._state).set_state is not _set_state
+            or getattr(_set_state, "__code__", None) is not _set_state_code
+        ):
+            raise ContinuousSessionError(
+                "canonical coordinator operator-control authority changed"
+            )
+        _set_state(self._state, SessionState.STOPPED, reason=reason)
 
-    def resume(self) -> None:
-        current = self._state.snapshot().state
+    def resume(
+        self,
+        *,
+        _bounded_state: Callable[["_ContinuousSessionState"], SessionState] = (
+            _ContinuousSessionState.bounded_state
+        ),
+        _bounded_state_code: object = _ContinuousSessionState.bounded_state.__code__,
+        _set_state: Callable[..., None] = _ContinuousSessionState.set_state,
+        _set_state_code: object = _ContinuousSessionState.set_state.__code__,
+    ) -> None:
+        if (
+            type(self._state).bounded_state is not _bounded_state
+            or getattr(_bounded_state, "__code__", None) is not _bounded_state_code
+            or type(self._state).set_state is not _set_state
+            or getattr(_set_state, "__code__", None) is not _set_state_code
+        ):
+            raise ContinuousSessionError(
+                "canonical coordinator operator-control authority changed"
+            )
+        current = _bounded_state(self._state)
         if current not in {SessionState.PAUSED, SessionState.STOPPED}:
             return
-        self._state.set_state(SessionState.RUNNING)
+        _set_state(self._state, SessionState.RUNNING)
 
     def _require_running(
         self,

@@ -366,6 +366,7 @@ def test_save_rejects_directory_flag_authority_drift_before_parent_creation(
     (
         ("exists", r"snapshot exists authority changed"),
         ("mkdir", r"snapshot mkdir authority changed"),
+        ("__eq__", r"snapshot equality authority changed"),
     ),
 )
 def test_save_rejects_rebound_snapshot_path_method_before_parent_creation(

@@ -922,6 +922,17 @@ def _execute_market_book_batch_attempt(
     ],
     token: Callable[[object, str], str],
     canonical_batch: Callable[[MarketBookReadPlan, str], MarketBookReadBatch],
+    admission_error_type: type[MarketBookBatchAdmissionError],
+    post_dispatch_failure_type: type[MarketBookPostDispatchFailure],
+    transport_error_type: type[BaseException],
+    provider_error_type: type[BaseException],
+    protocol_error_type: type[BaseException],
+    transport_failure_outcome: MarketBookAttemptOutcome,
+    provider_failure_outcome: MarketBookAttemptOutcome,
+    parse_failure_outcome: MarketBookAttemptOutcome,
+    exact_response_outcome: MarketBookAttemptOutcome,
+    incomplete_response_outcome: MarketBookAttemptOutcome,
+    exact_response_status: BatchReceiptStatus,
     make_execution: Callable[
         [MarketBookAttemptHistory, MarketBookAttemptOutcome, MarketBookBatchTransportResult | None],
         MarketBookBatchAttemptExecution,
@@ -956,7 +967,7 @@ def _execute_market_book_batch_attempt(
             rate_gate=rate_gate,
             concurrency_gate=concurrency_gate,
         )
-    except MarketBookBatchAdmissionError as exc:
+    except admission_error_type as exc:
         outcome = exc.outcome
         updated = append_nonresponse(
             frozen_history,
@@ -966,8 +977,8 @@ def _execute_market_book_batch_attempt(
             outcome=outcome,
         )
         return make_execution(updated, outcome, None)
-    except (MarketBookPostDispatchFailure, _transport.BetfairMarketBookTransportError):
-        outcome = MarketBookAttemptOutcome.TRANSPORT_FAILURE
+    except (post_dispatch_failure_type, transport_error_type):
+        outcome = transport_failure_outcome
         updated = append_nonresponse(
             frozen_history,
             batch_id=batch_id,
@@ -976,8 +987,8 @@ def _execute_market_book_batch_attempt(
             outcome=outcome,
         )
         return make_execution(updated, outcome, None)
-    except _transport.BetfairMarketBookProviderError:
-        outcome = MarketBookAttemptOutcome.PROVIDER_FAILURE
+    except provider_error_type:
+        outcome = provider_failure_outcome
         updated = append_nonresponse(
             frozen_history,
             batch_id=batch_id,
@@ -986,8 +997,8 @@ def _execute_market_book_batch_attempt(
             outcome=outcome,
         )
         return make_execution(updated, outcome, None)
-    except _transport.BetfairMarketBookProtocolError:
-        outcome = MarketBookAttemptOutcome.PARSE_FAILURE
+    except protocol_error_type:
+        outcome = parse_failure_outcome
         updated = append_nonresponse(
             frozen_history,
             batch_id=batch_id,
@@ -1004,9 +1015,9 @@ def _execute_market_book_batch_attempt(
         required=required,
     )
     outcome = (
-        MarketBookAttemptOutcome.EXACT_RESPONSE
-        if result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE
-        else MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
+        exact_response_outcome
+        if result.receipt.status is exact_response_status
+        else incomplete_response_outcome
     )
     return make_execution(updated, outcome, result)
 
@@ -1024,6 +1035,17 @@ def _install_attempt_executor() -> None:
     canonical_history_from_json = MarketBookAttemptHistory.from_json
     canonical_token = _token
     canonical_batch = _canonical_batch
+    canonical_admission_error_type = MarketBookBatchAdmissionError
+    canonical_post_dispatch_failure_type = MarketBookPostDispatchFailure
+    canonical_transport_error_type = _transport.BetfairMarketBookTransportError
+    canonical_provider_error_type = _transport.BetfairMarketBookProviderError
+    canonical_protocol_error_type = _transport.BetfairMarketBookProtocolError
+    canonical_transport_failure_outcome = MarketBookAttemptOutcome.TRANSPORT_FAILURE
+    canonical_provider_failure_outcome = MarketBookAttemptOutcome.PROVIDER_FAILURE
+    canonical_parse_failure_outcome = MarketBookAttemptOutcome.PARSE_FAILURE
+    canonical_exact_response_outcome = MarketBookAttemptOutcome.EXACT_RESPONSE
+    canonical_incomplete_response_outcome = MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
+    canonical_exact_response_status = BatchReceiptStatus.EXACT_RESPONSE
 
     def freeze_plan(plan: MarketBookReadPlan) -> MarketBookReadPlan:
         return canonical_plan_from_json(canonical_plan_to_json(plan))
@@ -1078,6 +1100,17 @@ def _install_attempt_executor() -> None:
             freeze_history=freeze_history,
             token=canonical_token,
             canonical_batch=canonical_batch,
+            admission_error_type=canonical_admission_error_type,
+            post_dispatch_failure_type=canonical_post_dispatch_failure_type,
+            transport_error_type=canonical_transport_error_type,
+            provider_error_type=canonical_provider_error_type,
+            protocol_error_type=canonical_protocol_error_type,
+            transport_failure_outcome=canonical_transport_failure_outcome,
+            provider_failure_outcome=canonical_provider_failure_outcome,
+            parse_failure_outcome=canonical_parse_failure_outcome,
+            exact_response_outcome=canonical_exact_response_outcome,
+            incomplete_response_outcome=canonical_incomplete_response_outcome,
+            exact_response_status=canonical_exact_response_status,
             make_execution=make_execution,
         )
 

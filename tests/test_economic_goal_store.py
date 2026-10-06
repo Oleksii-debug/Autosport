@@ -419,6 +419,22 @@ def test_store_rejects_instance_binding_rebind(tmp_path) -> None:
         )
 
 
+def test_store_ignores_rebound_lock_acquire_release(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+
+    def forged_acquire(*args, **kwargs):
+        raise AssertionError("rebound WorkspaceEconomicLock.acquire executed")
+
+    def forged_release(*args, **kwargs):
+        raise AssertionError("rebound WorkspaceEconomicLock.release executed")
+
+    monkeypatch.setattr(WorkspaceEconomicLock, "acquire", forged_acquire)
+    monkeypatch.setattr(WorkspaceEconomicLock, "release", forged_release)
+
+    store.initialize_owner(_goal())
+    assert store.load() == _goal()
+
+
 def test_store_ignores_rebound_lock_lifecycle(monkeypatch, tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
 

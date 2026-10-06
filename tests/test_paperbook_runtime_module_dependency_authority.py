@@ -232,6 +232,34 @@ def test_save_rejects_rebound_path_unlink_before_publication(
         monkeypatch.setattr(paper_module.Path, "unlink", original)
 
 
+def test_save_rejects_rebound_path_constructor_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    destination = tmp_path / "path-new" / "paper.json"
+    original = paper_module.Path.__new__
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound Path.__new__ executed")
+
+    monkeypatch.setattr(paper_module.Path, "__new__", hostile)
+    try:
+        with pytest.raises(
+            ValueError,
+            match=r"snapshot Path constructor authority changed",
+        ):
+            book.save(destination)
+    finally:
+        monkeypatch.setattr(paper_module.Path, "__new__", original)
+
+    assert attacker_calls == 0
+    assert not destination.exists()
+
+
 def test_load_rejects_rebound_path_factory_before_execution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -353,6 +381,25 @@ def test_save_rejects_directory_flag_authority_drift_before_parent_creation(
     with pytest.raises(
         ValueError,
         match=r"directory flag authority changed",
+    ):
+        book.save(destination)
+
+    assert not destination.exists()
+    assert not destination.parent.exists()
+
+
+def test_save_rejects_directory_readonly_flag_authority_drift_before_parent_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    original = paper_module.os.O_RDONLY
+    monkeypatch.setattr(paper_module.os, "O_RDONLY", original ^ 1)
+    destination = tmp_path / "nested-rdonly-flag" / "paper.json"
+
+    with pytest.raises(
+        ValueError,
+        match=r"directory read-only flag authority changed",
     ):
         book.save(destination)
 

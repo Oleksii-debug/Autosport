@@ -37,6 +37,12 @@ class ProviderMaximumOrderLimitKind(str, Enum):
     ORDER_NOTIONAL_PER_ORDER = "ORDER_NOTIONAL_PER_ORDER"
 
 
+class ProviderMaximumOrderLimitScope(str, Enum):
+    """Structural scope supported by this foundation."""
+
+    PER_ORDER = "PER_ORDER"
+
+
 class ProviderMaximumOrderLimitSourceKind(str, Enum):
     AUTHENTICATED_PROVIDER_READBACK = "AUTHENTICATED_PROVIDER_READBACK"
     AUTHENTICATED_ACTION_QUOTE = "AUTHENTICATED_ACTION_QUOTE"
@@ -72,6 +78,7 @@ class ProviderMaximumOrderLimitEvidence:
     source_ref: str
     source_payload_sha256: str
     action_binding_sha256: str | None = None
+    limit_scope: ProviderMaximumOrderLimitScope = ProviderMaximumOrderLimitScope.PER_ORDER
     execution_authority: bool = False
 
     def __post_init__(self) -> None:
@@ -94,6 +101,14 @@ class ProviderMaximumOrderLimitEvidence:
         if type(self.limit_kind) is not ProviderMaximumOrderLimitKind:
             raise ProviderMaximumOrderLimitError(
                 "limit_kind must be exact ProviderMaximumOrderLimitKind"
+            )
+        if type(self.limit_scope) is not ProviderMaximumOrderLimitScope:
+            raise ProviderMaximumOrderLimitError(
+                "limit_scope must be exact ProviderMaximumOrderLimitScope"
+            )
+        if self.limit_scope is not ProviderMaximumOrderLimitScope.PER_ORDER:
+            raise ProviderMaximumOrderLimitError(
+                "maximum-order foundation supports only PER_ORDER scope"
             )
         allowed_limit_kinds = {
             "BACK": {
@@ -154,6 +169,11 @@ class ProviderMaximumOrderLimitEvidence:
         """Structural evidence alone never authorizes the requested amount."""
         return False
 
+    @property
+    def cumulative_capacity_proven(self) -> bool:
+        """Per-order evidence never proves event/day/account cumulative capacity."""
+        return False
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderMaximumOrderLimitAssessment:
@@ -170,6 +190,7 @@ class ProviderMaximumOrderLimitAssessment:
     maximum_amount: Decimal
     evidence_sha256: str
     reason: str
+    limit_scope: ProviderMaximumOrderLimitScope = ProviderMaximumOrderLimitScope.PER_ORDER
     execution_authority: bool = False
 
     def __post_init__(self) -> None:
@@ -184,6 +205,14 @@ class ProviderMaximumOrderLimitAssessment:
         if type(self.comparison) is not ProviderMaximumOrderLimitComparison:
             raise ProviderMaximumOrderLimitError(
                 "comparison must be exact ProviderMaximumOrderLimitComparison"
+            )
+        if type(self.limit_scope) is not ProviderMaximumOrderLimitScope:
+            raise ProviderMaximumOrderLimitError(
+                "limit_scope must be exact ProviderMaximumOrderLimitScope"
+            )
+        if self.limit_scope is not ProviderMaximumOrderLimitScope.PER_ORDER:
+            raise ProviderMaximumOrderLimitError(
+                "maximum-order assessment supports only PER_ORDER scope"
             )
         _positive_decimal(self.requested_amount, "requested_amount")
         _positive_decimal(self.maximum_amount, "maximum_amount")
@@ -200,6 +229,10 @@ class ProviderMaximumOrderLimitAssessment:
 
     @property
     def supports_requested_amount(self) -> bool:
+        return False
+
+    @property
+    def cumulative_capacity_proven(self) -> bool:
         return False
 
 
@@ -439,6 +472,7 @@ def assess_provider_maximum_order_limit(
         maximum_amount=maximum,
         evidence_sha256=evidence.evidence_sha256,
         reason=reason,
+        limit_scope=evidence.limit_scope,
     )
 
 
@@ -456,6 +490,7 @@ def _fingerprint(evidence: ProviderMaximumOrderLimitEvidence) -> str:
         "order_family": evidence.order_family,
         "currency": evidence.currency,
         "limit_kind": evidence.limit_kind.value,
+        "limit_scope": evidence.limit_scope.value,
         "maximum_amount": _decimal_text(evidence.maximum_amount),
         "observed_at": _utc_text(evidence.observed_at),
         "valid_until": _utc_text(evidence.valid_until),

@@ -14,8 +14,12 @@ from ..betfair_account_readonly import (
     assert_market_book_depth_authoritative,
     market_book_depth_acquisition_started_at,
 )
-from ..real_execution_ledger import RealExecutionLedger
-from ..supervised_execution import BoundSupervisedExecutionPlan
+from ..real_execution_ledger import ExecutionPlan, RealExecutionLedger
+from ..supervised_execution import (
+    BoundSupervisedExecutionPlan,
+    ExecutionLegConstraint,
+    ProfileBinding,
+)
 
 
 class FeasibilityState(str, Enum):
@@ -478,6 +482,10 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     action_id: str,
     max_snapshot_age: timedelta,
     _bound_type,
+    _execution_plan_type,
+    _profile_binding_type,
+    _constraint_type,
+    _execution_plan_fingerprint,
     _verify_bound_binding,
     _bound_action_for,
     _bound_profile_for,
@@ -500,6 +508,18 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
         raise TypeError("ledger must be RealExecutionLedger")
     if type(bound) is not _bound_type:
         raise TypeError("bound must be exact BoundSupervisedExecutionPlan")
+    if type(bound.execution_plan) is not _execution_plan_type:
+        raise TypeError("bound.execution_plan must be exact ExecutionPlan")
+    if (
+        type(bound.profile_bindings) is not tuple
+        or any(type(item) is not _profile_binding_type for item in bound.profile_bindings)
+    ):
+        raise TypeError("bound.profile_bindings must contain exact ProfileBinding values")
+    if (
+        type(bound.constraints) is not tuple
+        or any(type(item) is not _constraint_type for item in bound.constraints)
+    ):
+        raise TypeError("bound.constraints must contain exact ExecutionLegConstraint values")
     if not isinstance(receipt, BetfairMarketBookDepthObservation):
         raise TypeError("receipt must be BetfairMarketBookDepthObservation")
     acquisition_started_at = market_book_depth_acquisition_started_at(receipt)
@@ -518,7 +538,11 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
         raise ValueError(
             "product-owned feasibility requires a durably reserved execution plan"
         ) from exc
-    if plan_view.plan_fingerprint != bound.execution_plan.fingerprint:
+    if type(plan_view.plan) is not _execution_plan_type:
+        raise TypeError("durable execution view must contain exact ExecutionPlan")
+    if plan_view.plan_fingerprint != _execution_plan_fingerprint(
+        bound.execution_plan
+    ):
         raise ValueError("durable execution-plan fingerprint mismatch")
     if plan_view.stale:
         raise ValueError(
@@ -527,7 +551,12 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     decision_at = _provider_timestamp(plan_view.plan_reserved_at)
     _require_aware(decision_at, "decision_at")
 
-    action = _bound_action_for(bound, action_id)
+    durable_actions = tuple(
+        item for item in plan_view.plan.actions if item.action_id == action_id
+    )
+    if len(durable_actions) != 1:
+        raise ValueError("action is not in durable execution plan")
+    action = durable_actions[0]
     try:
         provider_selection_id = int(action.selection_id)
     except (TypeError, ValueError) as exc:
@@ -690,6 +719,15 @@ def _install_execution_feasibility_result_authority():
     canonical_assess = _assess_execution_feasibility
     canonical_assess_code = canonical_assess.__code__
     bound_type = BoundSupervisedExecutionPlan
+    execution_plan_type = ExecutionPlan
+    execution_plan_to_dict = execution_plan_type.to_dict
+    execution_plan_to_dict_code = execution_plan_to_dict.__code__
+    execution_plan_fingerprint = execution_plan_type.fingerprint.fget
+    if execution_plan_fingerprint is None:
+        raise RuntimeError("canonical ExecutionPlan fingerprint is unavailable")
+    execution_plan_fingerprint_code = execution_plan_fingerprint.__code__
+    profile_binding_type = ProfileBinding
+    constraint_type = ExecutionLegConstraint
     verify_bound_binding = bound_type.verify_binding
     verify_bound_binding_code = verify_bound_binding.__code__
     bound_action_for = bound_type.action_for
@@ -715,6 +753,19 @@ def _install_execution_feasibility_result_authority():
         ):
             raise RuntimeError(
                 "canonical execution feasibility assessor changed"
+            )
+        if (
+            ExecutionPlan is not execution_plan_type
+            or execution_plan_type.to_dict is not execution_plan_to_dict
+            or execution_plan_to_dict.__code__ is not execution_plan_to_dict_code
+            or execution_plan_type.fingerprint.fget is not execution_plan_fingerprint
+            or execution_plan_fingerprint.__code__
+            is not execution_plan_fingerprint_code
+            or ProfileBinding is not profile_binding_type
+            or ExecutionLegConstraint is not constraint_type
+        ):
+            raise RuntimeError(
+                "canonical execution plan structure changed"
             )
         if (
             BoundSupervisedExecutionPlan is not bound_type
@@ -744,6 +795,10 @@ def _install_execution_feasibility_result_authority():
             action_id=action_id,
             max_snapshot_age=max_snapshot_age,
             _bound_type=bound_type,
+            _execution_plan_type=execution_plan_type,
+            _profile_binding_type=profile_binding_type,
+            _constraint_type=constraint_type,
+            _execution_plan_fingerprint=execution_plan_fingerprint,
             _verify_bound_binding=verify_bound_binding,
             _bound_action_for=bound_action_for,
             _bound_profile_for=bound_profile_for,

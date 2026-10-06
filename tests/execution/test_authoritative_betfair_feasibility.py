@@ -1321,3 +1321,144 @@ def test_bound_plan_method_code_mutation_revokes_authoritative_feasibility(
                 max_snapshot_age=timedelta(seconds=2),
             )
 
+class _ExecutionPlanSubclass(ExecutionPlan):
+    """Semantically equal subclass that must not cross an authority ingress."""
+
+
+def test_authoritative_feasibility_rejects_nested_execution_plan_subclass() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    canonical = _bound(datetime.now(timezone.utc))
+    plan = canonical.execution_plan
+    substituted_plan = _ExecutionPlanSubclass(
+        plan_id=plan.plan_id,
+        bookmaker_profile_version=plan.bookmaker_profile_version,
+        decision_id=plan.decision_id,
+        approval_id=plan.approval_id,
+        created_at=plan.created_at,
+        actions=plan.actions,
+        schema_version=plan.schema_version,
+    )
+    forged = BoundSupervisedExecutionPlan(
+        execution_plan=substituted_plan,
+        portfolio_plan_sha256=canonical.portfolio_plan_sha256,
+        economic_goal_contract_sha256=canonical.economic_goal_contract_sha256,
+        intent_id=canonical.intent_id,
+        intent_sha256=canonical.intent_sha256,
+        approval_fingerprint=canonical.approval_fingerprint,
+        profile_bindings=canonical.profile_bindings,
+        constraints=canonical.constraints,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, canonical)
+        with pytest.raises(TypeError, match="exact ExecutionPlan"):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                forged,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    (
+        ("profile_bindings", lambda bound: (type("DerivedProfile", (ProfileBinding,), {})(**{
+            "venue_id": bound.profile_bindings[0].venue_id,
+            "account_id": bound.profile_bindings[0].account_id,
+            "adapter_id": bound.profile_bindings[0].adapter_id,
+            "adapter_version": bound.profile_bindings[0].adapter_version,
+            "profile_version": bound.profile_bindings[0].profile_version,
+            "profile_sha256": bound.profile_bindings[0].profile_sha256,
+        }),)),
+        ("constraints", lambda bound: (type("DerivedConstraint", (ExecutionLegConstraint,), {})(**{
+            "leg_id": bound.constraints[0].leg_id,
+            "side": bound.constraints[0].side,
+            "quote_expires_at": bound.constraints[0].quote_expires_at,
+            "max_slippage_fraction": bound.constraints[0].max_slippage_fraction,
+        }),)),
+    ),
+)
+def test_authoritative_feasibility_rejects_nested_binding_subclasses(
+    field_name: str,
+    replacement,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    canonical = _bound(datetime.now(timezone.utc))
+    values = {
+        "execution_plan": canonical.execution_plan,
+        "portfolio_plan_sha256": canonical.portfolio_plan_sha256,
+        "economic_goal_contract_sha256": canonical.economic_goal_contract_sha256,
+        "intent_id": canonical.intent_id,
+        "intent_sha256": canonical.intent_sha256,
+        "approval_fingerprint": canonical.approval_fingerprint,
+        "profile_bindings": canonical.profile_bindings,
+        "constraints": canonical.constraints,
+    }
+    values[field_name] = replacement(canonical)
+    forged = BoundSupervisedExecutionPlan(**values)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, canonical)
+        with pytest.raises(TypeError, match="must contain exact"):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                forged,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_execution_plan_to_dict_rebind_revokes_authoritative_feasibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+
+    def substituted(self):
+        raise AssertionError("substituted ExecutionPlan.to_dict must not execute")
+
+    monkeypatch.setattr(ExecutionPlan, "to_dict", substituted)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(RuntimeError, match="canonical execution plan structure changed"):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_execution_plan_fingerprint_rebind_revokes_authoritative_feasibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    monkeypatch.setattr(
+        ExecutionPlan,
+        "fingerprint",
+        property(lambda self: "0" * 64),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(RuntimeError, match="canonical execution plan structure changed"):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+

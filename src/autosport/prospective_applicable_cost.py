@@ -462,6 +462,20 @@ def _build_canonical_authority():
     model_source_family = "autosport.prospective_model_compute_money"
     slippage_source_family = "autosport.betfair_standard_limit_price_bound"
     required_classes = tuple(sorted(REQUIRED_COST_CLASSES, key=lambda value: value.value))
+    canonical_type = type
+    canonical_getattribute = object.__getattribute__
+    canonical_new = object.__new__
+    canonical_setattr = object.__setattr__
+    canonical_tuple = tuple
+    tuple_cls = tuple
+    canonical_any = any
+    canonical_len = len
+    canonical_enumerate = enumerate
+    canonical_str = str
+    str_cls = str
+    bool_cls = bool
+    unicode_error_cls = UnicodeEncodeError
+    value_error_cls = ValueError
 
     status_axes = (
         (resolution_status_cls.UNKNOWN_UNPROVEN, ()),
@@ -531,11 +545,11 @@ def _build_canonical_authority():
     )
 
     def text(value: object, field: str) -> str:
-        if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+        if canonical_type(value) is not str_cls or not value or value != value.strip() or "\x00" in value:
             raise error_cls(f"{field} must be a non-empty canonical string")
         try:
             value.encode("utf-8", errors="strict")
-        except UnicodeEncodeError as exc:
+        except unicode_error_cls as exc:
             raise error_cls(f"{field} must be valid UTF-8") from exc
         return value
 
@@ -546,15 +560,15 @@ def _build_canonical_authority():
         return digest
 
     def instant(value: object, field: str) -> datetime:
-        if type(value) is datetime_cls:
-            if object.__getattribute__(value, "tzinfo") is not timezone_utc:
+        if canonical_type(value) is datetime_cls:
+            if canonical_getattribute(value, "tzinfo") is not timezone_utc:
                 raise error_cls(f"{field} datetime input must use exact UTC timezone authority")
             parsed = value
-        elif type(value) is str:
+        elif canonical_type(value) is str_cls:
             raw = text(value, field)
             try:
                 parsed = datetime_cls.fromisoformat(raw.replace("Z", "+00:00"))
-            except ValueError as exc:
+            except value_error_cls as exc:
                 raise error_cls(f"{field} must be valid ISO-8601") from exc
         else:
             raise error_cls(
@@ -601,25 +615,25 @@ def _build_canonical_authority():
         )
 
     def validate_component(value: object) -> None:
-        if type(value) is not component_cls:
+        if canonical_type(value) is not component_cls:
             raise error_cls(
                 "components must contain exact ProspectiveApplicableCostComponent values"
             )
-        cost_class = object.__getattribute__(value, "cost_class")
-        status = object.__getattribute__(value, "status")
-        reason = object.__getattribute__(value, "reason")
-        axes = object.__getattribute__(value, "dependency_axes")
-        source_family = object.__getattribute__(value, "source_family")
-        source_evidence_id = object.__getattribute__(value, "source_evidence_id")
-        source_sha256 = object.__getattribute__(value, "source_sha256")
+        cost_class = canonical_getattribute(value, "cost_class")
+        status = canonical_getattribute(value, "status")
+        reason = canonical_getattribute(value, "reason")
+        axes = canonical_getattribute(value, "dependency_axes")
+        source_family = canonical_getattribute(value, "source_family")
+        source_evidence_id = canonical_getattribute(value, "source_evidence_id")
+        source_sha256 = canonical_getattribute(value, "source_sha256")
 
-        if type(cost_class) is not cost_class_cls:
+        if canonical_type(cost_class) is not cost_class_cls:
             raise error_cls("cost_class must be exact CostClass")
-        if type(status) is not resolution_status_cls:
+        if canonical_type(status) is not resolution_status_cls:
             raise error_cls("status must be exact ProspectiveCostResolutionStatus")
-        if type(reason) is not reason_cls:
+        if canonical_type(reason) is not reason_cls:
             raise error_cls("reason must be exact ProspectiveApplicableCostReason")
-        if type(axes) is not tuple or any(type(axis) is not dependency_axis_cls for axis in axes):
+        if canonical_type(axes) is not tuple_cls or canonical_any(canonical_type(axis) is not dependency_axis_cls for axis in axes):
             raise error_cls(
                 "dependency_axes must be a tuple of exact ProspectiveCostDependencyAxis values"
             )
@@ -640,7 +654,7 @@ def _build_canonical_authority():
             )
         refs = (source_family, source_evidence_id, source_sha256)
         if expected_source is None:
-            if any(item is not None for item in refs):
+            if canonical_any(item is not None for item in refs):
                 raise error_cls(
                     "this cost class cannot carry source authority in schema v3"
                 )
@@ -658,18 +672,18 @@ def _build_canonical_authority():
             )
 
     def validate_resolution(value: object) -> None:
-        if type(value) is not resolution_cls:
+        if canonical_type(value) is not resolution_cls:
             raise error_cls(
                 "prospective applicable-cost resolution must use the exact canonical type"
             )
-        intent_sha256 = object.__getattribute__(value, "intent_sha256")
-        opportunity_id = object.__getattribute__(value, "opportunity_id")
-        plan_sha256 = object.__getattribute__(value, "portfolio_plan_sha256")
-        decision_at = object.__getattribute__(value, "decision_at")
-        components = object.__getattribute__(value, "components")
-        completeness = object.__getattribute__(value, "completeness")
-        amount = object.__getattribute__(value, "total_subtractable_amount")
-        currency = object.__getattribute__(value, "currency")
+        intent_sha256 = canonical_getattribute(value, "intent_sha256")
+        opportunity_id = canonical_getattribute(value, "opportunity_id")
+        plan_sha256 = canonical_getattribute(value, "portfolio_plan_sha256")
+        decision_at = canonical_getattribute(value, "decision_at")
+        components = canonical_getattribute(value, "components")
+        completeness = canonical_getattribute(value, "completeness")
+        amount = canonical_getattribute(value, "total_subtractable_amount")
+        currency = canonical_getattribute(value, "currency")
 
         sha256(intent_sha256, "intent_sha256")
         text(opportunity_id, "opportunity_id")
@@ -677,17 +691,17 @@ def _build_canonical_authority():
         normalized = instant(decision_at, "decision_at")
         if normalized != decision_at:
             raise error_cls("decision_at must be canonical UTC")
-        if type(components) is not tuple:
+        if canonical_type(components) is not tuple_cls:
             raise error_cls("components must be a canonical tuple")
         for component in components:
             validate_component(component)
-        classes = tuple(object.__getattribute__(item, "cost_class") for item in components)
+        classes = canonical_tuple(canonical_getattribute(item, "cost_class") for item in components)
         if classes != required_classes:
             raise error_cls(
                 "components must contain each required cost class exactly once in canonical order"
             )
         if (
-            type(completeness) is not completeness_cls
+            canonical_type(completeness) is not completeness_cls
             or completeness is not completeness_cls.INCOMPLETE
         ):
             raise error_cls("schema v3 cannot represent COMPLETE applicable-cost authority")
@@ -695,37 +709,37 @@ def _build_canonical_authority():
             raise error_cls("schema v3 cannot represent an authoritative monetary total")
 
     def model_evidence_id(value: object, *, expected_request_id: str) -> str:
-        if type(value) is not model_evidence_cls:
+        if canonical_type(value) is not model_evidence_cls:
             raise error_cls("model-compute authority returned a non-canonical evidence type")
-        intent_sha = sha256(object.__getattribute__(value, "intent_sha256"), "model intent_sha256")
+        intent_sha = sha256(canonical_getattribute(value, "intent_sha256"), "model intent_sha256")
         opportunity_id = text(
-            object.__getattribute__(value, "opportunity_id"), "model opportunity_id"
+            canonical_getattribute(value, "opportunity_id"), "model opportunity_id"
         )
-        request_id = text(object.__getattribute__(value, "request_id"), "model request_id")
-        decision_at = instant(object.__getattribute__(value, "decision_at"), "model decision_at")
+        request_id = text(canonical_getattribute(value, "request_id"), "model request_id")
+        decision_at = instant(canonical_getattribute(value, "decision_at"), "model decision_at")
         router_decided_at = instant(
-            object.__getattribute__(value, "router_decided_at"), "model router_decided_at"
+            canonical_getattribute(value, "router_decided_at"), "model router_decided_at"
         )
         request_sha = sha256(
-            object.__getattribute__(value, "router_request_sha256"),
+            canonical_getattribute(value, "router_request_sha256"),
             "model router_request_sha256",
         )
         decision_sha = sha256(
-            object.__getattribute__(value, "router_decision_sha256"),
+            canonical_getattribute(value, "router_decision_sha256"),
             "model router_decision_sha256",
         )
-        status = object.__getattribute__(value, "status")
-        reason = object.__getattribute__(value, "reason")
-        amount = object.__getattribute__(value, "amount")
-        currency = object.__getattribute__(value, "currency")
-        tariff = object.__getattribute__(value, "tariff_sha256")
+        status = canonical_getattribute(value, "status")
+        reason = canonical_getattribute(value, "reason")
+        amount = canonical_getattribute(value, "amount")
+        currency = canonical_getattribute(value, "currency")
+        tariff = canonical_getattribute(value, "tariff_sha256")
         if request_id != expected_request_id:
             raise error_cls("model-compute evidence request mismatch")
         if router_decided_at > decision_at:
             raise error_cls("model-compute evidence router decision is from the future")
-        if type(status) is not model_status_cls or status is not model_status_cls.UNKNOWN_UNPROVEN:
+        if canonical_type(status) is not model_status_cls or status is not model_status_cls.UNKNOWN_UNPROVEN:
             raise error_cls("aggregate schema v3 cannot consume positive model-compute money")
-        if type(reason) is not model_reason_cls:
+        if canonical_type(reason) is not model_reason_cls:
             raise error_cls("model-compute evidence reason is non-canonical")
         if amount is not None or currency is not None or tariff is not None:
             raise error_cls("aggregate schema v3 cannot consume positive model-compute money")
@@ -748,33 +762,33 @@ def _build_canonical_authority():
         return digest(payload)
 
     def slippage_evidence_id(value: object) -> str:
-        if type(value) is not slippage_evidence_cls:
+        if canonical_type(value) is not slippage_evidence_cls:
             raise error_cls("canonical Betfair slippage evidence type changed")
 
-        requested_stake = object.__getattribute__(value, "requested_stake")
-        price_floor_odds = object.__getattribute__(value, "price_floor_odds")
+        requested_stake = canonical_getattribute(value, "requested_stake")
+        price_floor_odds = canonical_getattribute(value, "price_floor_odds")
         if (
-            type(requested_stake) is not decimal_cls
+            canonical_type(requested_stake) is not decimal_cls
             or not requested_stake.is_finite()
             or requested_stake <= 0
         ):
             raise error_cls("slippage requested_stake must be an exact finite positive Decimal")
         if (
-            type(price_floor_odds) is not decimal_cls
+            canonical_type(price_floor_odds) is not decimal_cls
             or not price_floor_odds.is_finite()
             or price_floor_odds <= 0
         ):
             raise error_cls("slippage price_floor_odds must be an exact finite positive Decimal")
 
-        matchme_proven = object.__getattribute__(value, "matchme_applicability_proven")
-        zero_adverse = object.__getattribute__(value, "zero_adverse_price_deterioration")
-        feasibility = object.__getattribute__(value, "execution_feasibility_proven")
-        realized_exact = object.__getattribute__(value, "realized_price_exact")
+        matchme_proven = canonical_getattribute(value, "matchme_applicability_proven")
+        zero_adverse = canonical_getattribute(value, "zero_adverse_price_deterioration")
+        feasibility = canonical_getattribute(value, "execution_feasibility_proven")
+        realized_exact = canonical_getattribute(value, "realized_price_exact")
         if (
-            type(matchme_proven) is not bool
-            or type(zero_adverse) is not bool
-            or type(feasibility) is not bool
-            or type(realized_exact) is not bool
+            canonical_type(matchme_proven) is not bool_cls
+            or canonical_type(zero_adverse) is not bool_cls
+            or canonical_type(feasibility) is not bool_cls
+            or canonical_type(realized_exact) is not bool_cls
         ):
             raise error_cls("slippage proof flags must be exact bool values")
 
@@ -782,89 +796,89 @@ def _build_canonical_authority():
             "schema": "autosport.betfair_standard_limit_price_bound",
             "schema_version": 2,
             "execution_plan_id": text(
-                object.__getattribute__(value, "execution_plan_id"),
+                canonical_getattribute(value, "execution_plan_id"),
                 "slippage execution_plan_id",
             ),
             "execution_plan_sha256": sha256(
-                object.__getattribute__(value, "execution_plan_sha256"),
+                canonical_getattribute(value, "execution_plan_sha256"),
                 "slippage execution_plan_sha256",
             ),
             "portfolio_plan_sha256": sha256(
-                object.__getattribute__(value, "portfolio_plan_sha256"),
+                canonical_getattribute(value, "portfolio_plan_sha256"),
                 "slippage portfolio_plan_sha256",
             ),
             "intent_id": text(
-                object.__getattribute__(value, "intent_id"),
+                canonical_getattribute(value, "intent_id"),
                 "slippage intent_id",
             ),
             "intent_sha256": sha256(
-                object.__getattribute__(value, "intent_sha256"),
+                canonical_getattribute(value, "intent_sha256"),
                 "slippage intent_sha256",
             ),
             "action_id": text(
-                object.__getattribute__(value, "action_id"),
+                canonical_getattribute(value, "action_id"),
                 "slippage action_id",
             ),
             "bookmaker_id": text(
-                object.__getattribute__(value, "bookmaker_id"),
+                canonical_getattribute(value, "bookmaker_id"),
                 "slippage bookmaker_id",
             ),
             "account_id": text(
-                object.__getattribute__(value, "account_id"),
+                canonical_getattribute(value, "account_id"),
                 "slippage account_id",
             ),
             "event_id": text(
-                object.__getattribute__(value, "event_id"),
+                canonical_getattribute(value, "event_id"),
                 "slippage event_id",
             ),
             "market_id": text(
-                object.__getattribute__(value, "market_id"),
+                canonical_getattribute(value, "market_id"),
                 "slippage market_id",
             ),
             "selection_id": text(
-                object.__getattribute__(value, "selection_id"),
+                canonical_getattribute(value, "selection_id"),
                 "slippage selection_id",
             ),
             "side": text(
-                object.__getattribute__(value, "side"),
+                canonical_getattribute(value, "side"),
                 "slippage side",
             ),
-            "requested_stake": str(requested_stake),
-            "price_floor_odds": str(price_floor_odds),
+            "requested_stake": canonical_str(requested_stake),
+            "price_floor_odds": canonical_str(price_floor_odds),
             "quote_id": text(
-                object.__getattribute__(value, "quote_id"),
+                canonical_getattribute(value, "quote_id"),
                 "slippage quote_id",
             ),
             "quote_observed_at": text(
-                object.__getattribute__(value, "quote_observed_at"),
+                canonical_getattribute(value, "quote_observed_at"),
                 "slippage quote_observed_at",
             ),
             "quote_expires_at": text(
-                object.__getattribute__(value, "quote_expires_at"),
+                canonical_getattribute(value, "quote_expires_at"),
                 "slippage quote_expires_at",
             ),
             "decision_at": text(
-                object.__getattribute__(value, "decision_at"),
+                canonical_getattribute(value, "decision_at"),
                 "slippage decision_at",
             ),
             "instruction_sha256": sha256(
-                object.__getattribute__(value, "instruction_sha256"),
+                canonical_getattribute(value, "instruction_sha256"),
                 "slippage instruction_sha256",
             ),
             "provider_contract_id": text(
-                object.__getattribute__(value, "provider_contract_id"),
+                canonical_getattribute(value, "provider_contract_id"),
                 "slippage provider_contract_id",
             ),
             "provider_contract_ref": text(
-                object.__getattribute__(value, "provider_contract_ref"),
+                canonical_getattribute(value, "provider_contract_ref"),
                 "slippage provider_contract_ref",
             ),
             "write_adapter_id": text(
-                object.__getattribute__(value, "write_adapter_id"),
+                canonical_getattribute(value, "write_adapter_id"),
                 "slippage write_adapter_id",
             ),
             "write_adapter_version": text(
-                object.__getattribute__(value, "write_adapter_version"),
+                canonical_getattribute(value, "write_adapter_version"),
                 "slippage write_adapter_version",
             ),
             "status": "PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION",
@@ -896,28 +910,28 @@ def _build_canonical_authority():
     ) -> ProspectiveApplicableCostResolution:
         """Re-resolve sealed product-owned prospective cost truth and fail closed."""
 
-        if type(intent) is not intent_cls:
+        if canonical_type(intent) is not intent_cls:
             raise error_cls("intent must be the exact canonical OpportunityIntent type")
-        if type(plan) is not plan_cls:
+        if canonical_type(plan) is not plan_cls:
             raise error_cls("plan must be the exact canonical PortfolioPlan type")
-        if type(router_store) is not router_store_cls:
+        if canonical_type(router_store) is not router_store_cls:
             raise error_cls(
                 "router_store must be the exact canonical ModelComputeRouterStore type"
             )
 
-        risk_context = object.__getattribute__(intent, "risk_context")
-        opportunity = object.__getattribute__(intent, "opportunity")
-        if type(risk_context) is not risk_context_cls:
+        risk_context = canonical_getattribute(intent, "risk_context")
+        opportunity = canonical_getattribute(intent, "opportunity")
+        if canonical_type(risk_context) is not risk_context_cls:
             raise error_cls(
                 "intent risk_context must be the exact canonical ProposedTicketRiskContext type"
             )
-        if type(opportunity) is not opportunity_cls:
+        if canonical_type(opportunity) is not opportunity_cls:
             raise error_cls(
                 "intent opportunity must be the exact canonical Opportunity type"
             )
 
         cutoff = instant(
-            object.__getattribute__(risk_context, "proposal_ts"),
+            canonical_getattribute(risk_context, "proposal_ts"),
             "intent risk_context proposal_ts",
         )
         asserted_cutoff = instant(decision_at, "decision_at")
@@ -926,7 +940,7 @@ def _build_canonical_authority():
                 "caller decision_at does not match canonical OpportunityIntent proposal_ts"
             )
         plan_cutoff = instant(
-            object.__getattribute__(plan, "decision_ts"),
+            canonical_getattribute(plan, "decision_ts"),
             "portfolio plan decision_ts",
         )
         if plan_cutoff != cutoff:
@@ -949,31 +963,31 @@ def _build_canonical_authority():
         ):
             raise error_cls("canonical OpportunityIntent digest authority changed")
         intent_id = text(
-            object.__getattribute__(intent, "intent_id"),
+            canonical_getattribute(intent, "intent_id"),
             "intent.intent_id",
         )
-        plan_intent_sha256s = object.__getattribute__(plan, "intent_sha256s")
-        plan_intent_ids = object.__getattribute__(plan, "intent_ids")
-        if type(plan_intent_sha256s) is not tuple or type(plan_intent_ids) is not tuple:
+        plan_intent_sha256s = canonical_getattribute(plan, "intent_sha256s")
+        plan_intent_ids = canonical_getattribute(plan, "intent_ids")
+        if canonical_type(plan_intent_sha256s) is not tuple_cls or canonical_type(plan_intent_ids) is not tuple_cls:
             raise error_cls("canonical PortfolioPlan intent identity vectors must be tuples")
-        canonical_plan_digests = tuple(
+        canonical_plan_digests = canonical_tuple(
             sha256(candidate, "portfolio plan intent_sha256")
             for candidate in plan_intent_sha256s
         )
-        canonical_plan_ids = tuple(
+        canonical_plan_ids = canonical_tuple(
             text(candidate, "portfolio plan intent_id")
             for candidate in plan_intent_ids
         )
-        if len(canonical_plan_digests) != len(canonical_plan_ids):
+        if canonical_len(canonical_plan_digests) != canonical_len(canonical_plan_ids):
             raise error_cls(
                 "canonical PortfolioPlan intent identity vectors must have matching cardinality"
             )
         matches = [
             index
-            for index, candidate_digest in enumerate(canonical_plan_digests)
+            for index, candidate_digest in canonical_enumerate(canonical_plan_digests)
             if candidate_digest == intent_sha256
         ]
-        if len(matches) != 1:
+        if canonical_len(matches) != 1:
             raise error_cls(
                 "canonical PortfolioPlan must bind the exact intent_sha256 exactly once"
             )
@@ -1059,7 +1073,7 @@ def _build_canonical_authority():
         durable_request = router_get_request(router_store, canonical_request_id)
         if router_get_request.__code__ is not router_get_request_code:
             raise error_cls("canonical router request reader authority changed")
-        if type(durable_request) is not router_request_cls:
+        if canonical_type(durable_request) is not router_request_cls:
             raise error_cls("canonical router request read returned non-canonical type")
         if router_request_payload.__code__ is not router_request_payload_code:
             raise error_cls("canonical router request payload authority changed")
@@ -1067,7 +1081,7 @@ def _build_canonical_authority():
         if router_request_payload.__code__ is not router_request_payload_code:
             raise error_cls("canonical router request payload authority changed")
         if digest(durable_request_payload) != sha256(
-            object.__getattribute__(model_evidence, "router_request_sha256"),
+            canonical_getattribute(model_evidence, "router_request_sha256"),
             "model router_request_sha256",
         ):
             raise error_cls("model-compute evidence request digest disagrees with durable router state")
@@ -1077,7 +1091,7 @@ def _build_canonical_authority():
         durable_decision = router_get_decision(router_store, canonical_request_id)
         if router_get_decision.__code__ is not router_get_decision_code:
             raise error_cls("canonical router decision reader authority changed")
-        if type(durable_decision) is not router_decision_cls:
+        if canonical_type(durable_decision) is not router_decision_cls:
             raise error_cls("canonical router decision read returned non-canonical type")
         if router_decision_payload.__code__ is not router_decision_payload_code:
             raise error_cls("canonical router decision payload authority changed")
@@ -1085,35 +1099,35 @@ def _build_canonical_authority():
         if router_decision_payload.__code__ is not router_decision_payload_code:
             raise error_cls("canonical router decision payload authority changed")
         if digest(durable_decision_payload) != sha256(
-            object.__getattribute__(model_evidence, "router_decision_sha256"),
+            canonical_getattribute(model_evidence, "router_decision_sha256"),
             "model router_decision_sha256",
         ):
             raise error_cls("model-compute evidence decision digest disagrees with durable router state")
         if instant(
-            object.__getattribute__(durable_decision, "decided_at"),
+            canonical_getattribute(durable_decision, "decided_at"),
             "durable router decided_at",
         ) != instant(
-            object.__getattribute__(model_evidence, "router_decided_at"),
+            canonical_getattribute(model_evidence, "router_decided_at"),
             "model router_decided_at",
         ):
             raise error_cls("model-compute evidence decision time disagrees with durable router state")
 
         if sha256(
-            object.__getattribute__(model_evidence, "intent_sha256"),
+            canonical_getattribute(model_evidence, "intent_sha256"),
             "model intent_sha256",
         ) != intent_sha256:
             raise error_cls("model-compute evidence intent mismatch")
         opportunity_id = text(
-            object.__getattribute__(opportunity, "opportunity_id"),
+            canonical_getattribute(opportunity, "opportunity_id"),
             "intent opportunity_id",
         )
         if text(
-            object.__getattribute__(model_evidence, "opportunity_id"),
+            canonical_getattribute(model_evidence, "opportunity_id"),
             "model opportunity_id",
         ) != opportunity_id:
             raise error_cls("model-compute evidence opportunity mismatch")
         if instant(
-            object.__getattribute__(model_evidence, "decision_at"),
+            canonical_getattribute(model_evidence, "decision_at"),
             "model decision_at",
         ) != cutoff:
             raise error_cls("model-compute evidence decision cutoff mismatch")
@@ -1127,14 +1141,14 @@ def _build_canonical_authority():
             source_evidence_id: str | None = None,
             source_sha256: str | None = None,
         ) -> ProspectiveApplicableCostComponent:
-            component = object.__new__(component_cls)
-            object.__setattr__(component, "cost_class", cost_class)
-            object.__setattr__(component, "status", status)
-            object.__setattr__(component, "reason", reason)
-            object.__setattr__(component, "dependency_axes", expected_axes(status))
-            object.__setattr__(component, "source_family", source_family)
-            object.__setattr__(component, "source_evidence_id", source_evidence_id)
-            object.__setattr__(component, "source_sha256", source_sha256)
+            component = canonical_new(component_cls)
+            canonical_setattr(component, "cost_class", cost_class)
+            canonical_setattr(component, "status", status)
+            canonical_setattr(component, "reason", reason)
+            canonical_setattr(component, "dependency_axes", expected_axes(status))
+            canonical_setattr(component, "source_family", source_family)
+            canonical_setattr(component, "source_evidence_id", source_evidence_id)
+            canonical_setattr(component, "source_sha256", source_sha256)
             validate_component(component)
             return component
 
@@ -1165,17 +1179,17 @@ def _build_canonical_authority():
                 status=resolution_status_cls.EXECUTION_AND_TERMINAL_STATE_DEPENDENT,
             ),
         }
-        ordered = tuple(components[cost_class] for cost_class in required_classes)
+        ordered = canonical_tuple(components[cost_class] for cost_class in required_classes)
 
-        resolution = object.__new__(resolution_cls)
-        object.__setattr__(resolution, "intent_sha256", intent_sha256)
-        object.__setattr__(resolution, "opportunity_id", opportunity_id)
-        object.__setattr__(resolution, "portfolio_plan_sha256", portfolio_plan_sha256)
-        object.__setattr__(resolution, "decision_at", cutoff)
-        object.__setattr__(resolution, "components", ordered)
-        object.__setattr__(resolution, "completeness", completeness_cls.INCOMPLETE)
-        object.__setattr__(resolution, "total_subtractable_amount", None)
-        object.__setattr__(resolution, "currency", None)
+        resolution = canonical_new(resolution_cls)
+        canonical_setattr(resolution, "intent_sha256", intent_sha256)
+        canonical_setattr(resolution, "opportunity_id", opportunity_id)
+        canonical_setattr(resolution, "portfolio_plan_sha256", portfolio_plan_sha256)
+        canonical_setattr(resolution, "decision_at", cutoff)
+        canonical_setattr(resolution, "components", ordered)
+        canonical_setattr(resolution, "completeness", completeness_cls.INCOMPLETE)
+        canonical_setattr(resolution, "total_subtractable_amount", None)
+        canonical_setattr(resolution, "currency", None)
         validate_resolution(resolution)
         return resolution
 
@@ -1199,15 +1213,15 @@ def _build_canonical_authority():
 
         if resolve.__code__ is not resolve_code:
             raise error_cls("canonical base applicable-cost resolver authority changed")
-        if type(slippage_evidence) is not slippage_evidence_cls:
+        if canonical_type(slippage_evidence) is not slippage_evidence_cls:
             raise error_cls(
                 "slippage_evidence must be exact BetfairStandardLimitPriceBoundEvidence"
             )
-        if type(ledger) is not ledger_cls:
+        if canonical_type(ledger) is not ledger_cls:
             raise error_cls("ledger must be exact RealExecutionLedger")
-        if type(issuance_store) is not issuance_store_cls:
+        if canonical_type(issuance_store) is not issuance_store_cls:
             raise error_cls("issuance_store must be exact SupervisedPlanIssuanceStore")
-        if type(runtime_profile) is not runtime_profile_cls:
+        if canonical_type(runtime_profile) is not runtime_profile_cls:
             raise error_cls("runtime_profile must be exact TrustedRuntimeCodeProfile")
         text(execution_plan_id, "execution_plan_id")
         text(action_id, "action_id")
@@ -1232,32 +1246,32 @@ def _build_canonical_authority():
                 ) from exc
             if slippage_product_verifier.__code__ is not slippage_product_verifier_code:
                 raise error_cls("canonical Betfair slippage verifier authority changed")
-            if type(candidate) is not slippage_evidence_cls:
+            if canonical_type(candidate) is not slippage_evidence_cls:
                 raise error_cls(
                     "canonical Betfair slippage verifier returned non-canonical evidence"
                 )
             if text(
-                object.__getattribute__(candidate, "execution_plan_id"),
+                canonical_getattribute(candidate, "execution_plan_id"),
                 "slippage execution_plan_id",
             ) != execution_plan_id:
                 raise error_cls("Betfair slippage evidence execution plan mismatch")
             if text(
-                object.__getattribute__(candidate, "action_id"),
+                canonical_getattribute(candidate, "action_id"),
                 "slippage action_id",
             ) != action_id:
                 raise error_cls("Betfair slippage evidence action mismatch")
             if (
-                object.__getattribute__(candidate, "status")
+                canonical_getattribute(candidate, "status")
                 is not slippage_status_cls.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION
-                or object.__getattribute__(candidate, "matchme_applicability_proven")
+                or canonical_getattribute(candidate, "matchme_applicability_proven")
                 is not True
-                or object.__getattribute__(
+                or canonical_getattribute(
                     candidate, "zero_adverse_price_deterioration"
                 )
                 is not True
-                or object.__getattribute__(candidate, "execution_feasibility_proven")
+                or canonical_getattribute(candidate, "execution_feasibility_proven")
                 is not False
-                or object.__getattribute__(candidate, "realized_price_exact") is not False
+                or canonical_getattribute(candidate, "realized_price_exact") is not False
             ):
                 raise error_cls(
                     "Betfair slippage evidence does not prove the narrow zero-adverse-price contract"
@@ -1288,27 +1302,27 @@ def _build_canonical_authority():
             )
         verified = reverified
 
-        canonical_intent_sha = object.__getattribute__(base, "intent_sha256")
-        canonical_plan_sha = object.__getattribute__(base, "portfolio_plan_sha256")
-        canonical_opportunity_id = object.__getattribute__(base, "opportunity_id")
-        cutoff = object.__getattribute__(base, "decision_at")
+        canonical_intent_sha = canonical_getattribute(base, "intent_sha256")
+        canonical_plan_sha = canonical_getattribute(base, "portfolio_plan_sha256")
+        canonical_opportunity_id = canonical_getattribute(base, "opportunity_id")
+        cutoff = canonical_getattribute(base, "decision_at")
         if sha256(
-            object.__getattribute__(verified, "intent_sha256"),
+            canonical_getattribute(verified, "intent_sha256"),
             "slippage intent_sha256",
         ) != canonical_intent_sha:
             raise error_cls("Betfair slippage evidence intent mismatch")
         if text(
-            object.__getattribute__(verified, "intent_id"),
+            canonical_getattribute(verified, "intent_id"),
             "slippage intent_id",
-        ) != text(object.__getattribute__(intent, "intent_id"), "intent.intent_id"):
+        ) != text(canonical_getattribute(intent, "intent_id"), "intent.intent_id"):
             raise error_cls("Betfair slippage evidence intent id mismatch")
         if sha256(
-            object.__getattribute__(verified, "portfolio_plan_sha256"),
+            canonical_getattribute(verified, "portfolio_plan_sha256"),
             "slippage portfolio_plan_sha256",
         ) != canonical_plan_sha:
             raise error_cls("Betfair slippage evidence portfolio plan mismatch")
         if instant(
-            object.__getattribute__(verified, "decision_at"),
+            canonical_getattribute(verified, "decision_at"),
             "slippage decision_at",
         ) != cutoff:
             raise error_cls("Betfair slippage evidence decision cutoff mismatch")
@@ -1323,22 +1337,22 @@ def _build_canonical_authority():
             source_evidence_id=source_evidence_id,
             source_sha256=source_evidence_id,
         )
-        components = tuple(
+        components = canonical_tuple(
             replacement
-            if object.__getattribute__(component, "cost_class")
+            if canonical_getattribute(component, "cost_class")
             is cost_class_cls.EXECUTION_SLIPPAGE
             else component
-            for component in object.__getattribute__(base, "components")
+            for component in canonical_getattribute(base, "components")
         )
-        resolution = object.__new__(resolution_cls)
-        object.__setattr__(resolution, "intent_sha256", canonical_intent_sha)
-        object.__setattr__(resolution, "opportunity_id", canonical_opportunity_id)
-        object.__setattr__(resolution, "portfolio_plan_sha256", canonical_plan_sha)
-        object.__setattr__(resolution, "decision_at", cutoff)
-        object.__setattr__(resolution, "components", components)
-        object.__setattr__(resolution, "completeness", completeness_cls.INCOMPLETE)
-        object.__setattr__(resolution, "total_subtractable_amount", None)
-        object.__setattr__(resolution, "currency", None)
+        resolution = canonical_new(resolution_cls)
+        canonical_setattr(resolution, "intent_sha256", canonical_intent_sha)
+        canonical_setattr(resolution, "opportunity_id", canonical_opportunity_id)
+        canonical_setattr(resolution, "portfolio_plan_sha256", canonical_plan_sha)
+        canonical_setattr(resolution, "decision_at", cutoff)
+        canonical_setattr(resolution, "components", components)
+        canonical_setattr(resolution, "completeness", completeness_cls.INCOMPLETE)
+        canonical_setattr(resolution, "total_subtractable_amount", None)
+        canonical_setattr(resolution, "currency", None)
         validate_resolution(resolution)
         return resolution
 

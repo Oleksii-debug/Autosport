@@ -2679,3 +2679,240 @@ def test_attempt_executor_seals_post_dispatch_failure_type(monkeypatch):
         "sealed-post-dispatch-type",
     )
 
+def test_response_append_seals_record_issuer_and_history_validator(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    history = MarketBookAttemptHistory(plan, ())
+    issue_called = False
+    validate_called = False
+
+    def forged_issue(cls, *args, **kwargs):
+        nonlocal issue_called
+        issue_called = True
+        raise AssertionError("rebound attempt record issuer must not run")
+
+    def forged_history_validate(self):
+        nonlocal validate_called
+        validate_called = True
+        raise AssertionError("rebound history validator must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module.MarketBookAttemptRecord,
+        "issue",
+        classmethod(forged_issue),
+    )
+    monkeypatch.setattr(
+        MarketBookAttemptHistory,
+        "__post_init__",
+        forged_history_validate,
+    )
+
+    updated = append_market_book_transport_attempt(
+        history,
+        issued,
+        attempt_id="sealed-response-history",
+        required=True,
+    )
+
+    assert issue_called is False
+    assert validate_called is False
+    assert updated.records[-1].outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert updated.records[-1].exact_receipt == issued.receipt
+
+
+def test_nonresponse_append_seals_record_issuer(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    history = MarketBookAttemptHistory(plan, ())
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    for _ in range(5):
+        assert rate_gate.reserve(("1.001",), scheduled_at=NOW).allowed is True
+    issue_called = False
+
+    def forged_issue(cls, *args, **kwargs):
+        nonlocal issue_called
+        issue_called = True
+        raise AssertionError("rebound nonresponse record issuer must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module.MarketBookAttemptRecord,
+        "issue",
+        classmethod(forged_issue),
+    )
+
+    execution = execute_market_book_batch_attempt(
+        client,
+        history,
+        batch_id=batch.batch_id,
+        attempt_id="sealed-nonresponse-issuer",
+        required=True,
+        request_id="sealed-nonresponse-issuer",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    assert issue_called is False
+    assert execution.outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_RATE
+    assert execution.history.required_gap_attempt_ids == (
+        "sealed-nonresponse-issuer",
+    )
+    assert transport.calls == []
+
+
+def test_bound_append_seals_result_class_rebind(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    history = MarketBookAttemptHistory(plan, ())
+
+    class ReboundResult:
+        pass
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookBatchTransportResult",
+        ReboundResult,
+    )
+
+    updated = append_market_book_transport_attempt(
+        history,
+        issued,
+        attempt_id="sealed-result-class-append",
+        required=True,
+    )
+
+    assert updated.records[-1].outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert updated.records[-1].exact_receipt == issued.receipt
+
+
+def test_execution_validator_seals_outcome_enum_rebind(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    history = append_market_book_transport_attempt(
+        MarketBookAttemptHistory(plan, ()),
+        issued,
+        attempt_id="sealed-enum-execution",
+        required=True,
+    )
+
+    class ReboundOutcome:
+        pass
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookAttemptOutcome",
+        ReboundOutcome,
+    )
+
+    execution = MarketBookBatchAttemptExecution(
+        history,
+        MarketBookAttemptOutcome.EXACT_RESPONSE,
+        issued,
+    )
+
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+    assert execution.result is issued
+
+
+def test_execution_validator_seals_receipt_status_rebind(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    history = append_market_book_transport_attempt(
+        MarketBookAttemptHistory(plan, ()),
+        issued,
+        attempt_id="sealed-status-execution",
+        required=True,
+    )
+
+    class ReboundStatus:
+        pass
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "BatchReceiptStatus",
+        ReboundStatus,
+    )
+
+    issued.assert_issued()
+    execution = MarketBookBatchAttemptExecution(
+        history,
+        MarketBookAttemptOutcome.EXACT_RESPONSE,
+        issued,
+    )
+
+    assert execution.result is issued
+    assert execution.history.records[-1].exact_receipt == issued.receipt
+
+
+def test_execution_validator_seals_result_class_rebind(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    history = append_market_book_transport_attempt(
+        MarketBookAttemptHistory(plan, ()),
+        issued,
+        attempt_id="sealed-result-class-execution",
+        required=True,
+    )
+
+    class ReboundResult:
+        pass
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookBatchTransportResult",
+        ReboundResult,
+    )
+
+    execution = MarketBookBatchAttemptExecution(
+        history,
+        MarketBookAttemptOutcome.EXACT_RESPONSE,
+        issued,
+    )
+
+    assert execution.result is issued
+    assert execution.outcome is MarketBookAttemptOutcome.EXACT_RESPONSE
+
+
+def test_execution_validator_rejects_forged_copy_after_class_rebind(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    history = append_market_book_transport_attempt(
+        MarketBookAttemptHistory(plan, ()),
+        issued,
+        attempt_id="sealed-forged-class-execution",
+        required=True,
+    )
+    forged = replace(issued)
+
+    class ReboundResult:
+        pass
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookBatchTransportResult",
+        ReboundResult,
+    )
+
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="not issued by canonical transport",
+    ):
+        MarketBookBatchAttemptExecution(
+            history,
+            MarketBookAttemptOutcome.EXACT_RESPONSE,
+            forged,
+        )
+

@@ -1116,6 +1116,9 @@ def test_store_canonical_workspace_survives_cwd_change(tmp_path, monkeypatch) ->
 
 
 def test_store_constructor_ignores_rebound_path_resolve_and_join(monkeypatch, tmp_path) -> None:
+    expected_workspace = tmp_path.resolve()
+    expected_path = expected_workspace / "economic_goal_contract.json"
+
     def forged(*args, **kwargs):
         raise AssertionError("rebound Path authority executed")
 
@@ -1125,5 +1128,5 @@ def test_store_constructor_ignores_rebound_path_resolve_and_join(monkeypatch, tm
 
     store = EconomicGoalStore(tmp_path)
 
-    assert store.workspace == tmp_path.resolve()
-    assert store.path.name == "economic_goal_contract.json"
+    assert store.workspace == expected_workspace
+    assert store.path == expected_path

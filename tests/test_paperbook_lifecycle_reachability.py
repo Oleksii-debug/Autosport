@@ -40,7 +40,7 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
         book.save(self.path)
 
         payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], 7)
+        self.assertEqual(payload["schema_version"], 8)
         self.assertEqual(
             payload["lifecycle"],
             [

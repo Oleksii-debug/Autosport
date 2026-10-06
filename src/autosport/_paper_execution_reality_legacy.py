@@ -540,6 +540,16 @@ class PaperExecutionEvidenceRecord:
         }
         if set(raw) != expected:
             raise PaperExecutionIntegrityError("evidence record schema is invalid")
+        if (
+            raw["accepted_odds"] is not None
+            and type(raw["accepted_odds"]) is not str
+        ) or (
+            raw["accepted_stake"] is not None
+            and type(raw["accepted_stake"]) is not str
+        ):
+            raise PaperExecutionIntegrityError(
+                "evidence decimal fields must use canonical text"
+            )
         try:
             return cls(
                 action_id=raw["action_id"],
@@ -780,6 +790,17 @@ class PaperLegAttempt:
         }
         if set(raw) != expected:
             raise PaperExecutionIntegrityError("attempt payload schema is invalid")
+        for decimal_name in (
+            "decision_odds",
+            "requested_stake",
+            "execution_odds",
+            "execution_stake",
+        ):
+            decimal_value = raw[decimal_name]
+            if decimal_value is not None and type(decimal_value) is not str:
+                raise PaperExecutionIntegrityError(
+                    "attempt decimal fields must use canonical text"
+                )
         decimal_parser = _CANONICAL_DECIMAL_PARSER
         if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
             raise PaperExecutionIntegrityError("decimal parser authority changed")

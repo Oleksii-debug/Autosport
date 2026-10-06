@@ -531,8 +531,6 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         if (
             getattr(_dependency_identity_guard, "__code__", None)
             is not _dependency_identity_guard_code
-            or getattr(_dependency_identity_guard, "__code__", None)
-            is not _dependency_identity_guard_code
             or getattr(_profile_validator, "__code__", None)
             is not _profile_validator_code
             or _profile_type.__post_init__ is not _profile_contract_validator

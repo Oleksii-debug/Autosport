@@ -246,6 +246,8 @@ def _make_account_identity_authority():
             getattr(expected, "__code__", None),
         )
         for owner, name, expected in (
+            (client_type, "__getattribute__", client_type.__getattribute__),
+            (transport_type, "__getattribute__", transport_type.__getattribute__),
             (_urllib_request.OpenerDirector, "open", _urllib_request.OpenerDirector.open),
             (_urllib_request.OpenerDirector, "error", _urllib_request.OpenerDirector.error),
             (

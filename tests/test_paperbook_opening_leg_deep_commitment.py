@@ -2834,6 +2834,35 @@ def test_lay_capital_root_rejects_underlying_calculator_code_mutation() -> None:
         calculator.__code__ = original_code
 
 
+def test_lay_capital_root_rejects_underlying_calculator_closure_mutation() -> None:
+    calculator = paper_module.locked_capital_for_exchange_side
+    target_cell = next(
+        cell
+        for cell in calculator.__closure__ or ()
+        if cell.cell_contents is paper_module._validate_decimal_text_resource_bound
+    )
+    original_value = target_cell.cell_contents
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("mutated exchange exposure closure executed")
+
+    try:
+        target_cell.cell_contents = hostile
+        book = PaperBook("100")
+        with pytest.raises(
+            ValueError,
+            match="exchange exposure authority changed",
+        ):
+            book.open_ticket([_lay_leg()], "10", placed_at=_TS)
+    finally:
+        target_cell.cell_contents = original_value
+
+    assert attacker_calls == 0
+
+
 def test_market_semantics_root_rejects_underlying_validator_code_mutation() -> None:
     validator = paper_module._canonical_semantic_identity
     original_code = validator.__code__

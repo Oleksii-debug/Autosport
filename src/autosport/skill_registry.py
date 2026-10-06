@@ -839,7 +839,14 @@ class SkillRegistry:
             return self._finish_failure(
                 rid, now, "HANDLER_INFRASTRUCTURE_" + exc.__class__.__name__.upper()
             )
-        if error is not None:return self._finish_failure(rid,now,error)
+        if error is not None:
+            if error in {
+                "HANDLER_START_STOP_FAILED",
+                "HANDLER_PROCESS_STOP_FAILED",
+                "HANDLER_TIMEOUT_STOP_FAILED",
+            }:
+                return self._finish_interrupted(rid, now, error)
+            return self._finish_failure(rid,now,error)
         try:
             if not isinstance(r,SkillExecutionResult):raise SkillRegistryError("skill handler must return SkillExecutionResult")
             self._check_result(d,r,c,db,ai)
@@ -1214,6 +1221,17 @@ class SkillRegistry:
         if kind!="OK":
             return None,"HANDLER_PROTOCOL_ERROR"
         return value,None
+    def _finish_interrupted(self,rid,at,code):
+        with WorkspaceEconomicLock(self.path.parent):
+            s=self._read(); e=next(x for x in s["runs"] if x["run_id"]==rid)
+            if e["status"]==SkillRunStatus.RUNNING.value:
+                e.update(
+                    status=SkillRunStatus.INTERRUPTED.value,
+                    completed_at=at,
+                    error_code=_text(code,"error_code"),
+                )
+                self._write(self.path,self._without_digest(s))
+            return self._run(e)
     def _finish_failure(self,rid,at,code,observed:SkillExecutionResult|None=None):
         with WorkspaceEconomicLock(self.path.parent):
             s=self._read(); e=next(x for x in s["runs"] if x["run_id"]==rid)

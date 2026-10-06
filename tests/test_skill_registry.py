@@ -814,6 +814,42 @@ def test_handler_spool_cleanup_failure_does_not_mask_process_stop_truth(
         spool_path.unlink(missing_ok=True)
 
 
+def test_stop_failed_invocation_remains_recovery_required(
+    tmp_path, monkeypatch
+):
+    registry = _registry(tmp_path)
+    definition = _definition("diagnose_provider_gap")
+
+    monkeypatch.setattr(
+        SkillRegistry,
+        "_execute_handler_bounded",
+        staticmethod(
+            lambda handler, payload, timeout_seconds: (
+                None,
+                "HANDLER_TIMEOUT_STOP_FAILED",
+            )
+        ),
+    )
+
+    interrupted = _invoke(
+        registry,
+        definition,
+        call_id="stop-failed-recovery",
+    )
+
+    assert interrupted.status is SkillRunStatus.INTERRUPTED
+    assert interrupted.error_code == "HANDLER_TIMEOUT_STOP_FAILED"
+    assert interrupted.completed_at == "2026-09-19T04:00:00Z"
+
+    with pytest.raises(SkillRecoveryRequiredError, match="recovery"):
+        _invoke(
+            SkillRegistry(registry.path),
+            definition,
+            call_id="stop-failed-recovery",
+            at="2026-09-19T04:05:00Z",
+        )
+
+
 def test_handler_spool_cleanup_failure_still_invalidates_success(
     tmp_path, monkeypatch
 ):

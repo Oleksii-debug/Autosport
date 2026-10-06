@@ -968,9 +968,9 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
 
     def initialize_owner(
         self,
+        contract: EconomicGoalContract,
         _type=type,
         _type_error=TypeError,
-        contract: EconomicGoalContract,
         _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
         _payload_encoder=economic_goal_to_payload,
         _writer=_CANONICAL_ATOMIC_WRITE_JSON,
@@ -993,9 +993,9 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
 
     def persist_automatic_successor(
         self,
+        candidate: EconomicGoalContract,
         _type=type,
         _type_error=TypeError,
-        candidate: EconomicGoalContract,
         _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
         _transition_validator=_CANONICAL_TRANSITION_VALIDATOR,
         _payload_encoder=economic_goal_to_payload,

@@ -1296,7 +1296,7 @@ class ProductEconomicSessionStore:
         self._require_configuration_authority()
         with self._workspace_lock_scope_witness(self._workspace_witness):
             self._require_configuration_authority()
-            goal = _ECONOMIC_GOAL_LOAD(self._goal_store_witness)
+            goal = self._economic_goal_load_witness(self._goal_store_witness)
             provenance = self._provenance_for_witness(goal)
             if self._lexists_witness(self._state_path_witness):
                 raw = self._read_regular_bytes_witness(
@@ -1308,7 +1308,7 @@ class ProductEconomicSessionStore:
                 )
                 observed = self._sha256_witness(raw).hexdigest()
                 self._require_configuration_authority()
-                recovery = _AUTHORITY_RECOVER(
+                recovery = self._authority_recover_witness(
                     self._authority_witness,
                     observed_state_sha256=observed,
                     tx_id=self._tx_id_witness(payload),
@@ -1335,7 +1335,7 @@ class ProductEconomicSessionStore:
                 return self._evidence(payload, observed, recovery.committed_generation)
 
             self._require_configuration_authority()
-            recovery = _AUTHORITY_RECOVER(
+            recovery = self._authority_recover_witness(
                 self._authority_witness,
                 observed_state_sha256=None,
             )
@@ -1378,7 +1378,7 @@ class ProductEconomicSessionStore:
                 workspace_instance_id=self._authority_witness.workspace_instance_id,
             )
             observed = self._sha256_witness(raw).hexdigest()
-            recovery = _AUTHORITY_RECOVER(
+            recovery = self._authority_recover_witness(
                 self._authority_witness,
                 observed_state_sha256=observed,
                 tx_id=self._tx_id_witness(payload),
@@ -1402,7 +1402,7 @@ class ProductEconomicSessionStore:
                     "explicit transition predecessor does not match current durable session"
                 )
 
-            goal = _ECONOMIC_GOAL_LOAD(self._goal_store_witness)
+            goal = self._economic_goal_load_witness(self._goal_store_witness)
             provenance = self._provenance_for_witness(goal)
             if (
                 payload["goal_id"] == goal.goal_id
@@ -1418,7 +1418,7 @@ class ProductEconomicSessionStore:
                 raise EconomicSessionIntegrityError(
                     "canonical paper_book.json is required before economic-session transition"
                 )
-            terminal_at = self._clock_instant_witness(self._clock)
+            terminal_at = self._clock_instant_witness(self._clock_witness)
             if self._parse_instant_witness(terminal_at) < self._parse_instant_witness(previous.started_at):
                 raise EconomicSessionIntegrityError(
                     "economic-session transition clock precedes predecessor start"
@@ -1428,7 +1428,7 @@ class ProductEconomicSessionStore:
             )
             successor = self._state_payload_witness(
                 workspace_instance_id=self._authority_witness.workspace_instance_id,
-                session_id=_UUID4().hex,
+                session_id=self._uuid4_witness().hex,
                 goal_id=goal.goal_id,
                 goal_revision=goal.revision,
                 bankroll_id=goal.bankroll_id,
@@ -1436,8 +1436,8 @@ class ProductEconomicSessionStore:
                 goal_contract_sha256=provenance.contract_sha256,
                 started_at=terminal_at,
                 opening_paperbook_sha256=opening_sha256,
-                product_clock_authoritative=self._product_clock,
-                transition_id=_UUID4().hex,
+                product_clock_authoritative=self._product_clock_witness,
+                transition_id=self._uuid4_witness().hex,
                 predecessor_session_id=previous.session_id,
                 predecessor_state_sha256=previous.state_sha256,
                 predecessor_ended_at=terminal_at,
@@ -1446,7 +1446,7 @@ class ProductEconomicSessionStore:
             binding = self._semantic_binding_witness(successor)
             tx_id = self._tx_id_witness(successor)
             self._require_configuration_authority()
-            _AUTHORITY_PREPARE(
+            self._authority_prepare_witness(
                 self._authority_witness,
                 tx_id=tx_id,
                 observed_state_sha256=observed,
@@ -1465,7 +1465,7 @@ class ProductEconomicSessionStore:
                     "published successor session does not match prepared digest"
                 )
             self._require_configuration_authority()
-            committed = _AUTHORITY_COMMIT(
+            committed = self._authority_commit_witness(
                 self._authority_witness,
                 tx_id=tx_id,
                 observed_state_sha256=successor_observed,
@@ -1504,22 +1504,22 @@ class ProductEconomicSessionStore:
         self._require_configuration_authority()
         payload = self._state_payload_witness(
             workspace_instance_id=self._authority_witness.workspace_instance_id,
-            session_id=_UUID4().hex,
+            session_id=self._uuid4_witness().hex,
             goal_id=goal.goal_id,
             goal_revision=goal.revision,
             bankroll_id=goal.bankroll_id,
             currency=goal.currency,
             goal_contract_sha256=goal_contract_sha256,
-            started_at=self._clock_instant_witness(self._clock),
+            started_at=self._clock_instant_witness(self._clock_witness),
             opening_paperbook_sha256=opening_sha256,
-            product_clock_authoritative=self._product_clock,
-            transition_id=_UUID4().hex,
+            product_clock_authoritative=self._product_clock_witness,
+            transition_id=self._uuid4_witness().hex,
         )
         intended = self._state_sha256_witness(payload)
         binding = self._semantic_binding_witness(payload)
         tx_id = self._tx_id_witness(payload)
         self._require_configuration_authority()
-        _AUTHORITY_PREPARE(
+        self._authority_prepare_witness(
             self._authority_witness,
             tx_id=tx_id,
             observed_state_sha256=None,
@@ -1536,7 +1536,7 @@ class ProductEconomicSessionStore:
                 "published economic-session state does not match prepared digest"
             )
         self._require_configuration_authority()
-        committed = _AUTHORITY_COMMIT(
+        committed = self._authority_commit_witness(
             self._authority_witness,
             tx_id=tx_id,
             observed_state_sha256=observed,

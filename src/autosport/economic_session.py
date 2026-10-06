@@ -72,8 +72,15 @@ _WORKSPACE_LOCK_RELEASE: Final = WorkspaceEconomicLock.release
 _WORKSPACE_LOCK_RELEASE_CODE: Final = getattr(_WORKSPACE_LOCK_RELEASE, "__code__", None)
 _OBJECT_SETATTR: Final = object.__setattr__
 _METHOD_TYPE: Final = MethodType
-_PAPERBOOK_LOAD_BYTES = PaperBook.load_bytes
-_PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
+_PAPERBOOK_TYPE: Final = PaperBook
+_PAPERBOOK_LOAD_BYTES_DESCRIPTOR: Final = PaperBook.__dict__["load_bytes"]
+_PAPERBOOK_VALIDATE_LOADED_STATE_DESCRIPTOR: Final = PaperBook.__dict__[
+    "_validate_loaded_state"
+]
+_PAPERBOOK_LOAD_BYTES: Final = _PAPERBOOK_LOAD_BYTES_DESCRIPTOR.__func__
+_PAPERBOOK_VALIDATE_LOADED_STATE: Final = (
+    _PAPERBOOK_VALIDATE_LOADED_STATE_DESCRIPTOR.__func__
+)
 _ECONOMIC_GOAL_LOAD = EconomicGoalStore.load
 _ECONOMIC_GOAL_STORE_TYPE: Final = EconomicGoalStore
 _ECONOMIC_GOAL_STORE_NEW: Final = EconomicGoalStore.__new__
@@ -548,6 +555,7 @@ def _opening_paperbook_sha256(
     path: Path,
     *,
     _read=_read_regular_bytes,
+    _paperbook_type=_PAPERBOOK_TYPE,
     _load_bytes=_PAPERBOOK_LOAD_BYTES,
     _validate=_PAPERBOOK_VALIDATE_LOADED_STATE,
     _sha256=hashlib.sha256,
@@ -555,8 +563,8 @@ def _opening_paperbook_sha256(
 ) -> str:
     before = _read(path, limit=_limit, label="canonical PaperBook")
     try:
-        book = _load_bytes(before)
-        _validate(book)
+        book = _load_bytes(_paperbook_type, before)
+        _validate(_paperbook_type, book)
     except (OSError, TypeError, ValueError) as exc:
         raise EconomicSessionIntegrityError(
             "canonical PaperBook cannot establish economic session"
@@ -1009,6 +1017,13 @@ class ProductEconomicSessionStore:
         self._workspace_lock_exit_witness = _WORKSPACE_LOCK_EXIT
         self._workspace_lock_acquire_witness = _WORKSPACE_LOCK_ACQUIRE
         self._workspace_lock_release_witness = _WORKSPACE_LOCK_RELEASE
+        self._paperbook_type_witness = _PAPERBOOK_TYPE
+        self._paperbook_load_bytes_descriptor_witness = (
+            _PAPERBOOK_LOAD_BYTES_DESCRIPTOR
+        )
+        self._paperbook_validate_descriptor_witness = (
+            _PAPERBOOK_VALIDATE_LOADED_STATE_DESCRIPTOR
+        )
         self._paperbook_load_bytes_witness = _PAPERBOOK_LOAD_BYTES
         self._paperbook_validate_witness = _PAPERBOOK_VALIDATE_LOADED_STATE
         self._economic_goal_load_witness = _ECONOMIC_GOAL_LOAD
@@ -1122,6 +1137,11 @@ class ProductEconomicSessionStore:
             or _AUTHORITY_RECOVER is not self._authority_recover_witness
             or _AUTHORITY_PREPARE is not self._authority_prepare_witness
             or _AUTHORITY_COMMIT is not self._authority_commit_witness
+            or _PAPERBOOK_TYPE is not self._paperbook_type_witness
+            or _PAPERBOOK_LOAD_BYTES_DESCRIPTOR
+            is not self._paperbook_load_bytes_descriptor_witness
+            or _PAPERBOOK_VALIDATE_LOADED_STATE_DESCRIPTOR
+            is not self._paperbook_validate_descriptor_witness
             or _PAPERBOOK_LOAD_BYTES is not self._paperbook_load_bytes_witness
             or _PAPERBOOK_VALIDATE_LOADED_STATE is not self._paperbook_validate_witness
             or _WORKSPACE_LOCK_TYPE is not self._workspace_lock_type_witness
@@ -1164,8 +1184,15 @@ class ProductEconomicSessionStore:
             or MonotonicWorkspaceAuthority.recover is not self._authority_recover_witness
             or MonotonicWorkspaceAuthority.prepare is not self._authority_prepare_witness
             or MonotonicWorkspaceAuthority.commit is not self._authority_commit_witness
-            or PaperBook.load_bytes is not self._paperbook_load_bytes_witness
-            or PaperBook._validate_loaded_state is not self._paperbook_validate_witness
+            or PaperBook is not self._paperbook_type_witness
+            or PaperBook.__dict__.get("load_bytes")
+            is not self._paperbook_load_bytes_descriptor_witness
+            or PaperBook.__dict__.get("_validate_loaded_state")
+            is not self._paperbook_validate_descriptor_witness
+            or self._paperbook_load_bytes_descriptor_witness.__func__
+            is not self._paperbook_load_bytes_witness
+            or self._paperbook_validate_descriptor_witness.__func__
+            is not self._paperbook_validate_witness
             or _PRODUCT_ECONOMIC_SESSION_TYPE is not self._product_economic_session_type_witness
             or ProductEconomicSession is not self._product_economic_session_type_witness
             or ProductEconomicSession.__eq__ is not self._product_economic_session_eq_witness

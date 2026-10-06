@@ -667,7 +667,6 @@ class PaperBook:
         _CANONICAL_REQUIRE_OPENING_AUTHORITY(self)
         _CANONICAL_REQUIRE_CAUSAL_AUTHORITY(self)
         amount = _CANONICAL_DECIMAL_INPUT(stake, "stake")
-        new_balance = _CANONICAL_DEBIT_BALANCE(self.balance, amount)
 
         ticket_placed_at = _CANONICAL_VALIDATE_PLACED_AT(
             placed_at if placed_at is not None else _CANONICAL_UTC_NOW_ISO()
@@ -694,6 +693,16 @@ class PaperBook:
         quote_keys = [leg.quote_key for leg in ticket_legs]
         if len(quote_keys) != len(set(quote_keys)):
             raise ValueError("ticket contains duplicate quote_key leg")
+        if any(leg.exchange_side == "lay" for leg in ticket_legs) and len(ticket_legs) != 1:
+            raise ValueError(
+                "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+            )
+        locked_capital = (
+            _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(amount, ticket_legs[0])
+            if len(ticket_legs) == 1
+            else amount
+        )
+        new_balance = _CANONICAL_DEBIT_BALANCE(self.balance, locked_capital)
         ticket = _CANONICAL_PAPER_TICKET_CONSTRUCTOR(
             ticket_id=str(_CANONICAL_UUID4()),
             stake=amount,

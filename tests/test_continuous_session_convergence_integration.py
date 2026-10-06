@@ -452,6 +452,37 @@ def test_register_rejects_existing_canonical_dependency_selector_drift() -> None
         )
 
 
+def test_register_rejects_subclass_dependency_selector_publication_mismatch() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+
+    class SubIndex(continuous_session.FocusedMirrorDependencyIndex):
+        pass
+
+    index = SubIndex(MarketMirror())
+
+    def publish_wrong_selectors(input_id: str, **_selectors: object) -> None:
+        continuous_session.FocusedMirrorDependencyIndex.register(
+            index,
+            input_id,
+            source_ids="provider-b",
+            sports="table_tennis",
+            event_ids="provider-a:event-1",
+        )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="registration selectors do not match lifecycle request",
+    ):
+        coordinator._register_input(
+            "input-1",
+            dependency_index=index,
+            register_input=publish_wrong_selectors,
+            source_ids="provider-a",
+            sports="table_tennis",
+            event_ids="provider-a:event-1",
+        )
+
+
 def test_register_rejects_canonical_dependency_selector_publication_mismatch() -> None:
     coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
     index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())

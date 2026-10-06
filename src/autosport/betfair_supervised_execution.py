@@ -14,6 +14,7 @@ from enum import Enum
 from hashlib import sha256
 from hmac import compare_digest as _hmac_compare_digest, digest as _hmac_digest
 import json
+import sys
 from pathlib import Path
 from secrets import token_bytes as _token_bytes
 from typing import Callable, Mapping, Sequence
@@ -972,7 +973,7 @@ class BetfairSupervisedPlaceOrdersClient:
         )
 
 
-def _build_canonical_place_action_dispatch():
+def _build_canonical_place_action_dispatch(canonical_caller_code, frame_getter):
     """Capture provider-write dispatch and authenticate each client construction."""
 
     client_type = BetfairSupervisedPlaceOrdersClient
@@ -2019,6 +2020,14 @@ def _build_canonical_place_action_dispatch():
         execution_workspace: Path,
         _before_transport: Callable[[str], None] | None,
     ) -> BetfairPlaceExecutionReport:
+        try:
+            caller_code = frame_getter(1).f_code
+        except (AttributeError, ValueError):
+            caller_code = None
+        if caller_code is not canonical_caller_code:
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair provider dispatch is private to final-send authority"
+            )
         preflight(client)
         return place_action(
             client,
@@ -2255,10 +2264,6 @@ def _parse_place_orders_response(
     )
 
 
-_canonical_place_action_dispatch, _canonical_place_client_preflight = (
-    _build_canonical_place_action_dispatch()
-)
-del _build_canonical_place_action_dispatch
 
 
 def _report_outcome(
@@ -2333,6 +2338,7 @@ def _place_action_with_final_durable_authority(
     execution_workspace: Path,
     confirmation_receipt_id: str | None,
     confirmation_review_sha256: str | None,
+    _canonical_dispatch,
 ) -> BetfairPlaceExecutionReport:
     """Hold durable approval + exact operator confirmation through the provider boundary."""
 
@@ -2549,7 +2555,7 @@ def _place_action_with_final_durable_authority(
                 )
 
         try:
-            report = _canonical_place_action_dispatch(
+            report = _canonical_dispatch(
                 client,
                 action,
                 profile=profile,
@@ -2580,7 +2586,7 @@ def _place_action_with_final_durable_authority(
 
     return ledger._mutate(operation)
 
-def execute_betfair_supervised_action(
+def _execute_betfair_supervised_action_core(
     ledger: RealExecutionLedger,
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
@@ -2592,9 +2598,14 @@ def execute_betfair_supervised_action(
     clock: Callable[[], str] | None = None,
     confirmation_receipt_id: str | None = None,
     confirmation_review_sha256: str | None = None,
+    _final_helper=None,
 ) -> BetfairSupervisedExecutionResult:
     """Reserve -> submit -> placeOrders -> report -> canonical ledger transition."""
 
+    if _final_helper is None:
+        raise BetfairSupervisedExecutionError(
+            "canonical Betfair final-send helper is unavailable"
+        )
     if type(ledger) is not RealExecutionLedger:
         raise TypeError("ledger must be exact RealExecutionLedger")
     if type(bound) is not BoundSupervisedExecutionPlan:
@@ -2644,7 +2655,7 @@ def execute_betfair_supervised_action(
             provider_id=action.bookmaker_id,
         )
         try:
-            report = _place_action_with_final_durable_authority(
+            report = _final_helper(
                 ledger,
                 bound,
                 approval,
@@ -2761,3 +2772,151 @@ def execute_betfair_supervised_action(
         evidence_id,
         receipt,
     )
+
+# Compose the irreversible provider boundary only after both the raw final-send helper
+# and canonical executor code exist. The only callable provider dispatch is then
+# closure-owned beneath the public executor; module-level private helper names are
+# removed so callers cannot bypass confirmation/workspace authority by importing an
+# underscored implementation detail.
+_FINAL_HELPER_OPERATION_CODES = tuple(
+    code
+    for code in _place_action_with_final_durable_authority.__code__.co_consts
+    if getattr(code, "co_name", None) == "operation"
+)
+if len(_FINAL_HELPER_OPERATION_CODES) != 1:
+    raise RuntimeError("canonical Betfair final-send operation code is unavailable")
+_FINAL_HELPER_OPERATION_CODE = _FINAL_HELPER_OPERATION_CODES[0]
+del _FINAL_HELPER_OPERATION_CODES
+
+_canonical_place_action_dispatch, _canonical_place_client_preflight = (
+    _build_canonical_place_action_dispatch(
+        _FINAL_HELPER_OPERATION_CODE,
+        sys._getframe,
+    )
+)
+del _build_canonical_place_action_dispatch
+
+_RAW_FINAL_SEND_HELPER = _place_action_with_final_durable_authority
+_RAW_FINAL_SEND_HELPER_CODE = _RAW_FINAL_SEND_HELPER.__code__
+_CANONICAL_EXECUTE_CORE = _execute_betfair_supervised_action_core
+_CANONICAL_EXECUTE_CORE_CODE = _CANONICAL_EXECUTE_CORE.__code__
+_CANONICAL_PROVIDER_DISPATCH = _canonical_place_action_dispatch
+del _place_action_with_final_durable_authority
+del _canonical_place_action_dispatch
+del _execute_betfair_supervised_action_core
+
+
+def _build_final_send_helper_boundary(
+    raw_helper,
+    raw_helper_code,
+    canonical_execute_code,
+    canonical_dispatch,
+    frame_getter,
+):
+    def protected_final_send_helper(
+        ledger: RealExecutionLedger,
+        bound: BoundSupervisedExecutionPlan,
+        approval: SupervisedApproval,
+        *,
+        action: ExecutionAction,
+        attempt_id: str,
+        profile: BookmakerCapabilityProfile,
+        client: BetfairSupervisedPlaceOrdersClient,
+        provider_order_ref: str,
+        execution_workspace: Path,
+        confirmation_receipt_id: str | None,
+        confirmation_review_sha256: str | None,
+    ) -> BetfairPlaceExecutionReport:
+        try:
+            caller_code = frame_getter(1).f_code
+        except (AttributeError, ValueError):
+            caller_code = None
+        if caller_code is not canonical_execute_code:
+            raise BetfairSupervisedExecutionError(
+                "Betfair final-send helper is private to canonical execution"
+            )
+        if getattr(raw_helper, "__code__", None) is not raw_helper_code:
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair final-send helper authority changed"
+            )
+        return raw_helper(
+            ledger,
+            bound,
+            approval,
+            action=action,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            provider_order_ref=provider_order_ref,
+            execution_workspace=execution_workspace,
+            confirmation_receipt_id=confirmation_receipt_id,
+            confirmation_review_sha256=confirmation_review_sha256,
+            _canonical_dispatch=canonical_dispatch,
+        )
+
+    return protected_final_send_helper
+
+
+_PROTECTED_FINAL_SEND_HELPER = _build_final_send_helper_boundary(
+    _RAW_FINAL_SEND_HELPER,
+    _RAW_FINAL_SEND_HELPER_CODE,
+    _CANONICAL_EXECUTE_CORE_CODE,
+    _CANONICAL_PROVIDER_DISPATCH,
+    sys._getframe,
+)
+del _build_final_send_helper_boundary
+
+
+def _build_public_betfair_executor(
+    canonical_core,
+    canonical_core_code,
+    final_helper,
+):
+    def public_execute_betfair_supervised_action(
+        ledger: RealExecutionLedger,
+        bound: BoundSupervisedExecutionPlan,
+        approval: SupervisedApproval,
+        *,
+        action_id: str,
+        attempt_id: str,
+        profile: BookmakerCapabilityProfile,
+        client: BetfairSupervisedPlaceOrdersClient,
+        clock: Callable[[], str] | None = None,
+        confirmation_receipt_id: str | None = None,
+        confirmation_review_sha256: str | None = None,
+    ) -> BetfairSupervisedExecutionResult:
+        if getattr(canonical_core, "__code__", None) is not canonical_core_code:
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair execution authority changed"
+            )
+        return canonical_core(
+            ledger,
+            bound,
+            approval,
+            action_id=action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=clock,
+            confirmation_receipt_id=confirmation_receipt_id,
+            confirmation_review_sha256=confirmation_review_sha256,
+            _final_helper=final_helper,
+        )
+
+    return public_execute_betfair_supervised_action
+
+
+execute_betfair_supervised_action = _build_public_betfair_executor(
+    _CANONICAL_EXECUTE_CORE,
+    _CANONICAL_EXECUTE_CORE_CODE,
+    _PROTECTED_FINAL_SEND_HELPER,
+)
+execute_betfair_supervised_action.__name__ = "execute_betfair_supervised_action"
+execute_betfair_supervised_action.__qualname__ = "execute_betfair_supervised_action"
+execute_betfair_supervised_action.__module__ = __name__
+del _build_public_betfair_executor
+del _RAW_FINAL_SEND_HELPER
+del _CANONICAL_EXECUTE_CORE
+del _CANONICAL_PROVIDER_DISPATCH
+del _PROTECTED_FINAL_SEND_HELPER
+

@@ -2539,18 +2539,30 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         *,
         _running_fence: Callable[..., Any] = _ContinuousSessionState.running_fence,
         _running_fence_code: object = _ContinuousSessionState.running_fence.__code__,
+        _require_running_method: Callable[["ContinuousSessionCoordinator"], None] = (
+            _require_running
+        ),
+        _require_running_method_code: object = _require_running.__code__,
+        _instant_validator: Callable[[object, str], datetime] = _instant,
+        _instant_validator_code: object = _instant.__code__,
     ) -> ContinuousTickResult:
         if (
             type(self._state).running_fence is not _running_fence
             or getattr(_running_fence, "__code__", None) is not _running_fence_code
+            or type(self)._require_running is not _require_running_method
+            or getattr(_require_running_method, "__code__", None)
+            is not _require_running_method_code
+            or _instant is not _instant_validator
+            or getattr(_instant_validator, "__code__", None)
+            is not _instant_validator_code
         ):
             raise ContinuousSessionError(
                 "canonical coordinator running-fence authority changed"
             )
-        self._require_running()
+        _require_running_method(self)
         observation_token = self._state._checkpoint_token
         now = self.clock()
-        _instant(now, "now")
+        _instant_validator(now, "now")
 
         try:
             cycle = self.collector.run_cycle()

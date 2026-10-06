@@ -5,7 +5,9 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.economic_goal as economic_goal_module
 import autosport.economic_goal_provenance as economic_goal_provenance_module
+import autosport.economic_goal_store as economic_goal_store_module
 
 from autosport.economic_goal import (
     AutomationLevel,
@@ -887,3 +889,12 @@ def test_provenance_verifier_maps_contract_identity_fields_by_canonical_position
     ):
         with pytest.raises(EconomicGoalProvenanceError, match=message):
             verify_provenance(replace(goal, **{field: value}), evidence)
+
+
+def test_economic_goal_field_order_is_shared_across_contract_store_and_provenance() -> None:
+    assert economic_goal_provenance_module._PROVENANCE_CONTRACT_FIELD_NAMES == (
+        economic_goal_module._CONTRACT_FIELD_NAMES
+    )
+    assert economic_goal_store_module._CONTRACT_KEYS_ORDERED == (
+        economic_goal_module._CONTRACT_FIELD_NAMES
+    )

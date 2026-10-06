@@ -251,6 +251,7 @@ def test_capture_class_authority_rebind_fails_before_ingest(
         (BetfairExecutionReadbackEnvelope, "assert_authoritative"),
         (BetfairExecutionReadbackEnvelope, "_authority_fingerprint"),
         (RealExecutionLedger, "saga"),
+        (RealExecutionLedger, "_action_payload"),
     ],
 )
 def test_authority_method_code_drift_fails_before_ingest(
@@ -259,7 +260,8 @@ def test_authority_method_code_drift_fails_before_ingest(
     owner,
     method_name,
 ) -> None:
-    method = vars(owner)[method_name]
+    descriptor = vars(owner)[method_name]
+    method = descriptor.__func__ if type(descriptor) is classmethod else descriptor
     original_code = method.__code__
     drifted_code = original_code.replace(
         co_name=f"drifted_{owner.__name__}_{method_name}"

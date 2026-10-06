@@ -427,6 +427,102 @@ def test_changed_content_at_equal_provider_settled_time_appends_observed_revisio
     assert store.current("betfair", "acct-1", "bet-777") == corrected
 
 
+def _write_three_record_forged_journal(
+    path,
+    first_record: dict[str, object],
+    second_record: dict[str, object],
+    third_record: dict[str, object],
+) -> None:
+    chained_third = dict(third_record)
+    chained_third["previous_record_sha256"] = second_record["record_sha256"]
+    unsigned = dict(chained_third)
+    unsigned.pop("record_sha256")
+    chained_third["record_sha256"] = _test_digest(unsigned)
+    path.write_text(
+        "".join(
+            json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+            for record in (first_record, second_record, chained_third)
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_restart_rejects_return_to_superseded_semantic_revision(tmp_path) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    canonical_path = tmp_path / "canonical-corrections.jsonl"
+    store = BetfairSettlementRevisionStore(canonical_path)
+
+    _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+    transport.provider_status = "VOIDED"
+    transport.profit = 0
+    transport.settled_date = "2026-09-21T19:30:00+00:00"
+    _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+
+    first_record, second_record = tuple(
+        json.loads(line)
+        for line in canonical_path.read_text(encoding="utf-8").splitlines()
+    )
+    third_record = _rehashed_record(
+        first_record,
+        previous_revision_id=second_record["revision"]["revision_id"],
+        revision_number=3,
+        available_at="2026-09-21T20:01:00+00:00",
+    )
+    forged_path = tmp_path / "semantic-regression.jsonl"
+    _write_three_record_forged_journal(
+        forged_path,
+        first_record,
+        second_record,
+        third_record,
+    )
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="regressed to superseded semantic content",
+    ):
+        BetfairSettlementRevisionStore(forged_path)
+
+
+def test_restart_rejects_provider_settled_date_regression(tmp_path) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    canonical_path = tmp_path / "canonical-date-corrections.jsonl"
+    store = BetfairSettlementRevisionStore(canonical_path)
+
+    _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+    transport.provider_status = "VOIDED"
+    transport.profit = 0
+    transport.settled_date = "2026-09-21T19:30:00+00:00"
+    _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+
+    first_record, second_record = tuple(
+        json.loads(line)
+        for line in canonical_path.read_text(encoding="utf-8").splitlines()
+    )
+    third_record = _rehashed_record(
+        second_record,
+        previous_revision_id=second_record["revision"]["revision_id"],
+        revision_number=3,
+        provider_status="LAPSED",
+        settled_date="2026-09-21T19:15:00+00:00",
+        available_at="2026-09-21T20:01:00+00:00",
+    )
+    forged_path = tmp_path / "settled-date-regression.jsonl"
+    _write_three_record_forged_journal(
+        forged_path,
+        first_record,
+        second_record,
+        third_record,
+    )
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="regressed provider settled_date",
+    ):
+        BetfairSettlementRevisionStore(forged_path)
+
+
 def test_changed_content_with_older_provider_settled_time_fails_closed(tmp_path) -> None:
     transport = _Transport()
     ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)

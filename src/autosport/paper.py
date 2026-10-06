@@ -2281,15 +2281,19 @@ class PaperBook:
             raise ValueError(
                 "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
             )
-        leg_quote_keys = {leg.quote_key for leg in ticket.legs}
-        unknown_winners = winning_quote_keys - leg_quote_keys
-        unknown_voids = void_quote_keys - leg_quote_keys
+        leg_settlement_keys = {leg.settlement_key for leg in ticket.legs}
+        unknown_winners = winning_quote_keys - leg_settlement_keys
+        unknown_voids = void_quote_keys - leg_settlement_keys
         if unknown_winners:
-            raise ValueError("PaperBook settlement contains unknown winning quote_key")
+            raise ValueError(
+                "PaperBook settlement contains unknown winning settlement key"
+            )
         if unknown_voids:
-            raise ValueError("PaperBook settlement contains unknown void quote_key")
+            raise ValueError(
+                "PaperBook settlement contains unknown void settlement key"
+            )
         if winning_quote_keys & void_quote_keys:
-            raise ValueError("PaperBook settlement quote_key cannot be both winning and void")
+            raise ValueError("PaperBook settlement key cannot be both winning and void")
 
         if len(ticket.legs) == 1 and ticket.legs[0].exchange_side == "lay":
             leg = ticket.legs[0]
@@ -2297,10 +2301,10 @@ class PaperBook:
                 ticket.stake,
                 leg,
             )
-            if leg.quote_key in void_quote_keys:
+            if leg.settlement_key in void_quote_keys:
                 status = TicketStatus.VOID
                 payout = locked_capital
-            elif leg.quote_key in winning_quote_keys:
+            elif leg.settlement_key in winning_quote_keys:
                 status = TicketStatus.LOST
                 payout = Decimal("0")
             else:
@@ -2342,9 +2346,9 @@ class PaperBook:
             return status, payout, new_balance
 
         effective_legs = tuple(
-            leg for leg in ticket.legs if leg.quote_key not in void_quote_keys
+            leg for leg in ticket.legs if leg.settlement_key not in void_quote_keys
         )
-        if any(leg.quote_key not in winning_quote_keys for leg in effective_legs):
+        if any(leg.settlement_key not in winning_quote_keys for leg in effective_legs):
             return TicketStatus.LOST, Decimal("0"), balance
 
         status = TicketStatus.VOID if not effective_legs else TicketStatus.WON

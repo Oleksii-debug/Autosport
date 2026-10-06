@@ -232,6 +232,32 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(attempt.execution_odds, Decimal("2.40"))
         self.assertEqual(attempt.execution_stake, Decimal("10.00"))
 
+    def test_attempt_reload_ignores_rebound_module_enum_constructors(self) -> None:
+        payload = self._attempt_payload()
+        names = ("PaperAttemptOutcome", "EvidenceGrade")
+        sentinel = object()
+        previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+        calls: list[str] = []
+
+        def forged_enum(value: object):
+            calls.append(str(value))
+            raise AssertionError("rebound module enum constructor executed")
+
+        try:
+            for name in names:
+                legacy.__dict__[name] = forged_enum
+            attempt = PaperLegAttempt.from_dict(payload)
+        finally:
+            for name, value in previous.items():
+                if value is sentinel:
+                    legacy.__dict__.pop(name, None)
+                else:
+                    legacy.__dict__[name] = value
+
+        self.assertEqual(calls, [])
+        self.assertIs(attempt.outcome, PaperAttemptOutcome.ACCEPTED)
+        self.assertIs(attempt.evidence_grade, EvidenceGrade.EMPIRICAL)
+
     def test_attempt_reload_bounds_decimal_before_module_constructor_dispatch(self) -> None:
         payload = self._attempt_payload()
         payload["decision_odds"] = "1E+8192"

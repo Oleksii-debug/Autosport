@@ -407,6 +407,9 @@ class _ContinuousSessionState:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.source_id = _text(source_id, "source_id")
         self._clock = clock
+        self._error_path = self.path.with_name(
+            f"{self.path.name}.operational_error.json"
+        )
 
         # Bootstrap is a read/create/read transaction on the canonical session
         # path.  Without this fence, two processes can both observe absence and
@@ -460,44 +463,45 @@ class _ContinuousSessionState:
                 )
             checkpoint_token = self._checkpoint_identity_token()
 
-        self._session_id = raw["session_id"]
-        self._generation = raw["generation"]
-        self._cycles_completed = raw["cycles_completed"]
-        self._last_success_at = raw["last_success_at"]
-        self._state = raw["state"]
-        self._last_error_code = raw["last_error_code"]
-        self._source_gap_state = raw["source_gap_state"]
-        self._source_sync_state = raw["source_sync_state"]
-        self._checkpoint_token = checkpoint_token
-        self._error_path = self.path.with_name(
-            f"{self.path.name}.operational_error.json"
-        )
-        if self._error_checkpoint_present():
-            error_checkpoint = self._read_error_checkpoint()
-            if error_checkpoint["observed_generation"] > self._generation:
-                raise ContinuousSessionError(
-                    "operational error checkpoint generation is ahead of "
-                    "canonical session bootstrap state"
-                )
-            same_generation = (
-                error_checkpoint["observed_generation"] == self._generation
-            )
-            if same_generation and (
-                error_checkpoint["observed_cycles_completed"] != self._cycles_completed
-                or error_checkpoint["observed_last_success_at"] != self._last_success_at
-                or error_checkpoint["observed_state"] != self._state
-            ):
-                raise ContinuousSessionError(
-                    "same-generation operational error checkpoint markers "
-                    "conflict with canonical session bootstrap state"
-                )
-            if same_generation and error_checkpoint["last_error_code"] is not None:
-                durable_error = raw["last_error_code"]
-                checkpoint_error = error_checkpoint["last_error_code"]
-                if durable_error is not None and durable_error != checkpoint_error:
+            # The canonical checkpoint and bounded operational overlay are one
+            # bootstrap observation. Keep both under the same session lock so a
+            # concurrent writer cannot advance the main generation and sidecar
+            # between reads, producing a false "sidecar ahead" bootstrap fault.
+            self._session_id = raw["session_id"]
+            self._generation = raw["generation"]
+            self._cycles_completed = raw["cycles_completed"]
+            self._last_success_at = raw["last_success_at"]
+            self._state = raw["state"]
+            self._last_error_code = raw["last_error_code"]
+            self._source_gap_state = raw["source_gap_state"]
+            self._source_sync_state = raw["source_sync_state"]
+            self._checkpoint_token = checkpoint_token
+            if self._error_checkpoint_present():
+                error_checkpoint = self._read_error_checkpoint()
+                if error_checkpoint["observed_generation"] > self._generation:
                     raise ContinuousSessionError(
-                        "continuous session error authorities conflict at bootstrap"
+                        "operational error checkpoint generation is ahead of "
+                        "canonical session bootstrap state"
                     )
+                same_generation = (
+                    error_checkpoint["observed_generation"] == self._generation
+                )
+                if same_generation and (
+                    error_checkpoint["observed_cycles_completed"] != self._cycles_completed
+                    or error_checkpoint["observed_last_success_at"] != self._last_success_at
+                    or error_checkpoint["observed_state"] != self._state
+                ):
+                    raise ContinuousSessionError(
+                        "same-generation operational error checkpoint markers "
+                        "conflict with canonical session bootstrap state"
+                    )
+                if same_generation and error_checkpoint["last_error_code"] is not None:
+                    durable_error = raw["last_error_code"]
+                    checkpoint_error = error_checkpoint["last_error_code"]
+                    if durable_error is not None and durable_error != checkpoint_error:
+                        raise ContinuousSessionError(
+                            "continuous session error authorities conflict at bootstrap"
+                        )
 
     @staticmethod
     def _file_identity(info: os.stat_result) -> tuple[int, int]:

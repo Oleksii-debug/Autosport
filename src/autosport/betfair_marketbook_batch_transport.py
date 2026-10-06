@@ -41,6 +41,7 @@ from .betfair_marketbook_rate_gate import (
 from .betfair_marketbook_projection_concurrency import (
     BetfairMarketBookProjectionConcurrencyGate,
     MarketBookProjectionConcurrencyDecision,
+    MarketBookProjectionLease,
 )
 
 
@@ -728,13 +729,20 @@ def _install_transport_result_authority() -> None:
     rate_normalize_market_ids = rate_gate_module._normalize_market_ids
     rate_utc_microseconds = rate_gate_module._utc_microseconds
     rate_decision_global = rate_gate_module.MarketBookRateDecision
+    rate_max_calls_per_window = rate_gate_module._MAX_CALLS_PER_WINDOW
+    rate_window_microseconds = rate_gate_module._WINDOW_MICROSECONDS
     projection_validate_request_id = projection_gate_module._validate_request_id
     projection_utc_microseconds = projection_gate_module._utc_microseconds
     projection_decision_global = (
         projection_gate_module.MarketBookProjectionConcurrencyDecision
     )
+    projection_lease_global = projection_gate_module.MarketBookProjectionLease
+    projection_max_unresolved = (
+        projection_gate_module._MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
+    )
     rate_decision_type = MarketBookRateDecision
     projection_decision_type = MarketBookProjectionConcurrencyDecision
+    projection_lease_type = MarketBookProjectionLease
     datetime_type = datetime
     utc_timezone = timezone.utc
     utc_epoch = datetime_type(1970, 1, 1, tzinfo=utc_timezone)
@@ -762,6 +770,14 @@ def _install_transport_result_authority() -> None:
             is not projection_utc_microseconds
             or projection_gate_module.MarketBookProjectionConcurrencyDecision
             is not projection_decision_global
+            or projection_gate_module.MarketBookProjectionLease
+            is not projection_lease_global
+            or type(
+                projection_gate_module._MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
+            )
+            is not int
+            or projection_gate_module._MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
+            != projection_max_unresolved
         ):
             raise batch_transport_error_type(
                 "MarketBook projection gate authority changed after transport installation"
@@ -796,7 +812,9 @@ def _install_transport_result_authority() -> None:
             )
         if (
             type(decision.active_projection_requests) is not int
-            or decision.active_projection_requests < 0
+            or not 0
+            <= decision.active_projection_requests
+            <= projection_max_unresolved
         ):
             raise batch_transport_error_type(
                 "MarketBook projection decision carries invalid active-request count"
@@ -831,6 +849,10 @@ def _install_transport_result_authority() -> None:
             rate_gate_module._normalize_market_ids is not rate_normalize_market_ids
             or rate_gate_module._utc_microseconds is not rate_utc_microseconds
             or rate_gate_module.MarketBookRateDecision is not rate_decision_global
+            or type(rate_gate_module._MAX_CALLS_PER_WINDOW) is not int
+            or rate_gate_module._MAX_CALLS_PER_WINDOW != rate_max_calls_per_window
+            or type(rate_gate_module._WINDOW_MICROSECONDS) is not int
+            or rate_gate_module._WINDOW_MICROSECONDS != rate_window_microseconds
         ):
             raise batch_transport_error_type(
                 "MarketBook rate gate authority changed after transport installation"

@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import threading
+from sys import _getframe
 import uuid
 from decimal import (
     Context,
@@ -317,6 +318,9 @@ def _make_ticket_opening_authority_registry():
     # become their own witness.
     authorities = WeakKeyDictionary()
     guard = threading.RLock()
+    snapshot_revoke_caller_code = None
+    snapshot_install_caller_code = None
+    frame = _getframe
     require_registry_key = _require_registry_book_key_authority
     require_registry_key_code = require_registry_key.__code__
     commitment_for = _ticket_opening_commitment
@@ -346,6 +350,18 @@ def _make_ticket_opening_authority_registry():
         ):
             raise ValueError("PaperBook ticket opening commitment authority changed")
 
+    def bind_snapshot_revoke_caller(code) -> None:
+        nonlocal snapshot_revoke_caller_code
+        if snapshot_revoke_caller_code is not None:
+            raise RuntimeError("PaperBook opening snapshot revoke caller already bound")
+        snapshot_revoke_caller_code = code
+
+    def bind_snapshot_install_caller(code) -> None:
+        nonlocal snapshot_install_caller_code
+        if snapshot_install_caller_code is not None:
+            raise RuntimeError("PaperBook opening snapshot install caller already bound")
+        snapshot_install_caller_code = code
+
     def register_book(book: object) -> None:
         require_registry_key_authority(book)
         with guard:
@@ -370,11 +386,25 @@ def _make_ticket_opening_authority_registry():
             current[ticket.ticket_id] = commitment
 
     def revoke(book: object) -> None:
+        if (
+            snapshot_revoke_caller_code is None
+            or frame(1).f_code is not snapshot_revoke_caller_code
+        ):
+            raise ValueError(
+                "PaperBook opening snapshot revoke requires trusted decode authority"
+            )
         require_registry_key_authority(book)
         with guard:
             authorities.pop(book, None)
 
     def install_validated_snapshot(book: object) -> None:
+        if (
+            snapshot_install_caller_code is None
+            or frame(1).f_code is not snapshot_install_caller_code
+        ):
+            raise ValueError(
+                "PaperBook opening snapshot install requires trusted load authority"
+            )
         require_registry_key_authority(book)
         require_commitment_authority()
         tickets = tickets_for(book)
@@ -384,8 +414,10 @@ def _make_ticket_opening_authority_registry():
         }
         require_commitment_authority()
         with guard:
-            if book not in authorities:
-                raise RuntimeError("PaperBook opening authority registry is unavailable")
+            if book in authorities:
+                raise RuntimeError(
+                    "PaperBook opening authority must be revoked before snapshot install"
+                )
             authorities[book] = commitments
 
     def require_current(book: object) -> None:
@@ -446,6 +478,8 @@ def _make_ticket_opening_authority_registry():
         install_validated_snapshot,
         require_current,
         require_candidate,
+        bind_snapshot_revoke_caller,
+        bind_snapshot_install_caller,
     )
 
 
@@ -456,6 +490,8 @@ def _make_ticket_opening_authority_registry():
     _install_validated_ticket_opening_authority,
     _require_ticket_opening_authority,
     _require_snapshot_candidate_opening_authority,
+    _bind_ticket_opening_snapshot_revoke_caller,
+    _bind_ticket_opening_snapshot_install_caller,
 ) = _make_ticket_opening_authority_registry()
 
 
@@ -475,6 +511,9 @@ def _make_paperbook_causal_history_authority_registry():
     # the authoritative copy outside caller-visible mutable PaperBook fields.
     authorities = WeakKeyDictionary()
     guard = threading.RLock()
+    snapshot_revoke_caller_code = None
+    snapshot_install_caller_code = None
+    frame = _getframe
     require_registry_key = _require_registry_book_key_authority
     require_registry_key_code = require_registry_key.__code__
     snapshot_for = _paperbook_causal_history_snapshot
@@ -491,6 +530,18 @@ def _make_paperbook_causal_history_authority_registry():
         if snapshot_for.__code__ is not snapshot_for_code:
             raise ValueError("PaperBook causal-history snapshot authority changed")
 
+    def bind_snapshot_revoke_caller(code) -> None:
+        nonlocal snapshot_revoke_caller_code
+        if snapshot_revoke_caller_code is not None:
+            raise RuntimeError("PaperBook causal snapshot revoke caller already bound")
+        snapshot_revoke_caller_code = code
+
+    def bind_snapshot_install_caller(code) -> None:
+        nonlocal snapshot_install_caller_code
+        if snapshot_install_caller_code is not None:
+            raise RuntimeError("PaperBook causal snapshot install caller already bound")
+        snapshot_install_caller_code = code
+
     def register_book(book: object) -> None:
         require_registry_key_authority(book)
         with guard:
@@ -501,16 +552,34 @@ def _make_paperbook_causal_history_authority_registry():
             authorities[book] = ((), ())
 
     def revoke(book: object) -> None:
+        if (
+            snapshot_revoke_caller_code is None
+            or frame(1).f_code is not snapshot_revoke_caller_code
+        ):
+            raise ValueError(
+                "PaperBook causal snapshot revoke requires trusted decode authority"
+            )
         require_registry_key_authority(book)
         with guard:
             authorities.pop(book, None)
 
     def install_validated_snapshot(book: object) -> None:
+        if (
+            snapshot_install_caller_code is None
+            or frame(1).f_code is not snapshot_install_caller_code
+        ):
+            raise ValueError(
+                "PaperBook causal snapshot install requires trusted load authority"
+            )
         require_registry_key_authority(book)
         require_snapshot_authority()
         snapshot = snapshot_for(book)
         require_snapshot_authority()
         with guard:
+            if book in authorities:
+                raise RuntimeError(
+                    "PaperBook causal authority must be revoked before snapshot install"
+                )
             authorities[book] = snapshot
 
     def require_current(book: object) -> None:
@@ -594,6 +663,8 @@ def _make_paperbook_causal_history_authority_registry():
         require_candidate,
         advance_open,
         advance_settle,
+        bind_snapshot_revoke_caller,
+        bind_snapshot_install_caller,
     )
 
 
@@ -605,6 +676,8 @@ def _make_paperbook_causal_history_authority_registry():
     _require_snapshot_candidate_causal_history_authority,
     _advance_paperbook_causal_history_open,
     _advance_paperbook_causal_history_settle,
+    _bind_paperbook_causal_snapshot_revoke_caller,
+    _bind_paperbook_causal_snapshot_install_caller,
 ) = _make_paperbook_causal_history_authority_registry()
 
 
@@ -1704,6 +1777,9 @@ def _seal_paperbook_json_decode_authority(method):
 def _seal_paperbook_snapshot_decode_authority(method):
     """Inject closure-captured authority revocation into raw snapshot decoding."""
     method_code = method.__code__
+    frame = _getframe
+    bind_opening_revoke = _bind_ticket_opening_snapshot_revoke_caller
+    bind_causal_revoke = _bind_paperbook_causal_snapshot_revoke_caller
     revoke_opening = _revoke_ticket_opening_authority
     revoke_opening_code = revoke_opening.__code__
     revoke_causal = _revoke_paperbook_causal_history_authority
@@ -1750,6 +1826,10 @@ def _seal_paperbook_snapshot_decode_authority(method):
             raise ValueError("PaperBook canonical type authority changed")
 
     def revoke(book: object) -> None:
+        if frame(1).f_code is not method_code:
+            raise ValueError(
+                "PaperBook snapshot revoke wrapper requires trusted decoder"
+            )
         if revoke_opening.__code__ is not revoke_opening_code:
             raise ValueError("PaperBook opening revoke authority changed")
         if revoke_causal.__code__ is not revoke_causal_code:
@@ -1760,6 +1840,9 @@ def _seal_paperbook_snapshot_decode_authority(method):
         revoke_causal(book)
         if revoke_causal.__code__ is not revoke_causal_code:
             raise ValueError("PaperBook causal-history revoke authority changed")
+
+    bind_opening_revoke(revoke.__code__)
+    bind_causal_revoke(revoke.__code__)
 
     @wraps(method)
     def sealed(cls, *args, **kwargs):
@@ -1784,6 +1867,9 @@ def _seal_paperbook_snapshot_decode_authority(method):
 def _seal_paperbook_snapshot_install_authority(method):
     """Inject closure-captured authority installation into trusted file load."""
     method_code = method.__code__
+    frame = _getframe
+    bind_opening_install = _bind_ticket_opening_snapshot_install_caller
+    bind_causal_install = _bind_paperbook_causal_snapshot_install_caller
     install_opening = _install_validated_ticket_opening_authority
     install_opening_code = install_opening.__code__
     install_causal = _install_validated_paperbook_causal_history_authority
@@ -1824,6 +1910,10 @@ def _seal_paperbook_snapshot_install_authority(method):
             raise ValueError("PaperBook canonical type authority changed")
 
     def install(book: object) -> None:
+        if frame(1).f_code is not method_code:
+            raise ValueError(
+                "PaperBook snapshot install wrapper requires trusted load"
+            )
         if install_opening.__code__ is not install_opening_code:
             raise ValueError("PaperBook opening install authority changed")
         if install_causal.__code__ is not install_causal_code:
@@ -1834,6 +1924,9 @@ def _seal_paperbook_snapshot_install_authority(method):
         install_causal(book)
         if install_causal.__code__ is not install_causal_code:
             raise ValueError("PaperBook causal-history install authority changed")
+
+    bind_opening_install(install.__code__)
+    bind_causal_install(install.__code__)
 
     @wraps(method)
     def sealed(cls, *args, **kwargs):
@@ -3472,4 +3565,9 @@ _install_paperbook_visible_state_authority(
     PaperBook.__dict__["_validate_loaded_state"].__func__
 )
 del _install_paperbook_visible_state_authority
+
+del _bind_ticket_opening_snapshot_revoke_caller
+del _bind_ticket_opening_snapshot_install_caller
+del _bind_paperbook_causal_snapshot_revoke_caller
+del _bind_paperbook_causal_snapshot_install_caller
 

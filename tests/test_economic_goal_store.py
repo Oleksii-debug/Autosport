@@ -1500,8 +1500,13 @@ def test_store_public_authority_operations_ignore_direct_dict_shadowing(tmp_path
     assert callable(store.persist_automatic_successor)
 
 
-def test_store_authority_seal_ignores_rebound_authority_name_set() -> None:
-    EconomicGoalStore._AUTHORITY_NAMES = frozenset()
+def test_store_authority_seal_ignores_rebound_authority_name_set(monkeypatch) -> None:
+    monkeypatch.setattr(
+        EconomicGoalStore,
+        "_AUTHORITY_NAMES",
+        frozenset(),
+        raising=False,
+    )
 
     for name, replacement in (
         ("load", lambda self: None),

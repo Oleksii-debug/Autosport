@@ -507,7 +507,12 @@ class _ContinuousSessionState:
             ) from exc
         finally:
             if descriptor is not None:
-                os.close(descriptor)
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    raise ContinuousSessionError(
+                        "cannot close continuous session operational error checkpoint"
+                    ) from exc
 
     def _read_error_checkpoint(
         self,

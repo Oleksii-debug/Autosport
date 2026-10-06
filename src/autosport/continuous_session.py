@@ -19,7 +19,7 @@ from .causal_collector import (
 )
 from .collector_service import HeadlessCollectorService
 from .event_lifecycle import ContinuousEventLifecycle, EventLifecycleRecord, EventPhase
-from .integrity import atomic_write_json
+from .integrity import atomic_write_json, durable_path_lock
 from .json_integrity import strict_json_loads
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
@@ -971,17 +971,29 @@ class _ContinuousSessionState:
         advance_generation: bool = False,
         _atomic_write_json: Callable[[str | Path, dict[str, Any]], None] = atomic_write_json,
         _atomic_write_json_code: object = atomic_write_json.__code__,
+        _durable_path_lock: Callable[..., Any] = durable_path_lock,
+        _durable_path_lock_code: object = durable_path_lock.__code__,
     ) -> dict[str, Any]:
-        if getattr(_atomic_write_json, "__code__", None) is not _atomic_write_json_code:
+        if (
+            getattr(_atomic_write_json, "__code__", None) is not _atomic_write_json_code
+            or durable_path_lock is not _durable_path_lock
+            or getattr(_durable_path_lock, "__code__", None)
+            is not _durable_path_lock_code
+        ):
             raise ContinuousSessionError(
-                "canonical session writer code identity changed"
+                "canonical session read-modify-write authority changed"
             )
-        raw = self._read()
-        mutate(raw)
-        if advance_generation:
-            raw["generation"] = int(raw["generation"]) + 1
-        _atomic_write_json(self.path, raw)
-        updated = self._read()
+        # The generation is a monotonic durable authority only if reading the
+        # predecessor image, applying the mutation, publishing the successor,
+        # and rereading it are one serialized transaction. atomic_write_json()
+        # already re-enters this canonical lock for publication.
+        with _durable_path_lock(self.path):
+            raw = self._read()
+            mutate(raw)
+            if advance_generation:
+                raw["generation"] = int(raw["generation"]) + 1
+            _atomic_write_json(self.path, raw)
+            updated = self._read()
         self._generation = updated["generation"]
         self._cycles_completed = updated["cycles_completed"]
         self._last_success_at = updated["last_success_at"]

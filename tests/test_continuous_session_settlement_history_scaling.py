@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1578,3 +1579,53 @@ def test_non_superseding_source_projection_preserves_failure_generation() -> Non
         )
         assert canonical["generation"] == 0
         assert sidecar["observed_generation"] == 0
+
+
+def test_session_update_blocks_behind_canonical_durable_path_lock() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        entered_mutation = threading.Event()
+        completed = threading.Event()
+
+        def mutate(raw: dict[str, object]) -> None:
+            entered_mutation.set()
+            raw["source_state_projection_backlog"] = True
+
+        def worker() -> None:
+            state._update(mutate)
+            completed.set()
+
+        with continuous_session.durable_path_lock(state.path):
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            assert not entered_mutation.wait(0.15)
+            assert not completed.is_set()
+
+        assert entered_mutation.wait(1.0)
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+        assert completed.is_set()
+        assert state.snapshot().source_state_projection_backlog is True
+
+
+def test_session_update_rejects_runtime_rmw_lock_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        def attacker_lock(_path: object):
+            raise AssertionError("runtime-rebound durable path lock executed")
+
+        monkeypatch.setattr(
+            continuous_session,
+            "durable_path_lock",
+            attacker_lock,
+        )
+
+        try:
+            state.record_source_projection(deltas=(), backlog=True)
+        except continuous_session.ContinuousSessionError as exc:
+            assert "read-modify-write authority" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound durable path lock was accepted")

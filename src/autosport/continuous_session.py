@@ -3101,8 +3101,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "continuous-session clock authority is unavailable"
             )
 
+        def restore_state_identity() -> bool:
+            if self._state is state:
+                return False
+            self._state = state
+            return True
+
         def require_state_identity() -> None:
-            if self._state is not state:
+            if restore_state_identity():
                 raise ContinuousSessionError(
                     "continuous session state authority changed during tick"
                 )
@@ -3150,6 +3156,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
             require_state_identity()
         except Exception as exc:
+            state_was_rebound = restore_state_identity()
+            if state_was_rebound:
+                try:
+                    exc.add_note(
+                        "continuous session state authority was rebound during "
+                        "collector observation and was restored"
+                    )
+                except BaseException:
+                    pass
             try:
                 with _running_fence(state):
                     # Collector observation happens outside the long-lived product
@@ -3389,6 +3404,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             except (SessionPausedError, SessionStoppedError):
                 raise
             except Exception as exc:
+                # Keep the coordinator pinned to the canonical state object even
+                # when a downstream callback tries to replace it before failing.
+                state_was_rebound = restore_state_identity()
+                if state_was_rebound:
+                    try:
+                        exc.add_note(
+                            "continuous session state authority was rebound during "
+                            "tick effects and was restored"
+                        )
+                    except BaseException:
+                        pass
                 # The running fence is still held here, so no other canonical
                 # generation can overtake this failure publication.
                 try:

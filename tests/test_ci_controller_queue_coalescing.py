@@ -4383,7 +4383,7 @@ def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
         if "/actions/workflows/356678400/runs?" in url:
             if "status=queued" in url:
                 page = int(url.rsplit("page=", 1)[1])
-                assert 1 <= page <= 12
+                assert 1 <= page <= 3
                 first_run_id = (page - 1) * 100 + 1
                 payload = {
                     "total_count": 1200,
@@ -4399,7 +4399,10 @@ def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
                     ],
                 }
             else:
-                assert "status=in_progress" in url or "status=pending" in url
+                assert any(
+                    f"status={status}" in url
+                    for status in ("in_progress", "waiting", "pending", "requested")
+                )
                 payload = {"total_count": 0, "workflow_runs": []}
             return FakeResponse(json.dumps(payload).encode("utf-8"))
 
@@ -4438,7 +4441,11 @@ def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
     cancel_requests = [
         url for method, url in requested if method == "POST" and url.endswith("/cancel")
     ]
-    assert cancel_requests
+    # The large queued snapshot is deliberately bounded so transport capacity is
+    # spent on irreversible effects rather than exhaustive observation. With the
+    # canonical 24-request budget this fixture must make five independently
+    # revalidated cancellation effects before exhaustion.
+    assert len(cancel_requests) == 5
     assert "request budget exhausted" in captured.err
     assert len(requested) == 24
 

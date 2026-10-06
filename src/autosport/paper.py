@@ -876,6 +876,8 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
     snapshot_path_exists_code = snapshot_path_exists.__code__
     snapshot_path_mkdir = snapshot_path_type.mkdir
     snapshot_path_mkdir_code = snapshot_path_mkdir.__code__
+    snapshot_path_eq = snapshot_path_type.__eq__
+    snapshot_path_eq_code = getattr(snapshot_path_eq, "__code__", None)
     snapshot_path_parent = snapshot_path_type.parent
     snapshot_path_name = snapshot_path_type.name
     snapshot_helper_authorities = None
@@ -1039,6 +1041,13 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             raise ValueError("PaperBook snapshot mkdir authority changed")
         if snapshot_path_mkdir.__code__ is not snapshot_path_mkdir_code:
             raise ValueError("PaperBook snapshot mkdir callable authority changed")
+        if snapshot_path_type.__eq__ is not snapshot_path_eq:
+            raise ValueError("PaperBook snapshot equality authority changed")
+        if (
+            snapshot_path_eq_code is not None
+            and getattr(snapshot_path_eq, "__code__", None) is not snapshot_path_eq_code
+        ):
+            raise ValueError("PaperBook snapshot equality callable authority changed")
         if snapshot_path_type.parent is not snapshot_path_parent:
             raise ValueError("PaperBook snapshot parent descriptor authority changed")
         if snapshot_path_type.name is not snapshot_path_name:

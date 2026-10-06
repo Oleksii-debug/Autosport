@@ -4203,6 +4203,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _invalidation_full_refresh_getter_code: object = (
             BoundedMirrorInvalidationBuffer.full_refresh_required.fget.__code__
         ),
+        _invalidation_force_full_refresh_method: Callable[
+            [BoundedMirrorInvalidationBuffer], None
+        ] = BoundedMirrorInvalidationBuffer.force_full_refresh,
+        _invalidation_force_full_refresh_method_code: object = (
+            BoundedMirrorInvalidationBuffer.force_full_refresh.__code__
+        ),
         _invalidation_state_validator: Callable[
             [BoundedMirrorInvalidationBuffer], None
         ] = _validate_canonical_invalidation_buffer_state,
@@ -4279,6 +4285,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             or _dependency_index_type.matching_keys is not _matching_keys_reader
             or getattr(_matching_keys_reader, "__code__", None)
             is not _matching_keys_reader_code
+            or BoundedMirrorInvalidationBuffer.force_full_refresh
+            is not _invalidation_force_full_refresh_method
+            or getattr(
+                _invalidation_force_full_refresh_method,
+                "__code__",
+                None,
+            )
+            is not _invalidation_force_full_refresh_method_code
             or _validate_canonical_invalidation_buffer_state
             is not _invalidation_state_validator
             or getattr(_invalidation_state_validator, "__code__", None)
@@ -4619,6 +4633,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 is not _invalidation_full_refresh_getter
                 or getattr(_invalidation_full_refresh_getter, "__code__", None)
                 is not _invalidation_full_refresh_getter_code
+                or _invalidation_buffer_type.force_full_refresh
+                is not _invalidation_force_full_refresh_method
+                or getattr(
+                    _invalidation_force_full_refresh_method,
+                    "__code__",
+                    None,
+                )
+                is not _invalidation_force_full_refresh_method_code
             ):
                 raise ContinuousSessionError(
                     "canonical invalidation buffer dispatch authority changed"
@@ -4698,6 +4720,62 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         require_invalidation_buffer_structure_authority()
         require_invalidation_buffer_dispatch_authority()
         require_lifecycle_dispatch_authority()
+
+        def invalidation_backlog_snapshot() -> (
+            tuple[bool, frozenset[tuple[str, str]]] | None
+        ):
+            if type(invalidation_buffer) is not _invalidation_buffer_type:
+                return None
+            require_invalidation_buffer_identity()
+            require_invalidation_buffer_structure_authority()
+            require_invalidation_buffer_dispatch_authority()
+            with invalidation_buffer_lock:
+                if invalidation_buffer._lock is not invalidation_buffer_lock:
+                    raise ContinuousSessionError(
+                        "canonical invalidation backlog state authority changed"
+                    )
+                _invalidation_state_validator(invalidation_buffer)
+                return (
+                    invalidation_buffer._full_refresh_required,
+                    frozenset(invalidation_buffer._dirty),
+                )
+
+        def require_unconsumed_invalidation_backlog(
+            baseline: tuple[bool, frozenset[tuple[str, str]]] | None,
+            *,
+            message: str,
+        ) -> None:
+            if baseline is None:
+                return
+            current = invalidation_backlog_snapshot()
+            if current is None:
+                raise ContinuousSessionError(message)
+            baseline_full_refresh, baseline_keys = baseline
+            current_full_refresh, current_keys = current
+            consumed = (
+                baseline_full_refresh and not current_full_refresh
+            ) or (
+                not baseline_full_refresh
+                and not current_full_refresh
+                and not baseline_keys.issubset(current_keys)
+            )
+            if not consumed:
+                return
+            if (
+                _invalidation_buffer_type.force_full_refresh
+                is not _invalidation_force_full_refresh_method
+                or getattr(
+                    _invalidation_force_full_refresh_method,
+                    "__code__",
+                    None,
+                )
+                is not _invalidation_force_full_refresh_method_code
+            ):
+                raise ContinuousSessionError(
+                    "canonical invalidation recovery authority changed"
+                )
+            _invalidation_force_full_refresh_method(invalidation_buffer)
+            raise ContinuousSessionError(message)
 
         def dependency_fingerprint(
             dependency: FocusedMirrorDependency,
@@ -4913,6 +4991,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         now = clock()
         _instant_validator(now, "now")
+        collector_invalidation_baseline = invalidation_backlog_snapshot()
 
         try:
             cycle = collector_run_cycle()
@@ -4949,6 +5028,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             require_lifecycle_dispatch_authority()
             require_tick_dependency_routing_authority(
                 "dependency routing authority changed during collector observation"
+            )
+            require_unconsumed_invalidation_backlog(
+                collector_invalidation_baseline,
+                message="collector observation consumed pending invalidations",
             )
         except Exception as exc:
             state_was_rebound = restore_state_identity()
@@ -4998,6 +5081,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     )
                 except BaseException:
                     pass
+            try:
+                require_unconsumed_invalidation_backlog(
+                    collector_invalidation_baseline,
+                    message="collector observation consumed pending invalidations",
+                )
+            except Exception as recovery_exc:
+                if recovery_exc is not exc:
+                    try:
+                        exc.add_note(
+                            "collector invalidation recovery: "
+                            f"{type(recovery_exc).__name__}: {recovery_exc}"
+                        )
+                    except BaseException:
+                        pass
             try:
                 with _running_fence(state):
                     # Collector observation happens outside the long-lived product
@@ -5159,6 +5256,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 last_success_at=failure.last_success_at,
             )
 
+        effects_invalidation_baseline: (
+            tuple[bool, frozenset[tuple[str, str]]] | None
+        ) = None
+
         with _running_fence(state):
             if state._checkpoint_token != observation_token:
                 raise ContinuousSessionError(
@@ -5167,6 +5268,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
             try:
                 require_economic_context()
+                effects_invalidation_baseline = invalidation_backlog_snapshot()
                 source_snapshot = _refresh_source_state_projection_method(
                     self,
                     state=state,
@@ -5179,6 +5281,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 require_tick_dependency_routing_authority(
                     "dependency routing authority changed during source projection"
                 )
+                require_unconsumed_invalidation_backlog(
+                    effects_invalidation_baseline,
+                    message="source projection consumed pending invalidations",
+                )
+                effects_invalidation_baseline = invalidation_backlog_snapshot()
                 source_gap_states = (
                     ()
                     if source_snapshot.source_gap_state is None
@@ -5200,6 +5307,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 require_tick_dependency_routing_authority(
                     "dependency routing authority changed during desktop delivery"
                 )
+                require_unconsumed_invalidation_backlog(
+                    effects_invalidation_baseline,
+                    message="desktop delivery consumed pending invalidations",
+                )
+                effects_invalidation_baseline = invalidation_backlog_snapshot()
                 if (
                     type(delivered) is not tuple
                     or any(
@@ -5223,6 +5335,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     max_batches=max_invalidation_batches,
                     max_items=max_invalidation_items,
                 )
+                effects_invalidation_baseline = None
                 require_state_identity()
                 require_dependency_index_identity()
                 refresh_tick_dependency_routing_authority()
@@ -5561,6 +5674,21 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         )
                     except BaseException:
                         pass
+                if effects_invalidation_baseline is not None:
+                    try:
+                        require_unconsumed_invalidation_backlog(
+                            effects_invalidation_baseline,
+                            message="tick callback consumed pending invalidations",
+                        )
+                    except Exception as recovery_exc:
+                        if recovery_exc is not exc:
+                            try:
+                                exc.add_note(
+                                    "tick invalidation recovery: "
+                                    f"{type(recovery_exc).__name__}: {recovery_exc}"
+                                )
+                            except BaseException:
+                                pass
                 # The running fence is still held here, so no other canonical
                 # generation can overtake this failure publication.
                 try:

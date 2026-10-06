@@ -9,6 +9,7 @@ from autosport.bookmaker_capability import (
     BookmakerCapabilityState,
 )
 from autosport.bookmaker_integration_boundary import (
+    BookmakerIntegrationEvidenceError,
     BookmakerIntegrationKind,
     bind_bookmaker_integration,
 )
@@ -373,7 +374,10 @@ def test_postconstruction_profile_mutation_invalidates_manifest_read() -> None:
     )
     object.__setattr__(live, "state", BookmakerCapabilityState.UNSUPPORTED)
 
-    with pytest.raises(Exception, match="does not match capability profile identity"):
+    with pytest.raises(
+        BookmakerIntegrationEvidenceError,
+        match="does not match capability profile identity",
+    ):
         manifest.state_of(ProviderManifestCapability.LIVE_QUOTES)
 
 

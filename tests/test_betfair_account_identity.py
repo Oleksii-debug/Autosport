@@ -620,29 +620,33 @@ def test_instance_level_transport_method_replacement_revokes_issued_identity(
     assert not is_authoritative_betfair_account_identity(value, client=client)
 
 
-def test_class_level_transport_getattribute_replacement_revokes_execution_origin(
+def test_class_level_transport_getattribute_replacement_revokes_issued_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+    assert is_authoritative_betfair_account_identity(value, client=client)
+
+    original = UrllibBetfairHttpTransport.__getattribute__
 
     def replacement(self, name):
         if name == "post":
             raise AssertionError("hostile transport attribute dispatch must not execute")
-        return object.__getattribute__(self, name)
+        return original(self, name)
 
     monkeypatch.setattr(UrllibBetfairHttpTransport, "__getattribute__", replacement)
 
-    with pytest.raises(
-        BetfairAccountIdentityError,
-        match="canonical Betfair client/network implementation changed",
-    ):
-        _client()
+    assert not is_authoritative_betfair_account_identity(value, client=client)
 
 
-def test_class_level_client_getattribute_replacement_revokes_execution_origin(
+def test_class_level_client_getattribute_replacement_revokes_issued_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+    assert is_authoritative_betfair_account_identity(value, client=client)
 
     original = BetfairReadOnlyClient.__getattribute__
 
@@ -653,8 +657,4 @@ def test_class_level_client_getattribute_replacement_revokes_execution_origin(
 
     monkeypatch.setattr(BetfairReadOnlyClient, "__getattribute__", replacement)
 
-    with pytest.raises(
-        BetfairAccountIdentityError,
-        match="canonical Betfair client/network implementation changed",
-    ):
-        _client()
+    assert not is_authoritative_betfair_account_identity(value, client=client)

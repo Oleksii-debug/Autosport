@@ -130,6 +130,51 @@ class IncidentRiskStoreTests(unittest.TestCase):
             after_second.content_sha256,
         )
 
+    def test_append_detaches_entry_before_post_validation_caller_mutation(self) -> None:
+        entry = self._entry()
+        original_summary = entry.summary
+        real_clock = __import__(
+            "autosport.incident_risk_store",
+            fromlist=["_availability_now"],
+        )._availability_now
+
+        def mutate_caller_then_timestamp() -> str:
+            object.__setattr__(
+                entry,
+                "summary",
+                "api_key=caller-secret-that-must-never-persist",
+            )
+            return real_clock()
+
+        with mock.patch(
+            "autosport.incident_risk_store._availability_now",
+            side_effect=mutate_caller_then_timestamp,
+        ):
+            published = self.store.append(entry)
+
+        durable_entry = published.history(entry.entry_id)[0]
+        self.assertEqual(durable_entry.summary, original_summary)
+        self.assertNotIn(
+            "caller-secret-that-must-never-persist",
+            self.store.path.read_text(encoding="utf-8"),
+        )
+
+    def test_append_rejects_secret_already_present_in_detached_snapshot(self) -> None:
+        entry = self._entry()
+        object.__setattr__(
+            entry,
+            "summary",
+            "Bearer caller-secret-that-must-never-persist",
+        )
+
+        with self.assertRaisesRegex(
+            IncidentRiskStoreError,
+            "credential-bearing",
+        ):
+            self.store.append(entry)
+
+        self.assertFalse(self.store.path.exists())
+
     def test_causal_as_of_hides_future_incident_and_revision(self) -> None:
         first = self._entry()
         second = self._entry(

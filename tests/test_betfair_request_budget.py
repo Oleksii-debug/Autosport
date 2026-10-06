@@ -34,7 +34,6 @@ def _market(
     request_id: str,
     *,
     market: str = "1.234",
-    weight: int = 1,
     priority: BetfairRequestPriority = BetfairRequestPriority.MONITORING,
     projection: bool = False,
     dedupe_key: str | None = None,
@@ -44,8 +43,7 @@ def _market(
         operation=BetfairRequestOperation.LIST_MARKET_BOOK,
         priority=priority,
         market_ids=(market,),
-        market_data_weight_per_market=weight,
-        uses_order_projection=projection,
+        order_projection="ALL" if projection else None,
         dedupe_key=dedupe_key,
     )
 
@@ -80,9 +78,55 @@ def test_weighted_market_request_over_200_points_fails_before_dispatch() -> None
             request_id="market-heavy",
             operation=BetfairRequestOperation.LIST_MARKET_BOOK,
             priority=BetfairRequestPriority.EXECUTION_READ,
-            market_ids=("1", "2", "3"),
-            market_data_weight_per_market=67,
+            market_ids=tuple(f"1.{index:03d}" for index in range(12)),
+            price_data=("EX_ALL_OFFERS",),
         )
+
+
+def test_market_weight_and_order_pool_are_canonical_not_caller_asserted() -> None:
+    exact = BetfairRequestIntent(
+        request_id="market-exact",
+        operation=BetfairRequestOperation.LIST_MARKET_BOOK,
+        priority=BetfairRequestPriority.EXECUTION_READ,
+        market_ids=tuple(f"1.{index:03d}" for index in range(12)),
+        price_data=("EX_BEST_OFFERS",),
+        best_prices_depth=10,
+        match_projection="ROLLED_UP_BY_PRICE",
+    )
+
+    assert exact.total_market_data_points == 200
+    assert exact.request_pool is BetfairRequestPool.SHARED_ORDER_READ
+
+    with pytest.raises(TypeError):
+        BetfairRequestIntent(
+            request_id="caller-lowball",
+            operation=BetfairRequestOperation.LIST_MARKET_BOOK,
+            priority=BetfairRequestPriority.EXECUTION_READ,
+            market_ids=tuple(f"1.{index:03d}" for index in range(12)),
+            price_data=("EX_ALL_OFFERS",),
+            market_data_weight_per_market=1,
+        )
+
+    with pytest.raises(BetfairRequestBudgetError, match="canonical Betfair projection"):
+        BetfairRequestIntent(
+            request_id="bad-projection",
+            operation=BetfairRequestOperation.LIST_MARKET_BOOK,
+            priority=BetfairRequestPriority.EXECUTION_READ,
+            market_ids=("1.234",),
+            match_projection="CALLER_SAYS_CHEAP",
+        )
+
+
+def test_tampered_market_projection_cannot_rebind_positive_budget_or_pool() -> None:
+    intent = _market("tamper")
+    object.__setattr__(intent, "price_data", ("EX_FAKE",))
+    with pytest.raises(BetfairRequestBudgetError, match="canonical provider budget"):
+        _ = intent.total_market_data_points
+
+    intent = _market("tamper-pool")
+    object.__setattr__(intent, "order_projection", "FAKE")
+    with pytest.raises(BetfairRequestBudgetError, match="canonical Betfair projection"):
+        _ = intent.request_pool
 
 
 def test_sixth_same_market_dispatch_in_rolling_second_is_throttled() -> None:

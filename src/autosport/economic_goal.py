@@ -541,7 +541,19 @@ def _validate_automatic_successor_bound(
     _validator(self, candidate)
 
 
-EconomicGoalContract.validate_automatic_successor = _validate_automatic_successor_bound
+def _bind_contract_successor_operation(operation):
+    def bound(
+        self: EconomicGoalContract,
+        candidate: EconomicGoalContract,
+    ) -> None:
+        operation(self, candidate)
+
+    return bound
+
+
+EconomicGoalContract.validate_automatic_successor = _bind_contract_successor_operation(
+    _validate_automatic_successor_bound
+)
 
 
 # Keep the public transition proof noninjectable while capturing the canonical

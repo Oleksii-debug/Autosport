@@ -15,6 +15,7 @@ from autosport.betfair_request_budget import (
     market_book_intent_from_rpc_params,
     order_betfair_intents,
     record_market_book_dispatch,
+    record_mutation_instruction_dispatch,
     record_read_backpressure,
 )
 
@@ -68,6 +69,7 @@ def _place(request_id: str = "place-2") -> BetfairRequestIntent:
         request_id=request_id,
         operation=BetfairRequestOperation.PLACE_ORDERS,
         priority=BetfairRequestPriority.EXECUTION_MUTATION,
+        mutation_instruction_count=1,
     )
 
 
@@ -338,6 +340,7 @@ def test_unknown_external_mutation_blocks_replace_and_update_but_not_safety_canc
             request_id=f"next-{operation.value}",
             operation=operation,
             priority=BetfairRequestPriority.EXECUTION_MUTATION,
+            mutation_instruction_count=1,
         )
         assert (
             admit_betfair_request(
@@ -353,6 +356,7 @@ def test_unknown_external_mutation_blocks_replace_and_update_but_not_safety_canc
         request_id="safety-cancel",
         operation=BetfairRequestOperation.CANCEL_ORDERS,
         priority=BetfairRequestPriority.SAFETY,
+        mutation_instruction_count=1,
     )
     assert (
         admit_betfair_request(
@@ -371,12 +375,95 @@ def test_mutation_priority_contract_cannot_mislabel_cancel_or_place() -> None:
             request_id="bad-cancel",
             operation=BetfairRequestOperation.CANCEL_ORDERS,
             priority=BetfairRequestPriority.EXECUTION_MUTATION,
+            mutation_instruction_count=1,
         )
     with pytest.raises(BetfairRequestBudgetError, match="EXECUTION_MUTATION"):
         BetfairRequestIntent(
             request_id="bad-place",
             operation=BetfairRequestOperation.PLACE_ORDERS,
             priority=BetfairRequestPriority.SAFETY,
+            mutation_instruction_count=1,
+        )
+
+
+def test_mutation_instruction_rate_is_shared_and_fail_closed_at_1000_per_second() -> None:
+    policy = _policy()
+    start = 20_000_000_000
+    first = BetfairRequestIntent(
+        request_id="place-600",
+        operation=BetfairRequestOperation.PLACE_ORDERS,
+        priority=BetfairRequestPriority.EXECUTION_MUTATION,
+        mutation_instruction_count=600,
+    )
+    second = BetfairRequestIntent(
+        request_id="cancel-400",
+        operation=BetfairRequestOperation.CANCEL_ORDERS,
+        priority=BetfairRequestPriority.SAFETY,
+        mutation_instruction_count=400,
+    )
+    state = BetfairRequestBudgetState()
+
+    assert (
+        admit_betfair_request(
+            first,
+            state=state,
+            policy=policy,
+            now_monotonic_ns=start,
+        ).decision
+        is BetfairAdmissionDecision.ADMIT
+    )
+    state = record_mutation_instruction_dispatch(
+        state,
+        intent=first,
+        now_monotonic_ns=start,
+    )
+    assert (
+        admit_betfair_request(
+            second,
+            state=state,
+            policy=policy,
+            now_monotonic_ns=start,
+        ).decision
+        is BetfairAdmissionDecision.ADMIT
+    )
+    state = record_mutation_instruction_dispatch(
+        state,
+        intent=second,
+        now_monotonic_ns=start,
+    )
+
+    blocked = admit_betfair_request(
+        _place("place-1001"),
+        state=state,
+        policy=policy,
+        now_monotonic_ns=start,
+    )
+    assert blocked.decision is BetfairAdmissionDecision.THROTTLE
+    assert blocked.retry_after_monotonic_ns == start + 1_000_000_000
+
+    after_window = admit_betfair_request(
+        _place("place-after-window"),
+        state=state,
+        policy=policy,
+        now_monotonic_ns=start + 1_000_000_000,
+    )
+    assert after_window.decision is BetfairAdmissionDecision.ADMIT
+
+
+def test_single_mutation_batch_over_1000_instructions_is_rejected() -> None:
+    with pytest.raises(BetfairRequestBudgetError, match="exceeds 1000"):
+        BetfairRequestIntent(
+            request_id="place-1001",
+            operation=BetfairRequestOperation.PLACE_ORDERS,
+            priority=BetfairRequestPriority.EXECUTION_MUTATION,
+            mutation_instruction_count=1001,
+        )
+    with pytest.raises(BetfairRequestBudgetError, match="exact integer"):
+        BetfairRequestIntent(
+            request_id="place-bool",
+            operation=BetfairRequestOperation.PLACE_ORDERS,
+            priority=BetfairRequestPriority.EXECUTION_MUTATION,
+            mutation_instruction_count=True,
         )
 
 

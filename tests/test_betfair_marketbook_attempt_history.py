@@ -422,3 +422,35 @@ def test_no_positive_remote_dispatch_or_execution_authority_is_minted():
     assert evidence["provider_freshness_proven"] is False
     assert evidence["provider_dispatch_authorized"] is False
     assert evidence["execution_authorized"] is False
+
+
+def test_backoff_non_dispatch_is_durable_required_gap_across_restart():
+    plan = MarketBookReadPlan(("1.1",), "OPEN")
+    blocked = issue(
+        plan,
+        attempt_id="backoff-gap",
+        sequence=1,
+        batch_index=0,
+        required=True,
+        outcome=MarketBookAttemptOutcome.NOT_DISPATCHED_BACKOFF,
+    )
+    recovered = issue(
+        plan,
+        attempt_id="later-success",
+        sequence=2,
+        batch_index=0,
+        required=True,
+        outcome=MarketBookAttemptOutcome.EXACT_RESPONSE,
+        previous=blocked,
+        receipt=exact_receipt(plan, 0),
+    )
+    history = MarketBookAttemptHistory(plan, (blocked, recovered))
+
+    assert history.current_structural_complete is True
+    assert history.required_gap_attempt_ids == ("backoff-gap",)
+    assert history.historical_required_gap_free is False
+
+    restored = MarketBookAttemptHistory.from_json(plan, history.to_json())
+    assert restored.required_gap_attempt_ids == ("backoff-gap",)
+    assert restored.historical_required_gap_free is False
+    assert restored.records[0].outcome is MarketBookAttemptOutcome.NOT_DISPATCHED_BACKOFF

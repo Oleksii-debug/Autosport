@@ -1969,6 +1969,13 @@ class PaperBook:
                 total = Decimal("0")
                 for ticket in self.tickets.values():
                     if ticket.status is TicketStatus.OPEN:
+                        if any(
+                            leg.exchange_side == "lay"
+                            for leg in ticket.legs
+                        ) and len(ticket.legs) != 1:
+                            raise ValueError(
+                                "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                            )
                         if len(ticket.legs) != 1 or ticket.legs[0].exchange_side == "back":
                             total += ticket.stake
                         else:
@@ -2143,6 +2150,10 @@ class PaperBook:
         cls._require_finite(balance, "balance")
         for leg in ticket.legs:
             cls._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
+        if any(leg.exchange_side == "lay" for leg in ticket.legs) and len(ticket.legs) != 1:
+            raise ValueError(
+                "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+            )
         leg_quote_keys = {leg.quote_key for leg in ticket.legs}
         unknown_winners = winning_quote_keys - leg_quote_keys
         unknown_voids = void_quote_keys - leg_quote_keys
@@ -2679,6 +2690,10 @@ class PaperBook:
             if action == "open":
                 if ticket_id in opened:
                     raise ValueError("PaperBook lifecycle opens a ticket more than once")
+                if any(leg.exchange_side == "lay" for leg in ticket.legs) and len(ticket.legs) != 1:
+                    raise ValueError(
+                        "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                    )
                 try:
                     locked_capital = (
                         _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
@@ -2804,6 +2819,10 @@ class PaperBook:
             quote_keys = [leg.quote_key for leg in ticket.legs]
             if len(quote_keys) != len(set(quote_keys)):
                 raise ValueError("PaperBook snapshot ticket contains duplicate quote_key leg")
+            if any(leg.exchange_side == "lay" for leg in ticket.legs) and len(ticket.legs) != 1:
+                raise ValueError(
+                    "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+                )
 
             is_lay = len(ticket.legs) == 1 and ticket.legs[0].exchange_side == "lay"
             if is_lay:

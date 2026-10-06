@@ -45,19 +45,22 @@ def test_caught_cleanup_failure_keeps_instance_generation_aligned_for_next_failu
         assert canonical["state"] == "PAUSED"
         assert canonical["generation"] == 1
 
-        publication = state.record_failure(code="AFTER_CLEANUP_FAILURE")
-        assert publication.state is continuous_session.SessionState.PAUSED
-        assert publication.generation == canonical["generation"]
+        try:
+            state.record_failure(code="AFTER_CLEANUP_FAILURE")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "conflicts with canonical session reason" in str(exc)
+        else:
+            raise AssertionError("conflicting post-transition failure was published")
 
         sidecar = json.loads(
             path.with_name(f"{path.name}.operational_error.json").read_text(
                 encoding="utf-8"
             )
         )
-        assert sidecar["observed_generation"] == canonical["generation"]
-        assert sidecar["observed_state"] == "PAUSED"
-        assert sidecar["last_error_code"] == "AFTER_CLEANUP_FAILURE"
+        assert sidecar["observed_generation"] < canonical["generation"]
+        assert sidecar["observed_state"] == "RUNNING"
+        assert sidecar["last_error_code"] == "PRE_TRANSITION_FAILURE"
 
         snapshot = state.snapshot()
         assert snapshot.state is continuous_session.SessionState.PAUSED
-        assert snapshot.last_error_code == "AFTER_CLEANUP_FAILURE"
+        assert snapshot.last_error_code == "OPERATOR_PAUSE"

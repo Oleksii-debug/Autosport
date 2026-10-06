@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from decimal import Decimal
 
 import pytest
@@ -206,3 +206,41 @@ def test_corrupt_durable_file_fails_closed_on_restart(tmp_path) -> None:
 
     with pytest.raises(EconomicGoalContractError, match="invalid economic goal JSON"):
         EconomicGoalStore(tmp_path).load()
+
+
+def test_payload_decoder_rejects_mapping_and_list_subclasses() -> None:
+    class DictSubclass(dict):
+        pass
+
+    class ListSubclass(list):
+        pass
+
+    payload = economic_goal_to_payload(_goal())
+    with pytest.raises(EconomicGoalContractError, match="JSON object"):
+        economic_goal_from_payload(DictSubclass(payload))
+
+    body = payload["contract"]
+    assert type(body) is dict
+    body["blocked_sports"] = ListSubclass(["boxing", "tennis"])
+    with pytest.raises(EconomicGoalContractError, match="sorted JSON array"):
+        economic_goal_from_payload(payload)
+
+
+def test_payload_encoder_rejects_contract_subclasses() -> None:
+    class ContractSubclass(EconomicGoalContract):
+        pass
+
+    goal = _goal()
+    subclass = ContractSubclass(
+        **{field.name: getattr(goal, field.name) for field in fields(EconomicGoalContract)}
+    )
+    with pytest.raises(EconomicGoalContractError, match="requires an EconomicGoalContract"):
+        economic_goal_to_payload(subclass)
+
+
+def test_json_decoder_rejects_string_subclasses_before_parsing() -> None:
+    class TextSubclass(str):
+        pass
+
+    with pytest.raises(EconomicGoalContractError, match="must be text"):
+        economic_goal_from_json(TextSubclass("{}"))

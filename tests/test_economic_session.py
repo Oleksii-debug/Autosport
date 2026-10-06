@@ -252,6 +252,39 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             ProductEconomicSession.__eq__ = original_eq
 
 
+    def test_session_class_binding_cannot_be_replaced_by_descriptor_cloned_subclass(self) -> None:
+        store = self._store()
+        first = store.current()
+        import autosport.economic_session as economic_session
+
+        canonical_type = ProductEconomicSession
+
+        class ForgedSession(canonical_type):
+            pass
+
+        for name in economic_session._PRODUCT_ECONOMIC_SESSION_FIELD_NAMES:
+            type.__setattr__(
+                ForgedSession,
+                name,
+                canonical_type.__dict__[name],
+            )
+
+        economic_session.ProductEconomicSession = ForgedSession
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.transition_to_current_goal(first)
+        finally:
+            economic_session.ProductEconomicSession = canonical_type
+
+
     def test_transition_rejects_rebound_product_session_field_descriptors(self) -> None:
         store = self._store()
         first = store.current()

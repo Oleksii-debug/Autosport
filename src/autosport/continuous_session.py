@@ -5335,7 +5335,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     max_batches=max_invalidation_batches,
                     max_items=max_invalidation_items,
                 )
-                effects_invalidation_baseline = None
+                effects_invalidation_baseline = invalidation_backlog_snapshot()
                 require_state_identity()
                 require_dependency_index_identity()
                 refresh_tick_dependency_routing_authority()
@@ -5446,6 +5446,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     register_input=register,
                     retire_input=retire,
                 )
+                require_unconsumed_invalidation_backlog(
+                    effects_invalidation_baseline,
+                    message="event lifecycle consumed pending invalidations",
+                )
+                effects_invalidation_baseline = invalidation_backlog_snapshot()
                 require_state_identity()
                 require_dependency_index_identity()
                 require_lifecycle_dispatch_authority()
@@ -5558,6 +5563,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     records_reader=lifecycle_records,
                     resolve_outcome=outcome_resolver,
                 )
+                require_unconsumed_invalidation_backlog(
+                    effects_invalidation_baseline,
+                    message="settlement resolution consumed pending invalidations",
+                )
+                effects_invalidation_baseline = invalidation_backlog_snapshot()
                 require_state_identity()
                 require_dependency_index_identity()
                 require_tick_dependency_routing_authority(
@@ -5576,6 +5586,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         ),
                         at=now,
                     )
+                    require_unconsumed_invalidation_backlog(
+                        effects_invalidation_baseline,
+                        message="settlement preparation consumed pending invalidations",
+                    )
+                    effects_invalidation_baseline = invalidation_backlog_snapshot()
                     require_state_identity()
                     require_dependency_index_identity()
                     require_tick_dependency_routing_authority(
@@ -5588,6 +5603,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     paper_book_path=paper_book_path,
                     initial_bankroll=initial_bankroll,
                 )
+                require_unconsumed_invalidation_backlog(
+                    effects_invalidation_baseline,
+                    message="settlement application consumed pending invalidations",
+                )
+                effects_invalidation_baseline = invalidation_backlog_snapshot()
                 require_state_identity()
                 require_dependency_index_identity()
                 require_tick_dependency_routing_authority(
@@ -5603,6 +5623,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         settled_ticket_ids=settled,
                         at=now,
                     )
+                    require_unconsumed_invalidation_backlog(
+                        effects_invalidation_baseline,
+                        message="settlement reconciliation consumed pending invalidations",
+                    )
+                    effects_invalidation_baseline = invalidation_backlog_snapshot()
                     require_state_identity()
                     require_dependency_index_identity()
                     require_tick_dependency_routing_authority(
@@ -5616,6 +5641,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     full_refresh=full_refresh,
                     settlement_evidence=resolutions,
                 )
+                require_unconsumed_invalidation_backlog(
+                    effects_invalidation_baseline,
+                    message="success publication consumed pending invalidations",
+                )
+                effects_invalidation_baseline = None
                 committed_last_success_at = state._last_success_at
             except Exception as exc:
                 # We are already inside a RUNNING durable fence here. A downstream

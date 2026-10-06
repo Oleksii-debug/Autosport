@@ -180,6 +180,64 @@ class RiskOfRuinEvidenceCanonicalityTests(unittest.TestCase):
             "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
         )
 
+    def test_ruin_evidence_is_revalidated_after_object_setattr_mutation(self) -> None:
+        leg = TicketLeg(
+            event_id="event-mutated",
+            market_id="market-mutated",
+            selection_id="selection-mutated",
+            locked_odds=Decimal("2"),
+        )
+
+        mutated_before_context = RiskOfRuinEvidence(**self._kwargs())
+        object.__setattr__(
+            mutated_before_context,
+            "upper_bound",
+            Decimal("-1"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "canonical RiskOfRuinEvidence",
+        ):
+            ProposedTicketRiskContext(
+                legs=(leg,),
+                risk_of_ruin_evidence=mutated_before_context,
+            )
+
+        scalar_evidence = RiskOfRuinEvidence(**self._kwargs())
+        context = ProposedTicketRiskContext(
+            legs=(leg,),
+            risk_of_ruin_evidence=scalar_evidence,
+        )
+        object.__setattr__(scalar_evidence, "upper_bound", Decimal("-1"))
+        scalar_decision = PaperRiskPolicy._risk_of_ruin_evidence_decision(
+            PaperBook("100"),
+            Decimal("10"),
+            PaperRiskReportingTests._goal(),
+            context,
+        )
+        self.assertIsNotNone(scalar_decision)
+        self.assertFalse(scalar_decision.allowed)
+        self.assertEqual(
+            scalar_decision.reason,
+            "portfolio risk-of-ruin evidence is invalid",
+        )
+
+        vector_evidence = RiskOfRuinVectorEvidence(**self._vector_kwargs())
+        object.__setattr__(vector_evidence, "upper_bound", Decimal("-1"))
+        vector_decision = PaperRiskPolicy._risk_of_ruin_vector_evidence_decision(
+            PaperBook("100"),
+            PaperRiskReportingTests._goal(),
+            (),
+            (),
+            vector_evidence,
+        )
+        self.assertIsNotNone(vector_decision)
+        self.assertFalse(vector_decision.allowed)
+        self.assertEqual(
+            vector_decision.reason,
+            "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
+        )
+
 
 class PaperRiskReportingTests(unittest.TestCase):
     @staticmethod

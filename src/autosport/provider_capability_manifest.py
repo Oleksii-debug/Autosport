@@ -540,10 +540,11 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         observed_at: datetime,
         _canonical_capability_for=_canonical_capability_for,
         _profile_state=_profile_state,
+        _manifest_fact_type=ProviderCapabilityManifestFact,
     ) -> None:
         if type(self.facts) is not tuple:
             raise ProviderCapabilityManifestError("facts must be an exact tuple")
-        if any(type(fact) is not ProviderCapabilityManifestFact for fact in self.facts):
+        if any(type(fact) is not _manifest_fact_type for fact in self.facts):
             raise ProviderCapabilityManifestError(
                 "facts must contain exact ProviderCapabilityManifestFact values"
             )
@@ -673,6 +674,7 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         _verify_profile_code: object = BookmakerIntegrationEvidence.verify_profile.__code__,
         _identity_guard=_manifest_identity_guard,
         _identity_guard_code: object = _manifest_identity_guard.__code__,
+        _manifest_fact_type=ProviderCapabilityManifestFact,
     ) -> ProviderManifestState:
         """Return revalidated capability truth, never a post-construction mutation."""
 
@@ -724,7 +726,7 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
             )
 
         if type(self.facts) is not tuple or any(
-            type(fact) is not ProviderCapabilityManifestFact for fact in self.facts
+            type(fact) is not _manifest_fact_type for fact in self.facts
         ):
             raise ProviderCapabilityManifestError(
                 "manifest facts changed after validation"
@@ -823,6 +825,8 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
 def _make_provider_capability_manifest_builder(
     _canonical_capability_for,
     _profile_state,
+    _manifest_type,
+    _manifest_fact_type,
 ):
     def build_provider_capability_manifest(
         profile: BookmakerCapabilityProfile,
@@ -851,7 +855,7 @@ def _make_provider_capability_manifest_builder(
         integration.verify_profile(profile)
         if type(extension_facts) is not tuple:
             raise ProviderCapabilityManifestError("extension_facts must be an exact tuple")
-        if any(type(fact) is not ProviderCapabilityManifestFact for fact in extension_facts):
+        if any(type(fact) is not _manifest_fact_type for fact in extension_facts):
             raise ProviderCapabilityManifestError(
                 "extension_facts must contain exact ProviderCapabilityManifestFact values"
             )
@@ -873,7 +877,7 @@ def _make_provider_capability_manifest_builder(
             canonical = _canonical_capability_for(capability)
             if canonical is not None:
                 facts.append(
-                    ProviderCapabilityManifestFact(
+                    _manifest_fact_type(
                         capability=capability,
                         state=_profile_state(profile, canonical),
                         authority=ProviderManifestFactAuthority.CANONICAL_PROFILE,
@@ -886,14 +890,14 @@ def _make_provider_capability_manifest_builder(
                 facts.append(supplied)
             else:
                 facts.append(
-                    ProviderCapabilityManifestFact(
+                    _manifest_fact_type(
                         capability=capability,
                         state=ProviderManifestState.NOT_PROVEN,
                         authority=ProviderManifestFactAuthority.NOT_PROVEN,
                     )
                 )
 
-        return ProviderCapabilityManifest(
+        return _manifest_type(
             manifest_ref=manifest_ref,
             manifest_version=manifest_version,
             profile=profile,
@@ -910,5 +914,7 @@ def _make_provider_capability_manifest_builder(
 build_provider_capability_manifest = _make_provider_capability_manifest_builder(
     _canonical_capability_for,
     _profile_state,
+    ProviderCapabilityManifest,
+    ProviderCapabilityManifestFact,
 )
 del _make_provider_capability_manifest_builder

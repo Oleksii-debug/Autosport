@@ -2317,6 +2317,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _selector_normalizer_code: object = FocusedMirrorDependencyIndex._selector.__code__,
         _input_id_validator: Callable[[str], str] = FocusedMirrorDependencyIndex._input_id,
         _input_id_validator_code: object = FocusedMirrorDependencyIndex._input_id.__code__,
+        _input_ids_descriptor: object = (
+            FocusedMirrorDependencyIndex.__dict__["input_ids"]
+        ),
+        _input_ids_getter: Callable[
+            [FocusedMirrorDependencyIndex], tuple[str, ...]
+        ] = FocusedMirrorDependencyIndex.input_ids.fget,
+        _input_ids_getter_code: object = (
+            FocusedMirrorDependencyIndex.input_ids.fget.__code__
+        ),
         _dependency_reader: Callable[
             [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
         ] = FocusedMirrorDependencyIndex._dependency,
@@ -2337,6 +2346,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 or _dependency_index_type._input_id is not _input_id_validator
                 or getattr(_input_id_validator, "__code__", None)
                 is not _input_id_validator_code
+                or _dependency_index_type.__dict__.get("input_ids")
+                is not _input_ids_descriptor
+                or getattr(_input_ids_descriptor, "fget", None)
+                is not _input_ids_getter
+                or getattr(_input_ids_getter, "__code__", None)
+                is not _input_ids_getter_code
                 or _dependency_index_type._dependency is not _dependency_reader
                 or getattr(_dependency_reader, "__code__", None)
                 is not _dependency_reader_code
@@ -2364,7 +2379,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if register_input is None
             else register_input
         )
-        before_ids = dependency_index.input_ids
+
+        def read_input_ids() -> tuple[str, ...] | object:
+            if type(dependency_index) is _dependency_index_type:
+                return _input_ids_getter(dependency_index)
+            return dependency_index.input_ids
+
+        before_ids = read_input_ids()
         if (
             type(before_ids) is not tuple
             or any(
@@ -2496,7 +2517,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index registration changed state authority"
             )
-        after_ids = dependency_index.input_ids
+        after_ids = read_input_ids()
         if (
             type(after_ids) is not tuple
             or any(
@@ -2572,6 +2593,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _dependency_type: type[FocusedMirrorDependency] = FocusedMirrorDependency,
         _input_id_validator: Callable[[str], str] = FocusedMirrorDependencyIndex._input_id,
         _input_id_validator_code: object = FocusedMirrorDependencyIndex._input_id.__code__,
+        _input_ids_descriptor: object = (
+            FocusedMirrorDependencyIndex.__dict__["input_ids"]
+        ),
+        _input_ids_getter: Callable[
+            [FocusedMirrorDependencyIndex], tuple[str, ...]
+        ] = FocusedMirrorDependencyIndex.input_ids.fget,
+        _input_ids_getter_code: object = (
+            FocusedMirrorDependencyIndex.input_ids.fget.__code__
+        ),
         _dependency_reader: Callable[
             [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
         ] = FocusedMirrorDependencyIndex._dependency,
@@ -2588,6 +2618,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 or _dependency_index_type._input_id is not _input_id_validator
                 or getattr(_input_id_validator, "__code__", None)
                 is not _input_id_validator_code
+                or _dependency_index_type.__dict__.get("input_ids")
+                is not _input_ids_descriptor
+                or getattr(_input_ids_descriptor, "fget", None)
+                is not _input_ids_getter
+                or getattr(_input_ids_getter, "__code__", None)
+                is not _input_ids_getter_code
                 or _dependency_index_type._dependency is not _dependency_reader
                 or getattr(_dependency_reader, "__code__", None)
                 is not _dependency_reader_code
@@ -2615,6 +2651,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if unregister_input is None
             else unregister_input
         )
+
+        def read_input_ids() -> tuple[str, ...] | object:
+            if type(dependency_index) is _dependency_index_type:
+                return _input_ids_getter(dependency_index)
+            return dependency_index.input_ids
+
         if (
             type(input_id) is not str
             or not input_id
@@ -2627,7 +2669,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index retirement authority is unavailable"
             )
-        before_ids = dependency_index.input_ids
+        before_ids = read_input_ids()
         if (
             type(before_ids) is not tuple
             or any(
@@ -2701,7 +2743,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index retirement receipt is invalid"
             )
-        after_ids = dependency_index.input_ids
+        after_ids = read_input_ids()
         if (
             type(after_ids) is not tuple
             or any(
@@ -2787,6 +2829,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _dependency_index_type: type[FocusedMirrorDependencyIndex] = (
             FocusedMirrorDependencyIndex
         ),
+        _input_ids_descriptor: object = (
+            FocusedMirrorDependencyIndex.__dict__["input_ids"]
+        ),
+        _input_ids_getter: Callable[
+            [FocusedMirrorDependencyIndex], tuple[str, ...]
+        ] = FocusedMirrorDependencyIndex.input_ids.fget,
+        _input_ids_getter_code: object = (
+            FocusedMirrorDependencyIndex.input_ids.fget.__code__
+        ),
         _dependency_reader: Callable[
             [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
         ] = FocusedMirrorDependencyIndex._dependency,
@@ -2859,6 +2910,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "canonical dependency index subtype is not supported"
                 )
+        def require_dependency_identity_dispatch(message: str) -> None:
+            if type(dependency_index) is not _dependency_index_type:
+                return
+            descriptor = _dependency_index_type.__dict__.get("input_ids")
+            if (
+                FocusedMirrorDependencyIndex is not _dependency_index_type
+                or descriptor is not _input_ids_descriptor
+                or getattr(descriptor, "fget", None) is not _input_ids_getter
+                or getattr(_input_ids_getter, "__code__", None)
+                is not _input_ids_getter_code
+            ):
+                raise ContinuousSessionError(message)
+
+        require_dependency_identity_dispatch(
+            "canonical dependency routing identity authority changed"
+        )
         drain_invalidation = (
             getattr(invalidation_buffer, "drain", None)
             if drain_invalidation is None
@@ -2931,7 +2998,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "continuous-session invalidation bounds are invalid"
             )
-        indexed_input_ids = dependency_index.input_ids
+        indexed_input_ids = (
+            _input_ids_getter(dependency_index)
+            if type(dependency_index) is _dependency_index_type
+            else dependency_index.input_ids
+        )
         if (
             type(indexed_input_ids) is not tuple
             or any(
@@ -3048,6 +3119,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         def require_dependency_authority(message: str) -> None:
             require_dependency_model_dispatch(message)
+            require_dependency_identity_dispatch(message)
             if dependency_authority is None:
                 return
             if (

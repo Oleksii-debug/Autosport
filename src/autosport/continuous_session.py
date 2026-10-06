@@ -1199,17 +1199,21 @@ class _ContinuousSessionState:
         *,
         _durable_path_lock: Callable[..., Any] = durable_path_lock,
         _durable_path_lock_code: object = durable_path_lock.__code__,
+        _bounded_state: Callable[["_ContinuousSessionState"], SessionState] = bounded_state,
+        _bounded_state_code: object = bounded_state.__code__,
     ) -> Iterator[None]:
         if (
             durable_path_lock is not _durable_path_lock
             or getattr(_durable_path_lock, "__code__", None)
             is not _durable_path_lock_code
+            or type(self).bounded_state is not _bounded_state
+            or getattr(_bounded_state, "__code__", None) is not _bounded_state_code
         ):
             raise ContinuousSessionError(
                 "canonical running-fence authority changed"
             )
         with _durable_path_lock(self.path):
-            state = self.bounded_state()
+            state = _bounded_state(self)
             if state is SessionState.PAUSED:
                 raise SessionPausedError("continuous session is durably PAUSED")
             if state is SessionState.STOPPED:
@@ -1895,8 +1899,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             return
         self._state.set_state(SessionState.RUNNING)
 
-    def _require_running(self) -> None:
-        state = self._state.bounded_state()
+    def _require_running(
+        self,
+        *,
+        _bounded_state: Callable[["_ContinuousSessionState"], SessionState] = (
+            _ContinuousSessionState.bounded_state
+        ),
+        _bounded_state_code: object = _ContinuousSessionState.bounded_state.__code__,
+    ) -> None:
+        if (
+            type(self._state).bounded_state is not _bounded_state
+            or getattr(_bounded_state, "__code__", None) is not _bounded_state_code
+        ):
+            raise ContinuousSessionError(
+                "canonical coordinator running-state authority changed"
+            )
+        state = _bounded_state(self._state)
         if state is SessionState.PAUSED:
             raise SessionPausedError("continuous session is durably PAUSED")
         if state is SessionState.STOPPED:
@@ -2248,14 +2266,26 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if leg.event_id in parts
         }
 
-    def tick(self) -> ContinuousTickResult:
+    def tick(
+        self,
+        *,
+        _running_fence: Callable[..., Any] = _ContinuousSessionState.running_fence,
+        _running_fence_code: object = _ContinuousSessionState.running_fence.__code__,
+    ) -> ContinuousTickResult:
+        if (
+            type(self._state).running_fence is not _running_fence
+            or getattr(_running_fence, "__code__", None) is not _running_fence_code
+        ):
+            raise ContinuousSessionError(
+                "canonical coordinator running-fence authority changed"
+            )
         self._require_running()
         now = self.clock()
         _instant(now, "now")
         try:
             cycle = self.collector.run_cycle()
             if cycle.provider_unavailable:
-                with self._state.running_fence():
+                with _running_fence(self._state):
                     # A provider-unavailable collector cycle commits no source deltas,
                     # so there is no new source projection to publish. Avoid the full
                     # continuous-session snapshot path here: retained settlement history
@@ -2295,7 +2325,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     last_success_at=failure.last_success_at,
                 )
 
-            with self._state.running_fence():
+            with _running_fence(self._state):
                 source_snapshot = self._refresh_source_state_projection()
                 source_gap_states = (
                     ()
@@ -2398,7 +2428,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise
         except Exception as exc:
             try:
-                with self._state.running_fence():
+                with _running_fence(self._state):
                     self._state.record_failure(code=type(exc).__name__)
             except (SessionPausedError, SessionStoppedError):
                 # Preserve the original failure if an operator pause/stop became

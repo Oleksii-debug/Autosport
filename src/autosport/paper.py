@@ -86,28 +86,80 @@ def _make_registry_book_key_authority():
 _require_registry_book_key_authority = _make_registry_book_key_authority()
 
 
-def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
+_CANONICAL_PAPER_TICKET_TYPE: Final = PaperTicket
+_CANONICAL_PAPER_TICKET_OPENING_FIELDS: Final = (
+    PaperTicket.__dict__["ticket_id"],
+    PaperTicket.__dict__["stake"],
+    PaperTicket.__dict__["legs"],
+    PaperTicket.__dict__["placed_at"],
+    PaperTicket.__dict__["strategy_reason"],
+    PaperTicket.__dict__["provider_source_ids"],
+    PaperTicket.__dict__["provider_accounts"],
+    PaperTicket.__dict__["bankroll_id"],
+    PaperTicket.__dict__["currency"],
+)
+_CANONICAL_TICKET_LEG_TYPE: Final = TicketLeg
+_CANONICAL_TICKET_LEG_OPENING_FIELDS: Final = (
+    TicketLeg.__dict__["event_id"],
+    TicketLeg.__dict__["market_id"],
+    TicketLeg.__dict__["selection_id"],
+    TicketLeg.__dict__["locked_odds"],
+    TicketLeg.__dict__["sport"],
+    TicketLeg.__dict__["exchange_side"],
+)
+
+
+def _ticket_opening_commitment(
+    ticket: PaperTicket,
+    _ticket_type=_CANONICAL_PAPER_TICKET_TYPE,
+    _ticket_fields=_CANONICAL_PAPER_TICKET_OPENING_FIELDS,
+    _leg_type=_CANONICAL_TICKET_LEG_TYPE,
+    _leg_fields=_CANONICAL_TICKET_LEG_OPENING_FIELDS,
+) -> tuple[object, ...]:
     """Return detached immutable opening facts that authorized PAPER economics."""
-    leg_commitments = tuple(
+
+    (
+        _ticket_id,
+        stake,
+        legs,
+        placed_at,
+        strategy_reason,
+        provider_source_ids,
+        provider_accounts,
+        bankroll_id,
+        currency,
+    ) = tuple(descriptor.__get__(ticket, _ticket_type) for descriptor in _ticket_fields)
+
+    leg_commitments = []
+    for leg in legs:
         (
-            leg.event_id,
-            leg.market_id,
-            leg.selection_id,
-            leg.locked_odds,
-            leg.sport,
-            leg.exchange_side,
+            event_id,
+            market_id,
+            selection_id,
+            locked_odds,
+            sport,
+            exchange_side,
+        ) = tuple(descriptor.__get__(leg, _leg_type) for descriptor in _leg_fields)
+        leg_commitments.append(
+            (
+                event_id,
+                market_id,
+                selection_id,
+                locked_odds,
+                sport,
+                exchange_side,
+            )
         )
-        for leg in ticket.legs
-    )
+
     return (
-        ticket.stake,
-        leg_commitments,
-        ticket.placed_at,
-        ticket.strategy_reason,
-        ticket.provider_source_ids,
-        ticket.provider_accounts,
-        ticket.bankroll_id,
-        ticket.currency,
+        stake,
+        tuple(leg_commitments),
+        placed_at,
+        strategy_reason,
+        provider_source_ids,
+        provider_accounts,
+        bankroll_id,
+        currency,
     )
 
 

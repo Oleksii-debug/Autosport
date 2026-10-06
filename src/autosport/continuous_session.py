@@ -1182,18 +1182,47 @@ class _ContinuousSessionState:
         deltas: tuple[CollectorDelta, ...],
         backlog: bool,
     ) -> None:
+        if type(deltas) is not tuple:
+            raise TypeError("deltas must be an exact tuple")
         if type(backlog) is not bool:
             raise TypeError("backlog must be boolean")
+        if backlog and not deltas:
+            raise ContinuousSessionError(
+                "source-state projection backlog requires at least one delta"
+            )
+        seen_delta_ids: set[str] = set()
+        previous_epoch: str | None = None
+        previous_position: int | None = None
         for delta in deltas:
-            if not isinstance(delta, CollectorDelta):
-                raise TypeError("deltas must contain CollectorDelta values")
+            if type(delta) is not CollectorDelta:
+                raise TypeError("deltas must contain exact CollectorDelta values")
             delta.validate()
             if delta.source_id != self.source_id:
                 raise ContinuousSessionError(
                     "source-state projection delta belongs to another source"
                 )
+            if delta.delta_id in seen_delta_ids:
+                raise ContinuousSessionError(
+                    "source-state projection delta ids must be unique"
+                )
+            seen_delta_ids.add(delta.delta_id)
+            if previous_epoch == delta.stream_epoch and previous_position is not None:
+                if delta.cursor_position <= previous_position:
+                    raise ContinuousSessionError(
+                        "source-state projection positions must increase within an epoch"
+                    )
+            previous_epoch = delta.stream_epoch
+            previous_position = delta.cursor_position
 
-        def mutate(raw: dict[str, Any]) -> None:
+        def mutate(raw: dict[str, Any]) -> bool:
+            before = (
+                raw["source_gap_state"],
+                raw["source_sync_state"],
+                raw["source_state_delta_id"],
+                tuple(raw["source_unresolved_gap_delta_ids"]),
+                raw["source_projection_stream_epoch"],
+                raw["source_state_projection_backlog"],
+            )
             unresolved = set(raw["source_unresolved_gap_delta_ids"])
             projection_epoch = raw["source_projection_stream_epoch"]
             for delta in deltas:
@@ -1222,8 +1251,17 @@ class _ContinuousSessionState:
 
             raw["source_unresolved_gap_delta_ids"] = sorted(unresolved)
             raw["source_state_projection_backlog"] = backlog
+            after = (
+                raw["source_gap_state"],
+                raw["source_sync_state"],
+                raw["source_state_delta_id"],
+                tuple(raw["source_unresolved_gap_delta_ids"]),
+                raw["source_projection_stream_epoch"],
+                raw["source_state_projection_backlog"],
+            )
+            return after != before
 
-        self._update(mutate)
+        self._update(mutate, advance_generation=True)
 
     def record_success(
         self,

@@ -3021,9 +3021,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         try:
             cycle = collector_run_cycle()
-            cycle_source_id = cycle_source_id
-            cycle_provider_unavailable = cycle_provider_unavailable
-            cycle_committed_delta_ids = cycle_committed_delta_ids
+            cycle_source_id = cycle.source_id
+            cycle_provider_unavailable = cycle.provider_unavailable
+            cycle_committed_delta_ids = cycle.committed_delta_ids
             if (
                 type(cycle_source_id) is not str
                 or not cycle_source_id

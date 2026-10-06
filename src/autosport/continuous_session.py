@@ -45,14 +45,18 @@ class SessionStoppedError(ContinuousSessionError):
 
 
 def _bind_canonical_settlement_engine(method):
-    """Inject the import-time exact SettlementEngine through a closure-owned seam."""
+    """Inject canonical settlement authorities through a closure-owned seam."""
 
     canonical_engine_type = SettlementEngine
+    canonical_resolution_validate = SettlementResolution.validate
 
     def guarded(self, *args, **kwargs):
         if "_settlement_engine_type" in kwargs:
             raise TypeError("settlement engine origin is internal product authority")
+        if "_resolution_validate" in kwargs:
+            raise TypeError("settlement validator origin is internal product authority")
         kwargs["_settlement_engine_type"] = canonical_engine_type
+        kwargs["_resolution_validate"] = canonical_resolution_validate
         return method(self, *args, **kwargs)
 
     guarded.__name__ = method.__name__
@@ -1813,12 +1817,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         *,
         resolutions: tuple[SettlementResolution, ...],
         _settlement_engine_type: type[SettlementEngine],
+        _resolution_validate: Callable[..., None],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if not resolutions:
             return (), ()
         if SettlementEngine is not _settlement_engine_type:
             raise ContinuousSessionError(
                 "settlement engine constructor origin changed"
+            )
+        if SettlementResolution.validate is not _resolution_validate:
+            raise ContinuousSessionError(
+                "settlement consumer validator authority changed"
             )
         if type(resolutions) is not tuple:
             raise TypeError("resolutions must be an exact tuple")
@@ -1840,6 +1849,19 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 resolution,
                 quote_outcomes=resolution.quote_outcomes.copy(),
             )
+            try:
+                # The collector already enforces the external causal cutoff.
+                # At this lower economic boundary, self-cutoff validation
+                # independently rejects malformed identity/evidence/outcomes
+                # before workspace or PaperBook I/O.
+                _resolution_validate(
+                    resolution,
+                    as_of=resolution.available_at,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "settlement consumer received invalid settlement resolution"
+                ) from exc
             settlement_key = (
                 resolution.event_identity,
                 resolution.settlement_ref,

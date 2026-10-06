@@ -293,6 +293,7 @@ def _validate_contract_bound(
     _nonnegative_decimal_validator=_nonnegative_decimal,
     _nonnegative_int_validator=_nonnegative_int,
     _restrictions_validator=_canonical_restrictions,
+    _snapshot=_canonical_contract_snapshot,
     _objective_type=EconomicObjective,
     _automation_type=AutomationLevel,
     _error_type=EconomicGoalContractError,
@@ -301,7 +302,7 @@ def _validate_contract_bound(
 
     if type(self) is not _contract_type:
         raise _error_type("economic goal must use the exact contract type")
-    values = _canonical_contract_snapshot(self, _field_getters)
+    values = _snapshot(self, _field_getters)
     (
         goal_id, revision, bankroll_id, currency, objective,
         max_stake_fraction, max_stake_amount, max_session_loss_fraction,

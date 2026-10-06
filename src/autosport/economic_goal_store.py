@@ -715,26 +715,32 @@ class _EconomicGoalStoreMeta(type):
         super().__delattr__(name)
 
 
-class _StoreOperationDescriptor:
-    """Make captured public store operations non-shadowable on an instance."""
+def _make_store_operation_descriptor(operation):
+    """Make a closure-owned public store operation non-shadowable on an instance."""
 
-    __slots__ = ("_operation",)
+    class _ImmutableStoreOperation:
+        __slots__ = ()
 
-    def __init__(self, operation):
-        self._operation = operation
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return operation
+            if type(instance) is not owner:
+                raise TypeError(
+                    "economic goal store authority requires the exact store type"
+                )
+            return MethodType(operation, instance)
 
-    def __get__(self, instance, owner=None):
-        if instance is None:
-            return self._operation
-        if type(instance) is not owner:
-            raise TypeError("economic goal store authority requires the exact store type")
-        return MethodType(self._operation, instance)
+        def __set__(self, _instance, _value) -> None:
+            raise TypeError(
+                "economic goal store authority operation binding is immutable"
+            )
 
-    def __set__(self, _instance, _value) -> None:
-        raise TypeError("economic goal store authority operation binding is immutable")
+        def __delete__(self, _instance) -> None:
+            raise TypeError(
+                "economic goal store authority operation binding is immutable"
+            )
 
-    def __delete__(self, _instance) -> None:
-        raise TypeError("economic goal store authority operation binding is immutable")
+    return _ImmutableStoreOperation()
 
 
 class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
@@ -937,13 +943,13 @@ economic_goal_to_payload = _bind_goal_encoder(_BOUND_ECONOMIC_GOAL_TO_PAYLOAD)
 economic_goal_from_payload = _bind_goal_payload_decoder(_BOUND_ECONOMIC_GOAL_FROM_PAYLOAD)
 economic_goal_from_json = _bind_goal_json_decoder(_BOUND_ECONOMIC_GOAL_FROM_JSON)
 EconomicGoalStore.__init__ = _bind_store_init(_BOUND_STORE_INIT)
-EconomicGoalStore.load = _StoreOperationDescriptor(
+EconomicGoalStore.load = _make_store_operation_descriptor(
     _bind_store_load(_BOUND_STORE_LOAD)
 )
-EconomicGoalStore.initialize_owner = _StoreOperationDescriptor(
+EconomicGoalStore.initialize_owner = _make_store_operation_descriptor(
     _bind_store_contract_write(_BOUND_STORE_INITIALIZE_OWNER)
 )
-EconomicGoalStore.persist_automatic_successor = _StoreOperationDescriptor(
+EconomicGoalStore.persist_automatic_successor = _make_store_operation_descriptor(
     _bind_store_contract_write(_BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR)
 )
 EconomicGoalStore._authority_operations_sealed = True

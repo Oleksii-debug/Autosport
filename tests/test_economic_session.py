@@ -2112,28 +2112,66 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             self._store().current()
         self.assertEqual(second.authority_generation, 2)
 
-    def test_bankroll_or_currency_change_requires_explicit_successor_scope(self) -> None:
+    def test_bankroll_or_currency_change_requires_separate_paperbook_authority(self) -> None:
         store = self._store()
         first = store.current()
+        durable_before = store.state_path.read_bytes()
 
         EconomicGoalStore(self.workspace).persist_automatic_successor(
-            _goal(revision=2, max_turnover="5", bankroll_id="bankroll-eur", currency="EUR")
+            _goal(
+                revision=2,
+                max_turnover="5",
+                bankroll_id="bankroll-eur",
+                currency="EUR",
+            )
         )
 
         with self.assertRaisesRegex(
             EconomicSessionMismatchError,
+            "bankroll/currency change requires separate PaperBook denomination transition authority",
+        ):
+            self._store().transition_to_current_goal(first)
+
+        self.assertEqual(store.state_path.read_bytes(), durable_before)
+        with self.assertRaisesRegex(
+            EconomicSessionMismatchError,
             "changed without explicit economic-session transition",
         ):
-            store.current()
+            self._store().current()
 
-        self.clock.set("2026-10-05T13:00:00Z")
-        successor = self._store().transition_to_current_goal(first)
+    def test_currency_only_change_cannot_reinterpret_existing_paperbook_balance(self) -> None:
+        store = self._store()
+        first = store.current()
+        durable_before = store.state_path.read_bytes()
 
-        self.assertNotEqual(successor.session_id, first.session_id)
-        self.assertEqual(successor.bankroll_id, "bankroll-eur")
-        self.assertEqual(successor.currency, "EUR")
-        self.assertEqual(successor.predecessor_session_id, first.session_id)
-        self.assertEqual(successor.predecessor_state_sha256, first.state_sha256)
+        EconomicGoalStore(self.workspace).persist_automatic_successor(
+            _goal(revision=2, max_turnover="5", currency="EUR")
+        )
+
+        with self.assertRaisesRegex(
+            EconomicSessionMismatchError,
+            "bankroll/currency change requires separate PaperBook denomination transition authority",
+        ):
+            self._store().transition_to_current_goal(first)
+
+        self.assertEqual(store.state_path.read_bytes(), durable_before)
+
+    def test_bankroll_only_change_cannot_rebind_existing_paperbook_balance(self) -> None:
+        store = self._store()
+        first = store.current()
+        durable_before = store.state_path.read_bytes()
+
+        EconomicGoalStore(self.workspace).persist_automatic_successor(
+            _goal(revision=2, max_turnover="5", bankroll_id="bankroll-2")
+        )
+
+        with self.assertRaisesRegex(
+            EconomicSessionMismatchError,
+            "bankroll/currency change requires separate PaperBook denomination transition authority",
+        ):
+            self._store().transition_to_current_goal(first)
+
+        self.assertEqual(store.state_path.read_bytes(), durable_before)
 
     def test_explicit_successor_survives_fresh_store_re_resolution(self) -> None:
         first_store = self._store()

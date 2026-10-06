@@ -1696,6 +1696,23 @@ def test_record_failure_rejects_runtime_session_lock_rebinding(monkeypatch) -> N
             raise AssertionError("runtime-rebound failure lock was accepted")
 
 
+def test_record_failure_rejects_runtime_text_validator_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        def attacker_text(_value: object, _field: str) -> str:
+            raise AssertionError("runtime-rebound failure text validator executed")
+
+        monkeypatch.setattr(continuous_session, "_text", attacker_text)
+        try:
+            state.record_failure(code="FAIL")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "failure publication lock authority" in str(exc)
+        else:
+            raise AssertionError("runtime-rebound failure validator was accepted")
+
+
 def test_record_failure_ignores_instance_writer_rebinding() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

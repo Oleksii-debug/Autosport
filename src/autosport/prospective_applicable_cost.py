@@ -1214,44 +1214,57 @@ def _build_canonical_authority():
         if slippage_product_verifier.__code__ is not slippage_product_verifier_code:
             raise error_cls("canonical Betfair slippage verifier authority changed")
 
-        try:
-            verified = slippage_product_verifier(
-                evidence=slippage_evidence,
-                ledger=ledger,
-                issuance_store=issuance_store,
-                runtime_profile=runtime_profile,
-                execution_plan_id=execution_plan_id,
-                action_id=action_id,
-            )
-        except slippage_error_cls as exc:
-            raise error_cls(
-                "canonical Betfair slippage verification failed"
-            ) from exc
-        if slippage_product_verifier.__code__ is not slippage_product_verifier_code:
-            raise error_cls("canonical Betfair slippage verifier authority changed")
-        if type(verified) is not slippage_evidence_cls:
-            raise error_cls("canonical Betfair slippage verifier returned non-canonical evidence")
-        if text(
-            object.__getattribute__(verified, "execution_plan_id"),
-            "slippage execution_plan_id",
-        ) != execution_plan_id:
-            raise error_cls("Betfair slippage evidence execution plan mismatch")
-        if text(
-            object.__getattribute__(verified, "action_id"),
-            "slippage action_id",
-        ) != action_id:
-            raise error_cls("Betfair slippage evidence action mismatch")
-        if (
-            object.__getattribute__(verified, "status")
-            is not slippage_status_cls.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION
-            or object.__getattribute__(verified, "matchme_applicability_proven") is not True
-            or object.__getattribute__(verified, "zero_adverse_price_deterioration") is not True
-            or object.__getattribute__(verified, "execution_feasibility_proven") is not False
-            or object.__getattribute__(verified, "realized_price_exact") is not False
-        ):
-            raise error_cls(
-                "Betfair slippage evidence does not prove the narrow zero-adverse-price contract"
-            )
+        def verify_slippage_source():
+            if slippage_product_verifier.__code__ is not slippage_product_verifier_code:
+                raise error_cls("canonical Betfair slippage verifier authority changed")
+            try:
+                candidate = slippage_product_verifier(
+                    evidence=slippage_evidence,
+                    ledger=ledger,
+                    issuance_store=issuance_store,
+                    runtime_profile=runtime_profile,
+                    execution_plan_id=execution_plan_id,
+                    action_id=action_id,
+                )
+            except slippage_error_cls as exc:
+                raise error_cls(
+                    "canonical Betfair slippage verification failed"
+                ) from exc
+            if slippage_product_verifier.__code__ is not slippage_product_verifier_code:
+                raise error_cls("canonical Betfair slippage verifier authority changed")
+            if type(candidate) is not slippage_evidence_cls:
+                raise error_cls(
+                    "canonical Betfair slippage verifier returned non-canonical evidence"
+                )
+            if text(
+                object.__getattribute__(candidate, "execution_plan_id"),
+                "slippage execution_plan_id",
+            ) != execution_plan_id:
+                raise error_cls("Betfair slippage evidence execution plan mismatch")
+            if text(
+                object.__getattribute__(candidate, "action_id"),
+                "slippage action_id",
+            ) != action_id:
+                raise error_cls("Betfair slippage evidence action mismatch")
+            if (
+                object.__getattribute__(candidate, "status")
+                is not slippage_status_cls.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION
+                or object.__getattribute__(candidate, "matchme_applicability_proven")
+                is not True
+                or object.__getattribute__(
+                    candidate, "zero_adverse_price_deterioration"
+                )
+                is not True
+                or object.__getattribute__(candidate, "execution_feasibility_proven")
+                is not False
+                or object.__getattribute__(candidate, "realized_price_exact") is not False
+            ):
+                raise error_cls(
+                    "Betfair slippage evidence does not prove the narrow zero-adverse-price contract"
+                )
+            return candidate, slippage_evidence_id(candidate)
+
+        verified, verified_source_id = verify_slippage_source()
 
         if resolve.__code__ is not resolve_code:
             raise error_cls("canonical base applicable-cost resolver authority changed")
@@ -1264,6 +1277,17 @@ def _build_canonical_authority():
         )
         if resolve.__code__ is not resolve_code:
             raise error_cls("canonical base applicable-cost resolver authority changed")
+
+        # The caller-owned frozen evidence and its durable product roots can
+        # change while the base aggregate performs its independent resolution.
+        # Re-resolve both at the irreversible positive-component boundary.
+        reverified, reverified_source_id = verify_slippage_source()
+        if reverified_source_id != verified_source_id:
+            raise error_cls(
+                "Betfair slippage evidence changed during applicable-cost resolution"
+            )
+        verified = reverified
+
         canonical_intent_sha = object.__getattribute__(base, "intent_sha256")
         canonical_plan_sha = object.__getattribute__(base, "portfolio_plan_sha256")
         canonical_opportunity_id = object.__getattribute__(base, "opportunity_id")
@@ -1290,7 +1314,7 @@ def _build_canonical_authority():
             raise error_cls("Betfair slippage evidence decision cutoff mismatch")
         text(canonical_opportunity_id, "opportunity_id")
 
-        source_evidence_id = slippage_evidence_id(verified)
+        source_evidence_id = reverified_source_id
         replacement = issue_component(
             cost_class_cls.EXECUTION_SLIPPAGE,
             reason_cls.BETFAIR_STANDARD_LIMIT_ZERO_ADVERSE_PRICE,

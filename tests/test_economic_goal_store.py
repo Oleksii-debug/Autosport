@@ -454,6 +454,59 @@ def test_json_decoder_ignores_rebound_parser_and_payload_decoder(monkeypatch) ->
 
 
 
+def test_store_load_rejects_bound_default_rebinding(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+    operation = economic_goal_store_module._BOUND_STORE_LOAD
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+
+    operation.__defaults__ = (
+        lambda _text: _goal(),
+        *original_defaults[1:],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="economic-goal store load defaults authority changed",
+        ):
+            store.load()
+    finally:
+        operation.__defaults__ = original_defaults
+
+
+def test_store_successor_rejects_nested_transition_default_rebinding(tmp_path) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.01"),
+    )
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(previous)
+    operation = economic_goal_store_module._BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR
+    original_defaults = operation.__defaults__
+    assert original_defaults is not None
+    transition = original_defaults[1]
+    transition_defaults = transition.__defaults__
+    assert transition_defaults is not None
+
+    transition.__defaults__ = (
+        transition_defaults[0],
+        lambda *args: None,
+        *transition_defaults[2:],
+    )
+    try:
+        with pytest.raises(
+            EconomicGoalContractError,
+            match="economic-goal store write nested defaults authority changed",
+        ):
+            store.persist_automatic_successor(candidate)
+    finally:
+        transition.__defaults__ = transition_defaults
+        operation.__defaults__ = original_defaults
+
+
 def test_store_ignores_rebound_canonical_filename(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(EconomicGoalStore, "FILE_NAME", "attacker.json")
 

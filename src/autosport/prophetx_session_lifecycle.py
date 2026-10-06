@@ -2080,14 +2080,14 @@ class ProphetXSessionLifecycle:
                 raise ProphetXSessionLifecycleError(
                     "ProphetX session state exceeds the bounded file-size contract"
                 )
-            with os.fdopen(descriptor, "r", encoding="utf-8", closefd=True) as handle:
+            with os.fdopen(descriptor, "rb", closefd=True) as handle:
                 descriptor = -1
-                raw = handle.read(_MAX_STATE_FILE_BYTES + 1)
-            encoded_raw = raw.encode("utf-8")
+                encoded_raw = handle.read(_MAX_STATE_FILE_BYTES + 1)
             if len(encoded_raw) > _MAX_STATE_FILE_BYTES:
                 raise ProphetXSessionLifecycleError(
                     "ProphetX session state exceeds the bounded file-size contract"
                 )
+            raw = encoded_raw.decode("utf-8")
             payload = json.loads(
                 raw,
                 object_pairs_hook=_strict_json_object_pairs,
@@ -2315,8 +2315,8 @@ class ProphetXSessionLifecycle:
             f".{self._STATE_NAME}.{os.getpid()}.{token_hex(8)}.tmp"
         )
         try:
-            with temporary.open("x", encoding="utf-8") as handle:
-                handle.write(encoded)
+            with temporary.open("xb") as handle:
+                handle.write(encoded_bytes)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self._state_path)

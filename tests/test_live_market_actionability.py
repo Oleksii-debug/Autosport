@@ -553,6 +553,35 @@ def test_datetime_and_timedelta_subclasses_cannot_control_policy_dispatch() -> N
         )
 
 
+def test_post_coherence_mirror_rebind_cannot_redirect_current_view(monkeypatch) -> None:
+    updates, dependencies = _runtime(_event())
+    attacker_mirror = MarketMirror()
+    original_selector_evidence = live_actionability._selector_evidence
+    rebound = False
+
+    def rebind_after_coherence(value, *, label):
+        nonlocal rebound
+        if not rebound:
+            rebound = True
+            updates._mirror = attacker_mirror
+        return original_selector_evidence(value, label=label)
+
+    monkeypatch.setattr(
+        live_actionability,
+        "_selector_evidence",
+        rebind_after_coherence,
+    )
+
+    result = _evaluate(updates, dependencies)
+
+    assert rebound is True
+    assert len(result.components) == 1
+    assert result.wait_reasons == (
+        LiveInputWaitReason.PRODUCT_ORIGIN_UNPROVEN,
+    )
+    assert result.components[0].sequence == 1
+
+
 def test_dependency_index_from_different_mirror_is_rejected() -> None:
     updates, _ = _runtime(_event())
 

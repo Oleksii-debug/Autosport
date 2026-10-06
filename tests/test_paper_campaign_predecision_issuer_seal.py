@@ -6,6 +6,7 @@ from autosport._paper_execution_decision_origin import (
     PaperExecutionDecisionOriginError,
 )
 from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
+from autosport.campaign_provider_cycle_capture import CampaignCompleteBoardCycleReceipt
 
 
 _ISSUER_METHOD = "_autosport_issue_predecision_learning_observation"
@@ -83,3 +84,73 @@ def test_descriptor_executable_rebinding_fails_closed_before_dispatch():
         object.__setattr__(descriptor, "_issuer", canonical_issuer)
 
     assert attacker_called is False
+
+
+def _closure_function(root, name: str):
+    seen: set[int] = set()
+    pending = [root]
+    while pending:
+        candidate = pending.pop()
+        identity = id(candidate)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if getattr(candidate, "__name__", None) == name:
+            return candidate
+        for cell in getattr(candidate, "__closure__", ()) or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if callable(value):
+                pending.append(value)
+    raise AssertionError(f"closure function {name} not found")
+
+
+def test_predecision_cycle_receipt_descriptor_rebind_fails_closed_before_getter():
+    descriptor = PaperExecutionAdoptionRuntime.__dict__[_ISSUER_METHOD]
+    issuer = object.__getattribute__(descriptor, "_issuer")
+    reader = _closure_function(issuer, "read_authority_fields")
+    receipt = object.__new__(CampaignCompleteBoardCycleReceipt)
+    values = {
+        "campaign_id": "campaign-a",
+        "source_id": "source-a",
+        "campaign_receipt_sha256": "a" * 64,
+        "receipt_sha256": "b" * 64,
+        "provider_captured_at": "2026-10-06T00:00:00+00:00",
+    }
+    for name, value in values.items():
+        object.__setattr__(receipt, name, value)
+
+    captured = tuple(
+        (name, CampaignCompleteBoardCycleReceipt.__dict__[name])
+        for name in values
+    )
+    original = CampaignCompleteBoardCycleReceipt.__dict__["receipt_sha256"]
+    hostile_called = False
+
+    def hostile_getter(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile cycle receipt getter executed")
+
+    setattr(
+        CampaignCompleteBoardCycleReceipt,
+        "receipt_sha256",
+        property(hostile_getter),
+    )
+    try:
+        with pytest.raises(
+            PaperExecutionDecisionOriginError,
+            match="campaign cycle receipt descriptor authority changed",
+        ):
+            reader(
+                receipt,
+                expected_type=CampaignCompleteBoardCycleReceipt,
+                descriptors=captured,
+                label="campaign cycle receipt",
+            )
+    finally:
+        setattr(CampaignCompleteBoardCycleReceipt, "receipt_sha256", original)
+
+    assert hostile_called is False

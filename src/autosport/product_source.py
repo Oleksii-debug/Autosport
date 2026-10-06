@@ -1063,7 +1063,7 @@ class ParlayApiProductSource:
             raise ProductSourceStateError("pending snapshot cannot confirm before assignment")
         if type(pending["catalog_events"]) is not list:
             raise ProductSourceStateError("pending catalog_events must be a list")
-        catalog_identities: set[str] = set()
+        catalog_by_identity: dict[str, CatalogEvent] = {}
         for event_raw in pending["catalog_events"]:
             try:
                 catalog_event = CatalogEvent.from_dict(event_raw)
@@ -1073,7 +1073,12 @@ class ParlayApiProductSource:
                 raise ProductSourceStateError(
                     "pending catalog event source conflicts with product source"
                 )
-            catalog_identities.add(catalog_event.identity)
+            catalog_identity = catalog_event.identity
+            if catalog_identity in catalog_by_identity:
+                raise ProductSourceStateError(
+                    "pending catalog contains duplicate event identity"
+                )
+            catalog_by_identity[catalog_identity] = catalog_event
         flags = pending["quality_flags"]
         if (
             type(flags) is not list
@@ -1103,9 +1108,37 @@ class ParlayApiProductSource:
                 raise ProductSourceStateError(
                     "pending market event source conflicts with product source"
                 )
-            if event.event_id not in catalog_identities:
+            catalog_event = catalog_by_identity.get(event.event_id)
+            if catalog_event is None:
                 raise ProductSourceStateError(
                     "pending market event is absent from catalog snapshot"
+                )
+            if event.sport is None:
+                raise ProductSourceStateError(
+                    "pending market event lacks catalog sport identity"
+                )
+            try:
+                scheduled_start = self._scheduled_start(event)
+                expected_phase = (
+                    EventPhase.PRE_MATCH
+                    if self._instant(event.observed_ts, "observed_ts")
+                    < self._instant(scheduled_start, "commence_time")
+                    else EventPhase.LIVE
+                )
+            except ProductSourcePayloadError as exc:
+                raise ProductSourceStateError(
+                    "pending market event lifecycle projection is invalid"
+                ) from exc
+            if (
+                catalog_event.sport != event.sport
+                or catalog_event.available_at != event.observed_ts
+                or catalog_event.scheduled_start_at != scheduled_start
+                or catalog_event.phase is not expected_phase
+                or catalog_event.completion_ref is not None
+                or catalog_event.settlement_ref is not None
+            ):
+                raise ProductSourceStateError(
+                    "pending market event conflicts with catalog lifecycle projection"
                 )
             if item["quote_key"] != event.quote_key or item["dedupe_key"] != event.dedupe_key:
                 raise ProductSourceStateError("pending event identity cache mismatch")

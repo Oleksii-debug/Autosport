@@ -1229,6 +1229,122 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             ):
                 source._validate_pending(pending)
 
+    def test_pending_rejects_duplicate_catalog_event_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            source.fetch_catalog_page(None)
+            state = source._read_state()
+            pending = state["pending"]
+            assert isinstance(pending, dict)
+            pending["catalog_events"].append(dict(pending["catalog_events"][0]))
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "duplicate event identity",
+            ):
+                source._validate_pending(pending)
+
+    def test_pending_rejects_market_sport_catalog_projection_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            source.fetch_catalog_page(None)
+            state = source._read_state()
+            pending = state["pending"]
+            assert isinstance(pending, dict)
+            item = pending["items"][0]
+            item["event"]["sport"] = "tennis"
+            event = MarketEvent.from_dict(item["event"])
+            item["quote_key"] = event.quote_key
+            item["dedupe_key"] = event.dedupe_key
+            item["canonical_digest"] = canonical_event_digest(event)
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "catalog lifecycle projection",
+            ):
+                source._validate_pending(pending)
+
+    def test_pending_rejects_market_observation_catalog_projection_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            source.fetch_catalog_page(None)
+            state = source._read_state()
+            pending = state["pending"]
+            assert isinstance(pending, dict)
+            item = pending["items"][0]
+            item["event"]["observed_ts"] = "2026-09-20T17:33:00+00:00"
+            event = MarketEvent.from_dict(item["event"])
+            item["canonical_digest"] = canonical_event_digest(event)
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "catalog lifecycle projection",
+            ):
+                source._validate_pending(pending)
+
+    def test_pending_rejects_market_schedule_catalog_projection_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            source.fetch_catalog_page(None)
+            state = source._read_state()
+            pending = state["pending"]
+            assert isinstance(pending, dict)
+            item = pending["items"][0]
+            item["event"]["metadata"]["commence_time"] = "2026-09-20T19:00:00+00:00"
+            event = MarketEvent.from_dict(item["event"])
+            item["canonical_digest"] = canonical_event_digest(event)
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "catalog lifecycle projection",
+            ):
+                source._validate_pending(pending)
+
+    def test_pending_rejects_catalog_phase_projection_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            source.fetch_catalog_page(None)
+            state = source._read_state()
+            pending = state["pending"]
+            assert isinstance(pending, dict)
+            pending["catalog_events"][0]["phase"] = EventPhase.LIVE.value
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "catalog lifecycle projection",
+            ):
+                source._validate_pending(pending)
+
     def test_assigned_pending_delta_must_match_frozen_compliance_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = ParlayApiProductSource(

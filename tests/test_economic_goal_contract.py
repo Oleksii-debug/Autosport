@@ -425,6 +425,18 @@ def test_contract_constructor_ignores_rebound_post_init(monkeypatch) -> None:
         _goal(max_stake_fraction=Decimal("2"))
 
 
+def test_contract_constructor_ignores_rebound_object_writer(monkeypatch) -> None:
+    class ForgedObject:
+        @staticmethod
+        def __setattr__(instance, name, value):
+            raise AssertionError("rebound object writer executed")
+
+    monkeypatch.setattr(economic_goal_module, "object", ForgedObject)
+
+    with pytest.raises(EconomicGoalContractError, match="between 0 and 1"):
+        _goal(max_stake_fraction=Decimal("2"))
+
+
 def test_contract_validation_ignores_rebound_public_helpers(monkeypatch) -> None:
     def forged(*args, **kwargs):
         raise AssertionError("rebound validation helper executed")

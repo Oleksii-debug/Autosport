@@ -23,6 +23,7 @@ PaperExecutionRun = _impl.PaperExecutionRun
 PaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
 
 _CANONICAL_RECOVERY_DECISION_TYPE = RecoveryDecision
+_CANONICAL_DECIMAL_TYPE = Decimal
 _CANONICAL_TEXT_VALIDATOR = _impl._CANONICAL_TEXT_VALIDATOR
 _CANONICAL_DECIMAL_PARSER = _impl._CANONICAL_DECIMAL_PARSER
 _CANONICAL_DECIMAL_TEXT_FORMATTER = _impl._CANONICAL_DECIMAL_TEXT_FORMATTER
@@ -45,8 +46,9 @@ def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
 
 def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
     sign = 1 if coefficient < 0 else 0
-    digits = tuple(int(ch) for ch in str(abs(coefficient)))
-    return Decimal((sign, digits, exponent))
+    magnitude = _CANONICAL_DECIMAL_TYPE(abs(coefficient))
+    digits = magnitude.as_tuple().digits
+    return _CANONICAL_DECIMAL_TYPE((sign, digits, exponent))
 
 
 def _decimal_add_exact(left: Decimal, right: Decimal) -> Decimal:
@@ -88,8 +90,8 @@ def _derive_run_economics(
     if len(attempts) > len(action_ids):
         raise PaperExecutionIntegrityError("durable attempts exceed reserved action list")
 
-    known_exposure = Decimal("0")
-    worst_case = Decimal("0")
+    known_exposure = _CANONICAL_DECIMAL_TYPE("0")
+    worst_case = _CANONICAL_DECIMAL_TYPE("0")
     terminal_seen = False
     for index, attempt in enumerate(attempts):
         if attempt.sequence != index or attempt.action_id != action_ids[index]:
@@ -470,10 +472,10 @@ def _synthetic_attempt(
             )
             odds_margin = _decimal_subtract_exact(
                 action.requested_odds,
-                Decimal("1"),
+                _CANONICAL_DECIMAL_TYPE("1"),
             )
             execution_odds = _decimal_add_exact(
-                Decimal("1"),
+                _CANONICAL_DECIMAL_TYPE("1"),
                 _decimal_scale_bps_exact(
                     odds_margin,
                     10_000 - slippage_bps,
@@ -611,8 +613,8 @@ def execute_paper_plan(
         assert result is not None
         return result
 
-    known_exposure = Decimal("0")
-    worst_case_exposure = Decimal("0")
+    known_exposure = _CANONICAL_DECIMAL_TYPE("0")
+    worst_case_exposure = _CANONICAL_DECIMAL_TYPE("0")
     for prior in attempts:
         assert prior.outcome is PaperAttemptOutcome.ACCEPTED
         assert prior.execution_stake is not None

@@ -276,6 +276,32 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(attempt.execution_odds, Decimal("2.40"))
         self.assertEqual(attempt.execution_stake, Decimal("10.00"))
 
+    def test_oversized_event_is_rejected_before_durable_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            anchor_path = ledger_path.with_name(ledger_path.name + ".anchor.json")
+            ledger = PaperExecutionLedger(ledger_path)
+            ledger.register_observation_evidence(evidence())
+            before_ledger = ledger_path.read_bytes()
+            before_anchor = anchor_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger event exceeds resource limit",
+            ):
+                ledger._append_event(
+                    event_type="RESOURCE_TEST",
+                    run_id="resource-run",
+                    key="resource-key",
+                    payload={
+                        "oversized": "x" * legacy._MAX_DURABLE_EVENT_LINE_CHARS,
+                    },
+                )
+
+            self.assertEqual(ledger_path.read_bytes(), before_ledger)
+            self.assertEqual(anchor_path.read_bytes(), before_anchor)
+            self.assertEqual(len(ledger.events()), 1)
+
     def test_oversized_anchor_fails_before_json_parse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger_path = Path(tmp) / "paper-execution.jsonl"

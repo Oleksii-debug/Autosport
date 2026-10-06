@@ -327,6 +327,7 @@ _CONTINUOUS_SESSION_FIELDS: Final = frozenset(
 _CONTINUOUS_SESSION_LEGACY_FIELDS: Final = frozenset(
     _CONTINUOUS_SESSION_FIELDS - {"generation"}
 )
+_EXPECTED_PROJECTION_UNSET: Final = object()
 
 
 class _ContinuousSessionState:
@@ -1185,6 +1186,7 @@ class _ContinuousSessionState:
         *,
         deltas: tuple[CollectorDelta, ...],
         backlog: bool,
+        expected_after_delta_id: str | None | object = _EXPECTED_PROJECTION_UNSET,
     ) -> None:
         if type(deltas) is not tuple:
             raise TypeError("deltas must be an exact tuple")
@@ -1226,6 +1228,13 @@ class _ContinuousSessionState:
             previous_position = delta.cursor_position
 
         def mutate(raw: dict[str, Any]) -> bool:
+            if (
+                expected_after_delta_id is not _EXPECTED_PROJECTION_UNSET
+                and raw["source_state_delta_id"] != expected_after_delta_id
+            ):
+                raise ContinuousSessionError(
+                    "source-state projection predecessor changed before publication"
+                )
             before = (
                 raw["source_gap_state"],
                 raw["source_sync_state"],
@@ -1606,6 +1615,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self._state.record_source_projection(
             deltas=selected,
             backlog=backlog,
+            expected_after_delta_id=snapshot.source_state_delta_id,
         )
         return self._state.snapshot()
 

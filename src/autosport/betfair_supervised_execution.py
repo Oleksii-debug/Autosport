@@ -927,6 +927,14 @@ def _build_canonical_place_action_dispatch():
             raise BetfairSupervisedExecutionError(
                 "Betfair client instance state is unavailable"
             )
+        if type(namespace.get("_credentials")) is not canonical_credentials_type:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client credentials must be exact canonical credentials"
+            )
+        if type(namespace.get("_gate")) is not canonical_gate_type:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client gate must be exact canonical gate"
+            )
         proof = dependency_proof(self, namespace)
         namespace[binding_field] = proof
 
@@ -958,7 +966,7 @@ def _build_canonical_place_action_dispatch():
             or binding_field not in namespace
         ):
             raise BetfairSupervisedExecutionError(
-                "Betfair client lacks canonical dependency binding"
+                "Betfair client has no canonical dependency binding"
             )
         proof = namespace.get(binding_field)
         if type(proof) is not bytes or len(proof) != 32:

@@ -594,6 +594,42 @@ def _guard_paperbook_runtime_authority(method):
     type_authority_code = type_authority.__code__
     runtime_helper_authority = _require_paperbook_runtime_helper_authority
     runtime_helper_authority_code = runtime_helper_authority.__code__
+    runtime_module_globals = globals()
+    runtime_module_dependencies = {
+        "Context": Context,
+        "Decimal": Decimal,
+        "DecimalException": DecimalException,
+        "Inexact": Inexact,
+        "InvalidOperation": InvalidOperation,
+        "Overflow": Overflow,
+        "PaperTicket": PaperTicket,
+        "ROUND_HALF_EVEN": ROUND_HALF_EVEN,
+        "TicketLeg": TicketLeg,
+        "TicketStatus": TicketStatus,
+        "Underflow": Underflow,
+        "_paper_decimal_context": _paper_decimal_context,
+        "localcontext": localcontext,
+        "parse_iso_timestamp": parse_iso_timestamp,
+    }
+    runtime_module_dependency_codes = {
+        name: getattr(dependency, "__code__", None)
+        for name, dependency in runtime_module_dependencies.items()
+    }
+
+    def require_runtime_module_dependencies() -> None:
+        for name, dependency in runtime_module_dependencies.items():
+            if runtime_module_globals.get(name) is not dependency:
+                raise ValueError(
+                    f"PaperBook runtime module dependency changed: {name}"
+                )
+            expected_code = runtime_module_dependency_codes[name]
+            if (
+                expected_code is not None
+                and getattr(dependency, "__code__", None) is not expected_code
+            ):
+                raise ValueError(
+                    f"PaperBook runtime module dependency authority changed: {name}"
+                )
 
     @wraps(method)
     def guarded(self, *args, **kwargs):
@@ -606,7 +642,9 @@ def _guard_paperbook_runtime_authority(method):
             raise ValueError("PaperBook canonical type authority changed")
         if runtime_helper_authority.__code__ is not runtime_helper_authority_code:
             raise ValueError("PaperBook runtime helper dispatch authority changed")
+        require_runtime_module_dependencies()
         runtime_helper_authority(self)
+        require_runtime_module_dependencies()
         if runtime_helper_authority.__code__ is not runtime_helper_authority_code:
             raise ValueError("PaperBook runtime helper dispatch authority changed")
         # Preserve the existing safety order: canonical visible state must be
@@ -631,9 +669,11 @@ def _guard_paperbook_runtime_authority(method):
         if method.__code__ is not method_code:
             raise ValueError("PaperBook runtime callable authority changed")
         result = method(self, *args, **kwargs)
+        require_runtime_module_dependencies()
         if runtime_helper_authority.__code__ is not runtime_helper_authority_code:
             raise ValueError("PaperBook runtime helper dispatch authority changed")
         runtime_helper_authority(self)
+        require_runtime_module_dependencies()
         if method.__code__ is not method_code:
             raise ValueError("PaperBook runtime callable authority changed")
         return result

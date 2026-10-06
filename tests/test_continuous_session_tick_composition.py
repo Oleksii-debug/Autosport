@@ -4072,3 +4072,36 @@ def test_tick_rejects_dependency_matches_code_mutation_during_invalidation_drain
 
         assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
 
+@pytest.mark.parametrize(
+    ("state_value", "error_type"),
+    (
+        (continuous_session.SessionState.PAUSED, continuous_session.SessionPausedError),
+        (continuous_session.SessionState.STOPPED, continuous_session.SessionStoppedError),
+    ),
+)
+def test_tick_preserves_genuine_durable_operator_control_before_callbacks(
+    state_value: continuous_session.SessionState,
+    error_type: type[Exception],
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        coordinator._state.set_state(state_value, reason="OPERATOR_CONTROL")
+        callback_called = False
+
+        class Collector(_Collector):
+            def run_cycle(self):
+                nonlocal callback_called
+                callback_called = True
+                return super().run_cycle()
+
+        coordinator.collector = Collector()
+
+        with pytest.raises(error_type):
+            coordinator.tick()
+
+        assert not callback_called
+        snapshot = coordinator._state.snapshot()
+        assert snapshot.state is state_value
+        assert snapshot.last_error_code == "OPERATOR_CONTROL"
+

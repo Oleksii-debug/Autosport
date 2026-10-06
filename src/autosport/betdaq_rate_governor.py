@@ -98,7 +98,7 @@ _DEFAULT_RATE_POLICY_PER_MINUTE: Final[Mapping[str, int]] = MappingProxyType(
         _ANY_OTHER_RATE_POLICY_KEY: _DEFAULT_ANY_OTHER_PER_MINUTE,
     }
 )
-_OPERATION_TO_RATE_POLICY_KEY: Final[Mapping[str, str]] = MappingProxyType(
+_NAMED_OPERATION_TO_RATE_POLICY_KEY: Final[Mapping[str, str]] = MappingProxyType(
     {
         "PlaceOrdersNoReceipt": "PlaceOrdersNoReceipt",
         "PlaceOrdersWithReceipt": "PlaceOrdersWithReceipt",
@@ -109,10 +109,16 @@ _OPERATION_TO_RATE_POLICY_KEY: Final[Mapping[str, str]] = MappingProxyType(
         "GetPrices": "GetPrices",
         "ListOrdersChangedSince": "ListOrdersChangedSince",
         "ListSelectionTrades": "ListSelectionTrades",
+    }
+)
+_OPERATION_TO_RATE_POLICY_KEY: Final[Mapping[str, str]] = MappingProxyType(
+    {
         **{
             operation_id: _ANY_OTHER_RATE_POLICY_KEY
             for operation_id in _ANY_OTHER_OPERATION_IDS
         },
+        # Named provider rows must structurally override generic Any Other.
+        **_NAMED_OPERATION_TO_RATE_POLICY_KEY,
     }
 )
 _PROVIDER_API_NAME_TO_OPERATION_ID: Final[Mapping[str, str]] = MappingProxyType(

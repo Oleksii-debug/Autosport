@@ -15,10 +15,12 @@ import os
 import stat
 import time
 import uuid
+from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MethodType
 from typing import Final
 
 from .economic_goal_provenance import provenance_for
@@ -53,13 +55,52 @@ _HEX: Final = frozenset("0123456789abcdef")
 _PRODUCT_TIME_NS: Final = time.time_ns
 _DATETIME_FROMTIMESTAMP: Final = datetime.fromtimestamp
 _UUID4 = uuid.uuid4
-_WORKSPACE_LOCK_TYPE = WorkspaceEconomicLock
+_WORKSPACE_LOCK_TYPE: Final = WorkspaceEconomicLock
+_WORKSPACE_LOCK_NEW: Final = WorkspaceEconomicLock.__new__
+_WORKSPACE_LOCK_INIT: Final = WorkspaceEconomicLock.__init__
+_WORKSPACE_LOCK_ENTER: Final = WorkspaceEconomicLock.__enter__
+_WORKSPACE_LOCK_EXIT: Final = WorkspaceEconomicLock.__exit__
+_WORKSPACE_LOCK_ACQUIRE: Final = WorkspaceEconomicLock.acquire
+_WORKSPACE_LOCK_RELEASE: Final = WorkspaceEconomicLock.release
+_OBJECT_SETATTR: Final = object.__setattr__
+_METHOD_TYPE: Final = MethodType
 _PAPERBOOK_LOAD = PaperBook.load
 _PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
 _ECONOMIC_GOAL_LOAD = EconomicGoalStore.load
 _AUTHORITY_RECOVER = MonotonicWorkspaceAuthority.recover
 _AUTHORITY_PREPARE = MonotonicWorkspaceAuthority.prepare
 _AUTHORITY_COMMIT = MonotonicWorkspaceAuthority.commit
+
+@contextmanager
+def _economic_session_lock_scope(
+    workspace: Path,
+    _lock_type=_WORKSPACE_LOCK_TYPE,
+    _new=_WORKSPACE_LOCK_NEW,
+    _init=_WORKSPACE_LOCK_INIT,
+    _enter=_WORKSPACE_LOCK_ENTER,
+    _exit=_WORKSPACE_LOCK_EXIT,
+    _acquire=_WORKSPACE_LOCK_ACQUIRE,
+    _release=_WORKSPACE_LOCK_RELEASE,
+    _setattr=_OBJECT_SETATTR,
+    _method_type=_METHOD_TYPE,
+):
+    if _lock_type is _WORKSPACE_LOCK_TYPE:
+        lock = _new(_lock_type)
+        _init(lock, workspace)
+    else:
+        lock = _lock_type(workspace)
+    _setattr(lock, "acquire", _method_type(_acquire, lock))
+    _setattr(lock, "release", _method_type(_release, lock))
+    _enter(lock)
+    try:
+        yield lock
+    except BaseException as exc:
+        if _exit(lock, type(exc), exc, exc.__traceback__):
+            return
+        raise
+    else:
+        _exit(lock, None, None, None)
+
 
 _STATE_KEYS: Final = frozenset(
     {
@@ -630,6 +671,13 @@ class ProductEconomicSessionStore:
         self._uuid4_witness = _UUID4
         self._opening_paperbook_sha256_witness = _opening_paperbook_sha256
         self._workspace_lock_type_witness = _WORKSPACE_LOCK_TYPE
+        self._workspace_lock_scope_witness = _economic_session_lock_scope
+        self._workspace_lock_new_witness = _WORKSPACE_LOCK_NEW
+        self._workspace_lock_init_witness = _WORKSPACE_LOCK_INIT
+        self._workspace_lock_enter_witness = _WORKSPACE_LOCK_ENTER
+        self._workspace_lock_exit_witness = _WORKSPACE_LOCK_EXIT
+        self._workspace_lock_acquire_witness = _WORKSPACE_LOCK_ACQUIRE
+        self._workspace_lock_release_witness = _WORKSPACE_LOCK_RELEASE
         self._paperbook_load_witness = _PAPERBOOK_LOAD
         self._paperbook_validate_witness = _PAPERBOOK_VALIDATE_LOADED_STATE
         self._economic_goal_load_witness = _ECONOMIC_GOAL_LOAD
@@ -710,6 +758,19 @@ class ProductEconomicSessionStore:
             or _PAPERBOOK_LOAD is not self._paperbook_load_witness
             or _PAPERBOOK_VALIDATE_LOADED_STATE is not self._paperbook_validate_witness
             or _WORKSPACE_LOCK_TYPE is not self._workspace_lock_type_witness
+            or _economic_session_lock_scope is not self._workspace_lock_scope_witness
+            or _WORKSPACE_LOCK_NEW is not self._workspace_lock_new_witness
+            or _WORKSPACE_LOCK_INIT is not self._workspace_lock_init_witness
+            or _WORKSPACE_LOCK_ENTER is not self._workspace_lock_enter_witness
+            or _WORKSPACE_LOCK_EXIT is not self._workspace_lock_exit_witness
+            or _WORKSPACE_LOCK_ACQUIRE is not self._workspace_lock_acquire_witness
+            or _WORKSPACE_LOCK_RELEASE is not self._workspace_lock_release_witness
+            or _WORKSPACE_LOCK_TYPE.__new__ is not self._workspace_lock_new_witness
+            or _WORKSPACE_LOCK_TYPE.__init__ is not self._workspace_lock_init_witness
+            or _WORKSPACE_LOCK_TYPE.__enter__ is not self._workspace_lock_enter_witness
+            or _WORKSPACE_LOCK_TYPE.__exit__ is not self._workspace_lock_exit_witness
+            or _WORKSPACE_LOCK_TYPE.acquire is not self._workspace_lock_acquire_witness
+            or _WORKSPACE_LOCK_TYPE.release is not self._workspace_lock_release_witness
             or _clock_instant is not self._clock_instant_witness
             or _parse_instant is not self._parse_instant_witness
             or _state_sha256 is not self._state_sha256_witness
@@ -749,7 +810,7 @@ class ProductEconomicSessionStore:
 
     def current(self) -> ProductEconomicSession:
         self._require_configuration_authority()
-        with _WORKSPACE_LOCK_TYPE(self._workspace_witness):
+        with self._workspace_lock_scope_witness(self._workspace_witness):
             self._require_configuration_authority()
             goal = _ECONOMIC_GOAL_LOAD(self._goal_store_witness)
             provenance = self._provenance_for_witness(goal)
@@ -817,7 +878,7 @@ class ProductEconomicSessionStore:
                 "previous must be exact ProductEconomicSession evidence"
             )
         self._require_configuration_authority()
-        with _WORKSPACE_LOCK_TYPE(self._workspace_witness):
+        with self._workspace_lock_scope_witness(self._workspace_witness):
             self._require_configuration_authority()
             if not self._lexists_witness(self._state_path_witness):
                 raise EconomicSessionIntegrityError(

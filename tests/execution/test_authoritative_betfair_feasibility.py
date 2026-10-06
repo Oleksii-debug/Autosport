@@ -11,6 +11,7 @@ import pytest
 
 import autosport.betfair_account_readonly as betfair_account_readonly
 import autosport.execution.feasibility as feasibility_module
+import autosport.supervised_execution as supervised_execution_module
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairReadOnlyError,
@@ -1689,4 +1690,77 @@ def test_append_reason_code_mutation_cannot_suppress_fail_closed_limit_reason(
                 action_id=ACTION_ID,
                 max_snapshot_age=timedelta(seconds=2),
             )
+
+@pytest.mark.parametrize(
+    "helper_name",
+    ("_bound_binding_sha256", "_digest"),
+)
+def test_supervised_binding_helper_rebind_revokes_authoritative_feasibility(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    called = False
+
+    def substituted(*args, **kwargs):
+        nonlocal called
+        called = True
+        return "0" * 64
+
+    monkeypatch.setattr(supervised_execution_module, helper_name, substituted)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical supervised binding dependency graph changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+    assert called is False
+
+
+def test_constraint_serialization_rebind_revokes_authoritative_feasibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    called = False
+
+    def substituted(self):
+        nonlocal called
+        called = True
+        return {
+            "leg_id": self.leg_id,
+            "side": self.side,
+            "quote_expires_at": self.quote_expires_at,
+            "max_slippage_fraction": "0",
+        }
+
+    monkeypatch.setattr(ExecutionLegConstraint, "to_dict", substituted)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical supervised binding dependency graph changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+    assert called is False
 

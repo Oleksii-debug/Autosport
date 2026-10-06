@@ -15,6 +15,7 @@ from ..betfair_account_readonly import (
     market_book_depth_acquisition_started_at,
 )
 from ..real_execution_ledger import ExecutionPlan, RealExecutionLedger
+from .. import supervised_execution as _supervised_execution
 from ..supervised_execution import (
     BoundSupervisedExecutionPlan,
     ExecutionLegConstraint,
@@ -731,6 +732,13 @@ def _install_execution_feasibility_result_authority():
     execution_plan_fingerprint_code = execution_plan_fingerprint.__code__
     profile_binding_type = ProfileBinding
     constraint_type = ExecutionLegConstraint
+    constraint_to_dict = constraint_type.to_dict
+    constraint_to_dict_code = constraint_to_dict.__code__
+    supervised_module = _supervised_execution
+    bound_binding_sha256 = supervised_module._bound_binding_sha256
+    bound_binding_sha256_code = bound_binding_sha256.__code__
+    supervised_digest = supervised_module._digest
+    supervised_digest_code = supervised_digest.__code__
     provider_limit_type = ProviderLimitAuthority
     provider_limit_init = provider_limit_type.__init__
     provider_limit_init_code = provider_limit_init.__code__
@@ -836,6 +844,18 @@ def _install_execution_feasibility_result_authority():
         ):
             raise RuntimeError(
                 "canonical MarketBook authority resolver changed"
+            )
+        if (
+            _supervised_execution is not supervised_module
+            or supervised_module._bound_binding_sha256 is not bound_binding_sha256
+            or bound_binding_sha256.__code__ is not bound_binding_sha256_code
+            or supervised_module._digest is not supervised_digest
+            or supervised_digest.__code__ is not supervised_digest_code
+            or constraint_type.to_dict is not constraint_to_dict
+            or constraint_to_dict.__code__ is not constraint_to_dict_code
+        ):
+            raise RuntimeError(
+                "canonical supervised binding dependency graph changed"
             )
         if (
             ExecutionPlan is not execution_plan_type

@@ -125,13 +125,13 @@ def _release_projection_lease_after_failure(
     gate: BetfairMarketBookProjectionConcurrencyGate,
     request_id: str,
     lease_generation: int | None,
-    primary: Exception,
+    primary: BaseException,
 ) -> None:
     """Best-effort cleanup without masking the primary dispatch failure."""
 
     try:
         _release_projection_lease(gate, request_id, lease_generation)
-    except Exception as cleanup_exc:
+    except BaseException as cleanup_exc:
         add_note = getattr(primary, "add_note", None)
         if callable(add_note):
             add_note(
@@ -586,7 +586,10 @@ def _install_transport_result_authority() -> None:
 
         try:
             result = _read_market_book_batch(client, plan, batch_id=batch_id)
-        except Exception as exc:
+        except BaseException as exc:
+            # Parent process-control interruption must not strand a locally
+            # admitted projection lease. Cleanup is bounded/local and the
+            # original BaseException is re-raised unchanged.
             _release_projection_lease_after_failure(
                 concurrency_gate,
                 request,

@@ -826,6 +826,61 @@ def test_transport_failure_is_not_masked_by_projection_cleanup_failure():
     assert concurrency_gate.snapshot().active == ()
 
 
+@pytest.mark.parametrize(
+    "interrupt",
+    (
+        KeyboardInterrupt("operator stop"),
+        SystemExit(17),
+    ),
+)
+def test_process_control_interrupt_releases_projection_lease_and_propagates_unchanged(
+    interrupt,
+):
+    plan = _plan(
+        market_ids=("1.001",),
+        order_projection="EXECUTABLE",
+    )
+    history = MarketBookAttemptHistory(plan, ())
+    batch = plan.batches[0]
+    rate_gate, concurrency_gate = _gates()
+
+    class InterruptingTransport:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, url, *, headers, body, timeout_seconds):
+            self.calls += 1
+            raise interrupt
+
+    transport = InterruptingTransport()
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(type(interrupt)) as exc_info:
+        execute_market_book_batch_attempt(
+            client,
+            history,
+            batch_id=batch.batch_id,
+            attempt_id="attempt-process-control",
+            required=True,
+            request_id="process-control",
+            scheduled_at=NOW,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert exc_info.value is interrupt
+    assert transport.calls == 1
+    assert history.records == ()
+    assert concurrency_gate.snapshot().active == ()
+    state = rate_gate.snapshot()
+    assert state.markets[0].market_id == "1.001"
+    assert len(state.markets[0].accepted_at_utc_us) == 1
+
+
 def test_attempt_executor_records_provider_and_protocol_failures():
     plan = _plan(market_ids=("1.001",))
     batch = plan.batches[0]

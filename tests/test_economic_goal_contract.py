@@ -545,6 +545,23 @@ def test_contract_constructor_ignores_rebound_module_authorities(monkeypatch) ->
         _goal(max_stake_fraction=Decimal("2"))
 
 
+def test_contract_constructor_uses_captured_slot_setters(monkeypatch) -> None:
+    expected = economic_goal_module._canonical_contract_snapshot(_goal())
+
+    for name in economic_goal_module._CONTRACT_FIELD_NAMES:
+        class HostileDescriptor:
+            def __get__(self, instance, owner=None):
+                raise AssertionError("rebound contract descriptor getter executed")
+
+            def __set__(self, instance, value):
+                raise AssertionError("rebound contract descriptor setter executed")
+
+        monkeypatch.setattr(EconomicGoalContract, name, HostileDescriptor())
+        constructed = _goal()
+        assert economic_goal_module._canonical_contract_snapshot(constructed) == expected
+        monkeypatch.undo()
+
+
 def test_contract_constructor_rejects_bound_default_rebinding() -> None:
     operation = economic_goal_module._contract_init_authority
     original_defaults = operation.__defaults__

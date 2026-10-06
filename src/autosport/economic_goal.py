@@ -447,10 +447,21 @@ _CONTRACT_FIELD_NAMES: Final = (
 )
 
 # Capture the original slot descriptors once so class-level rebinding cannot
-# redirect economic-goal validation or identity reads to a forged descriptor.
-_CANONICAL_CONTRACT_FIELD_GETTERS: Final = tuple(
-    (name, EconomicGoalContract.__dict__[name].__get__)
+# redirect economic-goal construction, validation or identity reads to a forged
+# descriptor. Constructor writes use the captured member-descriptor setters
+# directly rather than object.__setattr__, which would redispatch through the
+# mutable class dictionary before validation.
+_CANONICAL_CONTRACT_FIELD_DESCRIPTORS: Final = tuple(
+    (name, EconomicGoalContract.__dict__[name])
     for name in _CONTRACT_FIELD_NAMES
+)
+_CANONICAL_CONTRACT_FIELD_GETTERS: Final = tuple(
+    (name, descriptor.__get__)
+    for name, descriptor in _CANONICAL_CONTRACT_FIELD_DESCRIPTORS
+)
+_CANONICAL_CONTRACT_FIELD_SETTERS: Final = tuple(
+    descriptor.__set__
+    for _, descriptor in _CANONICAL_CONTRACT_FIELD_DESCRIPTORS
 )
 
 
@@ -661,38 +672,42 @@ def _contract_init_authority(
     blocked_providers: frozenset[str] = frozenset(),
     blocked_markets: frozenset[str] = frozenset(),
     _validator=_CANONICAL_CONTRACT_VALIDATOR,
-    _setattr=_CONTRACT_OBJECT_SETATTR,
+    _field_setters=_CANONICAL_CONTRACT_FIELD_SETTERS,
+    _zip=zip,
 ) -> None:
-    for name, value in (
-        ("goal_id", goal_id),
-        ("revision", revision),
-        ("bankroll_id", bankroll_id),
-        ("currency", currency),
-        ("objective", objective),
-        ("max_stake_fraction", max_stake_fraction),
-        ("max_stake_amount", max_stake_amount),
-        ("max_session_loss_fraction", max_session_loss_fraction),
-        ("max_day_loss_fraction", max_day_loss_fraction),
-        ("max_drawdown_fraction", max_drawdown_fraction),
-        ("max_capital_at_risk_fraction", max_capital_at_risk_fraction),
-        ("max_event_concentration_fraction", max_event_concentration_fraction),
-        ("max_market_concentration_fraction", max_market_concentration_fraction),
-        ("max_provider_concentration_fraction", max_provider_concentration_fraction),
-        ("max_sport_concentration_fraction", max_sport_concentration_fraction),
-        ("max_turnover_fraction", max_turnover_fraction),
-        ("max_risk_of_ruin", max_risk_of_ruin),
-        ("max_execution_slippage_fraction", max_execution_slippage_fraction),
-        ("max_quote_age_seconds", max_quote_age_seconds),
-        ("minimum_data_quality", minimum_data_quality),
-        ("max_concurrent_positions", max_concurrent_positions),
-        ("max_parlay_legs", max_parlay_legs),
-        ("automation_level", automation_level),
-        ("emergency_stop", emergency_stop),
-        ("blocked_sports", blocked_sports),
-        ("blocked_providers", blocked_providers),
-        ("blocked_markets", blocked_markets),
+    for setter, value in _zip(
+        _field_setters,
+        (
+            goal_id,
+            revision,
+            bankroll_id,
+            currency,
+            objective,
+            max_stake_fraction,
+            max_stake_amount,
+            max_session_loss_fraction,
+            max_day_loss_fraction,
+            max_drawdown_fraction,
+            max_capital_at_risk_fraction,
+            max_event_concentration_fraction,
+            max_market_concentration_fraction,
+            max_provider_concentration_fraction,
+            max_sport_concentration_fraction,
+            max_turnover_fraction,
+            max_risk_of_ruin,
+            max_execution_slippage_fraction,
+            max_quote_age_seconds,
+            minimum_data_quality,
+            max_concurrent_positions,
+            max_parlay_legs,
+            automation_level,
+            emergency_stop,
+            blocked_sports,
+            blocked_providers,
+            blocked_markets,
+        ),
     ):
-        _setattr(self, name, value)
+        setter(self, value)
     _validator(self)
 
 

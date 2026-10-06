@@ -284,10 +284,14 @@ class BoundedMirrorInvalidationBuffer:
     authority. Every accepted event is applied synchronously to ``MarketMirror``;
     only the downstream invalidation keys are buffered.
 
-    Repeated material updates to one quote coalesce to one dirty key. If more
-    distinct keys become dirty than ``max_dirty_keys`` can represent, the buffer
-    drops the incomplete key list and raises an explicit full-refresh fence. The
-    mirror itself is still current, so no durable market update is lost merely to
+    Repeated price-only updates to one quote coalesce to one dirty key. Material
+    semantic barriers on that quote (for example OPEN -> SUSPENDED, score-state, or
+    market-semantics changes) instead raise an explicit full-refresh fence so cached
+    downstream decision state cannot flow across the barrier as if it were continuous.
+
+    If more distinct keys become dirty than ``max_dirty_keys`` can represent, the
+    buffer likewise drops the incomplete key list and raises a full-refresh fence.
+    The mirror itself is still current, so no durable market update is lost merely to
     keep downstream recomputation bounded.
     """
 
@@ -329,6 +333,18 @@ class BoundedMirrorInvalidationBuffer:
         with self._lock:
             return self._full_refresh_required
 
+    @staticmethod
+    def _requires_full_refresh(previous: MarketEvent, current: MarketEvent) -> bool:
+        """Return whether one same-quote update crosses a decision-safety barrier."""
+        return (
+            previous.status != current.status
+            or previous.score_state != current.score_state
+            or previous.market_type != current.market_type
+            or previous.competition_id != current.competition_id
+            or previous.market_semantics_id != current.market_semantics_id
+            or previous.provider_source_class != current.provider_source_class
+        )
+
     def accept_persisted(self, event: MarketEvent) -> MirrorApplyResult:
         """Apply one already-durable event and record its affected quote if material.
 
@@ -340,8 +356,28 @@ class BoundedMirrorInvalidationBuffer:
             raise TypeError("event must be a MarketEvent")
 
         with self._lock:
+            key = (event.source_id, event.quote_key)
+            # Only snapshot the previous event when this update would otherwise be
+            # coalesced into an already-pending dirty key. A first dirty update will
+            # be recomputed normally, and avoiding an unconditional deep snapshot
+            # keeps the high-frequency path proportional to the work being bounded.
+            previous = (
+                self._mirror.event_for_quote_key(event.source_id, event.quote_key)
+                if not self._full_refresh_required and key in self._dirty
+                else None
+            )
             result = self._mirror.apply(event)
             if result.status is not MirrorUpdate.APPLIED:
+                return result
+
+            if previous is not None and self._requires_full_refresh(previous, event):
+                # The durable event is already authoritative and the mirror now
+                # contains its newest state. Do not collapse a material transition
+                # into an ordinary same-key dirty marker: invalidate every cached
+                # dependency so the live loop rebuilds decision state across the
+                # barrier rather than carrying pre-barrier state through it.
+                self._dirty.clear()
+                self._full_refresh_required = True
                 return result
 
             if self._full_refresh_required:

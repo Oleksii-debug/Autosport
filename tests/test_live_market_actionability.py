@@ -191,7 +191,7 @@ def test_invalid_observed_timestamp_fails_closed() -> None:
     assert LiveInputWaitReason.INVALID_CAUSAL_TIMESTAMP in result.wait_reasons
 
 
-def test_exact_freshness_boundary_is_inclusive_but_fractional_excess_waits() -> None:
+def test_exact_freshness_boundary_is_stale_but_one_microsecond_inside_reaches_origin_gate() -> None:
     exact_updates, exact_dependencies = _runtime(
         _event(observed_at=AS_OF - timedelta(seconds=60))
     )
@@ -201,20 +201,20 @@ def test_exact_freshness_boundary_is_inclusive_but_fractional_excess_waits() -> 
         max_age=timedelta(seconds=60),
     )
     assert exact.current_view_eligible is False
-    assert exact.wait_reasons == (
-        LiveInputWaitReason.PRODUCT_ORIGIN_UNPROVEN,
-    )
+    assert exact.wait_reasons == (LiveInputWaitReason.STALE,)
 
-    stale_updates, stale_dependencies = _runtime(
-        _event(observed_at=AS_OF - timedelta(seconds=60, microseconds=1))
+    inside_updates, inside_dependencies = _runtime(
+        _event(observed_at=AS_OF - timedelta(seconds=59, microseconds=999999))
     )
-    stale = _evaluate(
-        stale_updates,
-        stale_dependencies,
+    inside = _evaluate(
+        inside_updates,
+        inside_dependencies,
         max_age=timedelta(seconds=60),
     )
-    assert stale.current_view_eligible is False
-    assert stale.wait_reasons == (LiveInputWaitReason.STALE,)
+    assert inside.current_view_eligible is False
+    assert inside.wait_reasons == (
+        LiveInputWaitReason.PRODUCT_ORIGIN_UNPROVEN,
+    )
 
 
 def test_weakest_component_blocks_multi_component_registered_input() -> None:
@@ -564,6 +564,7 @@ def test_unknown_input_is_not_silently_treated_as_empty_wait() -> None:
     "as_of,max_age,exc_type",
     [
         (datetime(2026, 9, 23, 11, 0, 0), timedelta(seconds=1), LiveMarketActionabilityError),
+        (AS_OF, timedelta(0), LiveMarketActionabilityError),
         (AS_OF, timedelta(microseconds=-1), LiveMarketActionabilityError),
         (AS_OF, "60", TypeError),
     ],

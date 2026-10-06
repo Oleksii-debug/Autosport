@@ -569,6 +569,55 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         self.assertEqual(projection.mitigation, entry.mitigation)
         self.assertEqual(projection.residual_risk, entry.residual_risk)
 
+    def test_operator_projection_revalidates_post_construction_entry_tamper(self) -> None:
+        entry = self._entry()
+        object.__setattr__(entry, "severity", object())
+
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "severity must be RiskSeverity",
+        ):
+            operator_projection(entry)
+
+    def test_operator_sort_revalidates_post_construction_entry_tamper(self) -> None:
+        entry = self._entry()
+        object.__setattr__(entry, "updated_at", "not-a-timestamp")
+
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "updated_at must be ISO-8601",
+        ):
+            operator_sort((entry,))
+
+    def test_successor_validation_rejects_hostile_subclass_before_attribute_access(self) -> None:
+        previous = self._entry()
+
+        class HostileEntry(IncidentRiskEntry):
+            def __getattribute__(self, name: str):
+                raise AssertionError("hostile IncidentRiskEntry subclass executed")
+
+        candidate = object.__new__(HostileEntry)
+        with self.assertRaisesRegex(
+            TypeError,
+            "register successor validation requires exact IncidentRiskEntry values",
+        ):
+            validate_successor(previous, candidate)
+
+    def test_successor_validation_revalidates_post_construction_tamper(self) -> None:
+        previous = self._entry()
+        candidate = self._entry(
+            revision=2,
+            updated_at="2026-09-21T07:06:00+00:00",
+            status=RiskStatus.ACKNOWLEDGED,
+        )
+        object.__setattr__(candidate, "requires_operator_action", 1)
+
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "requires_operator_action must be a bool",
+        ):
+            validate_successor(previous, candidate)
+
     def test_register_contract_has_no_execution_or_release_truth_fields(self) -> None:
         keys = set(self._entry().to_dict())
         self.assertNotIn("real_money_execution", keys)

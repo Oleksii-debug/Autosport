@@ -128,6 +128,31 @@ def test_decision_identity_public_property_cannot_be_rebound() -> None:
         del EconomicGoalProvenance.decision_identity
 
 
+def test_provenance_authority_rejects_direct_type_mutation() -> None:
+    original = EconomicGoalProvenance.decision_identity
+
+    def forged_property(_instance):
+        raise AssertionError("direct type mutation executed")
+
+    for name, replacement in (
+        ("decision_identity", forged_property),
+        ("_authority_operations_sealed", False),
+    ):
+        with pytest.raises(
+            TypeError,
+            match="provenance public authority binding is immutable",
+        ):
+            type.__setattr__(EconomicGoalProvenance, name, replacement)
+        with pytest.raises(
+            TypeError,
+            match="provenance public authority binding is immutable",
+        ):
+            type.__delattr__(EconomicGoalProvenance, name)
+
+    assert EconomicGoalProvenance.decision_identity is original
+    assert EconomicGoalProvenance._authority_operations_sealed is True
+
+
 def test_decision_identity_ignores_rebound_bound_implementation(monkeypatch) -> None:
     evidence = provenance_for(_goal())
     expected = evidence.decision_identity

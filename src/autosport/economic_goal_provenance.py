@@ -518,6 +518,25 @@ provenance_for = _bind_contract_operation(_provenance_for_bound)
 verify_provenance = _bind_provenance_verifier(_verify_provenance_bound)
 
 
+def _decision_identity_bound(
+    self: EconomicGoalProvenance,
+    _validator=_CANONICAL_PROVENANCE_VALIDATOR,
+    _snapshot=_canonical_provenance_snapshot,
+    _error_type=EconomicGoalProvenanceError,
+) -> str:
+    """Derive identity from two coherent reads of the bound provenance state."""
+    _validator(self)
+    before = _snapshot(self)
+    _validator(self)
+    after = _snapshot(self)
+    if before != after:
+        raise _error_type(
+            "economic-goal provenance changed during identity derivation"
+        )
+    _, _, goal_id, revision, _, contract_sha256 = after
+    return f"{goal_id}@{revision}:{contract_sha256}"
+
+
 def _make_provenance_authority(operation, label: str):
     operation_code = operation.__code__
     operation_defaults = operation.__defaults__

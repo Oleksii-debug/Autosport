@@ -46,13 +46,66 @@ _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 def _make_paperbook_market_semantics_authority():
     validator = _canonical_semantic_identity
     validator_code = validator.__code__
+    validator_defaults = validator.__defaults__
+    validator_kwdefaults = validator.__kwdefaults__
+    validator_globals = validator.__globals__
+    validator_builtins = validator.__builtins__
+    validator_closure = validator.__closure__
+    validator_closure_values = (
+        None
+        if validator_closure is None
+        else tuple(cell.cell_contents for cell in validator_closure)
+    )
+    validator_global_bindings = tuple(
+        (
+            name,
+            validator_globals[name],
+            getattr(validator_globals[name], "__code__", None),
+        )
+        for name in validator.__code__.co_names
+        if name in validator_globals
+    )
+
+    def require_validator_authority() -> None:
+        if (
+            validator.__code__ is not validator_code
+            or validator.__defaults__ is not validator_defaults
+            or validator.__kwdefaults__ is not validator_kwdefaults
+            or validator.__globals__ is not validator_globals
+            or validator.__builtins__ is not validator_builtins
+            or validator.__closure__ is not validator_closure
+        ):
+            raise ValueError("PaperBook market-semantics identity authority changed")
+        if validator_closure_values is not None:
+            if (
+                validator.__closure__ is None
+                or len(validator.__closure__) != len(validator_closure_values)
+                or any(
+                    cell.cell_contents is not expected
+                    for cell, expected in zip(
+                        validator.__closure__,
+                        validator_closure_values,
+                    )
+                )
+            ):
+                raise ValueError("PaperBook market-semantics identity authority changed")
+        for name, expected, expected_code in validator_global_bindings:
+            if validator_globals.get(name) is not expected:
+                raise ValueError(
+                    f"PaperBook market-semantics dependency changed: {name}"
+                )
+            if expected_code is not None and (
+                type(expected) is not FunctionType
+                or expected.__code__ is not expected_code
+            ):
+                raise ValueError(
+                    f"PaperBook market-semantics dependency authority changed: {name}"
+                )
 
     def require(value: object, field_name: str) -> str:
-        if validator.__code__ is not validator_code:
-            raise ValueError("PaperBook market-semantics identity authority changed")
+        require_validator_authority()
         result = validator(value, field_name)
-        if validator.__code__ is not validator_code:
-            raise ValueError("PaperBook market-semantics identity authority changed")
+        require_validator_authority()
         return result
 
     return require

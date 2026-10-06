@@ -29,6 +29,7 @@ from .economic_goal_store import (
 from .paper import (
     PaperBook,
     _require_paperbook_causal_history_authority,
+    _require_paperbook_operation_lock,
     _require_ticket_opening_authority,
 )
 from .risk import PaperRiskPolicy
@@ -57,6 +58,8 @@ _CANONICAL_RISK_HISTORICAL_METRICS = PaperRiskPolicy._historical_risk_metrics
 _CANONICAL_RISK_GOAL_HISTORY_ROOMS = PaperRiskPolicy._goal_history_rooms
 _CANONICAL_REQUIRE_TICKET_OPENING_AUTHORITY = _require_ticket_opening_authority
 _CANONICAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _require_paperbook_causal_history_authority
+_CANONICAL_PAPERBOOK_OPERATION_LOCK = _require_paperbook_operation_lock
+_CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE = _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__
 _CANONICAL_GOAL_PROVENANCE = provenance_for
 _CANONICAL_GOAL_FROM_PAYLOAD = economic_goal_from_payload
 _CANONICAL_GOAL_TO_PAYLOAD = economic_goal_to_payload
@@ -600,234 +603,256 @@ def build_product_issued_paper_equity_path(
     book: PaperBook,
     goal: EconomicGoalContract,
 ) -> ProductIssuedPaperEquityPath:
-    """Derive one immutable, re-resolvable current PAPER equity path.
-
-    The returned object is evidence, not staking authority. Its identity is
-    derived only from canonical PaperBook lifecycle state and the canonical
-    owner EconomicGoal snapshot; no caller-provided drawdown, minimum-equity or
-    risk-of-ruin scalar participates in issuance.
-    """
+    """Acquire the canonical PaperBook operation lock for the full evidence replay."""
 
     if type(book) is not PaperBook:
         raise TypeError("book must be canonical PaperBook")
     if type(goal) is not EconomicGoalContract:
         raise TypeError("goal must be canonical EconomicGoalContract")
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    lock = _CANONICAL_PAPERBOOK_OPERATION_LOCK(book)
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    with lock:
+        result = _build_product_issued_paper_equity_path_locked(book, goal)
+    if _CANONICAL_PAPERBOOK_OPERATION_LOCK.__code__ is not _CANONICAL_PAPERBOOK_OPERATION_LOCK_CODE:
+        raise ValueError("canonical PAPER operation-lock authority changed")
+    return result
 
-    _require_canonical_equity_replay_code_authority()
-    _require_product_issued_paper_state(book)
 
-    goal_provenance_before = _CANONICAL_GOAL_PROVENANCE(goal)
-    goal_snapshot = _CANONICAL_GOAL_FROM_PAYLOAD(_CANONICAL_GOAL_TO_PAYLOAD(goal))
-    goal_snapshot_provenance = _CANONICAL_GOAL_PROVENANCE(goal_snapshot)
-    if (
-        goal_provenance_before != goal_snapshot_provenance
-        or _CANONICAL_GOAL_PROVENANCE(goal) != goal_snapshot_provenance
-    ):
-        raise ValueError("canonical economic goal changed during equity-path issuance")
-
-    before_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
-    before_source_sha256 = _paper_equity_source_state_sha256(book)
-    if before_sha256 is None:
-        raise ValueError("canonical PAPER risk state cannot issue an equity path")
-
-    try:
-        _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
-        replay_balance = book.initial_bankroll
-        replay_committed = Decimal("0")
-        points: list[PaperEquityPathPoint] = [
-            PaperEquityPathPoint(
-                sequence=0,
-                point_id=_INITIAL_EQUITY_POINT_ID,
-                action="initial",
-                ticket_id=None,
-                available_at=None,
-                winning_quote_keys=(),
-                void_quote_keys=(),
-                equity=book.initial_bankroll,
-            )
-        ]
-        # PaperBook does not currently persist a product-issued availability
-        # timestamp for the opening capital point. Therefore the full path cannot
-        # honestly claim complete causal availability even when every settlement
-        # carries settled_at.
-        availability_complete = False
-        for index, raw_entry in enumerate(book._lifecycle):
-            action, ticket_id, winners_raw, voids_raw = (
-                _CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY(raw_entry)
-            )
-            ticket = book.tickets.get(ticket_id)
-            if ticket is None:
-                raise ValueError("PAPER lifecycle references missing ticket")
-            if action == "open":
-                if (
-                    _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL.__code__
-                    is not _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL_CODE
-                ):
-                    raise ValueError(
-                        "canonical PAPER equity locked-capital authority changed"
-                    )
-                locked_capital = _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
-                replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(
-                    replay_balance,
-                    locked_capital,
-                )
-                replay_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
-                    (replay_committed, locked_capital)
-                )
-                available_at = ticket.placed_at
-            else:
-                _, _, replay_balance = _CANONICAL_PAPERBOOK_SETTLEMENT_RESULT(
-                    ticket,
-                    replay_balance,
-                    set(winners_raw),
-                    set(voids_raw),
-                )
-                with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
-                    replay_committed = (
-                        replay_committed
-                        - _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
-                    )
-                if replay_committed < 0:
-                    raise ValueError("PAPER lifecycle committed stake became negative")
-                available_at = ticket.settled_at
-                if available_at is None:
-                    availability_complete = False
-            equity = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
-                (replay_balance, replay_committed)
-            )
-            points.append(
+    def _build_product_issued_paper_equity_path_locked(
+        book: PaperBook,
+        goal: EconomicGoalContract,
+    ) -> ProductIssuedPaperEquityPath:
+        """Derive one immutable, re-resolvable current PAPER equity path.
+    
+        The returned object is evidence, not staking authority. Its identity is
+        derived only from canonical PaperBook lifecycle state and the canonical
+        owner EconomicGoal snapshot; no caller-provided drawdown, minimum-equity or
+        risk-of-ruin scalar participates in issuance.
+        """
+    
+        if type(book) is not PaperBook:
+            raise TypeError("book must be canonical PaperBook")
+        if type(goal) is not EconomicGoalContract:
+            raise TypeError("goal must be canonical EconomicGoalContract")
+    
+        _require_canonical_equity_replay_code_authority()
+        _require_product_issued_paper_state(book)
+    
+        goal_provenance_before = _CANONICAL_GOAL_PROVENANCE(goal)
+        goal_snapshot = _CANONICAL_GOAL_FROM_PAYLOAD(_CANONICAL_GOAL_TO_PAYLOAD(goal))
+        goal_snapshot_provenance = _CANONICAL_GOAL_PROVENANCE(goal_snapshot)
+        if (
+            goal_provenance_before != goal_snapshot_provenance
+            or _CANONICAL_GOAL_PROVENANCE(goal) != goal_snapshot_provenance
+        ):
+            raise ValueError("canonical economic goal changed during equity-path issuance")
+    
+        before_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
+        before_source_sha256 = _paper_equity_source_state_sha256(book)
+        if before_sha256 is None:
+            raise ValueError("canonical PAPER risk state cannot issue an equity path")
+    
+        try:
+            _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
+            replay_balance = book.initial_bankroll
+            replay_committed = Decimal("0")
+            points: list[PaperEquityPathPoint] = [
                 PaperEquityPathPoint(
-                    sequence=index + 1,
-                    point_id=_lifecycle_point_id(index, action, ticket_id),
-                    action=action,
-                    ticket_id=ticket_id,
-                    available_at=available_at,
-                    winning_quote_keys=tuple(winners_raw),
-                    void_quote_keys=tuple(voids_raw),
-                    equity=equity,
+                    sequence=0,
+                    point_id=_INITIAL_EQUITY_POINT_ID,
+                    action="initial",
+                    ticket_id=None,
+                    available_at=None,
+                    winning_quote_keys=(),
+                    void_quote_keys=(),
+                    equity=book.initial_bankroll,
                 )
+            ]
+            # PaperBook does not currently persist a product-issued availability
+            # timestamp for the opening capital point. Therefore the full path cannot
+            # honestly claim complete causal availability even when every settlement
+            # carries settled_at.
+            availability_complete = False
+            for index, raw_entry in enumerate(book._lifecycle):
+                action, ticket_id, winners_raw, voids_raw = (
+                    _CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY(raw_entry)
+                )
+                ticket = book.tickets.get(ticket_id)
+                if ticket is None:
+                    raise ValueError("PAPER lifecycle references missing ticket")
+                if action == "open":
+                    if (
+                        _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL.__code__
+                        is not _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL_CODE
+                    ):
+                        raise ValueError(
+                            "canonical PAPER equity locked-capital authority changed"
+                        )
+                    locked_capital = _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
+                    replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(
+                        replay_balance,
+                        locked_capital,
+                    )
+                    replay_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
+                        (replay_committed, locked_capital)
+                    )
+                    available_at = ticket.placed_at
+                else:
+                    _, _, replay_balance = _CANONICAL_PAPERBOOK_SETTLEMENT_RESULT(
+                        ticket,
+                        replay_balance,
+                        set(winners_raw),
+                        set(voids_raw),
+                    )
+                    with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
+                        replay_committed = (
+                            replay_committed
+                            - _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
+                        )
+                    if replay_committed < 0:
+                        raise ValueError("PAPER lifecycle committed stake became negative")
+                    available_at = ticket.settled_at
+                    if available_at is None:
+                        availability_complete = False
+                equity = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
+                    (replay_balance, replay_committed)
+                )
+                points.append(
+                    PaperEquityPathPoint(
+                        sequence=index + 1,
+                        point_id=_lifecycle_point_id(index, action, ticket_id),
+                        action=action,
+                        ticket_id=ticket_id,
+                        available_at=available_at,
+                        winning_quote_keys=tuple(winners_raw),
+                        void_quote_keys=tuple(voids_raw),
+                        equity=equity,
+                    )
+                )
+        except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("canonical PAPER equity path cannot be resolved") from exc
+    
+        current_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
+            tuple(
+                _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
+                for ticket in book.tickets.values()
+                if ticket.status is TicketStatus.OPEN
             )
-    except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
-        raise ValueError("canonical PAPER equity path cannot be resolved") from exc
-
-    current_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
-        tuple(
-            _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
-            for ticket in book.tickets.values()
-            if ticket.status is TicketStatus.OPEN
         )
-    )
-    current_equity = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
-        (book.balance, current_committed)
-    )
-    if replay_balance != book.balance or replay_committed != current_committed:
-        raise ValueError("canonical PAPER equity path does not replay exact current state")
-    if points[-1].equity != current_equity:
-        raise ValueError("canonical PAPER equity path current equity is inconsistent")
-
-    # Capture every mutable PaperBook-derived output before the final source
-    # digest fence. After that fence, evidence assembly must use locals only so
-    # a concurrent mutation cannot mix a newer completion/scope fact into a
-    # path committed to the older source-state digest.
-    point_tuple = tuple(points)
-    initial_equity = book.initial_bankroll
-    settled_history_complete = all(
-        ticket.status is not TicketStatus.OPEN for ticket in book.tickets.values()
-    )
-    money_scope_complete = bool(book.tickets) and all(
-        ticket.bankroll_id == goal_snapshot.bankroll_id
-        and ticket.currency == goal_snapshot.currency
-        for ticket in book.tickets.values()
-    )
-
-    after_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
-    after_source_sha256 = _paper_equity_source_state_sha256(book)
-    if after_sha256 is None or after_sha256 != before_sha256:
-        raise ValueError("canonical PAPER risk state changed during equity-path issuance")
-    if after_source_sha256 != before_source_sha256:
-        raise ValueError("canonical PAPER source state changed during equity-path issuance")
-    _require_canonical_equity_replay_code_authority()
-    if _CANONICAL_GOAL_PROVENANCE(goal) != goal_snapshot_provenance:
-        raise ValueError("canonical economic goal changed during equity-path issuance")
-    # Current PaperBook persistence owns the opening numeric balance but does not
-    # durably bind that opening capital to EconomicGoal.bankroll_id/currency.
-    # Ticket-level provenance cannot retroactively mint that owner-capital
-    # authority. Keep the fact explicit and fail closed for downstream financial
-    # consumers until the canonical PaperBook/opening-capital authority carries it.
-    opening_capital_authority_complete = False
-    # PaperBook settlement arithmetic is gross of campaign/provider/execution
-    # monetary costs. Cost authorities exist elsewhere in the product, but this
-    # path does not yet compose and re-resolve them for the exact capital scope.
-    applicable_costs_complete = False
-    net_equity_authoritative = False
-    # Current PaperBook settlements are one-shot and expose no append-only
-    # correction/resettlement lineage. A current snapshot can be displayed, but
-    # cannot claim an authoritative corrected/restated historical view.
-    correction_lineage_complete = False
-    restated_history_authoritative = False
-    # Current resolver has no durable frozen-cutoff record that can be
-    # re-resolved after later legitimate PaperBook history is appended.
-    frozen_scope_complete = False
-    historical_reresolution_complete = False
-    payload = _equity_path_payload(
-        goal_snapshot=goal_snapshot,
-        goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
-        portfolio_risk_state_sha256=after_sha256,
-        paperbook_source_state_sha256=after_source_sha256,
-        initial_equity=initial_equity,
-        points=point_tuple,
-        availability_complete=availability_complete,
-        settled_history_complete=settled_history_complete,
-        money_scope_complete=money_scope_complete,
-        opening_capital_authority_complete=opening_capital_authority_complete,
-        applicable_costs_complete=applicable_costs_complete,
-        net_equity_authoritative=net_equity_authoritative,
-        correction_lineage_complete=correction_lineage_complete,
-        restated_history_authoritative=restated_history_authoritative,
-        frozen_scope_complete=frozen_scope_complete,
-        historical_reresolution_complete=historical_reresolution_complete,
-    )
-    path_sha256 = hashlib.sha256(
-        json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-    ).hexdigest()
-    minimum_point = min(point_tuple, key=lambda point: (point.equity, point.sequence))
-    return ProductIssuedPaperEquityPath(
-        schema=EQUITY_PATH_SCHEMA,
-        scope=RISK_REPORT_SCOPE_PAPER_ONLY,
-        goal_id=goal_snapshot.goal_id,
-        goal_revision=goal_snapshot.revision,
-        bankroll_id=goal_snapshot.bankroll_id,
-        currency=goal_snapshot.currency,
-        goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
-        portfolio_risk_state_sha256=after_sha256,
-        paperbook_source_state_sha256=after_source_sha256,
-        history_view=HISTORY_VIEW_RESTATED_CURRENT,
-        historical_as_known_supported=False,
-        initial_equity=initial_equity,
-        points=point_tuple,
-        point_count=len(point_tuple),
-        path_sha256=path_sha256,
-        current_equity=current_equity,
-        minimum_equity=minimum_point.equity,
-        minimum_equity_point_id=minimum_point.point_id,
-        availability_complete=availability_complete,
-        settled_history_complete=settled_history_complete,
-        money_scope_complete=money_scope_complete,
-        opening_capital_authority_complete=opening_capital_authority_complete,
-        applicable_costs_complete=applicable_costs_complete,
-        net_equity_authoritative=net_equity_authoritative,
-        correction_lineage_complete=correction_lineage_complete,
-        restated_history_authoritative=restated_history_authoritative,
-        frozen_scope_complete=frozen_scope_complete,
-        historical_reresolution_complete=historical_reresolution_complete,
-    )
-
-
+        current_equity = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
+            (book.balance, current_committed)
+        )
+        if replay_balance != book.balance or replay_committed != current_committed:
+            raise ValueError("canonical PAPER equity path does not replay exact current state")
+        if points[-1].equity != current_equity:
+            raise ValueError("canonical PAPER equity path current equity is inconsistent")
+    
+        # Capture every mutable PaperBook-derived output before the final source
+        # digest fence. After that fence, evidence assembly must use locals only so
+        # a concurrent mutation cannot mix a newer completion/scope fact into a
+        # path committed to the older source-state digest.
+        point_tuple = tuple(points)
+        initial_equity = book.initial_bankroll
+        settled_history_complete = all(
+            ticket.status is not TicketStatus.OPEN for ticket in book.tickets.values()
+        )
+        money_scope_complete = bool(book.tickets) and all(
+            ticket.bankroll_id == goal_snapshot.bankroll_id
+            and ticket.currency == goal_snapshot.currency
+            for ticket in book.tickets.values()
+        )
+    
+        after_sha256 = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
+        after_source_sha256 = _paper_equity_source_state_sha256(book)
+        if after_sha256 is None or after_sha256 != before_sha256:
+            raise ValueError("canonical PAPER risk state changed during equity-path issuance")
+        if after_source_sha256 != before_source_sha256:
+            raise ValueError("canonical PAPER source state changed during equity-path issuance")
+        _require_canonical_equity_replay_code_authority()
+        if _CANONICAL_GOAL_PROVENANCE(goal) != goal_snapshot_provenance:
+            raise ValueError("canonical economic goal changed during equity-path issuance")
+        # Current PaperBook persistence owns the opening numeric balance but does not
+        # durably bind that opening capital to EconomicGoal.bankroll_id/currency.
+        # Ticket-level provenance cannot retroactively mint that owner-capital
+        # authority. Keep the fact explicit and fail closed for downstream financial
+        # consumers until the canonical PaperBook/opening-capital authority carries it.
+        opening_capital_authority_complete = False
+        # PaperBook settlement arithmetic is gross of campaign/provider/execution
+        # monetary costs. Cost authorities exist elsewhere in the product, but this
+        # path does not yet compose and re-resolve them for the exact capital scope.
+        applicable_costs_complete = False
+        net_equity_authoritative = False
+        # Current PaperBook settlements are one-shot and expose no append-only
+        # correction/resettlement lineage. A current snapshot can be displayed, but
+        # cannot claim an authoritative corrected/restated historical view.
+        correction_lineage_complete = False
+        restated_history_authoritative = False
+        # Current resolver has no durable frozen-cutoff record that can be
+        # re-resolved after later legitimate PaperBook history is appended.
+        frozen_scope_complete = False
+        historical_reresolution_complete = False
+        payload = _equity_path_payload(
+            goal_snapshot=goal_snapshot,
+            goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
+            portfolio_risk_state_sha256=after_sha256,
+            paperbook_source_state_sha256=after_source_sha256,
+            initial_equity=initial_equity,
+            points=point_tuple,
+            availability_complete=availability_complete,
+            settled_history_complete=settled_history_complete,
+            money_scope_complete=money_scope_complete,
+            opening_capital_authority_complete=opening_capital_authority_complete,
+            applicable_costs_complete=applicable_costs_complete,
+            net_equity_authoritative=net_equity_authoritative,
+            correction_lineage_complete=correction_lineage_complete,
+            restated_history_authoritative=restated_history_authoritative,
+            frozen_scope_complete=frozen_scope_complete,
+            historical_reresolution_complete=historical_reresolution_complete,
+        )
+        path_sha256 = hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        minimum_point = min(point_tuple, key=lambda point: (point.equity, point.sequence))
+        return ProductIssuedPaperEquityPath(
+            schema=EQUITY_PATH_SCHEMA,
+            scope=RISK_REPORT_SCOPE_PAPER_ONLY,
+            goal_id=goal_snapshot.goal_id,
+            goal_revision=goal_snapshot.revision,
+            bankroll_id=goal_snapshot.bankroll_id,
+            currency=goal_snapshot.currency,
+            goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
+            portfolio_risk_state_sha256=after_sha256,
+            paperbook_source_state_sha256=after_source_sha256,
+            history_view=HISTORY_VIEW_RESTATED_CURRENT,
+            historical_as_known_supported=False,
+            initial_equity=initial_equity,
+            points=point_tuple,
+            point_count=len(point_tuple),
+            path_sha256=path_sha256,
+            current_equity=current_equity,
+            minimum_equity=minimum_point.equity,
+            minimum_equity_point_id=minimum_point.point_id,
+            availability_complete=availability_complete,
+            settled_history_complete=settled_history_complete,
+            money_scope_complete=money_scope_complete,
+            opening_capital_authority_complete=opening_capital_authority_complete,
+            applicable_costs_complete=applicable_costs_complete,
+            net_equity_authoritative=net_equity_authoritative,
+            correction_lineage_complete=correction_lineage_complete,
+            restated_history_authoritative=restated_history_authoritative,
+            frozen_scope_complete=frozen_scope_complete,
+            historical_reresolution_complete=historical_reresolution_complete,
+        )
+    
+    
 def _historical_max_drawdown_from_path(
     path: ProductIssuedPaperEquityPath,
 ) -> _HistoricalMaxDrawdown:

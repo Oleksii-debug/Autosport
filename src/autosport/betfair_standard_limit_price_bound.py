@@ -428,6 +428,32 @@ def _capture_canonical_instruction(
     }
 
 
+_CANONICAL_EXECUTION_ACTION_TO_DICT = ExecutionAction.to_dict
+_CANONICAL_EXECUTION_ACTION_TO_DICT_CODE = _CANONICAL_EXECUTION_ACTION_TO_DICT.__code__
+
+
+def _canonical_action_payload(
+    action: ExecutionAction,
+    _to_dict=_CANONICAL_EXECUTION_ACTION_TO_DICT,
+    _to_dict_code=_CANONICAL_EXECUTION_ACTION_TO_DICT_CODE,
+) -> dict[str, object]:
+    if (
+        _to_dict is not ExecutionAction.to_dict
+        or _to_dict.__code__ is not _to_dict_code
+        or ExecutionAction.to_dict is not _to_dict
+        or ExecutionAction.to_dict.__code__ is not _to_dict_code
+    ):
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical ExecutionAction serializer authority changed"
+        )
+    payload = _to_dict(action)
+    if type(payload) is not dict:
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical ExecutionAction serializer returned non-canonical payload"
+        )
+    return payload
+
+
 _CANONICAL_CAPTURE_INSTRUCTION = _capture_canonical_instruction
 _CANONICAL_INSTRUCTION_DIGEST = _digest
 
@@ -473,7 +499,7 @@ def _canonical_instruction_projection(
         raise BetfairStandardLimitPriceBoundError(
             "Betfair selection_id must be canonical positive integer text"
         )
-    action_payload = ExecutionAction.to_dict(action)
+    action_payload = _canonical_action_payload(action)
     if (
         type(instruction.get("selectionId")) is not int
         or instruction.get("selectionId") != selection_id

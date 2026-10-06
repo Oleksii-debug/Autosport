@@ -394,6 +394,8 @@ def _skill_handler_spooled_process(
                 },
             }
         encoded = _canonicalize(record)
+        if len(encoded.encode("utf-8")) > _HANDLER_RESULT_SPOOL_MAX_BYTES:
+            encoded = _canonicalize({"kind": "RESULT_TOO_LARGE"})
     except BaseException as exc:
         try:
             encoded = _canonicalize(
@@ -451,6 +453,10 @@ def _decode_handler_result_spool(
         except SkillRegistryError:
             return None, "HANDLER_PROTOCOL_ERROR"
         return None, "HANDLER_ERROR_" + error_type.upper()
+    if kind == "RESULT_TOO_LARGE":
+        if set(record) != {"kind"}:
+            return None, "HANDLER_PROTOCOL_ERROR"
+        return None, "HANDLER_RESULT_TOO_LARGE"
     if kind == "INVALID_RESULT":
         if set(record) != {"kind"}:
             return None, "HANDLER_PROTOCOL_ERROR"

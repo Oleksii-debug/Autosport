@@ -537,6 +537,48 @@ def test_handler_large_result_crosses_transport_without_false_timeout():
     assert len(result.output["payload"]) == 1024 * 1024
 
 
+def test_handler_oversized_result_is_bounded_before_spool_publication(
+    tmp_path, monkeypatch
+):
+    spool_path = tmp_path / "handler-result.json"
+    max_bytes = 256
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_HANDLER_RESULT_SPOOL_MAX_BYTES",
+        max_bytes,
+    )
+
+    real_write_text = skill_registry_module.Path.write_text
+    published_sizes = []
+
+    def bounded_write_text(self, data, *args, **kwargs):
+        encoded_size = len(data.encode("utf-8"))
+        published_sizes.append(encoded_size)
+        assert encoded_size <= max_bytes
+        return real_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(
+        skill_registry_module.Path,
+        "write_text",
+        bounded_write_text,
+    )
+
+    def oversized_handler(_payload):
+        return SkillExecutionResult(output={"payload": "x" * 4096})
+
+    skill_registry_module._skill_handler_spooled_process(
+        oversized_handler,
+        {},
+        str(spool_path),
+    )
+
+    result, error = skill_registry_module._decode_handler_result_spool(spool_path)
+    assert result is None
+    assert error == "HANDLER_RESULT_TOO_LARGE"
+    assert published_sizes
+    assert spool_path.stat().st_size <= max_bytes
+
+
 def test_handler_partial_result_spool_write_remains_timeout_bounded():
     started = time.monotonic()
     result, error = SkillRegistry._execute_handler_bounded(

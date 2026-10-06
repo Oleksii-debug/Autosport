@@ -6929,3 +6929,75 @@ def test_tick_rechecks_authority_after_final_invalidation_snapshot(
         if mutation == "dependency_storage":
             assert index._matched_keys is canonical_matched_keys
 
+@pytest.mark.parametrize(
+    "failure_phase",
+    ("collector", "provider_backlog", "desktop"),
+)
+def test_tick_exception_restores_economic_context(
+    failure_phase: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        original_workspace = coordinator.workspace
+        original_book = coordinator.paper_book_path
+        original_bankroll = coordinator.initial_bankroll
+
+        def mutate_and_raise() -> None:
+            coordinator.workspace = root / "attacker-workspace"
+            coordinator.paper_book_path = root / "attacker-paper-book.json"
+            coordinator.initial_bankroll = "999999"
+            raise RuntimeError("economic mutation failure")
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                if failure_phase == "desktop":
+                    mutate_and_raise()
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        if failure_phase == "collector":
+            coordinator.collector = _Collector(callback=mutate_and_raise)
+        elif failure_phase == "provider_backlog":
+            class ProviderUnavailableCollector(_Collector):
+                def run_cycle(self):
+                    return type(
+                        "ProviderUnavailableCycle",
+                        (),
+                        {
+                            "provider_unavailable": True,
+                            "source_id": "provider-a",
+                            "committed_delta_ids": (),
+                        },
+                    )()
+
+            class Buffer:
+                full_refresh_required = False
+
+                @property
+                def pending_count(self):
+                    mutate_and_raise()
+
+                def drain(self, **_kwargs):
+                    raise AssertionError(
+                        "provider-unavailable tick must not drain invalidations"
+                    )
+
+            coordinator.collector = ProviderUnavailableCollector()
+            coordinator.invalidation_buffer = Buffer()
+        else:
+            coordinator.collector = _Collector()
+
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(RuntimeError, match="economic mutation failure"):
+            coordinator.tick()
+
+        assert coordinator.workspace == original_workspace
+        assert coordinator.paper_book_path == original_book
+        assert coordinator.initial_bankroll == original_bankroll
+

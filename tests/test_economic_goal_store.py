@@ -485,6 +485,48 @@ def test_store_ignores_rebound_module_authorities(monkeypatch, tmp_path) -> None
     assert store.load() == candidate
 
 
+def test_successor_does_not_dispatch_rebound_instance_load(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    candidate = replace(
+        _goal(),
+        revision=2,
+        max_stake_fraction=Decimal("0.01"),
+        automation_level=AutomationLevel.RECOMMENDATION,
+    )
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound instance load executed")
+
+    monkeypatch.setattr(store, "load", forged)
+    store.persist_automatic_successor(candidate)
+
+    assert store.load is forged
+    assert EconomicGoalStore(tmp_path).load() == candidate
+
+
+def test_store_methods_ignore_rebound_lock_scope_module_name(monkeypatch, tmp_path) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.01"),
+        automation_level=AutomationLevel.RECOMMENDATION,
+    )
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound lock scope executed")
+
+    monkeypatch.setattr(economic_goal_store_module, "_workspace_lock_scope", forged)
+
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(previous)
+    store.persist_automatic_successor(candidate)
+
+    assert EconomicGoalStore(tmp_path).load() == candidate
+
+
 def test_payload_decoder_ignores_rebound_schema_helpers(monkeypatch) -> None:
     payload = economic_goal_to_payload(_goal())
 

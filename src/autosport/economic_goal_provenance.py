@@ -192,6 +192,7 @@ def _verify_provenance_bound(
     _goal_validator=_CANONICAL_GOAL_VALIDATOR,
     _payload_encoder=economic_goal_to_payload,
     _payload_decoder=economic_goal_from_payload,
+    _provenance_snapshotter=_snapshot_provenance,
     _provenance_validator=_CANONICAL_PROVENANCE_VALIDATOR,
     _contract_sha256=_contract_sha256_bound,
     _goal_error=EconomicGoalContractError,
@@ -205,7 +206,7 @@ def _verify_provenance_bound(
         raise _provenance_error("provenance must be EconomicGoalProvenance")
     _goal_validator(contract)
     contract_snapshot = _payload_decoder(_payload_encoder(contract))
-    evidence = _snapshot_provenance(provenance)
+    evidence = _provenance_snapshotter(provenance)
     if evidence.goal_id != contract_snapshot.goal_id:
         raise _provenance_error("provenance goal_id mismatch")
     if evidence.revision != contract_snapshot.revision:

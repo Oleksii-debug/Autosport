@@ -2375,6 +2375,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if unregister_input is None
             else unregister_input
         )
+        if (
+            type(input_id) is not str
+            or not input_id
+            or input_id.strip() != input_id
+        ):
+            raise ContinuousSessionError(
+                "dependency index retirement input id is invalid"
+            )
         if not callable(unregister_input):
             raise ContinuousSessionError(
                 "dependency index retirement authority is unavailable"

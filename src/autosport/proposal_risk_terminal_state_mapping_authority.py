@@ -789,6 +789,7 @@ def _leg_key(value: Mapping[str, object]) -> tuple[object, ...]:
         value.get("selection_id"),
         value.get("sport"),
         value.get("exchange_side"),
+        value.get("market_semantics_id"),
     )
 
 
@@ -942,11 +943,6 @@ def _candidate_mapping_material(
             if quote is None:
                 raise ProductProposalRiskTerminalStateMappingError(
                     "candidate leg lacks its exact locked quote"
-                )
-            if leg.get("exchange_side") is not None:
-                raise ProductProposalRiskTerminalStateMappingError(
-                    "terminal mapping does not support exchange-side "
-                    "settlement semantics"
                 )
             selection_id = _text(
                 leg.get("selection_id"),

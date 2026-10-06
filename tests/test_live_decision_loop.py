@@ -742,13 +742,32 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             second = loop.run_cycle()
             self.assertEqual(second.status, LiveCycleStatus.DECIDED)
-            self.assertEqual(factory.calls[-1], ("input-a", ()))
+            self.assertEqual(len(factory.calls), 1)
             second_progress = json.loads(
                 loop.progress_path.read_text(encoding="utf-8")
             )
+            self.assertEqual(second_progress["gate"], "actionability_wait")
             self.assertEqual(
                 second_progress["health_boundaries"][0]["transition_order"],
                 2,
+            )
+            latest = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[-1]
+            self.assertEqual(latest.payload["schema_version"], 4)
+            self.assertEqual(latest.payload["gate"], "actionability_wait")
+            wait = latest.to_dict()["payload"]["actionability_wait_evidence"]
+            self.assertEqual(
+                wait[0]["wait_reasons"],
+                ["provider_health:failed"],
+            )
+            self.assertEqual(
+                wait[0]["recheck_triggers"],
+                ["provider_health_transition"],
+            )
+            self.assertEqual(
+                wait[0]["provider_health"][0]["eligibility"],
+                "failed",
             )
             loop.close()
 
@@ -7920,7 +7939,80 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             result = loop.run_cycle()
 
             self.assertEqual(result.status, LiveCycleStatus.DECIDED)
-            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(factory.calls, [])
+            latest = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[-1]
+            self.assertEqual(latest.payload["schema_version"], 4)
+            self.assertEqual(latest.payload["gate"], "actionability_wait")
+            wait = latest.to_dict()["payload"]["actionability_wait_evidence"]
+            self.assertEqual(wait[0]["input_id"], "input-a")
+            self.assertEqual(wait[0]["wait_reasons"], ["stale"])
+            self.assertEqual(wait[0]["recheck_triggers"], ["fresh_observation"])
+            self.assertEqual(wait[0]["provider_health"], [])
+
+    def test_actionability_wait_append_pending_recovers_without_poll_or_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            crashes = {"armed": False}
+
+            def crash_after_append() -> None:
+                if crashes["armed"]:
+                    raise RuntimeError("simulated WAIT process loss after ledger append")
+
+            first_factory = _EmptyIntentFactory()
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),), ()],
+                ),
+                factory=first_factory,
+                clock=clock,
+                post_append_hook=crash_after_append,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first_factory.calls.clear()
+
+            crashes["armed"] = True
+            clock.value = self.START + timedelta(seconds=7)
+            with self.assertRaisesRegex(RuntimeError, "WAIT process loss"):
+                first.run_cycle()
+
+            self.assertEqual(first_factory.calls, [])
+            pending = json.loads(first.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["phase"], "append_pending")
+            self.assertEqual(pending["gate"], "actionability_wait")
+            ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+            records = ledger.verified_records()
+            self.assertEqual(len(records), 2)
+            wait_id = records[-1].decision_id
+            self.assertEqual(records[-1].payload["schema_version"], 4)
+            first.close()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed_factory = _EmptyIntentFactory()
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=resumed_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=8)),
+            )
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DUPLICATE_DECISION)
+            self.assertEqual(recovered.decision_id, wait_id)
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(resumed_factory.calls, [])
+            self.assertEqual(len(ledger.verified_records()), 2)
+            committed = json.loads(
+                resumed.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(committed["phase"], "committed")
+            self.assertEqual(committed["gate"], "actionability_wait")
+            resumed.close()
 
     def test_saturated_economic_quote_age_has_no_unrepresentable_freshness_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

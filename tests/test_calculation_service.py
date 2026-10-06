@@ -203,6 +203,19 @@ class CalculationServiceTests(unittest.TestCase):
                 causal_cutoff_ts=cutoff,
             )
 
+    def test_ingest_timestamp_before_observation_is_rejected_as_invalid_chronology(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts is before observed_ts",
+        ):
+            self.service.implied_probability_for_event(
+                self._event(
+                    observed_ts="2026-09-14T12:00:00+00:00",
+                    ingest_ts="2026-09-14T11:59:59+00:00",
+                ),
+                causal_cutoff_ts="2026-09-14T12:01:00+00:00",
+            )
+
     def test_future_source_timestamp_is_rejected_as_causally_unavailable(self) -> None:
         with self.assertRaisesRegex(
             ValueError,

@@ -698,3 +698,19 @@ def test_store_normalizes_invalid_utf8_read_failure(tmp_path) -> None:
 
     with pytest.raises(EconomicGoalContractError, match="cannot read persisted economic goal"):
         store.load()
+
+
+def test_store_binding_resolver_ignores_rebound_object_getattribute(monkeypatch, tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+
+    def forged(*args, **kwargs):
+        raise AssertionError("rebound object getattribute authority executed")
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "_CANONICAL_OBJECT_GETATTRIBUTE",
+        forged,
+    )
+
+    assert store.load() == _goal()

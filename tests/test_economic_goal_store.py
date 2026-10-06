@@ -442,6 +442,8 @@ def test_store_ignores_rebound_module_authorities(monkeypatch, tmp_path) -> None
         "EconomicGoalContract",
         "EconomicObjective",
         "AutomationLevel",
+        "_STORE_BINDINGS_BY_ID",
+        "_CANONICAL_STORE_FILE_NAME",
     ):
         monkeypatch.setattr(economic_goal_store_module, name, forged)
 
@@ -470,6 +472,17 @@ def test_payload_decoder_ignores_rebound_schema_helpers(monkeypatch) -> None:
         monkeypatch.setattr(economic_goal_store_module, name, forged)
 
     assert economic_goal_from_payload(payload) == _goal()
+
+
+
+def test_store_path_ignores_rebound_class_file_name(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(EconomicGoalStore, "FILE_NAME", "attacker.json")
+
+    store = EconomicGoalStore(tmp_path)
+
+    assert store.path == tmp_path / "economic_goal_contract.json"
+    store.initialize_owner(_goal())
+    assert not (tmp_path / "attacker.json").exists()
 
 
 

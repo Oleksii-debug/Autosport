@@ -57,6 +57,7 @@ _CANONICAL_AUTOMATION_LEVEL_MEMBERS: Final = (
     AutomationLevel.BOUNDED_AUTONOMY,
     AutomationLevel.HIGHER_AUTONOMY,
 )
+_CONTRACT_OBJECT_SETATTR: Final = object.__setattr__
 
 
 class _EconomicGoalContractMeta(type):

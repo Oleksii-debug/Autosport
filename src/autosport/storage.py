@@ -140,21 +140,22 @@ END""",
 
 
 def _timezone_aware_instant(value: str, field_name: str) -> datetime:
-    if isinstance(value, str):
-        # datetime.fromisoformat() silently truncates fractional-second/offset
-        # precision beyond microseconds. Reject only discarded non-zero digits so
-        # D+submicrosecond evidence can never be rounded backward onto cutoff D.
-        for match in re.finditer(r"[.,]([0-9]+)", value):
-            fractional_digits = match.group(1)
-            if len(fractional_digits) > 6 and any(
-                digit != "0" for digit in fractional_digits[6:]
-            ):
-                raise ValueError(
-                    f"{field_name} precision finer than microseconds is unsupported"
-                )
+    if type(value) is not str:
+        raise ValueError(f"{field_name} must be an exact string")
+    # datetime.fromisoformat() silently truncates fractional-second/offset
+    # precision beyond microseconds. Reject only discarded non-zero digits so
+    # D+submicrosecond evidence can never be rounded backward onto cutoff D.
+    for match in re.finditer(r"[.,]([0-9]+)", value):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"{field_name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (AttributeError, ValueError) as exc:
+    except ValueError as exc:
         raise ValueError(f"{field_name} must be valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware ISO-8601")
@@ -1931,6 +1932,22 @@ class SQLiteMarketStore:
                 append_authority,
                 prior_rows,
             )
+            if prior_rows:
+                latest_prior_instant = max(
+                    _timezone_aware_instant(
+                        prior_as_of,
+                        "as_of",
+                    ).astimezone(timezone.utc)
+                    for _prior_id, prior_as_of, _prior_generation in prior_rows
+                )
+                candidate_instant = _timezone_aware_instant(
+                    canonical_as_of,
+                    "as_of",
+                ).astimezone(timezone.utc)
+                if candidate_instant < latest_prior_instant:
+                    raise MonotonicAuthorityRollbackError(
+                        "causal replay cutoff PREPARE regresses decision time"
+                    )
             self._require_committed_append_authority_through(
                 append_authority,
                 max_generation,
@@ -2015,9 +2032,28 @@ class SQLiteMarketStore:
                 )
             row = candidates[0]
             _cutoff_id, _canonical_as_of, max_generation = row
+            cutoff_instant = _timezone_aware_instant(
+                _canonical_as_of,
+                "as_of",
+            ).astimezone(timezone.utc)
+            previous_cutoff_instant = (
+                _timezone_aware_instant(
+                    issued[-1][1],
+                    "as_of",
+                ).astimezone(timezone.utc)
+                if issued
+                else None
+            )
             if issued and max_generation < previous_max_generation:
                 raise MonotonicAuthorityRollbackError(
                     "causal replay cutoff commit regresses append generation"
+                )
+            if (
+                previous_cutoff_instant is not None
+                and cutoff_instant < previous_cutoff_instant
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff commit regresses decision time"
                 )
 
             if max_generation not in append_boundaries:
@@ -2790,6 +2826,27 @@ class SQLiteMarketStore:
                             None,
                         )
                         if current_row is None:
+                            if cutoff_rows:
+                                latest_issued_instant = max(
+                                    _timezone_aware_instant(
+                                        prior_as_of,
+                                        "as_of",
+                                    ).astimezone(timezone.utc)
+                                    for (
+                                        _prior_id,
+                                        prior_as_of,
+                                        _prior_generation,
+                                    ) in cutoff_rows
+                                )
+                                requested_instant = _timezone_aware_instant(
+                                    canonical_as_of,
+                                    "as_of",
+                                ).astimezone(timezone.utc)
+                                if requested_instant < latest_issued_instant:
+                                    raise MonotonicAuthorityRollbackError(
+                                        "causal replay cutoff issuance regresses "
+                                        "decision time"
+                                    )
                             generation_row = self.connection.execute(
                                 """SELECT COALESCE(MAX(append_generation), 0)
                                    FROM market_event_commit_order"""

@@ -828,9 +828,6 @@ class _ContinuousSessionState:
             is not _atomic_write_json_code
             or _text is not _text_validator
             or getattr(_text_validator, "__code__", None) is not _text_validator_code
-            or type(self)._write_error_checkpoint is not _write_error_checkpoint_method
-            or getattr(_write_error_checkpoint_method, "__code__", None)
-            is not _write_error_checkpoint_method_code
         ):
             raise ContinuousSessionError(
                 "canonical operational-checkpoint writer code identity changed"
@@ -1347,6 +1344,10 @@ class _ContinuousSessionState:
             or getattr(_update_method, "__code__", None) is not _update_method_code
             or _text is not _text_validator
             or getattr(_text_validator, "__code__", None) is not _text_validator_code
+            or type(self)._write_error_checkpoint
+            is not _write_error_checkpoint_method
+            or getattr(_write_error_checkpoint_method, "__code__", None)
+            is not _write_error_checkpoint_method_code
         ):
             raise ContinuousSessionError(
                 "canonical state-transition error authority changed"
@@ -1442,9 +1443,6 @@ class _ContinuousSessionState:
             _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
-            or type(self)._write_error_checkpoint is not _write_error_checkpoint_method
-            or getattr(_write_error_checkpoint_method, "__code__", None)
-            is not _write_error_checkpoint_method_code
         ):
             raise ContinuousSessionError(
                 "canonical settlement evidence timestamp authority changed"
@@ -1734,6 +1732,10 @@ class _ContinuousSessionState:
             _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
+            or type(self)._write_error_checkpoint
+            is not _write_error_checkpoint_method
+            or getattr(_write_error_checkpoint_method, "__code__", None)
+            is not _write_error_checkpoint_method_code
         ):
             raise ContinuousSessionError(
                 "canonical success timestamp authority changed"

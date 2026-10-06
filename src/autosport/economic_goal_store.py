@@ -673,31 +673,43 @@ def _read_economic_goal_text(
 _CANONICAL_GOAL_TEXT_READER: Final = _read_economic_goal_text
 
 
+_ECONOMIC_GOAL_STORE_AUTHORITY_NAMES: Final = frozenset(
+    {
+        "__init__",
+        "load",
+        "initialize_owner",
+        "persist_automatic_successor",
+        "_authority_operations_sealed",
+    }
+)
+
+
 class _EconomicGoalStoreMeta(type):
     """Seal public store authority entrypoints against class-level rebinding."""
 
-    _AUTHORITY_NAMES = frozenset(
-        {
-            "__init__",
-            "load",
-            "initialize_owner",
-            "persist_automatic_successor",
-            "_authority_operations_sealed",
-        }
-    )
+    _AUTHORITY_NAMES: Final = _ECONOMIC_GOAL_STORE_AUTHORITY_NAMES
 
-    def __setattr__(cls, name: str, value: object) -> None:
+    def __setattr__(
+        cls,
+        name: str,
+        value: object,
+        _authority_names=_ECONOMIC_GOAL_STORE_AUTHORITY_NAMES,
+    ) -> None:
         if (
             cls.__dict__.get("_authority_operations_sealed", False)
-            and name in cls._AUTHORITY_NAMES
+            and name in _authority_names
         ):
             raise TypeError("economic goal store authority operation binding is immutable")
         super().__setattr__(name, value)
 
-    def __delattr__(cls, name: str) -> None:
+    def __delattr__(
+        cls,
+        name: str,
+        _authority_names=_ECONOMIC_GOAL_STORE_AUTHORITY_NAMES,
+    ) -> None:
         if (
             cls.__dict__.get("_authority_operations_sealed", False)
-            and name in cls._AUTHORITY_NAMES
+            and name in _authority_names
         ):
             raise TypeError("economic goal store authority operation binding is immutable")
         super().__delattr__(name)

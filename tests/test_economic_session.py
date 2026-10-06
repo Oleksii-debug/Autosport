@@ -204,6 +204,37 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                 workspace_instance_id=store._authority.workspace_instance_id,
             )
 
+    def test_evidence_builder_rejects_payload_type_coercion(self) -> None:
+        store = self._store()
+        evidence = store.current()
+        baseline = json.loads(store.state_path.read_text(encoding="utf-8"))
+
+        mutations = (
+            (
+                "goal_revision",
+                True,
+                "goal_revision must be a positive exact integer",
+            ),
+            (
+                "product_clock_authoritative",
+                "false",
+                "product_clock_authoritative must be an exact boolean",
+            ),
+        )
+        for field, replacement, message in mutations:
+            with self.subTest(field=field):
+                payload = dict(baseline)
+                payload[field] = replacement
+                with self.assertRaisesRegex(
+                    EconomicSessionIntegrityError,
+                    message,
+                ):
+                    store._evidence(
+                        payload,
+                        evidence.state_sha256,
+                        evidence.authority_generation,
+                    )
+
     def test_midnight_does_not_reset_economic_session(self) -> None:
         first = self._store().current()
         self.clock.set("2026-10-06T12:00:00Z")

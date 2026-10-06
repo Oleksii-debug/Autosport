@@ -303,6 +303,32 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                 finally:
                     del store.__dict__[name]
 
+    def test_current_rejects_low_level_configuration_guard_shadow(self) -> None:
+        store = ProductEconomicSessionStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+        called = False
+
+        def hostile_configuration_guard():
+            nonlocal called
+            called = True
+
+        object.__setattr__(
+            store,
+            "_require_configuration_authority",
+            hostile_configuration_guard,
+        )
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+            self.assertFalse(called)
+        finally:
+            del store.__dict__["_require_configuration_authority"]
+
     def test_require_current_rejects_rebound_product_session_equality(self) -> None:
         store = ProductEconomicSessionStore(
             self.workspace,

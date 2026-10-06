@@ -42,6 +42,9 @@ _AUTHORITY_DOMAIN = "proposal-risk-target-precommit-v1"
 _WORKSPACE_BINDING_KEY = "workspace-binding-v1"
 _TARGET_CHAIN_KEY = "current-target-chain-v1"
 _TARGET_AUTHORITY_PREFIX = "target-v1:"
+_LEGACY_CHAIN_SCHEMAS = frozenset(
+    {"autosport.proposal-risk-target-precommit.v1"}
+)
 _PROTOCOL_CONSTANTS = (
     _SCHEMA,
     _ACTION,
@@ -51,6 +54,7 @@ _PROTOCOL_CONSTANTS = (
     _WORKSPACE_BINDING_KEY,
     _TARGET_CHAIN_KEY,
     _TARGET_AUTHORITY_PREFIX,
+    _LEGACY_CHAIN_SCHEMAS,
 )
 _PROTOCOL_CONSTANTS_EXPECTED = (
     "autosport.proposal-risk-target-precommit.v2",
@@ -61,6 +65,7 @@ _PROTOCOL_CONSTANTS_EXPECTED = (
     "workspace-binding-v1",
     "current-target-chain-v1",
     "target-v1:",
+    frozenset({"autosport.proposal-risk-target-precommit.v1"}),
 )
 _PROTOCOL_CONSTANTS_ROOT = _PROTOCOL_CONSTANTS
 _HEX = frozenset("0123456789abcdef")
@@ -502,6 +507,7 @@ def _require_dispatch() -> None:
         _WORKSPACE_BINDING_KEY,
         _TARGET_CHAIN_KEY,
         _TARGET_AUTHORITY_PREFIX,
+        _LEGACY_CHAIN_SCHEMAS,
     )
     if (
         _PROTOCOL_CONSTANTS is not _PROTOCOL_CONSTANTS_ROOT
@@ -1126,7 +1132,9 @@ def _verified_chain_target_record(
 
     The machine-side target chain already commits the target digest. This reader is
     used only to prove that the exact append-only Decision Ledger record anchoring a
-    prior chain tip still exists. It never restores current sizing or risk authority.
+    prior chain tip still exists. Historical v1 records are accepted only for chain
+    continuity during upgrade; they cannot be rebuilt as current v2 target authority.
+    This reader never restores current sizing or risk authority.
     """
 
     target_sha256 = _sha(target_sha256, "target_sha256")
@@ -1151,7 +1159,10 @@ def _verified_chain_target_record(
         or record.agent != _AGENT
         or record.replay_run_id != action_id
         or record.context_hash != target_sha256
-        or payload.get("schema") != _SCHEMA
+        or (
+            payload.get("schema") != _SCHEMA
+            and payload.get("schema") not in _LEGACY_CHAIN_SCHEMAS
+        )
         or payload.get("workspace_instance_id") != workspace_instance_id
         or payload.get("target_sha256") != target_sha256
         or payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY) != action_id

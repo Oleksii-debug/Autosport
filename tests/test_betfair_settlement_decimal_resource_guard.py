@@ -37,3 +37,26 @@ def test_settlement_decimal_resource_guard_preserves_ordinary_exact_values() -> 
     )
 
     assert tuple(settlement._dec(value, "field") for value in values) == values
+
+
+
+class _DecimalSubclass(Decimal):
+    pass
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        _DecimalSubclass("2"),
+        _DecimalSubclass("0"),
+        _DecimalSubclass("-1.25"),
+    ),
+)
+def test_settlement_decimal_resource_guard_rejects_decimal_subclasses(
+    value: Decimal,
+) -> None:
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="must be finite Decimal",
+    ):
+        settlement._dec(value, "field")

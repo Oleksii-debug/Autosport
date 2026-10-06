@@ -547,6 +547,45 @@ def test_mutating_issued_report_payload_revokes_projection_authority() -> None:
         report.assert_authoritative_projection()
 
 
+def test_required_cash_huge_fixed_point_exponent_fails_before_scaling() -> None:
+    with pytest.raises(
+        ProviderFundsFeasibilityError,
+        match="fixed-point representation exceeds resource limit",
+    ):
+        _allocation("hostile", amount="1e1000000")
+
+
+def test_required_cash_cross_value_exponent_span_fails_before_integer_power() -> None:
+    allocations = (
+        _allocation("high", amount="1e5000"),
+        _allocation("low", amount="1e-4000"),
+    )
+
+    with pytest.raises(
+        ProviderFundsFeasibilityError,
+        match="exponent span exceeds resource limit",
+    ):
+        assess_provider_funds(
+            allocations,
+            (_snapshot(venue_id="A", account_id="acct-a", amount="1e5001"),),
+            decision_ts=_T2,
+            max_balance_age_seconds=Decimal("10"),
+        )
+
+
+def test_huge_provider_balance_exponent_is_rejected_before_report_serialization() -> None:
+    with pytest.raises(
+        ProviderFundsFeasibilityError,
+        match="fixed-point representation exceeds resource limit",
+    ):
+        assess_provider_funds(
+            (_allocation("leg-1", amount="50"),),
+            (_snapshot(venue_id="A", account_id="acct-a", amount="1e1000000"),),
+            decision_ts=_T2,
+            max_balance_age_seconds=Decimal("10"),
+        )
+
+
 def test_allocation_amount_is_explicitly_non_authoritative_required_account_cash() -> None:
     allocation = _allocation("leg-1", amount="25")
 

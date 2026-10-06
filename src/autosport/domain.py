@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field
@@ -197,7 +198,7 @@ def _market_settlement_key(
     _utf8=_require_utf8_encodable,
     _semantic_identity=_canonical_semantic_identity,
     _json_dumps=json.dumps,
-    _sha256=__import__("hashlib").sha256,
+    _sha256=hashlib.sha256,
 ) -> str:
     if type(quote_key) is not str or not quote_key:
         raise ValueError("settlement quote_key must be non-empty canonical text")

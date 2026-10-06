@@ -233,7 +233,28 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         ):
             store.require_current(evidence)
 
-    def test_require_current_rejects_instance_shadow_without_dispatch(self) -> None:
+    def test_store_rejects_ordinary_authority_method_instance_shadowing(self) -> None:
+        store = ProductEconomicSessionStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+
+        for name in (
+            "current",
+            "require_current",
+            "transition_to_current_goal",
+            "_publish_new",
+            "_evidence",
+            "_require_configuration_authority",
+        ):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(
+                    EconomicSessionIntegrityError,
+                    "authority method cannot be instance-shadowed",
+                ):
+                    setattr(store, name, lambda: None)
+
+    def test_require_current_rejects_low_level_current_shadow_without_dispatch(self) -> None:
         store = ProductEconomicSessionStore(
             self.workspace,
             authority_root=self.authority_root,
@@ -246,15 +267,41 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             called = True
             raise AssertionError("caller-shadowed current must not execute")
 
-        store.current = hostile_current
+        object.__setattr__(store, "current", hostile_current)
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.require_current(evidence)
+            self.assertFalse(called)
+        finally:
+            del store.__dict__["current"]
 
-        with self.assertRaisesRegex(
-            EconomicSessionIntegrityError,
-            "authority composition changed after construction",
-        ):
-            store.require_current(evidence)
+    def test_current_rejects_low_level_internal_method_shadow_without_dispatch(self) -> None:
+        for name in ("_evidence", "_publish_new"):
+            with self.subTest(name=name):
+                store = ProductEconomicSessionStore(
+                    self.workspace,
+                    authority_root=self.authority_root,
+                )
+                called = False
 
-        self.assertFalse(called)
+                def hostile(*_args, **_kwargs):
+                    nonlocal called
+                    called = True
+                    raise AssertionError("shadowed authority method executed")
+
+                object.__setattr__(store, name, hostile)
+                try:
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.current()
+                    self.assertFalse(called)
+                finally:
+                    del store.__dict__[name]
 
     def test_require_current_rejects_rebound_product_session_equality(self) -> None:
         store = ProductEconomicSessionStore(

@@ -5169,6 +5169,43 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         state,
                         code="ProviderUnavailableError",
                     )
+                    # Failure publication performs durable I/O while the canonical
+                    # session fence is held, but invalidations use their own lock and
+                    # may legitimately arrive during that publication. Re-read the
+                    # bounded backlog afterwards so the returned tick receipt does
+                    # not falsely report a pre-publication empty snapshot.
+                    if type(invalidation_buffer) is _invalidation_buffer_type:
+                        with invalidation_buffer_lock:
+                            if (
+                                invalidation_buffer._lock
+                                is not invalidation_buffer_lock
+                                or type(invalidation_buffer)
+                                is not _invalidation_buffer_type
+                            ):
+                                raise ContinuousSessionError(
+                                    "canonical invalidation backlog state authority changed"
+                                )
+                            _invalidation_state_validator(invalidation_buffer)
+                            pending_count = len(invalidation_buffer._dirty)
+                            pending_full_refresh = (
+                                invalidation_buffer._full_refresh_required
+                            )
+                    else:
+                        pending_count = invalidation_buffer.pending_count
+                        pending_full_refresh = invalidation_buffer.full_refresh_required
+                    if (
+                        type(pending_count) is not int
+                        or pending_count < 0
+                        or type(pending_full_refresh) is not bool
+                    ):
+                        raise ContinuousSessionError(
+                            "invalidation buffer backlog state is invalid"
+                        )
+                    require_state_identity()
+                    require_dependency_index_identity()
+                    require_tick_dependency_routing_authority(
+                        "dependency routing authority changed after provider-unavailable failure publication"
+                    )
                 except Exception as exc:
                     # This fast path intentionally does not replace malformed local
                     # backlog truth with ProviderUnavailableError. It must still

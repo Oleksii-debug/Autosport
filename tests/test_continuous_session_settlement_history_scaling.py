@@ -2639,7 +2639,7 @@ def test_empty_source_projection_noop_is_generation_neutral() -> None:
         assert after.get("generation", 0) == before.get("generation", 0)
 
 
-def test_projection_change_invalidates_predecessor_failure_overlay() -> None:
+def test_projection_change_preserves_active_failure_overlay() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         state = _state_with_history(root, _SMALL_HISTORY)
@@ -2651,7 +2651,9 @@ def test_projection_change_invalidates_predecessor_failure_overlay() -> None:
             backlog=False,
         )
 
-        assert state.snapshot().last_error_code is None
+        # Source projection updates observation truth but is not a successful
+        # session generation. It must not erase the active operational failure.
+        assert state.snapshot().last_error_code == "PRE_PROJECTION_FAILURE"
 
 
 def test_failure_after_projection_binds_to_new_generation() -> None:

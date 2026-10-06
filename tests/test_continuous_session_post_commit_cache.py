@@ -47,10 +47,10 @@ def test_caught_cleanup_failure_keeps_instance_generation_aligned_for_next_failu
 
         try:
             state.record_failure(code="AFTER_CLEANUP_FAILURE")
-        except continuous_session.ContinuousSessionError as exc:
-            assert "conflicts with canonical session reason" in str(exc)
+        except continuous_session.SessionPausedError:
+            pass
         else:
-            raise AssertionError("conflicting post-transition failure was published")
+            raise AssertionError("post-transition failure crossed durable PAUSE")
 
         sidecar = json.loads(
             path.with_name(f"{path.name}.operational_error.json").read_text(

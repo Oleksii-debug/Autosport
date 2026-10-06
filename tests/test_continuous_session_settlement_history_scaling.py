@@ -3354,3 +3354,57 @@ def test_stale_instance_failure_cannot_override_newer_state_transition_generatio
         assert sidecar["observed_state"] == "RUNNING"
         assert canonical["state"] == "PAUSED"
         assert canonical["last_error_code"] == "OPERATOR_PAUSE"
+
+
+def test_settlement_resolution_collection_rejects_non_string_identity_before_equality_dispatch() -> None:
+    class ExplodingIdentity:
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("authority-owned identity equality executed")
+
+        def __ne__(self, _other: object) -> bool:
+            raise AssertionError("authority-owned identity inequality executed")
+
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    resolution = continuous_session.SettlementResolution(
+        event_identity=ExplodingIdentity(),  # type: ignore[arg-type]
+        settlement_ref="settlement-1",
+        quote_outcomes={"quote-1": "win"},
+        evidence_id="evidence-malformed-identity",
+        evidence_sha256="a" * 64,
+        available_at=_AT,
+    )
+    coordinator = _resolution_coordinator((record,), (resolution,))
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "malformed settlement resolution fields" in str(exc)
+    else:
+        raise AssertionError("non-string identity reached equality dispatch")
+
+
+def test_settlement_resolution_collection_rejects_non_string_reference_before_equality_dispatch() -> None:
+    class ExplodingReference:
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("authority-owned reference equality executed")
+
+        def __ne__(self, _other: object) -> bool:
+            raise AssertionError("authority-owned reference inequality executed")
+
+    record = _ResolutionRecord("provider-a:event-1", "settlement-1")
+    resolution = continuous_session.SettlementResolution(
+        event_identity="provider-a:event-1",
+        settlement_ref=ExplodingReference(),  # type: ignore[arg-type]
+        quote_outcomes={"quote-1": "win"},
+        evidence_id="evidence-malformed-reference",
+        evidence_sha256="b" * 64,
+        available_at=_AT,
+    )
+    coordinator = _resolution_coordinator((record,), (resolution,))
+
+    try:
+        coordinator._settlement_resolutions(as_of=_AT)
+    except continuous_session.ContinuousSessionError as exc:
+        assert "malformed settlement resolution fields" in str(exc)
+    else:
+        raise AssertionError("non-string settlement reference reached equality dispatch")

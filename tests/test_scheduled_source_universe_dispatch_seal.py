@@ -538,6 +538,110 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                 schedule_id.__code__ = original_code
 
 
+    def test_source_store_json_global_rebind_fails_before_cycle_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            original_json = active_store_module.json
+            hostile_calls = []
+
+            class HostileJson:
+                @staticmethod
+                def loads(_payload):
+                    hostile_calls.append(True)
+                    raise AssertionError("hostile collector JSON parser executed")
+
+            active_store_module.json = HostileJson()
+            try:
+                with self.assertRaisesRegex(
+                    source_module.SourceUniverseCommitmentError,
+                    "collector-cycle JSON authority is rebound or mutated",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=path,
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                active_store_module.json = original_json
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_schedule_store_instant_rebind_fails_before_timing_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, _cycle_seq, candidate = _ready_store(tmp)
+            original_instant = active_store_module._instant
+            hostile_calls = []
+
+            def hostile_instant(*_args, **_kwargs):
+                hostile_calls.append(True)
+                raise AssertionError("hostile collector clock parser executed")
+
+            active_store_module._instant = hostile_instant
+            try:
+                with self.assertRaisesRegex(
+                    scheduled_module.ScheduledSourceUniverseError,
+                    "collector time authority is rebound or mutated",
+                ):
+                    _resolve(path, store, candidate)
+            finally:
+                active_store_module._instant = original_instant
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_source_base_connect_rebind_fails_before_wrong_database_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            base_store_type = CollectorDeltaStore.__mro__[1]
+            original_connect = vars(base_store_type)["_connect"]
+            hostile_calls = []
+
+            def hostile_connect(_self):
+                hostile_calls.append(True)
+                raise AssertionError("hostile base collector connection executed")
+
+            setattr(base_store_type, "_connect", hostile_connect)
+            try:
+                with self.assertRaisesRegex(
+                    source_module.SourceUniverseCommitmentError,
+                    "base connection authority is rebound or mutated",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=path,
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                setattr(base_store_type, "_connect", original_connect)
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_schedule_base_connect_rebind_fails_before_wrong_database_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, _cycle_seq, candidate = _ready_store(tmp)
+            base_store_type = CollectorDeltaStore.__mro__[1]
+            original_connect = vars(base_store_type)["_connect"]
+            hostile_calls = []
+
+            def hostile_connect(_self):
+                hostile_calls.append(True)
+                raise AssertionError("hostile base collector connection executed")
+
+            setattr(base_store_type, "_connect", hostile_connect)
+            try:
+                with self.assertRaisesRegex(
+                    scheduled_module.ScheduledSourceUniverseError,
+                    "base connection authority is rebound or mutated",
+                ):
+                    _resolve(path, store, candidate)
+            finally:
+                setattr(base_store_type, "_connect", original_connect)
+
+            self.assertEqual(hostile_calls, [])
+
     def test_source_path_equality_rebind_cannot_admit_wrong_store_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             path, store, cycle_seq, _candidate = _ready_store(tmp)
@@ -706,111 +810,6 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                     )
             finally:
                 Path.__new__ = original_new
-
-            self.assertEqual(hostile_calls, [])
-
-
-    def test_source_store_json_global_rebind_fails_before_cycle_dispatch(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path, store, cycle_seq, _candidate = _ready_store(tmp)
-            original_json = active_store_module.json
-            hostile_calls = []
-
-            class HostileJson:
-                @staticmethod
-                def loads(_payload):
-                    hostile_calls.append(True)
-                    raise AssertionError("hostile collector JSON parser executed")
-
-            active_store_module.json = HostileJson()
-            try:
-                with self.assertRaisesRegex(
-                    source_module.SourceUniverseCommitmentError,
-                    "collector-cycle JSON authority is rebound or mutated",
-                ):
-                    source_module.build_source_universe_commitment(
-                        store,
-                        expected_store_path=path,
-                        source_id=SOURCE_ID,
-                        start_cycle_seq=cycle_seq,
-                        end_cycle_seq=cycle_seq,
-                    )
-            finally:
-                active_store_module.json = original_json
-
-            self.assertEqual(hostile_calls, [])
-
-    def test_schedule_store_instant_rebind_fails_before_timing_dispatch(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path, store, _cycle_seq, candidate = _ready_store(tmp)
-            original_instant = active_store_module._instant
-            hostile_calls = []
-
-            def hostile_instant(*_args, **_kwargs):
-                hostile_calls.append(True)
-                raise AssertionError("hostile collector clock parser executed")
-
-            active_store_module._instant = hostile_instant
-            try:
-                with self.assertRaisesRegex(
-                    scheduled_module.ScheduledSourceUniverseError,
-                    "collector time authority is rebound or mutated",
-                ):
-                    _resolve(path, store, candidate)
-            finally:
-                active_store_module._instant = original_instant
-
-            self.assertEqual(hostile_calls, [])
-
-    def test_source_base_connect_rebind_fails_before_wrong_database_dispatch(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path, store, cycle_seq, _candidate = _ready_store(tmp)
-            base_store_type = CollectorDeltaStore.__mro__[1]
-            original_connect = vars(base_store_type)["_connect"]
-            hostile_calls = []
-
-            def hostile_connect(_self):
-                hostile_calls.append(True)
-                raise AssertionError("hostile base collector connection executed")
-
-            setattr(base_store_type, "_connect", hostile_connect)
-            try:
-                with self.assertRaisesRegex(
-                    source_module.SourceUniverseCommitmentError,
-                    "base connection authority is rebound or mutated",
-                ):
-                    source_module.build_source_universe_commitment(
-                        store,
-                        expected_store_path=path,
-                        source_id=SOURCE_ID,
-                        start_cycle_seq=cycle_seq,
-                        end_cycle_seq=cycle_seq,
-                    )
-            finally:
-                setattr(base_store_type, "_connect", original_connect)
-
-            self.assertEqual(hostile_calls, [])
-
-    def test_schedule_base_connect_rebind_fails_before_wrong_database_dispatch(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path, store, _cycle_seq, candidate = _ready_store(tmp)
-            base_store_type = CollectorDeltaStore.__mro__[1]
-            original_connect = vars(base_store_type)["_connect"]
-            hostile_calls = []
-
-            def hostile_connect(_self):
-                hostile_calls.append(True)
-                raise AssertionError("hostile base collector connection executed")
-
-            setattr(base_store_type, "_connect", hostile_connect)
-            try:
-                with self.assertRaisesRegex(
-                    scheduled_module.ScheduledSourceUniverseError,
-                    "base connection authority is rebound or mutated",
-                ):
-                    _resolve(path, store, candidate)
-            finally:
-                setattr(base_store_type, "_connect", original_connect)
 
             self.assertEqual(hostile_calls, [])
 

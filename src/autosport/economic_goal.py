@@ -64,6 +64,8 @@ class _EconomicGoalContractMeta(type):
 
     _AUTHORITY_NAMES: Final = frozenset(
         {
+            "__init__",
+            "__post_init__",
             "validate_automatic_successor",
             "_authority_operations_sealed",
         }
@@ -804,6 +806,11 @@ def _bind_contract_constructor(operation):
 _CANONICAL_CONTRACT_INIT: Final = _bind_contract_constructor(
     _contract_init_authority
 )
+
+# Replace the dataclass-generated constructor with the captured canonical
+# constructor. The generated constructor dispatches through self.__post_init__
+# dynamically; that is too weak for an authority-bearing economic contract.
+EconomicGoalContract.__init__ = _CANONICAL_CONTRACT_INIT
 
 
 def _snapshot_transition_contract(

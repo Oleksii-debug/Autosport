@@ -1594,6 +1594,14 @@ class ProductEconomicSessionStore:
             goal = self._economic_goal_load_witness(self._goal_store_witness)
             provenance = self._provenance_for_witness(goal)
             if (
+                payload["bankroll_id"] != goal.bankroll_id
+                or payload["currency"] != goal.currency
+            ):
+                raise EconomicSessionMismatchError(
+                    "bankroll/currency change requires separate PaperBook denomination "
+                    "transition authority"
+                )
+            if (
                 payload["goal_id"] == goal.goal_id
                 and payload["goal_revision"] == goal.revision
                 and payload["bankroll_id"] == goal.bankroll_id

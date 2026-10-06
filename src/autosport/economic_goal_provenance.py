@@ -101,7 +101,7 @@ def _canonical_json(
         raise _error_type("economic-goal payload is not canonically serializable") from exc
 
 
-def contract_sha256(
+def _contract_sha256_bound(
     contract: EconomicGoalContract,
     _goal_type=_CANONICAL_GOAL_TYPE,
     _goal_validator=_CANONICAL_GOAL_VALIDATOR,
@@ -118,13 +118,13 @@ def contract_sha256(
     return _sha256(_json_encoder(_payload_encoder(contract))).hexdigest()
 
 
-def provenance_for(
+def _provenance_for_bound(
     contract: EconomicGoalContract,
     _goal_type=_CANONICAL_GOAL_TYPE,
     _goal_validator=_CANONICAL_GOAL_VALIDATOR,
     _provenance_type=_CANONICAL_PROVENANCE_TYPE,
     _provenance_validator=_CANONICAL_PROVENANCE_VALIDATOR,
-    _contract_sha256=contract_sha256,
+    _contract_sha256=_contract_sha256_bound,
     _schema=PROVENANCE_SCHEMA,
     _schema_version=PROVENANCE_SCHEMA_VERSION,
     _goal_error=EconomicGoalContractError,
@@ -146,14 +146,14 @@ def provenance_for(
     return provenance
 
 
-def verify_provenance(
+def _verify_provenance_bound(
     contract: EconomicGoalContract,
     provenance: EconomicGoalProvenance,
     _goal_type=_CANONICAL_GOAL_TYPE,
     _provenance_type=_CANONICAL_PROVENANCE_TYPE,
     _goal_validator=_CANONICAL_GOAL_VALIDATOR,
     _provenance_validator=_CANONICAL_PROVENANCE_VALIDATOR,
-    _contract_sha256=contract_sha256,
+    _contract_sha256=_contract_sha256_bound,
     _goal_error=EconomicGoalContractError,
     _provenance_error=EconomicGoalProvenanceError,
 ) -> None:
@@ -174,3 +174,29 @@ def verify_provenance(
     actual = _contract_sha256(contract)
     if provenance.contract_sha256 != actual:
         raise _provenance_error("provenance contract_sha256 mismatch")
+
+
+# Public authority-bearing operations intentionally expose no injectable helper
+# parameters.  The closures capture the already-bound canonical implementations,
+# so rebinding module aliases cannot redirect dispatch and callers cannot supply
+# forged validator/hash/type dependencies through hidden keyword arguments.
+def _bind_contract_operation(operation):
+    def bound(contract: EconomicGoalContract):
+        return operation(contract)
+
+    return bound
+
+
+def _bind_provenance_verifier(operation):
+    def bound(
+        contract: EconomicGoalContract,
+        provenance: EconomicGoalProvenance,
+    ) -> None:
+        operation(contract, provenance)
+
+    return bound
+
+
+contract_sha256 = _bind_contract_operation(_contract_sha256_bound)
+provenance_for = _bind_contract_operation(_provenance_for_bound)
+verify_provenance = _bind_provenance_verifier(_verify_provenance_bound)

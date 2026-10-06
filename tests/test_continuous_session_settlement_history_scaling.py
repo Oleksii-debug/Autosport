@@ -1025,3 +1025,25 @@ def test_pathological_main_checkpoint_nesting_is_normalized() -> None:
             assert "cannot verify continuous session state" in str(exc)
         else:
             raise AssertionError("pathological main checkpoint escaped domain validation")
+
+
+def test_sidecar_descriptor_close_failure_is_normalized(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        original_close = continuous_session.os.close
+
+        def failing_close(descriptor: int) -> None:
+            original_close(descriptor)
+            raise OSError("simulated close failure")
+
+        monkeypatch.setattr(continuous_session.os, "close", failing_close)
+
+        try:
+            state._read_error_checkpoint()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "cannot close" in str(exc)
+        else:
+            raise AssertionError("descriptor close failure escaped domain normalization")

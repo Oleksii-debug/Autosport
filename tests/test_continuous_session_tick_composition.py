@@ -6024,3 +6024,70 @@ def test_tick_rejects_canonical_lifecycle_class_mutation_after_provider_io() -> 
 
         assert type(lifecycle) is continuous_session.ContinuousEventLifecycle
         assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+def test_invalidation_rejects_dependency_index_class_mutation_during_routing() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+    buffer._dirty[("provider-a", "quote-1")] = None
+    index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+
+    class MutatedIndex(continuous_session.FocusedMirrorDependencyIndex):
+        pass
+
+    def affected_inputs(_batch) -> tuple[str, ...]:
+        index.__class__ = MutatedIndex
+        return ()
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical dependency index type changed during invalidation routing",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+
+    assert type(index) is continuous_session.FocusedMirrorDependencyIndex
+    assert buffer.pending_count == 0
+    assert buffer.full_refresh_required is True
+
+
+def test_invalidation_rejects_buffer_class_mutation_during_routing() -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+    buffer._dirty[("provider-a", "quote-1")] = None
+
+    class MutatedBuffer(continuous_session.BoundedMirrorInvalidationBuffer):
+        pass
+
+    class Index:
+        input_ids = ()
+
+        def affected_inputs(self, _batch):
+            buffer.__class__ = MutatedBuffer
+            return ()
+
+    index = Index()
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical invalidation buffer type changed during invalidation routing",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=index.affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+
+    assert type(buffer) is continuous_session.BoundedMirrorInvalidationBuffer
+    assert buffer.pending_count == 0
+    assert buffer.full_refresh_required is True

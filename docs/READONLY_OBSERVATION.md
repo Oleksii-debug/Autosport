@@ -18,6 +18,8 @@ and returns:
 
 Sealed generation-zero migration rows remain audit/sequence evidence in durable history but are excluded from the returned live result until positive product-issued append provenance exists.
 
+Forward-observed replay cutoffs form a monotonic decision-time frontier. Once product issuance has advanced to a later normalized `as_of`, a previously unseen earlier `as_of` is rejected rather than being bound to a newer append generation. Already-issued earlier cutoffs remain readable and immutable. This prevents a late backdated append from being retroactively admitted into a newly minted older decision slice. It does not claim that the first post-facto issuance of an arbitrary historical instant proves what the product knew at that old wall-clock time.
+
 It does not invoke paper strategy agents and does not open PaperBook tickets.
 
 ## CLI

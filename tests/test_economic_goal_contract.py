@@ -458,3 +458,17 @@ def test_public_transition_ignores_rebound_bound_implementation_alias(monkeypatc
 
     validate_automatic_transition(previous, candidate)
     previous.validate_automatic_successor(candidate)
+
+
+def test_contract_successor_method_rejects_validator_injection() -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.03"))
+
+    with pytest.raises(TypeError):
+        previous.validate_automatic_successor(
+            candidate,
+            _validator=lambda before, after: None,
+        )  # type: ignore[call-arg]
+
+    with pytest.raises(EconomicGoalContractError, match="must not increase"):
+        previous.validate_automatic_successor(candidate)

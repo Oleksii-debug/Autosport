@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import sqlite3
+import stat
 from pathlib import Path
 
 
@@ -72,7 +73,12 @@ class SQLiteProviderSequenceAuthority:
         existed_before = self.path.exists()
         if create and not existed_before:
             self._initialize_new()
+            self._file_identity = self._path_file_identity()
         else:
+            # Pin the exact live database inode before validation. A valid SQLite
+            # clone with the same authority_id must not be able to replace this
+            # live authority between allocations and silently restart ordering.
+            self._file_identity = self._path_file_identity()
             self._validate_existing()
 
     def __call__(self, source_id: str) -> int:
@@ -88,6 +94,7 @@ class SQLiteProviderSequenceAuthority:
         try:
             self._configure_connection(connection)
             connection.execute("BEGIN IMMEDIATE")
+            self._require_live_file_identity()
             self._require_wal_mode(connection)
             self._validate_schema_and_authority(connection)
             row = connection.execute(
@@ -129,6 +136,10 @@ class SQLiteProviderSequenceAuthority:
                     )
 
             connection.commit()
+            # A pathname replacement while SQLite held the original inode would
+            # otherwise make a successfully committed sequence disappear from the
+            # path consumers reopen. Never return such a sequence as authoritative.
+            self._require_live_file_identity()
             return next_sequence
         except ProviderSequenceAuthorityError:
             self._rollback_quietly(connection)
@@ -279,14 +290,33 @@ class SQLiteProviderSequenceAuthority:
         finally:
             connection.close()
 
-    def _connect_existing(self) -> sqlite3.Connection:
-        if not self.path.exists() or not self.path.is_file():
+    def _path_file_identity(self) -> tuple[int, int]:
+        try:
+            info = os.stat(self.path)
+        except OSError as exc:
             raise ProviderSequenceAuthorityError(
                 "provider sequence authority database is missing"
+            ) from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise ProviderSequenceAuthorityError(
+                "provider sequence authority database must be a regular file"
             )
+        return int(info.st_dev), int(info.st_ino)
+
+    def _require_live_file_identity(self) -> tuple[int, int]:
+        live_identity = self._path_file_identity()
+        expected_identity = getattr(self, "_file_identity", None)
+        if expected_identity is not None and live_identity != expected_identity:
+            raise ProviderSequenceAuthorityError(
+                "provider sequence authority file identity changed"
+            )
+        return live_identity
+
+    def _connect_existing(self) -> sqlite3.Connection:
+        before_identity = self._require_live_file_identity()
         uri = self.path.as_uri() + "?mode=rw"
         try:
-            return sqlite3.connect(
+            connection = sqlite3.connect(
                 uri,
                 uri=True,
                 timeout=self.busy_timeout_seconds,
@@ -296,6 +326,17 @@ class SQLiteProviderSequenceAuthority:
             raise ProviderSequenceAuthorityError(
                 "provider sequence authority database cannot be opened"
             ) from exc
+
+        try:
+            after_identity = self._require_live_file_identity()
+            if after_identity != before_identity:
+                raise ProviderSequenceAuthorityError(
+                    "provider sequence authority file changed while opening"
+                )
+        except Exception:
+            connection.close()
+            raise
+        return connection
 
     def _configure_connection(self, connection: sqlite3.Connection) -> None:
         connection.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")

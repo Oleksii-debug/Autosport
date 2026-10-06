@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
@@ -104,6 +105,31 @@ def test_deleted_live_authority_fails_closed_instead_of_restarting_at_one(
 
     path.unlink()
     with pytest.raises(ProviderSequenceAuthorityError, match="missing"):
+        authority(SOURCE_ID)
+
+
+def test_live_authority_rejects_valid_database_path_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "provider-sequence.db"
+    authority = _authority(path, create=True)
+    assert authority(SOURCE_ID) == 1
+    assert authority(SOURCE_ID) == 2
+
+    replacement_path = tmp_path / "replacement.db"
+    replacement = _authority(
+        replacement_path,
+        create=True,
+        authority_id=AUTHORITY_ID,
+    )
+    assert replacement(SOURCE_ID) == 1
+
+    os.replace(replacement_path, path)
+
+    with pytest.raises(
+        ProviderSequenceAuthorityError,
+        match="file identity changed",
+    ):
         authority(SOURCE_ID)
 
 

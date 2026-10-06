@@ -1173,14 +1173,19 @@ class _ContinuousSessionState:
                     raw["generation"] = int(raw["generation"]) + 1
                 _atomic_write_json(self.path, raw)
                 updated = self._read()
-                if finalize_under_lock is not None:
-                    finalize_under_lock(updated)
+            # Cache the committed canonical image before any post-commit sidecar
+            # finalization. If finalization fails after the main checkpoint was
+            # durably published, this in-process state must still represent the
+            # committed generation; otherwise a caught cleanup error can leave
+            # the instance publishing stale operational-failure receipts.
             self._generation = updated["generation"]
             self._cycles_completed = updated["cycles_completed"]
             self._last_success_at = updated["last_success_at"]
             self._state = updated["state"]
             self._source_gap_state = updated["source_gap_state"]
             self._source_sync_state = updated["source_sync_state"]
+            if mutation_result is not False and finalize_under_lock is not None:
+                finalize_under_lock(updated)
         return updated
 
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:

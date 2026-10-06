@@ -963,14 +963,14 @@ def test_tick_keeps_invalidation_bound_methods_after_provider_rebinding() -> Non
 
         class Index:
             def __init__(self) -> None:
-                self.ids = {"input-old"}
+                self.ids = ["input-old"]
                 self.affected_calls = 0
                 self.register_calls = 0
                 self.unregister_calls = 0
 
             @property
             def input_ids(self):
-                return tuple(sorted(self.ids))
+                return tuple(self.ids)
 
             def affected_inputs(self, _batch):
                 self.affected_calls += 1
@@ -978,11 +978,13 @@ def test_tick_keeps_invalidation_bound_methods_after_provider_rebinding() -> Non
 
             def register(self, input_id: str, **_selectors):
                 self.register_calls += 1
-                self.ids.add(input_id)
+                self.ids.append(input_id)
 
             def unregister(self, input_id: str):
                 self.unregister_calls += 1
-                self.ids.discard(input_id)
+                if input_id not in self.ids:
+                    return False
+                self.ids.remove(input_id)
                 return True
 
         class Desktop:
@@ -1122,7 +1124,7 @@ def test_tick_does_not_report_retirement_when_index_reports_no_effect() -> None:
                 return ()
 
         class Index:
-            input_ids = ("input-old",)
+            input_ids = ()
 
             def affected_inputs(self, _batch):
                 return ()

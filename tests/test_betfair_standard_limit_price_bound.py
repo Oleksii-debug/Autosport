@@ -196,6 +196,27 @@ def test_execution_action_serializer_rebinding_fails_before_capture(
         )
 
 
+def test_evidence_issue_uses_sealed_action_serializer_after_projection(monkeypatch) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    bound, action, expected = _evidence()
+    instruction = module._canonical_instruction_projection(action)
+    instruction_sha256 = module._digest(instruction)
+
+    def hostile_to_dict(_self):
+        raise AssertionError("live action serializer executed during evidence issuance")
+
+    monkeypatch.setattr(ExecutionAction, "to_dict", hostile_to_dict)
+
+    actual = module._issue_evidence(
+        bound=bound,
+        action=action,
+        instruction_sha256=instruction_sha256,
+    )
+
+    assert actual.to_dict() == expected.to_dict()
+
+
 def test_execution_action_serializer_in_place_code_mutation_fails_closed(
     monkeypatch,
 ) -> None:

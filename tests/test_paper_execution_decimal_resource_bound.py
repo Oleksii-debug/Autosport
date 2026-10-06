@@ -223,5 +223,98 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         self.assertEqual(legacy._decimal_text(Decimal("12.3400")), "12.3400")
 
 
+    def test_durable_decimal_serializers_ignore_rebound_module_helpers(self) -> None:
+        record = evidence()
+        attempt = PaperLegAttempt(
+            attempt_id="attempt-rebound",
+            run_id="run-rebound",
+            plan_id="plan-rebound",
+            action_id="resource-action",
+            sequence=0,
+            bookmaker_id="paper-venue",
+            account_id="paper-account",
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            side="BACK",
+            decision_quote_id="quote-1",
+            decision_odds=Decimal("2.50"),
+            requested_stake=Decimal("10.00"),
+            decision_observed_at="2026-10-05T00:00:00.100000+00:00",
+            execution_observed_at="2026-10-05T00:00:00.200000+00:00",
+            delay_ms=100,
+            quote_age_ms=100,
+            outcome=PaperAttemptOutcome.ACCEPTED,
+            execution_odds=Decimal("2.40"),
+            execution_stake=Decimal("10.00"),
+            suspended=False,
+            evidence_grade=EvidenceGrade.EMPIRICAL,
+            evidence_source="captured-paper-observation-v1",
+            evidence_id="paper-evidence-rebound",
+            evidence_sha256="a" * 64,
+            model_fingerprint="b" * 64,
+            reason="serializer rebound regression",
+        )
+        expected_record = record.to_dict()
+        expected_attempt = attempt.to_dict()
+
+        sentinel = object()
+        names = (
+            "_validate_decimal_text_resource_bound",
+            "_preflight_decimal_text_fields",
+            "_decimal_text",
+            "format",
+            "Decimal",
+        )
+        previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+
+        def forged(*args, **kwargs):
+            raise AssertionError("rebound Decimal serializer helper executed")
+
+        try:
+            for name in names:
+                legacy.__dict__[name] = forged
+
+            self.assertEqual(record.to_dict(), expected_record)
+            self.assertEqual(attempt.to_dict(), expected_attempt)
+        finally:
+            for name, value in previous.items():
+                if value is sentinel:
+                    legacy.__dict__.pop(name, None)
+                else:
+                    legacy.__dict__[name] = value
+
+    def test_complete_run_ignores_rebound_decimal_formatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+
+            sentinel = object()
+            previous = legacy.__dict__.get("_decimal_text", sentinel)
+
+            def forged(*args, **kwargs):
+                raise AssertionError("rebound completion Decimal formatter executed")
+
+            legacy._decimal_text = forged
+            try:
+                ledger.complete_run(
+                    run_id="run-complete-rebound",
+                    pending_action_ids=(),
+                    recovery_decision=RecoveryDecision.NONE,
+                    worst_case_exposure=Decimal("12.3400"),
+                )
+            finally:
+                if previous is sentinel:
+                    del legacy._decimal_text
+                else:
+                    legacy._decimal_text = previous
+
+            events = ledger.events("run-complete-rebound")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["payload"]["worst_case_exposure"],
+                "12.3400",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -199,20 +199,6 @@ def _snapshot_provenance(
         contract_sha256=provenance.contract_sha256,
     )
 
-def _decision_identity_bound(
-    self: EconomicGoalProvenance,
-    _snapshotter=_snapshot_provenance,
-) -> str:
-    snapshot = _snapshotter(self)
-    return (
-        f"{snapshot.goal_id}@{snapshot.revision}:"
-        f"{snapshot.contract_sha256}"
-    )
-
-
-EconomicGoalProvenance.decision_identity = property(_decision_identity_bound)
-
-
 def _canonical_json(
     payload: object,
     _dumps=json.dumps,

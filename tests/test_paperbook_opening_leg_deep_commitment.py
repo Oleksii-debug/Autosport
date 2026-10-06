@@ -43,6 +43,22 @@ def _leg(*, odds: str = "2.00", sport: str = "soccer") -> TicketLeg:
     )
 
 
+def _lay_leg(
+    *,
+    odds: str = "3.00",
+    semantics: str = "exchange.match.odds",
+) -> TicketLeg:
+    return TicketLeg(
+        "event-1",
+        "market-1",
+        "selection-1",
+        Decimal(odds),
+        sport="soccer",
+        exchange_side="lay",
+        market_semantics_id=semantics,
+    )
+
+
 def test_in_place_locked_odds_mutation_cannot_move_opening_authority() -> None:
     book = PaperBook("100")
     ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
@@ -2642,3 +2658,154 @@ def test_save_rejects_in_place_snapshot_path_property_getter_code_mutation_befor
         getter.__code__ = original_code
 
     assert not (tmp_path / "paper-book.json").exists()
+
+
+def test_lay_open_uses_locked_liability_and_committed_capital() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_lay_leg(odds="3.00")], "10", placed_at=_TS)
+
+    assert ticket.stake == Decimal("10")
+    assert book.balance == Decimal("80")
+    assert book.committed_stake == Decimal("10")
+    assert book.committed_capital == Decimal("20")
+
+
+def test_lay_selection_winner_is_a_loss_without_additional_debit() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_lay_leg(odds="3.00")], "10", placed_at=_TS)
+
+    settled = book.settle(ticket.ticket_id, {ticket.legs[0].quote_key}, settled_at=_TS)
+
+    assert settled.status is paper_module.TicketStatus.LOST
+    assert settled.payout == Decimal("0")
+    assert book.balance == Decimal("80")
+    assert book.committed_capital == Decimal("0")
+
+
+def test_lay_selection_loser_returns_stake_plus_liability() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_lay_leg(odds="3.00")], "10", placed_at=_TS)
+
+    settled = book.settle(ticket.ticket_id, set(), settled_at=_TS)
+
+    assert settled.status is paper_module.TicketStatus.WON
+    assert settled.payout == Decimal("30")
+    assert book.balance == Decimal("110")
+    assert book.committed_capital == Decimal("0")
+
+
+def test_lay_void_returns_locked_liability_only() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_lay_leg(odds="3.00")], "10", placed_at=_TS)
+
+    settled = book.settle(
+        ticket.ticket_id,
+        set(),
+        {ticket.legs[0].quote_key},
+        settled_at=_TS,
+    )
+
+    assert settled.status is paper_module.TicketStatus.VOID
+    assert settled.payout == Decimal("20")
+    assert book.balance == Decimal("100")
+    assert book.committed_capital == Decimal("0")
+
+
+def test_multi_leg_lay_is_rejected_before_bankroll_mutation() -> None:
+    book = PaperBook("100")
+
+    with pytest.raises(
+        ValueError,
+        match="exactly one canonical single-leg LAY ticket",
+    ):
+        book.open_ticket(
+            [_lay_leg(), _leg()],
+            "10",
+            placed_at=_TS,
+        )
+
+    assert book.balance == Decimal("100")
+    assert book.tickets == {}
+
+
+def test_market_semantics_identity_survives_schema8_save_load(tmp_path) -> None:
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_lay_leg(semantics="exchange.match.odds.v2")],
+        "10",
+        placed_at=_TS,
+    )
+
+    book.save(path)
+    raw = paper_module.json.loads(path.read_text(encoding="utf-8"))
+    raw_leg = raw["tickets"][0]["legs"][0]
+
+    assert raw["schema_version"] == 8
+    assert raw_leg["market_semantics_id"] == "exchange.match.odds.v2"
+
+    reopened = PaperBook.load(path)
+    reopened_ticket = reopened.tickets[ticket.ticket_id]
+    assert reopened_ticket.legs[0].market_semantics_id == "exchange.match.odds.v2"
+    assert reopened.committed_capital == Decimal("20")
+
+
+def test_schema8_market_semantics_field_cannot_be_silently_downgraded(tmp_path) -> None:
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_lay_leg()], "10", placed_at=_TS)
+    book.save(path)
+
+    raw = paper_module.json.loads(path.read_text(encoding="utf-8"))
+    raw["schema_version"] = 7
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported before schema 8",
+    ):
+        PaperBook.load_bytes(
+            paper_module.json.dumps(raw, separators=(",", ":")).encode("utf-8")
+        )
+
+
+def test_schema7_without_market_semantics_remains_backward_readable(tmp_path) -> None:
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    book.save(path)
+
+    raw = paper_module.json.loads(path.read_text(encoding="utf-8"))
+    raw["schema_version"] = 7
+    for leg in raw["tickets"][0]["legs"]:
+        leg.pop("market_semantics_id", None)
+
+    reopened = PaperBook.load_bytes(
+        paper_module.json.dumps(raw, separators=(",", ":")).encode("utf-8")
+    )
+    assert reopened.tickets[ticket.ticket_id].legs[0].market_semantics_id is None
+
+
+def test_market_semantics_mutation_after_admission_cannot_change_settlement() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_lay_leg(semantics="exchange.match.odds.v2")],
+        "10",
+        placed_at=_TS,
+    )
+    original_key = ticket.legs[0].quote_key
+    object.__setattr__(
+        ticket.legs[0],
+        "market_semantics_id",
+        "exchange.match.odds.v3",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        book.settle(ticket.ticket_id, set())
+
+    assert ticket.status is paper_module.TicketStatus.OPEN
+    assert ticket.payout == Decimal("0")
+    assert book.balance == Decimal("80")
+    assert ticket.legs[0].quote_key == original_key

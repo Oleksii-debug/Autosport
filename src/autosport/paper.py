@@ -871,7 +871,11 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
     directory_fsync_fsync = os.fsync
     directory_fsync_close = os.close
     directory_fsync_o_directory = getattr(os, "O_DIRECTORY", None)
-    snapshot_path_type = type(Path("."))
+    directory_fsync_o_rdonly = os.O_RDONLY
+    snapshot_path_factory = Path
+    snapshot_path_factory_new = snapshot_path_factory.__new__
+    snapshot_path_factory_new_code = getattr(snapshot_path_factory_new, "__code__", None)
+    snapshot_path_type = type(snapshot_path_factory("."))
     snapshot_path_exists = snapshot_path_type.exists
     snapshot_path_exists_code = snapshot_path_exists.__code__
     snapshot_path_mkdir = snapshot_path_type.mkdir
@@ -1031,7 +1035,17 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
         return result
 
     def require_snapshot_path_dependencies() -> None:
-        if type(Path(".")) is not snapshot_path_type:
+        if Path is not snapshot_path_factory:
+            raise ValueError("PaperBook snapshot Path factory authority changed")
+        if snapshot_path_factory.__new__ is not snapshot_path_factory_new:
+            raise ValueError("PaperBook snapshot Path constructor authority changed")
+        if (
+            snapshot_path_factory_new_code is not None
+            and getattr(snapshot_path_factory_new, "__code__", None)
+            is not snapshot_path_factory_new_code
+        ):
+            raise ValueError("PaperBook snapshot Path constructor callable authority changed")
+        if type(snapshot_path_factory(".")) is not snapshot_path_type:
             raise ValueError("PaperBook snapshot concrete Path type changed")
         if snapshot_path_type.exists is not snapshot_path_exists:
             raise ValueError("PaperBook snapshot exists authority changed")
@@ -1064,6 +1078,8 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             raise ValueError("PaperBook directory close authority changed")
         if getattr(directory_fsync_os_module, "O_DIRECTORY", None) != directory_fsync_o_directory:
             raise ValueError("PaperBook directory flag authority changed")
+        if directory_fsync_os_module.O_RDONLY != directory_fsync_o_rdonly:
+            raise ValueError("PaperBook directory read-only flag authority changed")
 
     def ensure_parent(canonical_type: type, directory: Path) -> None:
         if ensure_parent_descriptor is None or ensure_parent_function is None or ensure_parent_code is None:
@@ -1629,6 +1645,8 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
     named_temporary_file = tempfile_module.NamedTemporaryFile
     named_temporary_file_code = named_temporary_file.__code__
     path_factory = Path
+    path_factory_new = path_factory.__new__
+    path_factory_new_code = getattr(path_factory_new, "__code__", None)
     path_type = type(path_factory("."))
     path_unlink = path_type.unlink
     path_unlink_code = path_unlink.__code__
@@ -1646,6 +1664,13 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
             raise ValueError("PaperBook temporary-file callable authority changed")
         if publish_globals.get("Path") is not path_factory:
             raise ValueError("PaperBook snapshot Path authority changed")
+        if path_factory.__new__ is not path_factory_new:
+            raise ValueError("PaperBook snapshot Path constructor authority changed")
+        if (
+            path_factory_new_code is not None
+            and getattr(path_factory_new, "__code__", None) is not path_factory_new_code
+        ):
+            raise ValueError("PaperBook snapshot Path constructor callable authority changed")
         if path_type.unlink is not path_unlink:
             raise ValueError("PaperBook snapshot unlink authority changed")
         if path_unlink.__code__ is not path_unlink_code:

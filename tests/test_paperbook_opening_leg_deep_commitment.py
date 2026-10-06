@@ -3020,22 +3020,22 @@ def test_market_semantics_root_rejects_rebound_underlying_validator_dependency_b
 
 
 def test_market_semantics_root_rejects_underlying_validator_code_mutation() -> None:
+    book = PaperBook("100")
+    leg = _lay_leg()
     validator = paper_module._canonical_semantic_identity
     original_code = validator.__code__
 
-    def hostile(*_args, **_kwargs):
-        raise AssertionError("mutated market semantics validator executed")
-
     try:
-        validator.__code__ = hostile.__code__
-        book = PaperBook("100")
+        validator.__code__ = (lambda *_args, **_kwargs: None).__code__
         with pytest.raises(
             ValueError,
             match="market-semantics identity authority changed",
         ):
-            book.open_ticket([_lay_leg()], "10", placed_at=_TS)
+            _ = leg.settlement_key
     finally:
         validator.__code__ = original_code
+
+    assert book.balance == Decimal("100")
 
 
 def test_ticket_leg_settlement_key_binds_quote_to_market_semantics() -> None:

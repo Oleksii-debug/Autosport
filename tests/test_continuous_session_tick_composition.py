@@ -833,6 +833,112 @@ def test_tick_rejects_unregistered_affected_input_id() -> None:
         )
 
 
+def test_tick_rejects_invalidation_drain_identity_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Index:
+            input_ids = ("input-a",)
+
+            def affected_inputs(self, _batch):
+                raise AssertionError("routing must not run after drain mutates index")
+
+        index = Index()
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                index.input_ids = ("phantom",)
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.invalidation_buffer = Buffer()
+        coordinator.dependency_index = index
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="invalidation drain mutated dependency index input identity state",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
+def test_tick_orders_affected_inputs_by_registration_across_batches() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Buffer:
+            pending_count = 0
+            full_refresh_required = False
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def drain(self, *, max_items: int):
+                assert max_items == 250
+                self.calls += 1
+                return continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=self.calls == 1,
+                )
+
+        class Index:
+            input_ids = ("input-a", "input-b", "input-c")
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def affected_inputs(self, _batch):
+                self.calls += 1
+                return ("input-c",) if self.calls == 1 else ("input-a",)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        buffer = Buffer()
+        index = Index()
+        coordinator.collector = _Collector()
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = index
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        result = coordinator.tick()
+
+        assert buffer.calls == 2
+        assert index.calls == 2
+        assert result.affected_input_ids == ("input-a", "input-c")
+
+
 def test_tick_rejects_reordered_partial_affected_input_ids() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

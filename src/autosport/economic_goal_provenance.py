@@ -18,6 +18,7 @@ from .economic_goal_store import economic_goal_to_payload
 
 PROVENANCE_SCHEMA: Final = "autosport.economic_goal_provenance"
 PROVENANCE_SCHEMA_VERSION: Final = 1
+_MAX_PROVENANCE_IDENTITY_CHARS: Final = 512
 
 
 class EconomicGoalProvenanceError(ValueError):
@@ -40,12 +41,23 @@ class EconomicGoalProvenance:
             raise EconomicGoalProvenanceError("unsupported provenance schema")
         if type(self.schema_version) is not int or self.schema_version != PROVENANCE_SCHEMA_VERSION:
             raise EconomicGoalProvenanceError("unsupported provenance schema version")
-        if type(self.goal_id) is not str or not self.goal_id:
-            raise EconomicGoalProvenanceError("goal_id must be a non-empty string")
+        for name, value in (("goal_id", self.goal_id), ("bankroll_id", self.bankroll_id)):
+            if type(value) is not str or not value:
+                raise EconomicGoalProvenanceError(f"{name} must be a non-empty string")
+            if value != value.strip():
+                raise EconomicGoalProvenanceError(f"{name} must be canonical text")
+            if len(value) > _MAX_PROVENANCE_IDENTITY_CHARS:
+                raise EconomicGoalProvenanceError(f"{name} exceeds the identity size limit")
+            if "\x00" in value:
+                raise EconomicGoalProvenanceError(f"{name} must not contain NUL")
+            try:
+                value.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as exc:
+                raise EconomicGoalProvenanceError(
+                    f"{name} must be valid UTF-8 text"
+                ) from exc
         if type(self.revision) is not int or self.revision <= 0:
             raise EconomicGoalProvenanceError("revision must be a positive integer")
-        if type(self.bankroll_id) is not str or not self.bankroll_id:
-            raise EconomicGoalProvenanceError("bankroll_id must be a non-empty string")
         if (
             type(self.contract_sha256) is not str
             or len(self.contract_sha256) != 64
@@ -57,6 +69,7 @@ class EconomicGoalProvenance:
     def decision_identity(self) -> str:
         """Return an immutable, revision-specific identity suitable for evidence binding."""
 
+        EconomicGoalProvenance.__post_init__(self)
         return f"{self.goal_id}@{self.revision}:{self.contract_sha256}"
 
 

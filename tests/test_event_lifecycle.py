@@ -4,13 +4,12 @@ import json
 import tempfile
 import unittest
 from contextlib import contextmanager
-from unittest.mock import patch
-
-import autosport.event_lifecycle as event_lifecycle_module
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
+import autosport.event_lifecycle as event_lifecycle_module
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import (
     CatalogConflictError,

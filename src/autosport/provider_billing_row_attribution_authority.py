@@ -68,6 +68,8 @@ def _build_authority_capability():
         "row_amount_sign",
         "row_item_class",
         "row_item_class_data_sha256",
+        "row_provider_charge_class",
+        "row_provider_transaction_id",
         "attribution_state",
         "missing_authorities",
         "evidence_sha256",

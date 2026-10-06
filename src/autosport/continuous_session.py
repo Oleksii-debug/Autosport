@@ -2352,6 +2352,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         dependency_index = (
             self.dependency_index if dependency_index is None else dependency_index
         )
+        if (
+            isinstance(dependency_index, _dependency_index_type)
+            and type(dependency_index) is not _dependency_index_type
+        ):
+            raise ContinuousSessionError(
+                "canonical dependency index subtype is not supported"
+            )
         register_input = (
             getattr(dependency_index, "register", None)
             if register_input is None
@@ -2596,6 +2603,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         dependency_index = (
             self.dependency_index if dependency_index is None else dependency_index
         )
+        if (
+            isinstance(dependency_index, _dependency_index_type)
+            and type(dependency_index) is not _dependency_index_type
+        ):
+            raise ContinuousSessionError(
+                "canonical dependency index subtype is not supported"
+            )
         unregister_input = (
             getattr(dependency_index, "unregister", None)
             if unregister_input is None
@@ -2770,6 +2784,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         affected_inputs: Callable[[MirrorInvalidationBatch], tuple[str, ...]] | None = None,
         max_batches: int | None = None,
         max_items: int | None = None,
+        _dependency_index_type: type[FocusedMirrorDependencyIndex] = (
+            FocusedMirrorDependencyIndex
+        ),
         _dependency_reader: Callable[
             [FocusedMirrorDependencyIndex, str], FocusedMirrorDependency
         ] = FocusedMirrorDependencyIndex._dependency,
@@ -2833,6 +2850,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         dependency_index = (
             self.dependency_index if dependency_index is None else dependency_index
         )
+        if isinstance(dependency_index, _dependency_index_type):
+            if FocusedMirrorDependencyIndex is not _dependency_index_type:
+                raise ContinuousSessionError(
+                    "canonical dependency routing index authority changed"
+                )
+            if type(dependency_index) is not _dependency_index_type:
+                raise ContinuousSessionError(
+                    "canonical dependency index subtype is not supported"
+                )
         drain_invalidation = (
             getattr(invalidation_buffer, "drain", None)
             if drain_invalidation is None
@@ -2959,12 +2985,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         dependency_storage: object | None = None
         matched_keys_storage: object | None = None
         dependency_lock: object | None = None
-        if isinstance(dependency_index, FocusedMirrorDependencyIndex):
+        if type(dependency_index) is _dependency_index_type:
             if (
-                FocusedMirrorDependencyIndex._dependency is not _dependency_reader
+                _dependency_index_type._dependency is not _dependency_reader
                 or getattr(_dependency_reader, "__code__", None)
                 is not _dependency_reader_code
-                or FocusedMirrorDependencyIndex.matching_keys
+                or _dependency_index_type.matching_keys
                 is not _matching_keys_reader
                 or getattr(_matching_keys_reader, "__code__", None)
                 is not _matching_keys_reader_code
@@ -4000,6 +4026,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             invalidation_buffer_lock = invalidation_buffer._lock
             invalidation_max_dirty_keys = invalidation_buffer._max_dirty_keys
         dependency_index = self.dependency_index
+        if (
+            isinstance(dependency_index, _dependency_index_type)
+            and type(dependency_index) is not _dependency_index_type
+        ):
+            raise ContinuousSessionError(
+                "canonical dependency index subtype is not supported"
+            )
         dependency_affected_inputs = getattr(
             dependency_index,
             "affected_inputs",

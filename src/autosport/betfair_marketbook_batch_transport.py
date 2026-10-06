@@ -729,6 +729,8 @@ def _install_transport_result_authority() -> None:
     rate_normalize_market_ids = rate_gate_module._normalize_market_ids
     rate_utc_microseconds = rate_gate_module._utc_microseconds
     rate_decision_global = rate_gate_module.MarketBookRateDecision
+    rate_decision_init = rate_decision_global.__init__
+    rate_decision_validate = rate_decision_global.__post_init__
     rate_max_calls_per_window = rate_gate_module._MAX_CALLS_PER_WINDOW
     rate_window_microseconds = rate_gate_module._WINDOW_MICROSECONDS
     projection_validate_request_id = projection_gate_module._validate_request_id
@@ -737,12 +739,15 @@ def _install_transport_result_authority() -> None:
         projection_gate_module.MarketBookProjectionConcurrencyDecision
     )
     projection_lease_global = projection_gate_module.MarketBookProjectionLease
+    projection_decision_init = projection_decision_global.__init__
+    projection_decision_validate = projection_decision_global.__post_init__
+    projection_lease_init = projection_lease_global.__init__
+    projection_lease_validate = projection_lease_global.__post_init__
     projection_max_unresolved = (
         projection_gate_module._MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
     )
     rate_decision_type = MarketBookRateDecision
     projection_decision_type = MarketBookProjectionConcurrencyDecision
-    projection_lease_type = MarketBookProjectionLease
     datetime_type = datetime
     utc_timezone = timezone.utc
     utc_epoch = datetime_type(1970, 1, 1, tzinfo=utc_timezone)
@@ -772,6 +777,11 @@ def _install_transport_result_authority() -> None:
             is not projection_decision_global
             or projection_gate_module.MarketBookProjectionLease
             is not projection_lease_global
+            or projection_decision_global.__init__ is not projection_decision_init
+            or projection_decision_global.__post_init__
+            is not projection_decision_validate
+            or projection_lease_global.__init__ is not projection_lease_init
+            or projection_lease_global.__post_init__ is not projection_lease_validate
             or type(
                 projection_gate_module._MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED
             )
@@ -849,6 +859,8 @@ def _install_transport_result_authority() -> None:
             rate_gate_module._normalize_market_ids is not rate_normalize_market_ids
             or rate_gate_module._utc_microseconds is not rate_utc_microseconds
             or rate_gate_module.MarketBookRateDecision is not rate_decision_global
+            or rate_decision_global.__init__ is not rate_decision_init
+            or rate_decision_global.__post_init__ is not rate_decision_validate
             or type(rate_gate_module._MAX_CALLS_PER_WINDOW) is not int
             or rate_gate_module._MAX_CALLS_PER_WINDOW != rate_max_calls_per_window
             or type(rate_gate_module._WINDOW_MICROSECONDS) is not int

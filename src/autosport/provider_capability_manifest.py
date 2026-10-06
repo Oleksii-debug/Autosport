@@ -193,6 +193,44 @@ def _profile_state(
     raise ProviderCapabilityManifestError("canonical profile returned an unknown state")
 
 
+def _validate_dependency_identity_surfaces(
+    _profile_type=BookmakerCapabilityProfile,
+    _profile_id_property=BookmakerCapabilityProfile.profile_id,
+    _profile_id_code: object = BookmakerCapabilityProfile.profile_id.fget.__code__,
+    _profile_to_dict=BookmakerCapabilityProfile.to_canonical_dict,
+    _profile_to_dict_code: object = BookmakerCapabilityProfile.to_canonical_dict.__code__,
+    _integration_type=BookmakerIntegrationEvidence,
+    _integration_evidence_id_property=BookmakerIntegrationEvidence.evidence_id,
+    _integration_evidence_id_code: object = BookmakerIntegrationEvidence.evidence_id.fget.__code__,
+    _integration_to_dict=BookmakerIntegrationEvidence.to_canonical_dict,
+    _integration_to_dict_code: object = BookmakerIntegrationEvidence.to_canonical_dict.__code__,
+) -> None:
+    """Fail closed if canonical dependency identity computation is rebound."""
+
+    current_profile_id = _profile_type.profile_id
+    current_integration_id = _integration_type.evidence_id
+    if (
+        current_profile_id is not _profile_id_property
+        or getattr(getattr(_profile_id_property, "fget", None), "__code__", None)
+        is not _profile_id_code
+        or _profile_type.to_canonical_dict is not _profile_to_dict
+        or getattr(_profile_to_dict, "__code__", None) is not _profile_to_dict_code
+        or current_integration_id is not _integration_evidence_id_property
+        or getattr(
+            getattr(_integration_evidence_id_property, "fget", None),
+            "__code__",
+            None,
+        )
+        is not _integration_evidence_id_code
+        or _integration_type.to_canonical_dict is not _integration_to_dict
+        or getattr(_integration_to_dict, "__code__", None)
+        is not _integration_to_dict_code
+    ):
+        raise ProviderCapabilityManifestError(
+            "canonical dependency identity surface changed"
+        )
+
+
 def _make_manifest_identity_guard():
     """Create a process-local original-identity registry outside manifest instances."""
 
@@ -458,6 +496,8 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
     def __post_init__(
         self,
         _profile_type=BookmakerCapabilityProfile,
+        _dependency_identity_guard=_validate_dependency_identity_surfaces,
+        _dependency_identity_guard_code: object = _validate_dependency_identity_surfaces.__code__,
         _profile_validator=_validate_exact_profile,
         _profile_validator_code: object = _validate_exact_profile.__code__,
         _profile_contract_validator=BookmakerCapabilityProfile.__post_init__,
@@ -471,7 +511,11 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         _identity_guard_code: object = _manifest_identity_guard.__code__,
     ) -> None:
         if (
-            getattr(_profile_validator, "__code__", None)
+            getattr(_dependency_identity_guard, "__code__", None)
+            is not _dependency_identity_guard_code
+            or getattr(_dependency_identity_guard, "__code__", None)
+            is not _dependency_identity_guard_code
+            or getattr(_profile_validator, "__code__", None)
             is not _profile_validator_code
             or _profile_type.__post_init__ is not _profile_contract_validator
             or getattr(_profile_contract_validator, "__code__", None)
@@ -487,6 +531,7 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
                 "canonical manifest dependency validator changed"
             )
 
+        _dependency_identity_guard()
         _text(self.manifest_ref, "manifest_ref")
         _positive_int(self.manifest_version, "manifest_version")
         _profile_validator(self.profile)
@@ -681,6 +726,8 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
         _canonical_capability_for_code: object = _canonical_capability_for.__code__,
         _profile_state=_profile_state,
         _profile_state_code: object = _profile_state.__code__,
+        _dependency_identity_guard=_validate_dependency_identity_surfaces,
+        _dependency_identity_guard_code: object = _validate_dependency_identity_surfaces.__code__,
         _profile_validator=_validate_exact_profile,
         _profile_validator_code: object = _validate_exact_profile.__code__,
         _integration_type=BookmakerIntegrationEvidence,
@@ -710,6 +757,7 @@ class ProviderCapabilityManifest(metaclass=_SealedProviderManifestAuthorityType)
                 "canonical manifest read authority changed"
             )
 
+        _dependency_identity_guard()
         _profile_validator(self.profile)
         if type(self.integration) is not _integration_type:
             raise ProviderCapabilityManifestError(
@@ -843,6 +891,7 @@ def _make_provider_capability_manifest_builder(
     _manifest_fact_type,
     _profile_type,
     _profile_validator,
+    _dependency_identity_guard,
     _integration_type,
     _verify_profile,
 ):
@@ -865,6 +914,7 @@ def _make_provider_capability_manifest_builder(
         closed until a separate product-owned, re-resolvable issuer is composed.
         """
 
+        _dependency_identity_guard()
         _profile_validator(profile)
         if type(profile) is not _profile_type:
             raise ProviderCapabilityManifestError(
@@ -940,6 +990,7 @@ build_provider_capability_manifest = _make_provider_capability_manifest_builder(
     ProviderCapabilityManifestFact,
     BookmakerCapabilityProfile,
     _validate_exact_profile,
+    _validate_dependency_identity_surfaces,
     BookmakerIntegrationEvidence,
     BookmakerIntegrationEvidence.verify_profile,
 )

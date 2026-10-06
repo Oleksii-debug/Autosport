@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+import unittest
+from decimal import Decimal
+
+import autosport.proposal_risk_execution_evidence_authority as evidence_authority
+from autosport.proposal_risk_execution_evidence_authority import (
+    ProductProposalRiskExecutionEvidence,
+    ProductProposalRiskExecutionEvidenceError,
+)
+
+
+class ProductProposalRiskExecutionEvidenceDispatchGuardTests(unittest.TestCase):
+    def test_public_deriver_is_package_sealed(self) -> None:
+        self.assertIs(
+            getattr(
+                evidence_authority.derive_product_proposal_risk_execution_evidence,
+                "_autosport_dispatch_sealed",
+                False,
+            ),
+            True,
+        )
+
+    def test_helper_rebinding_is_rejected_before_input_dispatch(self) -> None:
+        original = evidence_authority._mint
+        try:
+            evidence_authority._mint = lambda values: values
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "helper _mint changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            evidence_authority._mint = original
+
+    def test_protocol_root_rebinding_is_rejected_before_input_dispatch(self) -> None:
+        original = evidence_authority._BOUND_METHOD
+        try:
+            evidence_authority._BOUND_METHOD = "CALLER_SELECTED_BOUND_METHOD"
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "protocol root _BOUND_METHOD changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            evidence_authority._BOUND_METHOD = original
+
+    def test_authority_type_rebinding_is_rejected_before_input_dispatch(self) -> None:
+        original = evidence_authority.ProductProposalRiskExecutionEvidence
+        try:
+            evidence_authority.ProductProposalRiskExecutionEvidence = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "result type was rebound",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            evidence_authority.ProductProposalRiskExecutionEvidence = original
+
+    def test_row_validation_descriptor_rebinding_is_rejected_before_input_dispatch(self) -> None:
+        row_type = evidence_authority.CounterfactualMemberExecutionEvidence
+        original = row_type.__dict__["minimum_equity"]
+        try:
+            row_type.minimum_equity = property(lambda self: Decimal("-1"))
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "row descriptor minimum_equity changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            row_type.minimum_equity = original
+
+    def test_identity_binder_and_mint_key_are_not_module_capabilities(self) -> None:
+        self.assertFalse(hasattr(evidence_authority, "_BIND_IDENTITY"))
+        self.assertFalse(hasattr(evidence_authority, "_IDENTITY_PROVEN"))
+        self.assertFalse(hasattr(evidence_authority, "_MINT_CAPABILITY"))
+        with self.assertRaises(TypeError):
+            evidence_authority._mint({})
+
+    def test_module_minter_cannot_accept_a_caller_selected_capability(self) -> None:
+        # This is the regression for the mutable-default escape hatch: the public
+        # module minter must not retain the canonical expected token in its defaults.
+        caller_capability = object()
+        self.assertIsNone(evidence_authority._mint.__kwdefaults__)
+        with self.assertRaisesRegex(
+            ProductProposalRiskExecutionEvidenceError,
+            "mint capability is invalid",
+        ):
+            evidence_authority._mint(
+                {},
+                mint_capability=caller_capability,
+            )
+
+        # Even if caller code installs its own default, the sealed minter compares
+        # against a closure-held canonical token and therefore still fails closed.
+        original_defaults = evidence_authority._mint.__kwdefaults__
+        try:
+            evidence_authority._mint.__kwdefaults__ = {
+                "mint_capability": caller_capability,
+            }
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "mint capability is invalid",
+            ):
+                evidence_authority._mint({})
+        finally:
+            evidence_authority._mint.__kwdefaults__ = original_defaults
+
+    def test_precommit_positive_identity_descriptor_rebinding_is_rejected(self) -> None:
+        precommit_type = evidence_authority.ProductProposalRiskEvaluationPrecommit
+        original = precommit_type.__dict__["binding_identity_proven"]
+        try:
+            precommit_type.binding_identity_proven = property(lambda self: True)
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "precommit descriptor binding_identity_proven changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            precommit_type.binding_identity_proven = original
+
+    def test_precommit_input_descriptor_rebinding_is_rejected_before_dispatch(self) -> None:
+        precommit_type = evidence_authority.ProductProposalRiskEvaluationPrecommit
+        original = precommit_type.__dict__["planned_member_ids"]
+        try:
+            precommit_type.planned_member_ids = property(lambda self: ("attacker",))
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "precommit descriptor planned_member_ids changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            precommit_type.planned_member_ids = original
+
+    def test_precommit_chronology_descriptor_rebinding_is_rejected_before_dispatch(self) -> None:
+        precommit_type = evidence_authority.ProductProposalRiskEvaluationPrecommit
+        original = precommit_type.__dict__["target_decision_ts"]
+        try:
+            precommit_type.target_decision_ts = property(
+                lambda self: "1970-01-01T00:00:00+00:00"
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "precommit descriptor target_decision_ts changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            precommit_type.target_decision_ts = original
+
+    def test_result_risk_truth_descriptor_rebinding_is_rejected(self) -> None:
+        result_type = evidence_authority.ProductProposalRiskExecutionEvidence
+        original = result_type.__dict__["proposal_target_risk_qualified"]
+        try:
+            result_type.proposal_target_risk_qualified = property(lambda self: True)
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "result descriptor proposal_target_risk_qualified changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            result_type.proposal_target_risk_qualified = original
+
+    def test_result_execution_provenance_descriptor_rebinding_is_rejected(self) -> None:
+        result_type = evidence_authority.ProductProposalRiskExecutionEvidence
+        original = result_type.__dict__["product_execution_provenance_proven"]
+        try:
+            result_type.product_execution_provenance_proven = property(lambda self: True)
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "result descriptor product_execution_provenance_proven changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            result_type.product_execution_provenance_proven = original
+
+    def test_malformed_row_fails_before_attribute_dispatch(self) -> None:
+        forged_precommit = object.__new__(
+            evidence_authority.ProductProposalRiskEvaluationPrecommit
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskExecutionEvidenceError,
+            r"rows\[0\] must be exact CounterfactualMemberExecutionEvidence",
+        ):
+            evidence_authority.derive_product_proposal_risk_execution_evidence(
+                forged_precommit,
+                (object(),),
+                evaluated_at="2026-10-04T10:02:00+00:00",
+            )
+
+    def test_result_type_still_cannot_be_directly_constructed(self) -> None:
+        with self.assertRaises(TypeError):
+            ProductProposalRiskExecutionEvidence()
+
+
+if __name__ == "__main__":
+    unittest.main()

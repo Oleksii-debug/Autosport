@@ -209,3 +209,14 @@ from . import _outcome_availability_clock_dispatch_guard as _outcome_availabilit
 # Product-owned risk randomization must expose only the closure-sealed public issuer,
 # never its implementation hook that accepts caller-supplied entropy.
 from . import _risk_randomization_precommit_internal_guard as _risk_randomization_precommit_internal_guard  # noqa: F401,E402
+
+# Proposal-specific risk evaluation now has two guarded stages on one package import:
+# the durable target/science precommit issuer/resolver and the assertion-only
+# execution-evidence derivation. The latter may compute a statistical bound but
+# deliberately cannot mint proposal execution, risk approval, ticket or money truth.
+from . import _proposal_risk_evaluation_precommit_dispatch_guard as _proposal_risk_evaluation_precommit_dispatch_guard  # noqa: F401,E402
+
+# Identity tokens on valid proposal-risk DTOs are not transferable capabilities.
+# Seal hidden capability slots after the canonical issuer/deriver composition so
+# only those exact call chains may perform the one product bind.
+from . import _proposal_risk_capability_transfer_guard as _proposal_risk_capability_transfer_guard  # noqa: F401,E402

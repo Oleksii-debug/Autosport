@@ -380,6 +380,31 @@ def test_pathological_operational_checkpoint_nesting_is_normalized() -> None:
             raise AssertionError("pathological nested sidecar was accepted")
 
 
+def test_continuous_session_schema_ignores_rebound_class_constants(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_SCHEMA",
+            "attacker.schema",
+        )
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_VERSION",
+            999,
+        )
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_FIELDS",
+            {"attacker"},
+        )
+
+        reopened = _state_with_history(root, _SMALL_HISTORY)
+        assert reopened.snapshot().session_id == "session-history-scaling"
+
+
 def test_operational_checkpoint_ignores_rebound_class_constants(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

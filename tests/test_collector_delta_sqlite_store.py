@@ -360,6 +360,34 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
 
             self.assertIsNone(store.get(delta.delta_id))
 
+    def test_event_payload_rejects_observation_time_relabel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = replace(
+                make_delta(payload=payload),
+                source_observed_at="2026-01-01T00:00:00+00:00",
+            )
+            delta.validate()
+
+            self.assertEqual(delta.canonical_event_digest, canonical_event_digest(event))
+            self.assertEqual(delta.event_dedupe_key, event.dedupe_key)
+            self.assertEqual(delta.source_id, event.source_id)
+            self.assertNotEqual(delta.source_observed_at, event.observed_ts)
+
+            with self.assertRaisesRegex(
+                DeltaConflictError,
+                "event payload conflicts with collector delta",
+            ):
+                store._append_with_runtime_stream_epoch(
+                    delta,
+                    activated_at="2026-01-01T00:00:00+00:00",
+                    event=event,
+                )
+
+            self.assertIsNone(store.get(delta.delta_id))
+
     def test_event_payload_delete_requires_canonical_retention_tombstone(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.json"

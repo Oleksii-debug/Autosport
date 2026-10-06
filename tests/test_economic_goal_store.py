@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from dataclasses import fields, replace
 from decimal import Decimal
 
@@ -503,3 +504,16 @@ def test_store_rejects_equal_but_distinct_path_rebind(tmp_path) -> None:
 
     with pytest.raises(EconomicGoalContractError, match="path binding was rebound"):
         store.load()
+
+
+
+def test_store_binding_registry_releases_dead_store_entries(tmp_path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store_id = id(store)
+
+    assert store_id in economic_goal_store_module._STORE_BINDINGS_BY_ID
+
+    del store
+    gc.collect()
+
+    assert store_id not in economic_goal_store_module._STORE_BINDINGS_BY_ID

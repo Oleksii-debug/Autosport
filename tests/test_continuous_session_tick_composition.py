@@ -762,3 +762,170 @@ def test_tick_rejects_phantom_lifecycle_registration() -> None:
         ):
             coordinator.tick()
 
+def test_tick_keeps_bound_callback_handles_after_provider_rebinding() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        record = continuous_session.EventLifecycleRecord(
+            identity="provider-a:event-1",
+            source_id="provider-a",
+            sport="table_tennis",
+            event_id="event-1",
+            phase=continuous_session.EventPhase.COMPLETED,
+            first_discovered_at=_AT,
+            last_available_at=_AT,
+            scheduled_start_at=None,
+            completion_ref="completion-1",
+            settlement_ref="settlement-1",
+            completion_discovered_at=_AT,
+            settlement_discovered_at=_AT,
+            last_discovered_at=_AT,
+        )
+        resolution = continuous_session.SettlementResolution(
+            event_identity=record.identity,
+            settlement_ref="settlement-1",
+            quote_outcomes={"quote-1": "win"},
+            evidence_id="evidence-bound-handles",
+            evidence_sha256="d" * 64,
+            available_at=_AT,
+        )
+
+        class Desktop:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def drain(self, **_kwargs):
+                self.calls += 1
+                return ()
+
+        class Lifecycle:
+            def __init__(self) -> None:
+                self.register_calls = 0
+                self.records_calls = 0
+
+            def register_eligible(self, *_args, **_kwargs):
+                self.register_calls += 1
+                return ()
+
+            def records(self):
+                self.records_calls += 1
+                return (record,)
+
+        class Authority:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def resolve(self, _record, *, as_of: str):
+                assert as_of == _AT
+                self.calls += 1
+                return resolution
+
+        class Handoff:
+            def __init__(self) -> None:
+                self.prepared = 0
+                self.reconciled = 0
+
+            def prepare_settlement(self, **_kwargs):
+                self.prepared += 1
+                return ()
+
+            def reconcile_after_settlement(self, **_kwargs):
+                self.reconciled += 1
+
+        desktop = Desktop()
+        lifecycle = Lifecycle()
+        authority = Authority()
+        handoff = Handoff()
+        coordinator.desktop_consumer = desktop
+        coordinator.lifecycle = lifecycle
+        coordinator.outcome_authority = authority
+        coordinator.settlement_learning_handoff = handoff
+
+        def attacker(*_args, **_kwargs):
+            raise AssertionError("provider-time rebound callback executed")
+
+        def rebind() -> None:
+            desktop.drain = attacker  # type: ignore[method-assign]
+            lifecycle.register_eligible = attacker  # type: ignore[method-assign]
+            lifecycle.records = attacker  # type: ignore[method-assign]
+            authority.resolve = attacker  # type: ignore[method-assign]
+            handoff.prepare_settlement = attacker  # type: ignore[method-assign]
+            handoff.reconcile_after_settlement = attacker  # type: ignore[method-assign]
+
+        coordinator.collector = _Collector(callback=rebind)
+
+        result = coordinator.tick()
+
+        assert result.settlement_evidence_ids == ("evidence-bound-handles",)
+        assert desktop.calls == 1
+        assert lifecycle.register_calls == 1
+        assert lifecycle.records_calls == 1
+        assert authority.calls == 1
+        assert handoff.prepared == 1
+        assert handoff.reconciled == 1
+
+
+def test_tick_keeps_collector_projection_fields_after_provider_rebinding() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        original = _Collector()
+        replacement_store = _DeltaStore(forbidden=True)
+
+        def rebind() -> None:
+            original.source_id = "provider-attacker"
+            original.delta_store = replacement_store
+            original.config = type("ConfigStub", (), {"max_items": 999})()
+
+        original.callback = rebind
+        coordinator.collector = original
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        result = coordinator.tick()
+
+        assert result.source_id == "provider-a"
+        assert original.delta_store is replacement_store
+        assert replacement_store.calls == 0
+
+
+def test_tick_keeps_collector_run_callable_across_clock_callback() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        collector = _Collector()
+        coordinator.collector = collector
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        def attacker_run():
+            raise AssertionError("clock-time rebound collector run executed")
+
+        def clock() -> str:
+            collector.run_cycle = attacker_run  # type: ignore[method-assign]
+            return _AT
+
+        coordinator.clock = clock
+
+        result = coordinator.tick()
+
+        assert result.cycle_index == 1
+

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -57,8 +58,7 @@ def _headless_app(tmp_path, *, worker=None):
     app._active_workspace = root
     app._active_strategy_id = "baseline-v1"
     app._active_research_plan = None
-    app.session = SimpleNamespace(workspace=root)
-    app.product_worker = worker or _CapturingWorker()
+    app.session = SimpleNamespace(\n        workspace=root,\n        book=SimpleNamespace(initial_bankroll=Decimal("10000")),\n    )\n    app.product_worker = worker or _CapturingWorker()
     app.dataset_worker = SimpleNamespace(busy=False)
     app.replay_worker = SimpleNamespace(busy=False)
     app.live_worker = SimpleNamespace(busy=False)
@@ -109,8 +109,7 @@ def test_product_runtime_start_uses_exact_active_strategy_workspace(
     app = _headless_app(tmp_path, worker=worker)
     strategy_workspace = tmp_path / "autosport" / "strategies" / "current"
     app._active_workspace = strategy_workspace
-    app.session = SimpleNamespace(workspace=strategy_workspace)
-    app._active_strategy_id = "captured-strategy"
+    app.session = SimpleNamespace(\n        workspace=strategy_workspace,\n        book=SimpleNamespace(initial_bankroll=Decimal("2500.50")),\n    )\n    app._active_strategy_id = "captured-strategy"
     plan = object()
     app._active_research_plan = plan
 
@@ -136,6 +135,7 @@ def test_product_runtime_start_uses_exact_active_strategy_workspace(
     assert worker.started_with is not None
     assert worker.started_with["workspace"] == strategy_workspace
     assert worker.started_with["expected_source_id"] == source.expected_provider_source_id
+    assert worker.started_with["initial_bankroll"] == "2500.50"
     assert app._product_runtime_workspace == strategy_workspace
     assert app._product_restore_strategy_id == "captured-strategy"
     assert app._product_restore_research_plan is plan
@@ -148,8 +148,7 @@ def test_product_runtime_refuses_active_workspace_identity_drift(
     app = _headless_app(tmp_path, worker=worker)
     expected = tmp_path / "autosport" / "strategies" / "expected"
     app._active_workspace = tmp_path / "autosport" / "strategies" / "wrong"
-    app.session = SimpleNamespace(workspace=app._active_workspace)
-    app._active_strategy_id = "captured-strategy"
+    app.session = SimpleNamespace(\n        workspace=app._active_workspace,\n        book=SimpleNamespace(initial_bankroll=Decimal("10000")),\n    )\n    app._active_strategy_id = "captured-strategy"
     app._active_research_plan = object()
     teardown_called = False
 

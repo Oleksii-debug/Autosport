@@ -2381,6 +2381,37 @@ class ProductProposalRiskTerminalPayoffEvaluationTests(unittest.TestCase):
                 {leg.quote_key: "win"},
             )
 
+    def test_public_terminal_payoff_resolver_prices_lay_profit_and_liability_end_to_end(self) -> None:
+        self.precommit = _canonical_precommit(self, lay_first=True)
+        self.workspace = getattr(self, "_proposal_risk_workspace")
+        self.terminal_population = getattr(self, "_proposal_terminal_population")
+        self.authorities = getattr(self, "_proposal_terminal_authorities")
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+
+        result = self._resolve(bindings)
+        stake_a, stake_b = self.precommit.evaluated_stakes
+        liability_a = stake_a * Decimal("4")
+
+        self.assertEqual(
+            result.member_candidate_paper_profit_vectors,
+            (
+                (stake_a, stake_b),
+                (-liability_a, -stake_b),
+            ),
+        )
+        self.assertEqual(
+            result.member_paper_terminal_profits,
+            (
+                stake_a + stake_b,
+                -liability_a - stake_b,
+            ),
+        )
+        self.assertTrue(result.paperbook_settlement_arithmetic_proven)
+        self.assertTrue(result.target_terminal_payoff_evaluation_proven)
+        self.assertFalse(result.grants_risk_approval_authority)
+        self.assertFalse(result.grants_real_money_authority)
+
     def test_zero_stake_candidate_is_zero_exposure_even_when_state_wins(self) -> None:
         target = terminal_payoff_authority._TARGET_RESOLVER(
             self.workspace,
@@ -3942,6 +3973,51 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
         self.assertFalse(result.grants_state_mutation_authority)
         self.assertEqual(len(result.evaluation_sha256), 64)
         self.assertEqual(self._resolve(bindings), result)
+
+    def test_public_cash_floor_resolver_reserves_lay_liability_end_to_end(self) -> None:
+        self.precommit = _canonical_precommit(self, lay_first=True)
+        self.workspace = getattr(self, "_proposal_risk_workspace")
+        self.terminal_population = getattr(self, "_proposal_terminal_population")
+        self.authorities = getattr(self, "_proposal_terminal_authorities")
+        bindings = self._bindings()
+        self._issue(bindings)
+
+        result = self._resolve(bindings)
+        stake_a, stake_b = self.precommit.evaluated_stakes
+        liability_a = stake_a * Decimal("4")
+        base = result.base_cash_balance
+        post_open = base - liability_a - stake_b
+
+        self.assertEqual(
+            result.evaluated_capital_at_risk,
+            (liability_a, stake_b),
+        )
+        self.assertTrue(result.counterfactual_target_capital_reservation_proven)
+        self.assertEqual(
+            result.candidate_open_cash_balances,
+            (base - liability_a, post_open),
+        )
+        self.assertEqual(result.post_open_cash_balance, post_open)
+        self.assertEqual(
+            result.member_candidate_payout_vectors,
+            (
+                (liability_a + stake_a, stake_b * Decimal("2")),
+                (Decimal("0"), Decimal("0")),
+            ),
+        )
+        self.assertEqual(
+            result.member_terminal_cash_balances,
+            (
+                base + stake_a + stake_b,
+                post_open,
+            ),
+        )
+        self.assertEqual(
+            result.member_minimum_cash_floors,
+            (post_open, post_open),
+        )
+        self.assertFalse(result.grants_risk_approval_authority)
+        self.assertFalse(result.grants_real_money_authority)
 
     def test_all_void_refunds_restore_base_cash_but_floor_remains_post_open(self) -> None:
         void_member = self._binding(

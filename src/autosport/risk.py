@@ -58,8 +58,6 @@ def _make_locked_capital_authority():
         require_calculator()
         if type(stake) is not Decimal or type(legs) is not tuple or not legs:
             raise ValueError("risk proposal exposure must use canonical stake and legs")
-        if stake.is_zero():
-            return Decimal("0")
         for leg in legs:
             if (
                 type(leg) is not TicketLeg
@@ -74,6 +72,8 @@ def _make_locked_capital_authority():
                 raise ValueError(
                     "risk LAY exposure requires exactly one canonical single-leg proposal"
                 )
+            if stake.is_zero():
+                return Decimal("0")
             return calculator(
                 stake=stake,
                 odds=legs[0].locked_odds,

@@ -4149,9 +4149,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     settlement_evidence=resolutions,
                 )
                 committed_last_success_at = state._last_success_at
-            except (SessionPausedError, SessionStoppedError):
-                raise
             except Exception as exc:
+                # We are already inside a RUNNING durable fence here. A downstream
+                # callback is not allowed to manufacture SessionPausedError or
+                # SessionStoppedError as an operator-control bypass: genuine durable
+                # PAUSED/STOPPED state is rejected by running_fence before this block
+                # is entered. Treat every in-fence callback failure uniformly so
+                # authority restoration and bounded failure publication still run.
                 # Keep the coordinator pinned to the canonical state and dependency
                 # routing objects even when a downstream callback replaces either
                 # authority before failing.

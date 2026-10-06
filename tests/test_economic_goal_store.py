@@ -161,6 +161,7 @@ def test_automatic_identity_rebinding_fails_closed_without_mutation(tmp_path) ->
         "extra_root_key",
         "extra_contract_key",
         "numeric_decimal",
+        "signed_zero_decimal",
         "unsorted_restrictions",
         "unknown_automation",
     ],
@@ -182,6 +183,8 @@ def test_persisted_payload_rejects_malformed_or_ambiguous_authority(
         body["unexpected"] = "authority"
     elif mutation == "numeric_decimal":
         body["max_stake_fraction"] = 0.02
+    elif mutation == "signed_zero_decimal":
+        body["max_stake_fraction"] = "-0"
     elif mutation == "unsorted_restrictions":
         body["blocked_sports"] = ["tennis", "boxing"]
     elif mutation == "unknown_automation":

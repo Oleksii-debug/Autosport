@@ -836,3 +836,113 @@ def test_in_place_credential_mutation_fails_closed_before_attempt() -> None:
 
         assert transport.calls == []
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_transport_method_rebinding_fails_closed_before_attempt(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        calls = 0
+
+        def rebound_post(*args, **kwargs):
+            nonlocal calls
+            del args, kwargs
+            calls += 1
+            raise AssertionError("rebound transport post must never execute")
+
+        monkeypatch.setattr(type(transport), "post", rebound_post)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="dependency dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-transport-method-rebinding",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert calls == 0
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_client_clock_rebinding_fails_closed_before_attempt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        client._clock = lambda: "2030-01-01T00:00:00+00:00"
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="dependency binding changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-clock-rebinding",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_client_timeout_rebinding_fails_closed_before_attempt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        client._timeout_seconds = 0.001
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="dependency binding changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-timeout-rebinding",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_exact_client_without_constructor_binding_cannot_execute() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, _ = _prepared(tmp)
+        client = object.__new__(betfair_execution.BetfairSupervisedPlaceOrdersClient)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="no canonical dependency binding",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-unbound-exact-client",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}

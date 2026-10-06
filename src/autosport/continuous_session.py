@@ -592,11 +592,11 @@ class _ContinuousSessionState:
     def session_id(self) -> str:
         return self._read()["session_id"]
 
-    def _update(self, mutate: Callable[[dict[str, Any]], None]) -> None:
+    def _update(self, mutate: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         raw = self._read()
         mutate(raw)
         atomic_write_json(self.path, raw)
-        self._read()
+        return self._read()
 
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:
         if not isinstance(state, SessionState):
@@ -728,9 +728,9 @@ class _ContinuousSessionState:
                 sorted(known.values(), key=lambda item: item["evidence_id"])
             )
 
-        self._update(mutate)
-        self._cycles_completed += 1
-        self._last_success_at = timestamp.isoformat()
+        updated = self._update(mutate)
+        self._cycles_completed = updated["cycles_completed"]
+        self._last_success_at = updated["last_success_at"]
         self._write_error_checkpoint(None)
 
     def record_failure(self, *, code: str) -> None:

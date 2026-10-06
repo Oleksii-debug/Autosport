@@ -2880,3 +2880,78 @@ def test_market_semantics_root_rejects_underlying_validator_code_mutation() -> N
             book.open_ticket([_lay_leg()], "10", placed_at=_TS)
     finally:
         validator.__code__ = original_code
+
+
+def test_ticket_leg_settlement_key_binds_quote_to_market_semantics() -> None:
+    back = _leg()
+    first = TicketLeg(
+        "event-1",
+        "market-1",
+        "selection-1",
+        Decimal("3.00"),
+        sport="soccer",
+        exchange_side="lay",
+        market_semantics_id="exchange.match.odds.v1",
+    )
+    second = TicketLeg(
+        "event-1",
+        "market-1",
+        "selection-1",
+        Decimal("3.00"),
+        sport="soccer",
+        exchange_side="lay",
+        market_semantics_id="exchange.match.odds.v2",
+    )
+
+    assert first.quote_key == second.quote_key
+    assert first.settlement_key != second.settlement_key
+    assert back.settlement_key == back.quote_key
+    assert first.settlement_identity == (
+        first.quote_key,
+        "exchange.match.odds.v1",
+    )
+
+
+def test_ticket_leg_market_semantics_id_rejects_reserved_and_noncanonical_values() -> None:
+    with pytest.raises(ValueError, match="lowercase canonical semantic identity"):
+        TicketLeg(
+            "event-1",
+            "market-1",
+            "selection-1",
+            Decimal("3.00"),
+            market_semantics_id="Exchange.Match.Odds",
+        )
+
+    with pytest.raises(ValueError, match="reserved identity"):
+        TicketLeg(
+            "event-1",
+            "market-1",
+            "selection-1",
+            Decimal("3.00"),
+            market_semantics_id="unknown",
+        )
+
+
+def test_ticket_leg_settlement_key_changes_when_semantics_is_mutated() -> None:
+    leg = TicketLeg(
+        "event-1",
+        "market-1",
+        "selection-1",
+        Decimal("3.00"),
+        sport="soccer",
+        exchange_side="lay",
+        market_semantics_id="exchange.match.odds.v1",
+    )
+    original = leg.settlement_key
+    object.__setattr__(leg, "market_semantics_id", "exchange.match.odds.v2")
+
+    assert leg.quote_key == TicketLeg(
+        "event-1",
+        "market-1",
+        "selection-1",
+        Decimal("3.00"),
+        sport="soccer",
+        exchange_side="lay",
+        market_semantics_id="exchange.match.odds.v2",
+    ).quote_key
+    assert leg.settlement_key != original

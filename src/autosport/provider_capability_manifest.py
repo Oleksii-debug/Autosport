@@ -485,18 +485,95 @@ class ProviderCapabilityManifest:
     def manifest_id(self) -> str:
         return self.manifest_sha256
 
-    def state_of(self, capability: ProviderManifestCapability) -> ProviderManifestState:
+    def state_of(
+        self,
+        capability: ProviderManifestCapability,
+        _canonical_capability_for=_canonical_capability_for,
+        _canonical_capability_for_code: object = _canonical_capability_for.__code__,
+        _profile_state=_profile_state,
+        _profile_state_code: object = _profile_state.__code__,
+        _profile_validator=_validate_exact_profile,
+        _profile_validator_code: object = _validate_exact_profile.__code__,
+        _verify_profile=BookmakerIntegrationEvidence.verify_profile,
+        _verify_profile_code: object = BookmakerIntegrationEvidence.verify_profile.__code__,
+    ) -> ProviderManifestState:
+        """Return revalidated capability truth, never a post-construction mutation."""
+
         if type(capability) is not ProviderManifestCapability:
             raise ProviderCapabilityManifestError(
                 "capability must be an exact ProviderManifestCapability value"
             )
-        for fact in self.facts:
-            if fact.capability is capability:
-                return fact.state
-        raise ProviderCapabilityManifestError("manifest capability is missing")
+        if (
+            getattr(_canonical_capability_for, "__code__", None)
+            is not _canonical_capability_for_code
+            or getattr(_profile_state, "__code__", None) is not _profile_state_code
+            or getattr(_profile_validator, "__code__", None)
+            is not _profile_validator_code
+            or BookmakerIntegrationEvidence.verify_profile is not _verify_profile
+            or getattr(_verify_profile, "__code__", None) is not _verify_profile_code
+        ):
+            raise ProviderCapabilityManifestError(
+                "canonical manifest read authority changed"
+            )
 
-    def supports(self, capability: ProviderManifestCapability) -> bool:
-        return self.state_of(capability) is ProviderManifestState.PROVEN
+        _profile_validator(self.profile)
+        if type(self.integration) is not BookmakerIntegrationEvidence:
+            raise ProviderCapabilityManifestError(
+                "integration must be an exact BookmakerIntegrationEvidence"
+            )
+        _verify_profile(self.integration, self.profile)
+
+        if type(self.facts) is not tuple or any(
+            type(fact) is not ProviderCapabilityManifestFact for fact in self.facts
+        ):
+            raise ProviderCapabilityManifestError(
+                "manifest facts changed after validation"
+            )
+        expected_capabilities = tuple(ProviderManifestCapability)
+        if tuple(fact.capability for fact in self.facts) != expected_capabilities:
+            raise ProviderCapabilityManifestError(
+                "manifest fact vocabulary changed after validation"
+            )
+        fact = self.facts[expected_capabilities.index(capability)]
+        canonical = _canonical_capability_for(capability)
+        if canonical is None:
+            if (
+                fact.state is not ProviderManifestState.NOT_PROVEN
+                or fact.authority is not ProviderManifestFactAuthority.NOT_PROVEN
+                or fact.values
+                or fact.evidence is not None
+            ):
+                raise ProviderCapabilityManifestError(
+                    f"{capability.value} extension truth changed after validation"
+                )
+            return ProviderManifestState.NOT_PROVEN
+
+        expected_state = _profile_state(self.profile, canonical)
+        if (
+            fact.state is not expected_state
+            or fact.authority is not ProviderManifestFactAuthority.CANONICAL_PROFILE
+            or fact.values
+            or fact.evidence is not None
+        ):
+            raise ProviderCapabilityManifestError(
+                f"{capability.value} canonical truth changed after validation"
+            )
+        return expected_state
+
+    def supports(
+        self,
+        capability: ProviderManifestCapability,
+        _state_of=state_of,
+        _state_of_code: object = state_of.__code__,
+    ) -> bool:
+        if (
+            type(self).state_of is not _state_of
+            or getattr(_state_of, "__code__", None) is not _state_of_code
+        ):
+            raise ProviderCapabilityManifestError(
+                "canonical manifest state reader changed"
+            )
+        return _state_of(self, capability) is ProviderManifestState.PROVEN
 
     @property
     def provider_write_authorized(self) -> bool:

@@ -122,7 +122,7 @@ def evaluate_market_actionability(
         return _wait(ActionabilityReason.EVIDENCE_UNRESOLVED, evidence)
     if type(evidence.max_quote_age) is not timedelta:
         return _wait(ActionabilityReason.INVALID_MAX_QUOTE_AGE, evidence)
-    if evidence.max_quote_age <= timedelta(0):
+    if evidence.max_quote_age < timedelta(0):
         return _wait(ActionabilityReason.INVALID_MAX_QUOTE_AGE, evidence)
     if (
         type(evidence.quote_observed_at) is not datetime
@@ -144,7 +144,7 @@ def evaluate_market_actionability(
         return _wait(ActionabilityReason.INVALID_TIMESTAMP, evidence)
     if age < timedelta(0):
         return _wait(ActionabilityReason.QUOTE_AFTER_DECISION, evidence)
-    if age >= evidence.max_quote_age:
+    if age > evidence.max_quote_age:
         return _wait(ActionabilityReason.QUOTE_STALE, evidence)
 
     status = (

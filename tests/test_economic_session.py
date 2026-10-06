@@ -39,12 +39,18 @@ class _Clock:
         self.value = _epoch_ns(value)
 
 
-def _goal(*, revision: int = 1, max_turnover: str = "10") -> EconomicGoalContract:
+def _goal(
+    *,
+    revision: int = 1,
+    max_turnover: str = "10",
+    bankroll_id: str = "paper-bankroll",
+    currency: str = "USD",
+) -> EconomicGoalContract:
     return EconomicGoalContract(
         goal_id="owner-goal",
         revision=revision,
-        bankroll_id="paper-bankroll",
-        currency="USD",
+        bankroll_id=bankroll_id,
+        currency=currency,
         max_session_loss_fraction=Decimal("0.10"),
         max_day_loss_fraction=Decimal("0.20"),
         max_drawdown_fraction=Decimal("0.25"),
@@ -717,6 +723,100 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         ):
             self._store().current()
         self.assertEqual(second.authority_generation, 2)
+
+    def test_bankroll_or_currency_change_requires_explicit_successor_scope(self) -> None:
+        store = self._store()
+        first = store.current()
+
+        EconomicGoalStore(self.workspace).persist_automatic_successor(
+            _goal(revision=2, max_turnover="5", bankroll_id="bankroll-eur", currency="EUR")
+        )
+
+        with self.assertRaisesRegex(
+            EconomicSessionMismatchError,
+            "changed without explicit economic-session transition",
+        ):
+            store.current()
+
+        self.clock.set("2026-10-05T13:00:00Z")
+        successor = self._store().transition_to_current_goal(first)
+
+        self.assertNotEqual(successor.session_id, first.session_id)
+        self.assertEqual(successor.bankroll_id, "bankroll-eur")
+        self.assertEqual(successor.currency, "EUR")
+        self.assertEqual(successor.predecessor_session_id, first.session_id)
+        self.assertEqual(successor.predecessor_state_sha256, first.state_sha256)
+
+    def test_explicit_successor_survives_fresh_store_re_resolution(self) -> None:
+        first_store = self._store()
+        first = first_store.current()
+        EconomicGoalStore(self.workspace).persist_automatic_successor(_goal(revision=2))
+        self.clock.set("2026-10-05T13:00:00Z")
+
+        successor = first_store.transition_to_current_goal(first)
+        fresh = self._store().current()
+
+        self.assertEqual(fresh, successor)
+        self.assertEqual(fresh.state_sha256, successor.state_sha256)
+        self.assertEqual(fresh.authority_generation, successor.authority_generation)
+
+    def test_concurrent_explicit_transition_has_one_winner_and_one_stale_predecessor(self) -> None:
+        first = self._store().current()
+        EconomicGoalStore(self.workspace).persist_automatic_successor(_goal(revision=2))
+        self.clock.set("2026-10-05T13:00:00Z")
+
+        first_attempt = self._store().transition_to_current_goal(first)
+        second_attempt = self._store().transition_to_current_goal(first)
+
+        self.assertNotEqual(first_attempt.session_id, first.session_id)
+        self.assertEqual(
+            self._store().current().session_id,
+            first_attempt.session_id,
+        )
+        with self.assertRaisesRegex(
+            EconomicSessionMismatchError,
+            "predecessor does not match current durable session",
+        ):
+            self._store().transition_to_current_goal(first)
+
+        self.assertEqual(
+            self._store().current().predecessor_session_id,
+            first.session_id,
+        )
+
+    def test_transition_clock_cannot_backdate_session_before_predecessor_start(self) -> None:
+        store = self._store()
+        first = store.current()
+
+        EconomicGoalStore(self.workspace).persist_automatic_successor(_goal(revision=2))
+        self.clock.set("2026-10-05T11:59:59Z")
+
+        with self.assertRaisesRegex(
+            EconomicSessionIntegrityError,
+            "transition clock precedes predecessor start",
+        ):
+            store.transition_to_current_goal(first)
+
+        self.assertEqual(self._store().current(), first)
+
+    def test_successor_predecessor_digest_is_not_rebindable_after_publication(self) -> None:
+        store = self._store()
+        first = store.current()
+        EconomicGoalStore(self.workspace).persist_automatic_successor(_goal(revision=2))
+        self.clock.set("2026-10-05T13:00:00Z")
+        successor = store.transition_to_current_goal(first)
+
+        payload = json.loads(store.state_path.read_text(encoding="utf-8"))
+        payload["predecessor_state_sha256"] = "0" * 64
+        store.state_path.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(MonotonicAuthorityRollbackError):
+            self._store().current()
+
+        self.assertEqual(successor.predecessor_state_sha256, first.state_sha256)
 
     def test_default_clock_session_is_positive_boundary_authority(self) -> None:
         store = ProductEconomicSessionStore(

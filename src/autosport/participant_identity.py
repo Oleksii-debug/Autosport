@@ -78,6 +78,18 @@ def _digest(payload: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate authority-bearing JSON keys at every object depth."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ParticipantIdentityError(
+                f"duplicate identity registry JSON key: {key}"
+            )
+        result[key] = value
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class EntityIdentity:
     entity_id: str
@@ -533,7 +545,12 @@ class ParticipantIdentityRegistry:
 
     def _load(self) -> None:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            raw = json.loads(
+                self.path.read_text(encoding="utf-8"),
+                object_pairs_hook=_unique_json_object,
+            )
+        except ParticipantIdentityError:
+            raise
         except (OSError, json.JSONDecodeError) as exc:
             raise ParticipantIdentityError(f"cannot load identity registry: {exc}") from exc
         expected_fields = {

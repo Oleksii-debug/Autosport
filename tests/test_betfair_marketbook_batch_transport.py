@@ -712,6 +712,72 @@ def test_module_rebound_physical_post_cannot_replace_canonical_transport(monkeyp
     assert len(transport.calls) == 1
 
 
+def test_module_rebound_canonical_batch_cannot_replace_plan_binding(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    called = False
+
+    def forged_canonical_batch(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("rebound canonical batch must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "_canonical_batch",
+        forged_canonical_batch,
+    )
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="sealed-canonical-batch",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    result.assert_issued()
+    assert called is False
+    assert len(transport.calls) == 1
+
+
+def test_module_rebound_params_for_batch_cannot_replace_request_contract(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+    called = False
+
+    def forged_params(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("rebound params mapper must not run")
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "_params_for_batch",
+        forged_params,
+    )
+
+    result = read_market_book_batch(
+        client,
+        plan,
+        batch_id=batch.batch_id,
+        request_id="sealed-params-mapper",
+        scheduled_at=NOW,
+        rate_gate=rate_gate,
+        concurrency_gate=concurrency_gate,
+    )
+
+    result.assert_issued()
+    assert called is False
+    assert len(transport.calls) == 1
+
+
 def test_module_rebound_request_budget_cannot_replace_canonical_preflight(monkeypatch):
     plan = _plan(market_ids=("1.001",))
     batch = plan.batches[0]

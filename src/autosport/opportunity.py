@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
-from .domain import MarketEvent, _quote_identity
+from .domain import MarketEvent, _canonical_semantic_identity, _quote_identity
 from .forecasting import ForecastRecord, parse_iso_timestamp
 
 
@@ -73,6 +73,18 @@ def _optional_text(value: object, field_name: str) -> str | None:
     if value is None:
         return None
     return _canonical_text(value, field_name)
+
+
+def _optional_market_semantics_id(value: object) -> str | None:
+    if value is None:
+        return None
+    try:
+        return _canonical_semantic_identity(
+            value,
+            "quote market_semantics_id",
+        )
+    except ValueError as exc:
+        raise OpportunityContractError(str(exc)) from exc
 
 
 def _optional_sport(value: object, field_name: str = "quote sport") -> str | None:
@@ -289,7 +301,7 @@ class QuoteRef:
             )
         _canonical_hash(self.market_event_hash, "market_event_hash")
         _optional_hash(self.market_snapshot_hash, "market_snapshot_hash")
-        _optional_text(self.market_semantics_id, "quote market_semantics_id")
+        _optional_market_semantics_id(self.market_semantics_id)
 
     @property
     def quote_key(self, _quote_key_fn=_quote_key) -> str:
@@ -413,9 +425,8 @@ class QuoteRef:
                 raw["market_snapshot_hash"], "market_snapshot_hash"
             ),
             sport=_optional_sport(raw.get("sport")),
-            market_semantics_id=_optional_text(
+            market_semantics_id=_optional_market_semantics_id(
                 raw.get("market_semantics_id"),
-                "quote market_semantics_id",
             ),
         )
 

@@ -596,3 +596,38 @@ def test_restart_revalidates_tampered_projection_policy_identity() -> None:
     ):
         BetfairMarketBookProjectionConcurrencyGate(state=state)
 
+
+def test_instance_shadowed_clock_helper_cannot_bypass_monotonic_fence() -> None:
+    acquire_gate = gate()
+    assert begin_projected(
+        acquire_gate,
+        "first",
+        at=T0 + timedelta(seconds=1),
+    ).allowed
+
+    acquire_gate._require_not_backwards = lambda observed_us: None  # type: ignore[method-assign]
+
+    before_acquire = acquire_gate.snapshot()
+    with pytest.raises(ValueError, match="must not move backwards"):
+        begin_projected(acquire_gate, "backdated", at=T0)
+    assert acquire_gate.snapshot() == before_acquire
+
+    release_gate = gate()
+    first = begin_projected(
+        release_gate,
+        "active",
+        at=T0 + timedelta(seconds=1),
+    )
+    assert first.lease_generation is not None
+
+    release_gate._require_not_backwards = lambda observed_us: None  # type: ignore[method-assign]
+
+    before_release = release_gate.snapshot()
+    with pytest.raises(ValueError, match="must not move backwards"):
+        release_gate.complete(
+            "active",
+            lease_generation=first.lease_generation,
+            observed_at=T0,
+        )
+    assert release_gate.snapshot() == before_release
+

@@ -230,7 +230,11 @@ class BetfairMarketBookProjectionConcurrencyGate:
         generation: int | None = None
         try:
             with self._lock:
-                self._require_not_backwards(observed_us)
+                if (
+                    self._last_observed_at_utc_us is not None
+                    and observed_us < self._last_observed_at_utc_us
+                ):
+                    raise ValueError("observed_at must not move backwards")
                 if request_id in self._active:
                     raise ValueError("request_id is already active")
 
@@ -312,7 +316,11 @@ class BetfairMarketBookProjectionConcurrencyGate:
         observed_us = _utc_microseconds(observed_at, name="observed_at")
 
         with self._lock:
-            self._require_not_backwards(observed_us)
+            if (
+                self._last_observed_at_utc_us is not None
+                and observed_us < self._last_observed_at_utc_us
+            ):
+                raise ValueError("observed_at must not move backwards")
             lease = self._active.get(request_id)
             if lease is None:
                 raise ValueError(

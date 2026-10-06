@@ -99,6 +99,51 @@ def test_price_only_request_bypasses_projection_bucket_even_when_full() -> None:
     assert len(value.snapshot().active) == 3
 
 
+def test_process_control_after_lease_mutation_rolls_back_only_exact_lease() -> None:
+    value = BetfairMarketBookProjectionConcurrencyGate()
+    interrupt = KeyboardInterrupt("begin interrupted after mutation")
+    original_lock = value._lock
+
+    class InterruptAfterMutationLock:
+        def __init__(self) -> None:
+            self.raise_once = True
+
+        def __enter__(self):
+            return original_lock.__enter__()
+
+        def __exit__(self, exc_type, exc, tb):
+            result = original_lock.__exit__(exc_type, exc, tb)
+            if self.raise_once and exc_type is None:
+                self.raise_once = False
+                raise interrupt
+            return result
+
+    value._lock = InterruptAfterMutationLock()
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        value.begin(
+            "interrupted",
+            observed_at=T0,
+            has_order_projection=True,
+            has_match_projection=False,
+        )
+
+    assert exc_info.value is interrupt
+    state = value.snapshot()
+    assert state.active == ()
+    assert state.next_lease_generation == 2
+    assert state.last_observed_at_utc_us == int(T0.timestamp() * 1_000_000)
+
+    successor = value.begin(
+        "successor",
+        observed_at=T0,
+        has_order_projection=True,
+        has_match_projection=False,
+    )
+    assert successor.allowed is True
+    assert successor.lease_generation == 2
+
+
 def test_completion_releases_exactly_one_slot() -> None:
     value = gate()
     for index in range(3):

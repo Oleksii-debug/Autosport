@@ -211,51 +211,77 @@ class BetfairMarketBookProjectionConcurrencyGate:
         observed_us = _utc_microseconds(observed_at, name="observed_at")
         projection_bearing = has_order_projection or has_match_projection
 
-        with self._lock:
-            self._require_not_backwards(observed_us)
-            if request_id in self._active:
-                raise ValueError("request_id is already active")
+        generation: int | None = None
+        try:
+            with self._lock:
+                self._require_not_backwards(observed_us)
+                if request_id in self._active:
+                    raise ValueError("request_id is already active")
 
-            if not projection_bearing:
-                decision = MarketBookProjectionConcurrencyDecision(
+                if not projection_bearing:
+                    decision = MarketBookProjectionConcurrencyDecision(
+                        request_id=request_id,
+                        observed_at_utc_us=observed_us,
+                        projection_bearing=False,
+                        allowed=True,
+                        active_projection_requests=len(self._active),
+                    )
+                    self._last_observed_at_utc_us = observed_us
+                    return decision
+
+                if len(self._active) >= _MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED:
+                    decision = MarketBookProjectionConcurrencyDecision(
+                        request_id=request_id,
+                        observed_at_utc_us=observed_us,
+                        projection_bearing=True,
+                        allowed=False,
+                        active_projection_requests=len(self._active),
+                    )
+                    self._last_observed_at_utc_us = observed_us
+                    return decision
+
+                generation = self._next_lease_generation
+                lease = MarketBookProjectionLease(
                     request_id=request_id,
-                    observed_at_utc_us=observed_us,
-                    projection_bearing=False,
-                    allowed=True,
-                    active_projection_requests=len(self._active),
+                    acquired_at_utc_us=observed_us,
+                    generation=generation,
                 )
-                self._last_observed_at_utc_us = observed_us
-                return decision
-
-            if len(self._active) >= _MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED:
                 decision = MarketBookProjectionConcurrencyDecision(
                     request_id=request_id,
                     observed_at_utc_us=observed_us,
                     projection_bearing=True,
-                    allowed=False,
-                    active_projection_requests=len(self._active),
+                    allowed=True,
+                    active_projection_requests=len(self._active) + 1,
+                    lease_generation=generation,
                 )
+                self._active[request_id] = lease
+                self._next_lease_generation = generation + 1
                 self._last_observed_at_utc_us = observed_us
                 return decision
-
-            generation = self._next_lease_generation
-            lease = MarketBookProjectionLease(
-                request_id=request_id,
-                acquired_at_utc_us=observed_us,
-                generation=generation,
-            )
-            decision = MarketBookProjectionConcurrencyDecision(
-                request_id=request_id,
-                observed_at_utc_us=observed_us,
-                projection_bearing=True,
-                allowed=True,
-                active_projection_requests=len(self._active) + 1,
-                lease_generation=generation,
-            )
-            self._active[request_id] = lease
-            self._next_lease_generation = generation + 1
-            self._last_observed_at_utc_us = observed_us
-            return decision
+        except BaseException as primary:
+            # A process-control interruption can land after lease mutation but
+            # before the decision reaches the caller. Remove only the exact
+            # request+generation introduced by this begin attempt. Never rewind
+            # causal time or generation counters and never touch a successor.
+            if generation is not None:
+                try:
+                    with self._lock:
+                        lease = self._active.get(request_id)
+                        if lease is not None and lease.generation == generation:
+                            del self._active[request_id]
+                except BaseException as cleanup_exc:
+                    if (
+                        not isinstance(cleanup_exc, Exception)
+                        and isinstance(primary, Exception)
+                    ):
+                        raise
+                    add_note = getattr(primary, "add_note", None)
+                    if callable(add_note):
+                        add_note(
+                            "projection-begin cleanup also failed: "
+                            f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                        )
+            raise
 
     def complete(
         self,

@@ -3037,6 +3037,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     or delta_id.strip() != delta_id
                     for delta_id in cycle_committed_delta_ids
                 )
+                or len(set(cycle_committed_delta_ids))
+                != len(cycle_committed_delta_ids)
+                or (
+                    cycle_provider_unavailable
+                    and bool(cycle_committed_delta_ids)
+                )
             ):
                 raise ContinuousSessionError(
                     "collector returned invalid continuous-session cycle metadata"
@@ -3151,6 +3157,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         or delta_id.strip() != delta_id
                         for delta_id in delivered
                     )
+                    or len(set(delivered)) != len(delivered)
                 ):
                     raise ContinuousSessionError(
                         "desktop consumer returned invalid delivered delta ids"
@@ -3202,6 +3209,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         or input_id.strip() != input_id
                         for input_id in registered
                     )
+                    or len(set(registered)) != len(registered)
                 ):
                     raise ContinuousSessionError(
                         "lifecycle returned invalid registered input ids"

@@ -1980,6 +1980,43 @@ def test_invalid_main_success_timestamp_is_normalized_to_domain_error() -> None:
             raise AssertionError("invalid main success timestamp escaped validation")
 
 
+def test_causally_impossible_main_session_time_combinations_fail_closed() -> None:
+    cases = (
+        ("zero-cycles-with-success", {"cycles_completed": 0}),
+        ("positive-cycles-without-success", {"last_success_at": None}),
+        (
+            "success-before-start",
+            {
+                "started_at": "2026-09-22T06:21:00+00:00",
+                "last_success_at": "2026-09-22T06:20:00+00:00",
+            },
+        ),
+        (
+            "full-refresh-after-success",
+            {"last_full_refresh_at": "2026-09-22T06:21:00+00:00"},
+        ),
+    )
+    for label, changes in cases:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "continuous_session.json"
+            payload = _checkpoint_payload(_SMALL_HISTORY)
+            payload.update(changes)
+            state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+            try:
+                continuous_session._ContinuousSessionState(
+                    state_path,
+                    session_id="session-history-scaling",
+                    source_id="provider-a",
+                    clock=lambda: _AT,
+                )
+            except continuous_session.ContinuousSessionError:
+                pass
+            else:
+                raise AssertionError(f"{label} durable checkpoint was accepted")
+
+
 def test_invalid_settlement_evidence_digest_is_normalized_to_domain_error() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

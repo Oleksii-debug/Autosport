@@ -628,6 +628,23 @@ def test_snapshot_provenance_ignores_rebound_field_descriptors(monkeypatch) -> N
 
 
 
+def test_decision_identity_ignores_rebound_provenance_field_descriptors(monkeypatch) -> None:
+    evidence = provenance_for(_goal())
+    expected = evidence.decision_identity
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return "0" * 64
+
+    monkeypatch.setattr(
+        EconomicGoalProvenance,
+        "contract_sha256",
+        ForgedDescriptor(),
+    )
+
+    assert evidence.decision_identity == expected
+
+
 def test_provenance_creation_and_identity_ignore_rebound_constructor(monkeypatch) -> None:
     goal = _goal()
     expected = provenance_for(goal)

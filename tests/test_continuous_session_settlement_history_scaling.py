@@ -1696,6 +1696,50 @@ def test_record_failure_rejects_runtime_session_lock_rebinding(monkeypatch) -> N
             raise AssertionError("runtime-rebound failure lock was accepted")
 
 
+def test_record_failure_ignores_instance_writer_rebinding() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        def attacker_writer(_code: str | None) -> None:
+            raise AssertionError("instance-rebound checkpoint writer executed")
+
+        with patch.object(state, "_write_error_checkpoint", attacker_writer):
+            publication = state.record_failure(code="CANONICAL_FAILURE")
+
+        assert publication.last_error_code == "CANONICAL_FAILURE"
+        payload = json.loads(
+            (root / "continuous_session.json.operational_error.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert payload["last_error_code"] == "CANONICAL_FAILURE"
+
+
+def test_record_failure_rejects_class_writer_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        def attacker_writer(
+            _self: continuous_session._ContinuousSessionState,
+            _code: str | None,
+        ) -> None:
+            raise AssertionError("class-rebound checkpoint writer executed")
+
+        monkeypatch.setattr(
+            continuous_session._ContinuousSessionState,
+            "_write_error_checkpoint",
+            attacker_writer,
+        )
+        try:
+            state.record_failure(code="FAIL")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "failure publication authority changed" in str(exc)
+        else:
+            raise AssertionError("class-rebound failure writer was accepted")
+
+
 def test_stale_failure_writer_cannot_clobber_newer_failure_sidecar() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

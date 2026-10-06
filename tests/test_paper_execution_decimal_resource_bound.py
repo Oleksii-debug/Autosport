@@ -55,6 +55,35 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
         ):
             evidence(stake="1E-8192")
 
+    def test_extreme_positive_exponent_fails_before_materialization(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            evidence(odds="1E+100000000")
+
+    def test_extreme_negative_exponent_fails_before_materialization(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            evidence(stake="1E-100000000")
+
+    def test_evidence_hash_and_id_fail_closed_for_mutated_oversized_decimal(self) -> None:
+        record = evidence()
+        object.__setattr__(record, "accepted_odds", Decimal("1E+100000000"))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            _ = record.evidence_sha256
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            _ = record.evidence_id
+
     def test_mutated_evidence_fails_before_fixed_point_formatting(self) -> None:
         record = evidence()
         object.__setattr__(record, "accepted_odds", Decimal("1E+8192"))

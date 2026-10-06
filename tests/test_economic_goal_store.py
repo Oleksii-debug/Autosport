@@ -244,6 +244,10 @@ def test_owner_atomic_create_cleans_staging_when_link_fails(tmp_path) -> None:
     assert not path.exists()
     assert list(tmp_path.glob(f".{path.name}.*.owner-init.tmp")) == []
 
+    economic_goal_store_module._atomic_create_owner_json(path, payload)
+    assert economic_goal_from_json(path.read_text(encoding="utf-8")) == _goal()
+    assert list(tmp_path.glob(f".{path.name}.*.owner-init.tmp")) == []
+
 
 def test_owner_atomic_create_ignores_rebound_exception_globals(
     monkeypatch,
@@ -297,6 +301,21 @@ def test_owner_initialization_atomic_create_leaves_single_link_and_no_staging(
     assert os.stat(store.path, follow_symlinks=False).st_nlink == 1
     assert list(tmp_path.glob(f".{store.path.name}.*.owner-init.tmp")) == []
     assert EconomicGoalStore(tmp_path).load() == goal
+
+
+def test_owner_initialization_creates_missing_nested_workspace(tmp_path) -> None:
+    workspace = tmp_path / "nested" / "economic-workspace"
+    goal = _goal()
+    store = EconomicGoalStore(workspace)
+
+    assert not workspace.exists()
+
+    store.initialize_owner(goal)
+
+    assert workspace.is_dir()
+    assert store.load() == goal
+    assert os.stat(store.path, follow_symlinks=False).st_nlink == 1
+    assert list(workspace.glob(f".{store.path.name}.*.owner-init.tmp")) == []
 
 
 def test_automatic_tightening_persists_and_survives_restart(tmp_path) -> None:

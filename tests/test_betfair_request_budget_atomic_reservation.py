@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from autosport.betfair_request_budget import (
     BetfairAdmissionDecision,
+    BetfairRequestBudgetError,
     BetfairRequestBudgetOwner,
     BetfairRequestBudgetPolicy,
     BetfairRequestBudgetState,
@@ -113,8 +116,7 @@ def test_reservation_release_is_exact_and_cannot_underflow() -> None:
     assert released.in_flight_market_data == 0
     assert released.in_flight_request_ids == frozenset()
 
-    import pytest
-    with pytest.raises(Exception, match="no in-flight reservation"):
+    with pytest.raises(BetfairRequestBudgetError, match="no in-flight reservation"):
         release_betfair_request(released, intent=intent)
 
 

@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 import json
 
 import pytest
@@ -2036,6 +2036,45 @@ def test_attempt_executor_records_provider_and_protocol_failures():
         concurrency_gate=concurrency_gate,
     )
     assert protocol_execution.outcome is MarketBookAttemptOutcome.PARSE_FAILURE
+
+
+def test_immediate_dispatch_observes_stateful_timezone_once_and_fails_future_closed():
+    plan = _plan()
+    batch = plan.batches[0]
+    client, transport = _client(_payload(batch.market_ids))
+    rate_gate, concurrency_gate = _gates()
+
+    class ChangingOffset(tzinfo):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def utcoffset(self, dt):
+            self.calls += 1
+            if self.calls == 1:
+                return timedelta(0)
+            return timedelta(hours=2)
+
+        def dst(self, dt):
+            return timedelta(0)
+
+    zone = ChangingOffset()
+    future = datetime(2026, 10, 6, 18, 0, tzinfo=zone)
+
+    with pytest.raises(ValueError, match="must not be in the future"):
+        read_market_book_batch(
+            client,
+            plan,
+            batch_id=batch.batch_id,
+            request_id="stateful-future",
+            scheduled_at=future,
+            rate_gate=rate_gate,
+            concurrency_gate=concurrency_gate,
+        )
+
+    assert zone.calls == 1
+    assert rate_gate.snapshot().markets == ()
+    assert concurrency_gate.snapshot().active == ()
+    assert transport.calls == []
 
 
 def test_immediate_dispatch_rejects_future_causal_instant_before_any_gate_mutation():

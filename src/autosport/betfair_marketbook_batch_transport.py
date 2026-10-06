@@ -121,12 +121,22 @@ def _dispatch_instant(
     value: object,
     *,
     transport_now: Callable[[_base.BetfairReadOnlyClient], datetime] = _transport_now,
+    datetime_type: type[datetime] = datetime,
+    timedelta_type: type[timedelta] = timedelta,
+    utc_timezone: timezone = timezone.utc,
 ) -> datetime:
-    if type(value) is not datetime:
+    if type(value) is not datetime_type:
         raise TypeError("scheduled_at must be an exact datetime")
-    if value.tzinfo is None or value.utcoffset() is None:
+    if value.tzinfo is None:
         raise ValueError("scheduled_at must be timezone-aware")
-    normalized = value.astimezone(timezone.utc)
+    offset = value.utcoffset()
+    if offset is None:
+        raise ValueError("scheduled_at must be timezone-aware")
+    if type(offset) is not timedelta_type:
+        raise TypeError("scheduled_at UTC offset must be an exact timedelta")
+    normalized = (value.replace(tzinfo=None) - offset).replace(
+        tzinfo=utc_timezone
+    )
     dispatch_now = transport_now(client)
 
     if normalized > dispatch_now:

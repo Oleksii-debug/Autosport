@@ -9,6 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from supervised_clock_test_support import install_trusted_clock, set_trusted_times
+
+install_trusted_clock()
+
 from betfair_execution_readback_test_support import semantic_authenticated_readback_client
 
 from autosport.betfair_account_readonly import (
@@ -84,11 +88,8 @@ APPROVAL_EXPIRES_AT = "2026-09-19T08:05:00+00:00"
 
 
 @pytest.fixture(autouse=True)
-def _fixed_supervised_clock(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "autosport.supervised_execution._trusted_now",
-        lambda: RESERVED_AT,
-    )
+def _fixed_supervised_clock() -> None:
+    set_trusted_times(RESERVED_AT)
 
 
 def _profile() -> BookmakerCapabilityProfile:
@@ -1030,10 +1031,7 @@ def test_transport_timeout_mocked_readback_stays_non_authoritative_for_retry(
             action_id=action.action_id,
         )
 
-        monkeypatch.setattr(
-            "autosport.supervised_execution._trusted_now",
-            lambda: "2026-09-19T08:00:06+00:00",
-        )
+        set_trusted_times("2026-09-19T08:00:06+00:00")
         retry_transport = _Transport(
             lambda request: _response(
                 request,

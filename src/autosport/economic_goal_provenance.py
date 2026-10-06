@@ -230,60 +230,71 @@ def _validate_provenance_bound(
     ):
         raise _error_type("contract_sha256 must be lowercase SHA-256 hex")
 
-def _make_provenance_post_init_authority(operation):
-    operation_code = operation.__code__
-    operation_defaults = operation.__defaults__
-    operation_kwdefaults = operation.__kwdefaults__
-    operation_kwdefault_items = tuple((operation_kwdefaults or {}).items())
-    nested_callables = tuple(
-        value
-        for value in (operation_defaults or ())
-        if callable(value)
-    )
-    nested_authority = tuple(
-        (
-            callable_object,
-            getattr(callable_object, "__code__", None),
-            getattr(callable_object, "__defaults__", None),
-            getattr(callable_object, "__kwdefaults__", None),
-            tuple(
-                (getattr(callable_object, "__kwdefaults__", None) or {}).items()
-            ),
+def _capture_callable_authority_graph(root):
+    """Capture every callable reachable through function defaults, cycle-safely."""
+
+    captured = []
+    seen: set[int] = set()
+
+    def visit(candidate) -> None:
+        if not callable(candidate):
+            return
+        identity = id(candidate)
+        if identity in seen:
+            return
+        seen.add(identity)
+        defaults = getattr(candidate, "__defaults__", None)
+        kwdefaults = getattr(candidate, "__kwdefaults__", None)
+        kwdefault_items = tuple((kwdefaults or {}).items())
+        captured.append(
+            (
+                candidate,
+                getattr(candidate, "__code__", None),
+                defaults,
+                kwdefaults,
+                kwdefault_items,
+            )
         )
-        for callable_object in nested_callables
-    )
+        for value in defaults or ():
+            if callable(value):
+                visit(value)
+        for _, value in kwdefault_items:
+            if callable(value):
+                visit(value)
+
+    visit(root)
+    return tuple(captured)
+
+
+def _make_provenance_post_init_authority(operation):
+    authority_graph = _capture_callable_authority_graph(operation)
     error_type = EconomicGoalProvenanceError
 
     def require_authority() -> None:
-        if operation.__code__ is not operation_code:
-            raise error_type("economic-goal provenance validator authority changed")
-        if operation.__defaults__ is not operation_defaults:
-            raise error_type("economic-goal provenance validator defaults authority changed")
-        if (
-            operation.__kwdefaults__ is not operation_kwdefaults
-            or tuple((operation.__kwdefaults__ or {}).items())
-            != operation_kwdefault_items
-        ):
-            raise error_type(
-                "economic-goal provenance validator keyword defaults authority changed"
-            )
-        for (
+        for index, (
             callable_object,
             expected_code,
             expected_defaults,
             expected_kwdefaults,
             expected_kwdefault_items,
-        ) in nested_authority:
+        ) in enumerate(authority_graph):
             if getattr(callable_object, "__code__", None) is not expected_code:
+                if index == 0:
+                    raise error_type("economic-goal provenance validator authority changed")
                 raise error_type("economic-goal provenance nested validator authority changed")
             if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                if index == 0:
+                    raise error_type("economic-goal provenance validator defaults authority changed")
                 raise error_type("economic-goal provenance nested validator defaults authority changed")
             current_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
             if (
                 current_kwdefaults is not expected_kwdefaults
-                or tuple((current_kwdefaults or {}).items())
-                != expected_kwdefault_items
+                or tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
             ):
+                if index == 0:
+                    raise error_type(
+                        "economic-goal provenance validator keyword defaults authority changed"
+                    )
                 raise error_type(
                     "economic-goal provenance nested validator keyword defaults authority changed"
                 )
@@ -294,7 +305,6 @@ def _make_provenance_post_init_authority(operation):
         require_authority()
 
     return bound
-
 
 _CANONICAL_GOAL_TYPE: Final = EconomicGoalContract
 _CANONICAL_GOAL_VALIDATOR: Final = EconomicGoalContract.__post_init__
@@ -329,22 +339,41 @@ def _provenance_init_authority(
 
 
 def _make_provenance_constructor_authority(operation):
-    operation_code = operation.__code__
-    operation_defaults = operation.__defaults__
-    operation_kwdefaults = operation.__kwdefaults__
+    authority_graph = _capture_callable_authority_graph(operation)
     error_type = EconomicGoalProvenanceError
 
     def require_authority() -> None:
-        if operation.__code__ is not operation_code:
-            raise error_type("economic-goal provenance constructor authority changed")
-        if operation.__defaults__ is not operation_defaults:
-            raise error_type(
-                "economic-goal provenance constructor defaults authority changed"
-            )
-        if operation.__kwdefaults__ is not operation_kwdefaults:
-            raise error_type(
-                "economic-goal provenance constructor keyword defaults authority changed"
-            )
+        for index, (
+            callable_object,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_kwdefault_items,
+        ) in enumerate(authority_graph):
+            if getattr(callable_object, "__code__", None) is not expected_code:
+                if index == 0:
+                    raise error_type("economic-goal provenance constructor authority changed")
+                raise error_type("economic-goal provenance constructor nested authority changed")
+            if getattr(callable_object, "__defaults__", None) is not expected_defaults:
+                if index == 0:
+                    raise error_type(
+                        "economic-goal provenance constructor defaults authority changed"
+                    )
+                raise error_type(
+                    "economic-goal provenance constructor nested defaults authority changed"
+                )
+            current_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
+            if (
+                current_kwdefaults is not expected_kwdefaults
+                or tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
+            ):
+                if index == 0:
+                    raise error_type(
+                        "economic-goal provenance constructor keyword defaults authority changed"
+                    )
+                raise error_type(
+                    "economic-goal provenance constructor nested keyword defaults authority changed"
+                )
 
     def bound(*args, **kwargs):
         require_authority()
@@ -353,7 +382,6 @@ def _make_provenance_constructor_authority(operation):
         return result
 
     return bound
-
 
 def _bind_provenance_constructor(operation):
     bound_operation = _make_provenance_constructor_authority(operation)
@@ -614,68 +642,32 @@ def _decision_identity_bound(
 
 
 def _make_provenance_authority(operation, label: str):
-    operation_code = operation.__code__
-    operation_defaults = operation.__defaults__
-    operation_kwdefaults = operation.__kwdefaults__
-    operation_kwdefault_items = tuple((operation_kwdefaults or {}).items())
-    nested_callables = tuple(
-        value
-        for value in (operation_defaults or ())
-        if callable(value)
-    )
-    nested_authority = tuple(
-        (
-            callable_object,
-            getattr(callable_object, "__code__", None),
-            getattr(callable_object, "__defaults__", None),
-            getattr(callable_object, "__kwdefaults__", None),
-            tuple(
-                (getattr(callable_object, "__kwdefaults__", None) or {}).items()
-            ),
-        )
-        for callable_object in nested_callables
-    )
+    authority_graph = _capture_callable_authority_graph(operation)
 
     def require_authority() -> None:
-        if operation.__code__ is not operation_code:
-            raise EconomicGoalProvenanceError(
-                f"{label} authority changed"
-            )
-        if operation.__defaults__ is not operation_defaults:
-            raise EconomicGoalProvenanceError(
-                f"{label} defaults authority changed"
-            )
-        if (
-            operation.__kwdefaults__ is not operation_kwdefaults
-            or tuple((operation.__kwdefaults__ or {}).items())
-            != operation_kwdefault_items
-        ):
-            raise EconomicGoalProvenanceError(
-                f"{label} keyword defaults authority changed"
-            )
-        for (
+        for index, (
             callable_object,
             expected_code,
             expected_defaults,
             expected_kwdefaults,
             expected_kwdefault_items,
-        ) in nested_authority:
+        ) in enumerate(authority_graph):
+            suffix = "" if index == 0 else " nested"
             if getattr(callable_object, "__code__", None) is not expected_code:
                 raise EconomicGoalProvenanceError(
-                    f"{label} nested authority changed"
+                    f"{label}{suffix} authority changed"
                 )
             if getattr(callable_object, "__defaults__", None) is not expected_defaults:
                 raise EconomicGoalProvenanceError(
-                    f"{label} nested defaults authority changed"
+                    f"{label}{suffix} defaults authority changed"
                 )
             current_kwdefaults = getattr(callable_object, "__kwdefaults__", None)
             if (
                 current_kwdefaults is not expected_kwdefaults
-                or tuple((current_kwdefaults or {}).items())
-                != expected_kwdefault_items
+                or tuple((current_kwdefaults or {}).items()) != expected_kwdefault_items
             ):
                 raise EconomicGoalProvenanceError(
-                    f"{label} nested keyword defaults authority changed"
+                    f"{label}{suffix} keyword defaults authority changed"
                 )
 
     def bound(*args, **kwargs):
@@ -685,7 +677,6 @@ def _make_provenance_authority(operation, label: str):
         return result
 
     return bound
-
 
 # Public authority-bearing operations intentionally expose no injectable helper
 # parameters.  The closures capture the already-bound canonical implementations,

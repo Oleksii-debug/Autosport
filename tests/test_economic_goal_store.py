@@ -1186,3 +1186,62 @@ def test_payload_encoder_ignores_rebound_enum_serialization_protocols(monkeypatc
     )
 
     assert economic_goal_to_payload(goal) == expected
+
+
+def test_public_goal_codec_authority_rejects_helper_injection() -> None:
+    goal = _goal()
+    payload = economic_goal_to_payload(goal)
+
+    with pytest.raises(TypeError):
+        economic_goal_to_payload(
+            goal,
+            _goal_validator=lambda contract: None,
+        )  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        economic_goal_from_payload(
+            payload,
+            _decimal_decoder=lambda name, value: Decimal("0"),
+        )  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        economic_goal_from_json(
+            "{}",
+            _payload_decoder=lambda payload: goal,
+        )  # type: ignore[call-arg]
+
+
+def test_store_constructor_rejects_path_authority_injection(tmp_path) -> None:
+    with pytest.raises(TypeError):
+        EconomicGoalStore(
+            tmp_path,
+            _path_constructor=lambda value: tmp_path,
+        )  # type: ignore[call-arg]
+
+
+def test_store_write_authority_rejects_transition_injection_without_mutation(tmp_path) -> None:
+    previous = _goal()
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(previous)
+    expanding = replace(previous, revision=2, max_stake_fraction=Decimal("0.03"))
+
+    with pytest.raises(TypeError):
+        store.persist_automatic_successor(
+            expanding,
+            _transition_validator=lambda before, after: None,
+        )  # type: ignore[call-arg]
+
+    assert EconomicGoalStore(tmp_path).load() == previous
+
+
+def test_store_public_methods_reject_writer_and_decoder_injection(tmp_path) -> None:
+    goal = _goal()
+    store = EconomicGoalStore(tmp_path)
+
+    with pytest.raises(TypeError):
+        store.initialize_owner(
+            goal,
+            _writer=lambda path, payload: None,
+        )  # type: ignore[call-arg]
+
+    store.initialize_owner(goal)
+    with pytest.raises(TypeError):
+        store.load(_json_decoder=lambda text: goal)  # type: ignore[call-arg]

@@ -283,6 +283,17 @@ def _sha256(value: object, field: str) -> str:
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
     _VERSION = 2
+    _ERROR_SCHEMA = "autosport.continuous_session.operational_error"
+    _ERROR_VERSION = 1
+    _ERROR_FIELDS = {
+        "schema",
+        "schema_version",
+        "session_id",
+        "source_id",
+        "observed_cycles_completed",
+        "observed_last_success_at",
+        "last_error_code",
+    }
     _FIELDS = {
         "schema",
         "schema_version",
@@ -358,7 +369,70 @@ class _ContinuousSessionState:
                     "source_state_projection_backlog": False,
                 },
             )
-            self._read()
+            raw = self._read()
+
+        self._session_id = raw["session_id"]
+        self._cycles_completed = raw["cycles_completed"]
+        self._last_success_at = raw["last_success_at"]
+        self._error_path = self.path.with_name(
+            f"{self.path.name}.operational_error.json"
+        )
+        if self._error_path.exists():
+            self._read_error_checkpoint()
+        else:
+            self._write_error_checkpoint(raw["last_error_code"])
+
+    def _read_error_checkpoint(self) -> dict[str, Any]:
+        try:
+            raw = strict_json_loads(self._error_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise ContinuousSessionError(
+                "cannot verify continuous session operational error checkpoint"
+            ) from exc
+        if (
+            type(raw) is not dict
+            or set(raw) != self._ERROR_FIELDS
+            or raw["schema"] != self._ERROR_SCHEMA
+            or raw["schema_version"] != self._ERROR_VERSION
+            or raw["session_id"] != self._session_id
+            or raw["source_id"] != self.source_id
+        ):
+            raise ContinuousSessionError(
+                "continuous session operational error checkpoint mismatch"
+            )
+        observed_cycles = raw["observed_cycles_completed"]
+        if (
+            isinstance(observed_cycles, bool)
+            or not isinstance(observed_cycles, int)
+            or observed_cycles < 0
+        ):
+            raise ContinuousSessionError(
+                "operational error observed_cycles_completed must be non-negative"
+            )
+        if raw["observed_last_success_at"] is not None:
+            _instant(
+                raw["observed_last_success_at"],
+                "operational error observed_last_success_at",
+            )
+        if raw["last_error_code"] is not None:
+            _text(raw["last_error_code"], "operational error last_error_code")
+        return raw
+
+    def _write_error_checkpoint(self, code: str | None) -> None:
+        if code is not None:
+            code = _text(code, "code")
+        atomic_write_json(
+            self._error_path,
+            {
+                "schema": self._ERROR_SCHEMA,
+                "schema_version": self._ERROR_VERSION,
+                "session_id": self._session_id,
+                "source_id": self.source_id,
+                "observed_cycles_completed": self._cycles_completed,
+                "observed_last_success_at": self._last_success_at,
+                "last_error_code": code,
+            },
+        )
 
     @staticmethod
     def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:
@@ -480,6 +554,19 @@ class _ContinuousSessionState:
 
     def snapshot(self) -> ContinuousSessionStatus:
         raw = self._read()
+        error_checkpoint = self._read_error_checkpoint()
+        marker_matches = (
+            error_checkpoint["observed_cycles_completed"] == raw["cycles_completed"]
+            and error_checkpoint["observed_last_success_at"] == raw["last_success_at"]
+        )
+        if marker_matches and error_checkpoint["last_error_code"] is not None:
+            durable_error = raw["last_error_code"]
+            checkpoint_error = error_checkpoint["last_error_code"]
+            if durable_error is not None and durable_error != checkpoint_error:
+                raise ContinuousSessionError(
+                    "continuous session error authorities conflict"
+                )
+            raw["last_error_code"] = checkpoint_error
         return ContinuousSessionStatus(
             session_id=raw["session_id"],
             source_id=raw["source_id"],
@@ -521,6 +608,8 @@ class _ContinuousSessionState:
                 raw["last_error_code"] = _text(reason, "reason")
 
         self._update(mutate)
+        if reason is not None:
+            self._write_error_checkpoint(None)
 
     @staticmethod
     def _normalized_settlement_evidence(
@@ -640,10 +729,13 @@ class _ContinuousSessionState:
             )
 
         self._update(mutate)
+        self._cycles_completed += 1
+        self._last_success_at = timestamp.isoformat()
+        self._write_error_checkpoint(None)
 
     def record_failure(self, *, code: str) -> None:
         code = _text(code, "code")
-        self._update(lambda raw: raw.__setitem__("last_error_code", code))
+        self._write_error_checkpoint(code)
 
 
 class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):

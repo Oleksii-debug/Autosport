@@ -2450,6 +2450,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     full_refresh=full_refresh,
                     settlement_evidence=resolutions,
                 )
+                committed_last_success_at = self._state._last_success_at
             except (SessionPausedError, SessionStoppedError):
                 raise
             except Exception as exc:
@@ -2483,7 +2484,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             invalidation_backlog=backlog,
             settled_ticket_ids=settled,
             settlement_evidence_ids=evidence_ids,
-            last_success_at=self._state.snapshot().last_success_at or now,
+            last_success_at=committed_last_success_at or now,
         )
 
 # Seal the consumer entry after class creation. The metaclass data descriptor also

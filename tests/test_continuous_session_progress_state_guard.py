@@ -1177,13 +1177,22 @@ def test_tick_ignores_instance_shadowed_success_publication() -> None:
         coordinator.required_history = None
         coordinator.market_store = object()
         coordinator.settlement_learning_handoff = None
+        coordinator.outcome_authority = None
 
         class SuccessfulCycle:
             provider_unavailable = False
             source_id = "provider-a"
             committed_delta_ids = ()
 
+        class DeltaStore:
+            def deltas_after_commit(self, **_kwargs):
+                return ()
+
         class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = DeltaStore()
+
             def run_cycle(self):
                 return SuccessfulCycle()
 
@@ -1203,14 +1212,8 @@ def test_tick_ignores_instance_shadowed_success_publication() -> None:
             (),
             {"input_ids": frozenset()},
         )()
-        coordinator._refresh_source_state_projection = (  # type: ignore[method-assign]
-            lambda: state.snapshot()
-        )
         coordinator._drain_invalidations = (  # type: ignore[method-assign]
             lambda: ((), False, False)
-        )
-        coordinator._settlement_resolutions = (  # type: ignore[method-assign]
-            lambda **_kwargs: ()
         )
 
         def attacker_record_success(**_kwargs):
@@ -1301,12 +1304,34 @@ def test_tick_ignores_instance_shadowed_settlement_history_validator() -> None:
         coordinator.market_store = object()
         coordinator.settlement_learning_handoff = None
 
+        class LifecycleRecord:
+            phase = continuous_session.EventPhase.COMPLETED
+            identity = "event-1"
+            settlement_ref = "settlement-1"
+            completion_discovered_at = _AT
+            settlement_discovered_at = _AT
+
+        class OutcomeAuthority:
+            def resolve(self, _record, *, as_of: str):
+                assert as_of == _AT
+                return conflicting
+
+        coordinator.outcome_authority = OutcomeAuthority()
+
         class SuccessfulCycle:
             provider_unavailable = False
             source_id = "provider-a"
             committed_delta_ids = ()
 
+        class DeltaStore:
+            def deltas_after_commit(self, **_kwargs):
+                return ()
+
         class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = DeltaStore()
+
             def run_cycle(self):
                 return SuccessfulCycle()
 
@@ -1318,6 +1343,9 @@ def test_tick_ignores_instance_shadowed_settlement_history_validator() -> None:
             def register_eligible(self, *_args, **_kwargs):
                 return ()
 
+            def records(self):
+                return (LifecycleRecord(),)
+
         coordinator.collector = Collector()
         coordinator.desktop_consumer = DesktopConsumer()
         coordinator.lifecycle = Lifecycle()
@@ -1326,14 +1354,8 @@ def test_tick_ignores_instance_shadowed_settlement_history_validator() -> None:
             (),
             {"input_ids": frozenset()},
         )()
-        coordinator._refresh_source_state_projection = (  # type: ignore[method-assign]
-            lambda: state.snapshot()
-        )
         coordinator._drain_invalidations = (  # type: ignore[method-assign]
             lambda: ((), False, False)
-        )
-        coordinator._settlement_resolutions = (  # type: ignore[method-assign]
-            lambda **_kwargs: (conflicting,)
         )
 
         def attacker_validate_settlement_evidence(**_kwargs) -> None:
@@ -1379,6 +1401,180 @@ def test_tick_rejects_class_rebound_settlement_history_validator(
             continuous_session._ContinuousSessionState,
             "validate_settlement_evidence",
             attacker_validate_settlement_evidence,
+        )
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical coordinator running-fence authority changed",
+        ):
+            coordinator.tick()
+
+
+def test_tick_ignores_instance_shadowed_source_projection_refresh() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path, state = _state(root)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+        coordinator.causal_view = continuous_session.CausalView.AS_KNOWN_AT_DECISION
+        coordinator.required_history = None
+        coordinator.market_store = object()
+        coordinator.settlement_learning_handoff = None
+        coordinator.outcome_authority = None
+
+        class SuccessfulCycle:
+            provider_unavailable = False
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+        class DeltaStore:
+            def deltas_after_commit(self, **_kwargs):
+                return ()
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = DeltaStore()
+
+            def run_cycle(self):
+                return SuccessfulCycle()
+
+        class DesktopConsumer:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = DesktopConsumer()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = type(
+            "DependencyIndexStub",
+            (),
+            {"input_ids": frozenset()},
+        )()
+        coordinator._drain_invalidations = (  # type: ignore[method-assign]
+            lambda: ((), False, False)
+        )
+
+        def attacker_refresh():
+            raise AssertionError("instance-shadowed source projection refresh executed")
+
+        coordinator._refresh_source_state_projection = (  # type: ignore[method-assign]
+            attacker_refresh
+        )
+
+        result = coordinator.tick()
+
+        assert result.cycle_index == 1
+        durable = json.loads(path.read_text(encoding="utf-8"))
+        assert durable["cycles_completed"] == 1
+
+
+def test_tick_ignores_instance_shadowed_settlement_resolver() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path, state = _state(root)
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+        coordinator.causal_view = continuous_session.CausalView.AS_KNOWN_AT_DECISION
+        coordinator.required_history = None
+        coordinator.market_store = object()
+        coordinator.settlement_learning_handoff = None
+        coordinator.outcome_authority = None
+
+        class SuccessfulCycle:
+            provider_unavailable = False
+            source_id = "provider-a"
+            committed_delta_ids = ()
+
+        class DeltaStore:
+            def deltas_after_commit(self, **_kwargs):
+                return ()
+
+        class Collector:
+            source_id = "provider-a"
+            config = type("ConfigStub", (), {"max_items": 1})()
+            delta_store = DeltaStore()
+
+            def run_cycle(self):
+                return SuccessfulCycle()
+
+        class DesktopConsumer:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = Collector()
+        coordinator.desktop_consumer = DesktopConsumer()
+        coordinator.lifecycle = Lifecycle()
+        coordinator.dependency_index = type(
+            "DependencyIndexStub",
+            (),
+            {"input_ids": frozenset()},
+        )()
+        coordinator._drain_invalidations = (  # type: ignore[method-assign]
+            lambda: ((), False, False)
+        )
+
+        def attacker_resolver(**_kwargs):
+            raise AssertionError("instance-shadowed settlement resolver executed")
+
+        coordinator._settlement_resolutions = (  # type: ignore[method-assign]
+            attacker_resolver
+        )
+
+        result = coordinator.tick()
+
+        assert result.cycle_index == 1
+        durable = json.loads(path.read_text(encoding="utf-8"))
+        assert durable["settlement_evidence"] == []
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ("_refresh_source_state_projection", "_settlement_resolutions"),
+)
+def test_tick_rejects_class_rebound_canonical_composition(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        _, state = _state(Path(directory))
+        coordinator = object.__new__(
+            continuous_session.ContinuousSessionCoordinator
+        )
+        coordinator._state = state
+        coordinator.clock = lambda: _AT
+
+        class Collector:
+            def run_cycle(self):
+                raise AssertionError(
+                    "collector ran after canonical composition authority changed"
+                )
+
+        coordinator.collector = Collector()
+
+        def attacker(*_args, **_kwargs):
+            raise AssertionError(
+                f"class-rebound canonical composition executed: {method_name}"
+            )
+
+        monkeypatch.setattr(
+            continuous_session.ContinuousSessionCoordinator,
+            method_name,
+            attacker,
         )
 
         with pytest.raises(

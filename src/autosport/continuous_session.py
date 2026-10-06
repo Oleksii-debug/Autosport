@@ -2661,6 +2661,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _validate_settlement_evidence_method_code: object = (
             _ContinuousSessionState.validate_settlement_evidence.__code__
         ),
+        _refresh_source_state_projection_method: Callable[
+            ["ContinuousSessionCoordinator"], ContinuousSessionStatus
+        ] = _refresh_source_state_projection,
+        _refresh_source_state_projection_method_code: object = (
+            _refresh_source_state_projection.__code__
+        ),
+        _settlement_resolutions_method: Callable[
+            ..., tuple[SettlementResolution, ...]
+        ] = _settlement_resolutions,
+        _settlement_resolutions_method_code: object = _settlement_resolutions.__code__,
         _instant_validator: Callable[[object, str], datetime] = _instant,
         _instant_validator_code: object = _instant.__code__,
     ) -> ContinuousTickResult:
@@ -2680,6 +2690,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             is not _validate_settlement_evidence_method
             or getattr(_validate_settlement_evidence_method, "__code__", None)
             is not _validate_settlement_evidence_method_code
+            or type(self)._refresh_source_state_projection
+            is not _refresh_source_state_projection_method
+            or getattr(_refresh_source_state_projection_method, "__code__", None)
+            is not _refresh_source_state_projection_method_code
+            or type(self)._settlement_resolutions is not _settlement_resolutions_method
+            or getattr(_settlement_resolutions_method, "__code__", None)
+            is not _settlement_resolutions_method_code
             or _instant is not _instant_validator
             or getattr(_instant_validator, "__code__", None)
             is not _instant_validator_code
@@ -2773,7 +2790,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "canonical session generation"
                 )
             try:
-                source_snapshot = self._refresh_source_state_projection()
+                source_snapshot = _refresh_source_state_projection_method(self)
                 source_gap_states = (
                     ()
                     if source_snapshot.source_gap_state is None
@@ -2818,7 +2835,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     if input_id not in newly_registered:
                         newly_registered.append(input_id)
 
-                resolutions = self._settlement_resolutions(as_of=now)
+                resolutions = _settlement_resolutions_method(self, as_of=now)
                 _validate_settlement_evidence_method(
                     self._state,
                     settlement_evidence=resolutions,

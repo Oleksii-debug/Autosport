@@ -492,7 +492,8 @@ class BetfairPlaceExecutionReport:
         return _digest(
             {
                 "schema": "autosport.betfair_place_execution_report",
-                "schema_version": 1,
+                "schema_version": 2,
+                "provider_origin_authoritative": self.provider_origin_authoritative,
                 "bookmaker_id": self.bookmaker_id,
                 "account_id": self.account_id,
                 "action_id": self.action_id,

@@ -769,6 +769,47 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 wait[0]["provider_health"][0]["eligibility"],
                 "failed",
             )
+            canonical_wait = loop._validated_actionability_wait_evidence(
+                tuple(wait)
+            )
+            frozen_boundaries = tuple(
+                ProviderHealthReplayBoundary.from_dict(value)
+                for value in latest.to_dict()["payload"]["health_boundaries"]
+            )
+            loop._require_actionability_wait_provider_health_truth(
+                canonical_wait,
+                as_of=clock.value,
+                health_boundaries=frozen_boundaries,
+            )
+
+            forged_wait = copy.deepcopy(wait)
+            forged_wait[0]["provider_health"][0]["source_status"] = "healthy"
+            forged_core = {
+                key: value
+                for key, value in forged_wait[0].items()
+                if key != "evidence_sha256"
+            }
+            forged_wait[0]["evidence_sha256"] = hashlib.sha256(
+                json.dumps(
+                    forged_core,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            canonical_forged = loop._validated_actionability_wait_evidence(
+                tuple(forged_wait)
+            )
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "conflicts with frozen source history",
+            ):
+                loop._require_actionability_wait_provider_health_truth(
+                    canonical_forged,
+                    as_of=clock.value,
+                    health_boundaries=frozen_boundaries,
+                )
             loop.close()
 
 

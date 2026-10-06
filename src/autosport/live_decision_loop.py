@@ -2884,6 +2884,56 @@ class PersistentLiveDecisionLoop:
                         "the exact decision health boundaries"
                     )
 
+    def _require_actionability_wait_provider_health_truth(
+        self,
+        wait_evidence: tuple[dict[str, object], ...],
+        *,
+        as_of: datetime,
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None,
+    ) -> None:
+        self._require_actionability_wait_health_boundaries(
+            wait_evidence,
+            health_boundaries,
+        )
+        provider_rows = tuple(
+            health
+            for item in wait_evidence
+            for health in item["provider_health"]
+        )
+        if not provider_rows:
+            return
+        gate = self._health_gate
+        if gate is None:
+            raise LiveDecisionProgressError(
+                "actionability WAIT provider-health evidence lacks canonical health gate"
+            )
+        for health in provider_rows:
+            boundary = ProviderHealthReplayBoundary.from_dict(
+                health["replay_boundary"]
+            )
+            try:
+                expected = gate.provider_health(
+                    boundary.source_id,
+                    as_of=as_of,
+                    replay_boundary=boundary,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT provider-health history cannot be replayed"
+                ) from exc
+            expected_row = {
+                "source_id": expected.source_id,
+                "eligibility": expected.eligibility.value,
+                "source_status": expected.source_status,
+                "last_success_at": expected.last_success_at,
+                "replay_boundary": expected.replay_boundary.to_dict(),
+            }
+            if health != expected_row:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT provider-health row conflicts with "
+                    "frozen source history"
+                )
+
     def _derive_actionability_wait_evidence(
         self,
         input_ids: tuple[str, ...],
@@ -3582,9 +3632,14 @@ class PersistentLiveDecisionLoop:
             else self._health_boundaries_for_progress()
         )
         if canonical_actionability_wait is not None:
-            self._require_actionability_wait_health_boundaries(
+            _, wait_decision_time = _canonical_timestamp(
+                "actionability WAIT decision_ts",
+                plan.decision_ts,
+            )
+            self._require_actionability_wait_provider_health_truth(
                 canonical_actionability_wait,
-                decision_health_boundaries,
+                as_of=wait_decision_time,
+                health_boundaries=decision_health_boundaries,
             )
         bind_actionability_wait_evidence = True
         if (
@@ -3931,9 +3986,14 @@ class PersistentLiveDecisionLoop:
                         ) from exc
                 if canonical_actionability_wait is not None:
                     try:
-                        self._require_actionability_wait_health_boundaries(
+                        _, existing_wait_time = _canonical_timestamp(
+                            "durable actionability WAIT decision_ts",
+                            plan.decision_ts,
+                        )
+                        self._require_actionability_wait_provider_health_truth(
                             canonical_actionability_wait,
-                            existing_health_boundaries,
+                            as_of=existing_wait_time,
+                            health_boundaries=existing_health_boundaries,
                         )
                     except (LiveDecisionProgressError, TypeError, ValueError) as exc:
                         raise DecisionLedgerIntegrityError(
@@ -5764,9 +5824,10 @@ class PersistentLiveDecisionLoop:
                 wait_evidence = self._validated_actionability_wait_evidence(
                     detached_payload.get("actionability_wait_evidence")
                 )
-                self._require_actionability_wait_health_boundaries(
+                self._require_actionability_wait_provider_health_truth(
                     wait_evidence,
-                    progress.health_boundaries,
+                    as_of=committed_decision_time,
+                    health_boundaries=progress.health_boundaries,
                 )
             except (LiveDecisionProgressError, TypeError, ValueError) as exc:
                 raise DecisionLedgerIntegrityError(

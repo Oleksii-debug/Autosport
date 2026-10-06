@@ -1631,6 +1631,10 @@ class _ContinuousSessionState:
             ["_ContinuousSessionState", str | None], None
         ] = _write_error_checkpoint,
         _write_error_checkpoint_code: object = _write_error_checkpoint.__code__,
+        _checkpoint_identity_token: Callable[
+            ["_ContinuousSessionState"], tuple[int, int, int, int, int]
+        ] = _checkpoint_identity_token,
+        _checkpoint_identity_token_code: object = _checkpoint_identity_token.__code__,
         _text_validator: Callable[[object, str], str] = _text,
         _text_validator_code: object = _text.__code__,
     ) -> _ContinuousSessionFailurePublication:
@@ -1653,11 +1657,25 @@ class _ContinuousSessionState:
             or type(self)._write_error_checkpoint is not _write_error_checkpoint
             or getattr(_write_error_checkpoint, "__code__", None)
             is not _write_error_checkpoint_code
+            or type(self)._checkpoint_identity_token is not _checkpoint_identity_token
+            or getattr(_checkpoint_identity_token, "__code__", None)
+            is not _checkpoint_identity_token_code
         ):
             raise ContinuousSessionError(
                 "canonical failure publication lock authority changed"
             )
         with _durable_path_lock(self.path):
+            # A canonical writer can crash after publishing the main checkpoint
+            # but before publishing the bounded sidecar tombstone.  Sidecar-only
+            # fencing therefore cannot prove that this cached generation is still
+            # current.  The already-established checkpoint identity token is a
+            # bounded stat/open identity witness: reject a stale publisher without
+            # performing the O(settlement-history) canonical _read().
+            if _checkpoint_identity_token(self) != self._checkpoint_token:
+                raise ContinuousSessionError(
+                    "stale continuous session instance cannot publish operational "
+                    "failure after canonical checkpoint changed"
+                )
             if self._last_error_code is not None and self._last_error_code != code:
                 raise ContinuousSessionError(
                     "operational failure conflicts with canonical session reason"

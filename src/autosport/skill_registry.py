@@ -512,6 +512,11 @@ class SkillRegistry:
             if not _close_pipe_endpoints(receiver,sender):
                 return None,"HANDLER_PROCESS_CONSTRUCTION_PIPE_CLOSE_FAILED"
             return None,"HANDLER_PROCESS_CONSTRUCTION_"+exc.__class__.__name__.upper()
+        except BaseException:
+            # Process-control interruption is not a handler failure, but parent
+            # pipe resources created before construction must still be released.
+            _close_pipe_endpoints(receiver,sender)
+            raise
         try:
             process.start()
         except Exception as exc:
@@ -527,6 +532,12 @@ class SkillRegistry:
             if not pipe_close_ok:
                 return None,"HANDLER_START_PIPE_CLOSE_FAILED"
             return None,"HANDLER_START_"+exc.__class__.__name__.upper()
+        except BaseException:
+            # A partially-started child must not survive an operator/process
+            # control interruption in the parent.
+            _stop_process_bounded(process)
+            _close_pipe_endpoints(receiver,sender)
+            raise
         try:
             sender.close()
         except Exception:
@@ -537,6 +548,10 @@ class SkillRegistry:
             if stop_error == "STOP_FAILED":
                 return None,"HANDLER_PROCESS_STOP_FAILED"
             return None,"HANDLER_RESULT_PIPE_CLOSE_FAILED"
+        except BaseException:
+            _stop_process_bounded(process)
+            _close_pipe_endpoints(receiver,sender)
+            raise
         try:
             process.join(timeout_seconds)
         except Exception:
@@ -549,6 +564,10 @@ class SkillRegistry:
             if not pipe_close_ok:
                 return None,"HANDLER_PROCESS_PIPE_CLOSE_FAILED"
             return None,"HANDLER_PROCESS_JOIN_FAILED"
+        except BaseException:
+            _stop_process_bounded(process)
+            _close_pipe_endpoints(receiver)
+            raise
         try:
             alive = process.is_alive()
         except Exception:
@@ -561,6 +580,10 @@ class SkillRegistry:
             if not pipe_close_ok:
                 return None,"HANDLER_PROCESS_PIPE_CLOSE_FAILED"
             return None,"HANDLER_PROCESS_STATE_UNAVAILABLE"
+        except BaseException:
+            _stop_process_bounded(process)
+            _close_pipe_endpoints(receiver)
+            raise
         if alive:
             # The timeout is an execution-authority boundary, not the start of
             # another multi-second wait. Force-stop the isolated child first,
@@ -586,6 +609,10 @@ class SkillRegistry:
             if not pipe_close_ok:
                 return None,"HANDLER_RESULT_PIPE_CLOSE_FAILED"
             return None,"HANDLER_RESULT_UNAVAILABLE"
+        except BaseException:
+            _close_pipe_endpoints(receiver)
+            _close_process_handle(process)
+            raise
         if not has_result:
             pipe_close_ok = _close_pipe_endpoints(receiver)
             handle_close_ok = _close_process_handle(process)
@@ -604,6 +631,10 @@ class SkillRegistry:
             if not pipe_close_ok:
                 return None,"HANDLER_RESULT_PIPE_CLOSE_FAILED"
             return None,"HANDLER_RESULT_UNAVAILABLE"
+        except BaseException:
+            _close_pipe_endpoints(receiver)
+            _close_process_handle(process)
+            raise
         pipe_close_ok = _close_pipe_endpoints(receiver)
         handle_close_ok = _close_process_handle(process)
         if not handle_close_ok:

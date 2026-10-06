@@ -465,7 +465,17 @@ class SkillRegistry:
             if denial:return self._run(e)
         h=self._handlers.get(d.version_key)
         if h is None:return self._finish_failure(rid,now,"HANDLER_UNAVAILABLE")
-        r,error=self._execute_handler_bounded(h,payload,d.timeout_seconds)
+        try:
+            r,error=self._execute_handler_bounded(h,payload,d.timeout_seconds)
+        except Exception as exc:
+            # RUNNING is already durable here. Any ordinary infrastructure
+            # exception must therefore become terminal durable truth rather
+            # than strand the run until a later restart recovery pass.
+            # BaseException remains intentionally outside this boundary so
+            # process-control interruptions still require explicit recovery.
+            return self._finish_failure(
+                rid, now, "HANDLER_INFRASTRUCTURE_" + exc.__class__.__name__.upper()
+            )
         if error is not None:return self._finish_failure(rid,now,error)
         try:
             if not isinstance(r,SkillExecutionResult):raise SkillRegistryError("skill handler must return SkillExecutionResult")

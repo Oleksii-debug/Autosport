@@ -1099,6 +1099,23 @@ def test_handler_initial_state_query_failure_stops_child_and_becomes_terminal_tr
     assert process.state_calls == 2
 
 
+
+def test_handler_context_failure_after_running_is_durable_terminal_truth(tmp_path, monkeypatch):
+    registry = _registry(tmp_path)
+    definition = _definition("diagnose_provider_gap")
+
+    def fail_context(_method):
+        raise RuntimeError("simulated multiprocessing context failure")
+
+    monkeypatch.setattr(skill_registry_module.multiprocessing, "get_context", fail_context)
+
+    run = _invoke(registry, definition, payload={})
+
+    assert run.status is SkillRunStatus.FAILED
+    assert run.error_code == "HANDLER_INFRASTRUCTURE_RUNTIMEERROR"
+    assert run.completed_at is not None
+    assert SkillRegistry(registry.path).get_run(run.run_id) == run
+
 def test_handler_timeout_terminates_and_persists_terminal_failure(tmp_path):
     registry = SkillRegistry.initialize(tmp_path / "skills.json")
     definition = SkillDefinition(

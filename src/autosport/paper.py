@@ -871,6 +871,13 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
     directory_fsync_fsync = os.fsync
     directory_fsync_close = os.close
     directory_fsync_o_directory = getattr(os, "O_DIRECTORY", None)
+    snapshot_path_type = type(Path("."))
+    snapshot_path_exists = snapshot_path_type.exists
+    snapshot_path_exists_code = snapshot_path_exists.__code__
+    snapshot_path_mkdir = snapshot_path_type.mkdir
+    snapshot_path_mkdir_code = snapshot_path_mkdir.__code__
+    snapshot_path_parent = snapshot_path_type.parent
+    snapshot_path_name = snapshot_path_type.name
     snapshot_helper_authorities = None
     snapshot_helper_names = (
         "_require_finite",
@@ -1002,7 +1009,9 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             raise ValueError("PaperBook snapshot path dispatch changed")
         if snapshot_path_function.__code__ is not snapshot_path_code:
             raise ValueError("PaperBook snapshot path authority changed")
+        require_snapshot_path_dependencies()
         result = snapshot_path_function(path)
+        require_snapshot_path_dependencies()
         if snapshot_path_function.__code__ is not snapshot_path_code:
             raise ValueError("PaperBook snapshot path authority changed")
         return result
@@ -1018,6 +1027,22 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
         if lifecycle_json_function.__code__ is not lifecycle_json_code:
             raise ValueError("PaperBook lifecycle serializer authority changed")
         return result
+
+    def require_snapshot_path_dependencies() -> None:
+        if type(Path(".")) is not snapshot_path_type:
+            raise ValueError("PaperBook snapshot concrete Path type changed")
+        if snapshot_path_type.exists is not snapshot_path_exists:
+            raise ValueError("PaperBook snapshot exists authority changed")
+        if snapshot_path_exists.__code__ is not snapshot_path_exists_code:
+            raise ValueError("PaperBook snapshot exists callable authority changed")
+        if snapshot_path_type.mkdir is not snapshot_path_mkdir:
+            raise ValueError("PaperBook snapshot mkdir authority changed")
+        if snapshot_path_mkdir.__code__ is not snapshot_path_mkdir_code:
+            raise ValueError("PaperBook snapshot mkdir callable authority changed")
+        if snapshot_path_type.parent is not snapshot_path_parent:
+            raise ValueError("PaperBook snapshot parent descriptor authority changed")
+        if snapshot_path_type.name is not snapshot_path_name:
+            raise ValueError("PaperBook snapshot name descriptor authority changed")
 
     def require_directory_fsync_dependencies() -> None:
         if os is not directory_fsync_os_module:
@@ -1046,9 +1071,11 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             raise ValueError("PaperBook directory fsync dispatch changed")
         if fsync_directory_function.__code__ is not fsync_directory_code:
             raise ValueError("PaperBook directory fsync authority changed")
+        require_snapshot_path_dependencies()
         require_directory_fsync_dependencies()
         ensure_parent_function(canonical_type, directory)
         require_directory_fsync_dependencies()
+        require_snapshot_path_dependencies()
         if canonical_type.__dict__.get("_fsync_snapshot_directory") is not fsync_directory_descriptor:
             raise ValueError("PaperBook directory fsync dispatch changed")
         if fsync_directory_function.__code__ is not fsync_directory_code:

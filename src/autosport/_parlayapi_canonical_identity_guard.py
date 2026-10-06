@@ -26,7 +26,7 @@ def _declared_text(event: dict[str, Any], field: str) -> str | None:
     if field not in event or event[field] is None:
         return None
     value = event[field]
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise provider.ProviderPayloadError(f"event {field} must be a string")
     if not value or value != value.strip():
         raise provider.ProviderPayloadError(
@@ -91,11 +91,13 @@ def _event_binding(event: dict[str, Any], expected_sport: str) -> tuple[str | No
 
 def _validate_stable_bookmaker_keys(events: list[dict[str, Any]]) -> None:
     for event in events:
+        if type(event) is not dict:
+            raise provider.ProviderPayloadError("event entries must be objects")
         bookmakers = event.get("bookmakers", [])
-        if not isinstance(bookmakers, list):
+        if type(bookmakers) is not list:
             raise provider.ProviderPayloadError("event bookmakers must be a list")
         for bookmaker in bookmakers:
-            if not isinstance(bookmaker, dict):
+            if type(bookmaker) is not dict:
                 raise provider.ProviderPayloadError("bookmaker entries must be objects")
             if "key" not in bookmaker:
                 raise provider.ProviderPayloadError(
@@ -107,10 +109,10 @@ def _validate_stable_bookmaker_keys(events: list[dict[str, Any]]) -> None:
                 allow_colon=False,
             )
             markets = bookmaker.get("markets", [])
-            if not isinstance(markets, list):
+            if type(markets) is not list:
                 raise provider.ProviderPayloadError("bookmaker markets must be a list")
             for market in markets:
-                if not isinstance(market, dict):
+                if type(market) is not dict:
                     raise provider.ProviderPayloadError("market entries must be objects")
                 raw_market_key = market.get("key")
                 if raw_market_key is None or raw_market_key == "":
@@ -128,6 +130,8 @@ def _strict_snapshot_quotes(
     observed_ts: str,
     http_status: int,
 ) -> Iterator[ProviderQuote]:
+    if type(events) is not list:
+        raise provider.ProviderPayloadError("provider snapshot must be a list")
     _validate_stable_bookmaker_keys(events)
 
     event_bindings: dict[str, tuple[str | None, ...]] = {}

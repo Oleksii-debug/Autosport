@@ -58,48 +58,24 @@ def _make_paperbook_market_semantics_authority():
     return require
 
 
-class _TicketForCapitalProbe:
-    __slots__ = ("stake", "legs")
-
-    def __init__(self, *, stake: Decimal, legs: tuple[TicketLeg, ...]) -> None:
-        self.stake = stake
-        self.legs = legs
-
-
 def _make_paperbook_locked_capital_authority():
     calculator = locked_capital_for_exchange_side
     calculator_code = calculator.__code__
 
-    def calculate(ticket: PaperTicket) -> Decimal:
+    def calculate(stake: Decimal, leg: TicketLeg) -> Decimal:
         if calculator.__code__ is not calculator_code:
             raise ValueError("PaperBook exchange exposure authority changed")
-        if type(ticket) is not PaperTicket or type(ticket.legs) is not tuple:
-            raise ValueError("PaperBook ticket must be canonical before locked-capital calculation")
-        if len(ticket.legs) != 1:
-            if any(
-                type(leg) is TicketLeg
-                and leg.exchange_side == "lay"
-                for leg in ticket.legs
-            ):
-                raise ValueError(
-                    "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
-                )
-            result = calculator(
-                stake=ticket.stake,
-                odds=Decimal("2"),
-                exchange_side="BACK",
-            )
-            if result != ticket.stake:
-                raise ValueError("PaperBook BACK locked-capital authority changed")
-            return ticket.stake
-        leg = ticket.legs[0]
+        if type(stake) is not Decimal:
+            raise ValueError("PaperBook locked-capital stake must be an exact Decimal")
         if type(leg) is not TicketLeg:
-            raise ValueError("PaperBook ticket leg must be canonical before locked-capital calculation")
+            raise ValueError(
+                "PaperBook ticket leg must be canonical before locked-capital calculation"
+            )
         side = leg.exchange_side
         if side is None:
             side = "back"
         result = calculator(
-            stake=ticket.stake,
+            stake=stake,
             odds=leg.locked_odds,
             exchange_side=side,
         )
@@ -2063,16 +2039,20 @@ class PaperBook:
         _debit_balance=None,
     ) -> PaperTicket:
         amount = _canonical_decimal(type(self), stake, "stake")
-        new_balance = _debit_balance(
-            type(self),
-            self.balance,
-            _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(
-                _TicketForCapitalProbe(
-                    stake=amount,
-                    legs=ticket_legs,
-                )
-            ),
+        if any(
+            type(leg) is TicketLeg and leg.exchange_side == "lay"
+            for leg in ticket_legs
+        ) and (len(ticket_legs) != 1):
+            raise ValueError(
+                "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
+            )
+        economic_leg = ticket_legs[0] if len(ticket_legs) == 1 else None
+        locked_capital = (
+            amount
+            if economic_leg is None
+            else _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(amount, economic_leg)
         )
+        new_balance = _debit_balance(type(self), self.balance, locked_capital)
 
         ticket_placed_at = self._validate_placed_at(
             placed_at if placed_at is not None else _placed_at_now()

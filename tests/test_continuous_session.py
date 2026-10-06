@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -999,6 +1000,59 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+
+    def test_status_rejects_invalidation_pending_descriptor_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                with patch.object(
+                    BoundedMirrorInvalidationBuffer,
+                    "pending_count",
+                    new=property(lambda self: 0),
+                ):
+                    with self.assertRaisesRegex(
+                        ContinuousSessionError,
+                        "canonical invalidation status authority changed",
+                    ):
+                        coordinator.status()
+            finally:
+                store.close()
+
+    def test_status_rejects_non_boolean_invalidation_full_refresh_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                invalidations = coordinator.invalidation_buffer
+                invalidations._full_refresh_required = 1
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "invalidation buffer status state is invalid",
+                ):
+                    coordinator.status()
+            finally:
+                store.close()
 
     def test_tick_preserves_primary_failure_when_checkpoint_persistence_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

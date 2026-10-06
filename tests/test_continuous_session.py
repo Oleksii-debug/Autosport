@@ -1029,6 +1029,44 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+
+    def test_status_rejects_invalidation_buffer_subclass_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                canonical = coordinator.invalidation_buffer
+
+                class ForgedInvalidationBuffer(BoundedMirrorInvalidationBuffer):
+                    @property
+                    def pending_count(self) -> int:
+                        return 0
+
+                    @property
+                    def full_refresh_required(self) -> bool:
+                        return False
+
+                coordinator.invalidation_buffer = ForgedInvalidationBuffer(
+                    canonical.mirror
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "canonical invalidation buffer subtype is not supported",
+                ):
+                    coordinator.status()
+            finally:
+                store.close()
+
     def test_status_rejects_non_boolean_invalidation_full_refresh_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

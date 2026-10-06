@@ -85,15 +85,42 @@ _CANONICAL_PROVENANCE_TYPE: Final = EconomicGoalProvenance
 _CANONICAL_PROVENANCE_VALIDATOR: Final = EconomicGoalProvenance.__post_init__
 
 
+def _build_provenance(
+    *,
+    schema: str,
+    schema_version: int,
+    goal_id: str,
+    revision: int,
+    bankroll_id: str,
+    contract_sha256: str,
+    _provenance_type=_CANONICAL_PROVENANCE_TYPE,
+    _validator=_CANONICAL_PROVENANCE_VALIDATOR,
+    _object_new=object.__new__,
+    _object_setattr=object.__setattr__,
+) -> EconomicGoalProvenance:
+    evidence = _object_new(_provenance_type)
+    for name, value in (
+        ("schema", schema),
+        ("schema_version", schema_version),
+        ("goal_id", goal_id),
+        ("revision", revision),
+        ("bankroll_id", bankroll_id),
+        ("contract_sha256", contract_sha256),
+    ):
+        _object_setattr(evidence, name, value)
+    _validator(evidence)
+    return evidence
+
+
 def _snapshot_provenance(
     provenance: EconomicGoalProvenance,
     _provenance_type=_CANONICAL_PROVENANCE_TYPE,
-    _validator=_CANONICAL_PROVENANCE_VALIDATOR,
+    _builder=_build_provenance,
     _error_type=EconomicGoalProvenanceError,
 ) -> EconomicGoalProvenance:
     if type(provenance) is not _provenance_type:
         raise _error_type("provenance must be EconomicGoalProvenance")
-    snapshot = _provenance_type(
+    return _builder(
         schema=provenance.schema,
         schema_version=provenance.schema_version,
         goal_id=provenance.goal_id,
@@ -101,9 +128,6 @@ def _snapshot_provenance(
         bankroll_id=provenance.bankroll_id,
         contract_sha256=provenance.contract_sha256,
     )
-    _validator(snapshot)
-    return snapshot
-
 
 def _decision_identity_bound(
     self: EconomicGoalProvenance,
@@ -159,6 +183,7 @@ def _provenance_for_bound(
     _payload_encoder=economic_goal_to_payload,
     _payload_decoder=economic_goal_from_payload,
     _provenance_type=_CANONICAL_PROVENANCE_TYPE,
+    _provenance_builder=_build_provenance,
     _provenance_validator=_CANONICAL_PROVENANCE_VALIDATOR,
     _contract_sha256=_contract_sha256_bound,
     _schema=PROVENANCE_SCHEMA,
@@ -172,7 +197,7 @@ def _provenance_for_bound(
     _goal_validator(contract)
     payload = _payload_encoder(contract)
     snapshot = _payload_decoder(payload)
-    provenance = _provenance_type(
+    provenance = _provenance_builder(
         schema=_schema,
         schema_version=_schema_version,
         goal_id=snapshot.goal_id,

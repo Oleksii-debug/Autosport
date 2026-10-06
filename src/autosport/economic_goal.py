@@ -84,6 +84,8 @@ def _decimal(
         raise _error_type(f"{name} must be an exact Decimal")
     if not value.is_finite():
         raise _error_type(f"{name} must be finite")
+    if value.is_zero() and value.is_signed():
+        raise _error_type(f"{name} must not use signed zero")
     return value
 
 

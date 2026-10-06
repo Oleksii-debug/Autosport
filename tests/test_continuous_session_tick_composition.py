@@ -7067,3 +7067,47 @@ def test_provider_unavailable_late_backlog_failure_replaces_provider_receipt(
             == expected_error.__name__
         )
 
+@pytest.mark.parametrize("mutation_style", ("delete", "hostile_equality"))
+def test_tick_economic_recovery_does_not_trust_replacement_values(
+    mutation_style: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        original_workspace = coordinator.workspace
+        original_book = coordinator.paper_book_path
+        original_bankroll = coordinator.initial_bankroll
+        equality_calls = 0
+
+        class HostileValue:
+            def __eq__(self, _other):
+                nonlocal equality_calls
+                equality_calls += 1
+                raise AssertionError("replacement equality executed")
+
+            def __ne__(self, _other):
+                nonlocal equality_calls
+                equality_calls += 1
+                raise AssertionError("replacement inequality executed")
+
+        def mutate_and_raise() -> None:
+            if mutation_style == "delete":
+                del coordinator.workspace
+                del coordinator.paper_book_path
+                del coordinator.initial_bankroll
+            else:
+                coordinator.workspace = HostileValue()
+                coordinator.paper_book_path = HostileValue()
+                coordinator.initial_bankroll = HostileValue()
+            raise RuntimeError("economic recovery trigger")
+
+        coordinator.collector = _Collector(callback=mutate_and_raise)
+
+        with pytest.raises(RuntimeError, match="economic recovery trigger"):
+            coordinator.tick()
+
+        assert equality_calls == 0
+        assert coordinator.workspace == original_workspace
+        assert coordinator.paper_book_path == original_book
+        assert coordinator.initial_bankroll == original_bankroll
+

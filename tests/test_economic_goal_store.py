@@ -1700,7 +1700,17 @@ def test_payload_decoder_revalidates_with_captured_contract_validator(monkeypatc
     assert type(body) is dict
     body["max_stake_fraction"] = "2"
 
-    monkeypatch.setattr(EconomicGoalContract, "__post_init__", lambda self: None)
+    with pytest.raises(
+        TypeError,
+        match="public authority operation binding is immutable",
+    ):
+        monkeypatch.setattr(EconomicGoalContract, "__post_init__", lambda self: None)
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "_CANONICAL_GOAL_VALIDATOR",
+        lambda self: None,
+    )
 
     with pytest.raises(EconomicGoalContractError, match="between 0 and 1"):
         economic_goal_from_payload(payload)
@@ -1838,28 +1848,36 @@ def test_store_successor_rejects_descriptor_laundered_expansion(
     assert EconomicGoalStore(tmp_path).load() == previous
 
 
-def test_payload_snapshot_ignores_rebound_contract_constructor(monkeypatch) -> None:
+def test_payload_snapshot_uses_sealed_contract_constructor_authority(monkeypatch) -> None:
     goal = _goal()
     expected = economic_goal_to_payload(goal)
 
     def forged(*args, **kwargs):
         raise AssertionError("rebound EconomicGoalContract constructor executed")
 
-    monkeypatch.setattr(EconomicGoalContract, "__init__", forged)
-    monkeypatch.setattr(EconomicGoalContract, "__post_init__", forged)
+    for name in ("__init__", "__post_init__"):
+        with pytest.raises(
+            TypeError,
+            match="public authority operation binding is immutable",
+        ):
+            monkeypatch.setattr(EconomicGoalContract, name, forged)
 
     assert economic_goal_to_payload(goal) == expected
 
 
-def test_payload_decoder_ignores_rebound_contract_constructor(monkeypatch) -> None:
+def test_payload_decoder_uses_sealed_contract_constructor_authority(monkeypatch) -> None:
     expected = _goal()
     payload = economic_goal_to_payload(expected)
 
     def forged(*args, **kwargs):
         raise AssertionError("rebound EconomicGoalContract constructor executed")
 
-    monkeypatch.setattr(EconomicGoalContract, "__init__", forged)
-    monkeypatch.setattr(EconomicGoalContract, "__post_init__", forged)
+    for name in ("__init__", "__post_init__"):
+        with pytest.raises(
+            TypeError,
+            match="public authority operation binding is immutable",
+        ):
+            monkeypatch.setattr(EconomicGoalContract, name, forged)
 
     restored = economic_goal_from_payload(payload)
     assert restored == expected

@@ -40,41 +40,8 @@ class EconomicGoalProvenance:
     bankroll_id: str
     contract_sha256: str
 
-    def __post_init__(
-        self,
-        _schema=PROVENANCE_SCHEMA,
-        _schema_version=PROVENANCE_SCHEMA_VERSION,
-        _max_identity_chars=_MAX_PROVENANCE_IDENTITY_CHARS,
-        _error_type=EconomicGoalProvenanceError,
-    ) -> None:
-        if type(self.schema) is not str or self.schema != _schema:
-            raise _error_type("unsupported provenance schema")
-        if type(self.schema_version) is not int or self.schema_version != _schema_version:
-            raise _error_type("unsupported provenance schema version")
-        for name, value in (("goal_id", self.goal_id), ("bankroll_id", self.bankroll_id)):
-            if type(value) is not str or not value:
-                raise _error_type(f"{name} must be a non-empty string")
-            if value != value.strip():
-                raise _error_type(f"{name} must be canonical text")
-            if len(value) > _max_identity_chars:
-                raise _error_type(f"{name} exceeds the identity size limit")
-            if "\x00" in value:
-                raise _error_type(f"{name} must not contain NUL")
-            try:
-                value.encode("utf-8", errors="strict")
-            except UnicodeEncodeError as exc:
-                raise _error_type(
-                    f"{name} must be valid UTF-8 text"
-                ) from exc
-        if type(self.revision) is not int or self.revision <= 0:
-            raise _error_type("revision must be a positive integer")
-        if (
-            type(self.contract_sha256) is not str
-            or len(self.contract_sha256) != 64
-            or any(ch not in "0123456789abcdef" for ch in self.contract_sha256)
-        ):
-            raise _error_type("contract_sha256 must be lowercase SHA-256 hex")
-
+    def __post_init__(self) -> None:
+        _validate_provenance_bound(self)
     @property
     def decision_identity(self) -> str:
         """Return an immutable, revision-specific identity suitable for evidence binding."""

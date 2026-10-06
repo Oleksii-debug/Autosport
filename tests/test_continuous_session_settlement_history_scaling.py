@@ -879,3 +879,25 @@ def test_durable_session_path_reader_ignores_runtime_rebinding(monkeypatch) -> N
         monkeypatch.setattr(Path, "read_text", attacker_read_text)
 
         assert state.snapshot().cycles_completed == 0
+
+
+def test_state_round_trip_does_not_resurrect_superseded_failure() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="STALE_PROVIDER_FAILURE")
+        assert state.snapshot().last_error_code == "STALE_PROVIDER_FAILURE"
+
+        state.set_state(continuous_session.SessionState.PAUSED)
+        assert state.snapshot().last_error_code is None
+
+        state.set_state(continuous_session.SessionState.RUNNING)
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        snapshot = reopened.snapshot()
+        assert snapshot.state is continuous_session.SessionState.RUNNING
+        assert snapshot.last_error_code is None

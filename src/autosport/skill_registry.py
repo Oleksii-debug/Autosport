@@ -21,6 +21,7 @@ SCHEMA: Final = "autosport.skill_registry"
 SCHEMA_VERSION: Final = 1
 AGENT_LOOP_READ_ONLY_AUTHORITY_PROFILE: Final = "agent-loop-read-only-v1"
 _HEX: Final = frozenset("0123456789abcdef")
+_HANDLER_TIMEOUT_REAP_GRACE_SECONDS: Final = 0.25
 NON_DELEGABLE_MUTATIONS: Final = frozenset({
     "ECONOMIC_GOAL_EXPAND", "RISK_LIMIT_EXPAND", "REAL_MONEY_EXECUTION_ENABLE",
     "PROVIDER_WRITE", "PROMOTION_DECISION", "DECISION_TIME_TRUTH_REWRITE",
@@ -439,9 +440,22 @@ class SkillRegistry:
         sender.close()
         process.join(timeout_seconds)
         if process.is_alive():
-            process.terminate(); process.join(2)
-            if process.is_alive() and hasattr(process,"kill"):
-                process.kill(); process.join(2)
+            # The timeout is an execution-authority boundary, not the start of
+            # another multi-second wait.  Force-stop the isolated child first,
+            # then spend only a small bounded grace reaping its process handle.
+            # In particular, do not let Windows spawn/termination bookkeeping
+            # turn a 1-second skill timeout into a 3+ second caller stall.
+            try:
+                if hasattr(process, "kill"):
+                    process.kill()
+                else:
+                    process.terminate()
+            except (OSError, ValueError):
+                # A concurrent process exit can race the stop request.  Reap
+                # whatever state remains below; the invocation is terminally
+                # classified as timed out either way.
+                pass
+            process.join(_HANDLER_TIMEOUT_REAP_GRACE_SECONDS)
             receiver.close()
             return None,"HANDLER_TIMEOUT"
         if not receiver.poll():

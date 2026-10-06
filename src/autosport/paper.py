@@ -2317,6 +2317,7 @@ class PaperBook:
                             "locked_odds": str(leg.locked_odds),
                             "sport": leg.sport,
                             "exchange_side": leg.exchange_side,
+                            "market_semantics_id": leg.market_semantics_id,
                         }
                         for leg in t.legs
                     ],
@@ -2545,10 +2546,11 @@ class PaperBook:
                 raise ValueError(
                     "PaperBook ticket exchange_side must be canonical 'back' or 'lay'"
                 )
-            if exchange_side == "lay":
-                raise ValueError(
-                    "PaperBook LAY economic materialization is not supported"
-                )
+        if leg.market_semantics_id is not None:
+            _CANONICAL_MARKET_SEMANTICS_IDENTITY(
+                leg.market_semantics_id,
+                f"market_semantics_id{suffix}",
+            )
         cls._require_finite(leg.locked_odds, f"locked_odds{suffix}")
         if leg.locked_odds <= 1:
             raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
@@ -2850,6 +2852,12 @@ class PaperBook:
                 expected_leg_fields.add("sport")
             if schema_version is not None and schema_version >= 7:
                 expected_leg_fields.add("exchange_side")
+            if schema_version is not None and schema_version >= 8:
+                expected_leg_fields.add("market_semantics_id")
+            if (schema_version is None or schema_version < 8) and "market_semantics_id" in raw_leg:
+                raise ValueError(
+                    "ticket leg market_semantics_id is unsupported before schema 8"
+                )
             if set(raw_leg) - expected_leg_fields:
                 version_label = (
                     "legacy" if schema_version is None else f"schema {schema_version}"
@@ -2867,6 +2875,20 @@ class PaperBook:
                 if schema_version is not None and schema_version >= 7
                 else None
             )
+            market_semantics_id = (
+                cls._required_snapshot_field(
+                    raw_leg,
+                    "market_semantics_id",
+                    "ticket leg",
+                )
+                if schema_version is not None and schema_version >= 8
+                else None
+            )
+            if market_semantics_id is not None:
+                _CANONICAL_MARKET_SEMANTICS_IDENTITY(
+                    market_semantics_id,
+                    f"market_semantics_id for ticket {ticket_id}",
+                )
             if sport is not None:
                 cls._require_canonical_text(
                     sport,
@@ -2884,6 +2906,7 @@ class PaperBook:
                     ),
                     sport=sport,
                     exchange_side=exchange_side,
+                    market_semantics_id=market_semantics_id,
                 )
             )
         return tuple(legs)

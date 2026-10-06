@@ -2159,3 +2159,52 @@ def test_payload_decoder_ignores_rebound_frozenset_that_would_erase_restrictions
     assert restored.blocked_providers == canonical_frozenset({"provider:a"})
     assert restored.blocked_markets == canonical_frozenset({"market:x"})
 
+def test_payload_decoder_rejects_mapping_subclass_when_module_type_is_rebound(
+    monkeypatch,
+) -> None:
+    class MappingSubclass(dict):
+        pass
+
+    payload = MappingSubclass(economic_goal_to_payload(_goal()))
+    canonical_type = type
+
+    def forged_type(value):
+        if canonical_type(value) is MappingSubclass:
+            return dict
+        return canonical_type(value)
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "type",
+        forged_type,
+        raising=False,
+    )
+
+    with pytest.raises(EconomicGoalContractError, match="JSON object"):
+        economic_goal_from_payload(payload)
+
+
+def test_store_constructor_rejects_subclass_when_module_type_is_rebound(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class StoreSubclass(EconomicGoalStore):
+        pass
+
+    canonical_type = type
+
+    def forged_type(value):
+        if canonical_type(value) is StoreSubclass:
+            return EconomicGoalStore
+        return canonical_type(value)
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "type",
+        forged_type,
+        raising=False,
+    )
+
+    with pytest.raises(TypeError, match="exact store type"):
+        StoreSubclass(tmp_path)
+

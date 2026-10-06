@@ -146,10 +146,11 @@ def _decimal_text(
     value: object,
     _decimal_type=Decimal,
     _invalid_operation=InvalidOperation,
+    _type=type,
     _error_type=EconomicGoalContractError,
     _max_chars=_MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS,
 ) -> Decimal:
-    if type(value) is not str:
+    if _type(value) is not str:
         raise _error_type(f"{name} must be a Decimal string")
     if not value or value != value.strip():
         raise _error_type(f"{name} must be a canonical Decimal string")
@@ -171,19 +172,20 @@ def _decimal_text(
 def _restriction_set(
     name: str,
     value: object,
+    _type=type,
     _error_type=EconomicGoalContractError,
     _max_members=_MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS,
     _max_text_chars=_MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS,
     _frozenset=frozenset,
 ) -> frozenset[str]:
-    if type(value) is not list:
+    if _type(value) is not list:
         raise _error_type(f"{name} must be a sorted JSON array")
     if len(value) > _max_members:
         raise _error_type(
             f"{name} exceeds the canonical restriction-count limit"
         )
     for item in value:
-        if type(item) is not str:
+        if _type(item) is not str:
             raise _error_type(f"{name} must contain only strings")
         if (
             not item
@@ -338,6 +340,7 @@ def _resolve_store_binding(
 
 def _snapshot_economic_goal_contract(
     contract: EconomicGoalContract,
+    _type=type,
     _goal_type=EconomicGoalContract,
     _goal_validator=EconomicGoalContract.__post_init__,
     _object_new=object.__new__,
@@ -348,7 +351,7 @@ def _snapshot_economic_goal_contract(
 ) -> EconomicGoalContract:
     """Capture one validated, non-shared contract image for authority decisions."""
 
-    if type(contract) is not _goal_type:
+    if _type(contract) is not _goal_type:
         raise _error_type(
             "economic goal persistence requires an EconomicGoalContract"
         )
@@ -367,6 +370,7 @@ def _snapshot_economic_goal_contract(
 
 def economic_goal_to_payload(
     contract: EconomicGoalContract,
+    _type=type,
     _goal_type=EconomicGoalContract,
     _goal_validator=EconomicGoalContract.__post_init__,
     _schema=ECONOMIC_GOAL_SCHEMA,
@@ -382,7 +386,7 @@ def economic_goal_to_payload(
 ) -> dict[str, object]:
     """Return the canonical schema-v1 JSON payload for ``contract``."""
 
-    if type(contract) is not _goal_type:
+    if _type(contract) is not _goal_type:
         raise _error_type(
             "economic goal persistence requires an EconomicGoalContract"
         )
@@ -509,6 +513,7 @@ def _build_economic_goal_contract(
 
 def economic_goal_from_payload(
     payload: object,
+    _type=type,
     _goal_type=EconomicGoalContract,
     _goal_builder=_build_economic_goal_contract,
     _goal_error=EconomicGoalContractError,
@@ -527,22 +532,22 @@ def economic_goal_from_payload(
 ) -> EconomicGoalContract:
     """Decode schema-v1 persistence input and fail closed on any ambiguity."""
 
-    if type(payload) is not dict or not all(
-        type(key) is str for key in payload
+    if _type(payload) is not dict or not all(
+        _type(key) is str for key in payload
     ):
         raise _goal_error("economic goal payload must be a JSON object")
     root: dict[str, object] = payload
     _exact_keys("economic goal payload", root, _root_keys)
 
-    if type(root["schema"]) is not str or root["schema"] != _schema:
+    if _type(root["schema"]) is not str or root["schema"] != _schema:
         raise _goal_error("unsupported economic goal schema")
     version = root["schema_version"]
-    if type(version) is not int or version != _schema_version:
+    if _type(version) is not int or version != _schema_version:
         raise _goal_error("unsupported economic goal schema_version")
 
     raw_contract = root["contract"]
-    if type(raw_contract) is not dict or not all(
-        type(key) is str for key in raw_contract
+    if _type(raw_contract) is not dict or not all(
+        _type(key) is str for key in raw_contract
     ):
         raise _goal_error("contract must be a JSON object")
     body: dict[str, object] = raw_contract
@@ -558,14 +563,14 @@ def economic_goal_from_payload(
             "max_stake_amount", body["max_stake_amount"]
         )
 
-    if type(body["objective"]) is not str:
+    if _type(body["objective"]) is not str:
         raise _goal_error("objective must be a string")
     if body["objective"] != _objective_value:
         raise _goal_error("unsupported economic objective")
     decoded["objective"] = _objective_member
 
     automation = body["automation_level"]
-    if type(automation) is not int:
+    if _type(automation) is not int:
         raise _goal_error("automation_level must be an integer")
     decoded_automation = None
     for expected_value, member in _automation_value_members:
@@ -581,7 +586,7 @@ def economic_goal_from_payload(
 
     try:
         contract = _goal_builder(decoded)
-        if type(contract) is not _goal_type:
+        if _type(contract) is not _goal_type:
             raise _goal_error("malformed economic goal contract")
         return contract
     except _goal_error:
@@ -592,6 +597,7 @@ def economic_goal_from_payload(
 
 def economic_goal_from_json(
     text: str,
+    _type=type,
     _loads=strict_json_loads,
     _payload_decoder=economic_goal_from_payload,
     _error_type=EconomicGoalContractError,
@@ -599,7 +605,7 @@ def economic_goal_from_json(
 ) -> EconomicGoalContract:
     """Decode one strict JSON document into a validated contract."""
 
-    if type(text) is not str:
+    if _type(text) is not str:
         raise _error_type("economic goal JSON must be text")
     if len(text) > _max_chars:
         raise _error_type("economic goal JSON text exceeds the canonical size limit")
@@ -882,6 +888,9 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
     def __init__(
         self,
         workspace: str | Path,
+        _type=type,
+        _str_type=str,
+        _type_error=TypeError,
         _path_constructor=_CANONICAL_PATH_CONSTRUCTOR,
         _path_type=_CANONICAL_PATH_TYPE,
         _path_resolve=_CANONICAL_PATH_RESOLVE,
@@ -894,10 +903,10 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
         _object_getattribute=_CANONICAL_OBJECT_GETATTRIBUTE,
         _error_type=EconomicGoalContractError,
     ) -> None:
-        if type(self) is not __class__:
-            raise TypeError("EconomicGoalStore authority requires the exact store type")
-        if type(workspace) not in {str, _path_type}:
-            raise TypeError(
+        if _type(self) is not __class__:
+            raise _type_error("EconomicGoalStore authority requires the exact store type")
+        if _type(workspace) not in {_str_type, _path_type}:
+            raise _type_error(
                 "EconomicGoalStore workspace must be exact str or exact Path"
             )
         try:
@@ -946,17 +955,21 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
 
     def load(
         self,
+        _type=type,
+        _type_error=TypeError,
         _json_decoder=economic_goal_from_json,
         _binding_resolver=_resolve_store_binding,
         _text_reader=_CANONICAL_GOAL_TEXT_READER,
     ) -> EconomicGoalContract:
-        if type(self) is not __class__:
-            raise TypeError("EconomicGoalStore authority requires the exact store type")
+        if _type(self) is not __class__:
+            raise _type_error("EconomicGoalStore authority requires the exact store type")
         _, path, _ = _binding_resolver(self)
         return _json_decoder(_text_reader(path))
 
     def initialize_owner(
         self,
+        _type=type,
+        _type_error=TypeError,
         contract: EconomicGoalContract,
         _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
         _payload_encoder=economic_goal_to_payload,
@@ -967,8 +980,8 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
     ) -> None:
         """Create the first owner contract while holding the economic writer lock."""
 
-        if type(self) is not __class__:
-            raise TypeError("EconomicGoalStore authority requires the exact store type")
+        if _type(self) is not __class__:
+            raise _type_error("EconomicGoalStore authority requires the exact store type")
         workspace, path, path_exists = _binding_resolver(self)
         with _lock_scope(workspace, _lock_type):
             if path_exists():
@@ -980,6 +993,8 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
 
     def persist_automatic_successor(
         self,
+        _type=type,
+        _type_error=TypeError,
         candidate: EconomicGoalContract,
         _lock_type=_CANONICAL_WORKSPACE_LOCK_TYPE,
         _transition_validator=_CANONICAL_TRANSITION_VALIDATOR,
@@ -1000,8 +1015,8 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
         between validation and serialization.
         """
 
-        if type(self) is not __class__:
-            raise TypeError("EconomicGoalStore authority requires the exact store type")
+        if _type(self) is not __class__:
+            raise _type_error("EconomicGoalStore authority requires the exact store type")
         workspace, path, _ = _binding_resolver(self)
         with _lock_scope(workspace, _lock_type):
             previous = _json_decoder(_text_reader(path))

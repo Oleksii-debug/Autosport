@@ -149,3 +149,29 @@ def test_owner_reservation_counts_toward_rolling_market_rate_limit() -> None:
         now_monotonic_ns=start + 10,
     )
     assert sixth.decision is BetfairAdmissionDecision.THROTTLE
+
+
+def test_owner_keeps_mutation_rate_history_after_concurrency_release() -> None:
+    policy = _policy()
+    first = BetfairRequestIntent(
+        request_id="place-1000",
+        operation=BetfairRequestOperation.PLACE_ORDERS,
+        priority=BetfairRequestPriority.EXECUTION_MUTATION,
+        mutation_instruction_count=1000,
+    )
+    second = BetfairRequestIntent(
+        request_id="cancel-1",
+        operation=BetfairRequestOperation.CANCEL_ORDERS,
+        priority=BetfairRequestPriority.SAFETY,
+        mutation_instruction_count=1,
+    )
+    owner = BetfairRequestBudgetOwner()
+
+    admitted = owner.reserve(first, policy=policy, now_monotonic_ns=100)
+    assert admitted.decision is BetfairAdmissionDecision.ADMIT
+    owner.release(first)
+    assert owner.snapshot().in_flight_mutations == 0
+
+    throttled = owner.reserve(second, policy=policy, now_monotonic_ns=101)
+    assert throttled.decision is BetfairAdmissionDecision.THROTTLE
+    assert throttled.retry_after_monotonic_ns == 1_000_000_100

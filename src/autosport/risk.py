@@ -10,6 +10,7 @@ from decimal import (
     Inexact,
     InvalidOperation,
     Overflow,
+    ROUND_DOWN,
     ROUND_HALF_EVEN,
     Underflow,
     localcontext,
@@ -1863,6 +1864,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         history_rooms = self._goal_history_rooms(book, goal, context=context)
         if history_rooms is None:
             return None
+        session_room, day_room, drawdown_room, turnover_room = history_rooms
 
         try:
             ticket_fraction, committed_fraction = self._effective_fraction_limits()
@@ -1874,21 +1876,71 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 reserve_limit = initial_bankroll * self.minimum_cash_reserve_fraction
                 committed_room = committed_limit - committed_stake
                 reserve_room = balance - reserve_limit
-            caps = [
-                signal_limit,
-                ticket_limit,
+
+            capital_factor = (
+                Decimal("1")
+                if context is None
+                else _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                    Decimal("1"),
+                    context.legs,
+                )
+            )
+            if not capital_factor.is_finite() or capital_factor <= 0:
+                return None
+
+            capital_rooms = (
                 committed_room,
                 reserve_room,
                 balance,
-                *history_rooms,
+                session_room,
+                day_room,
+                drawdown_room,
+            )
+            capital_stake_caps: list[Decimal] = []
+            for room in capital_rooms:
+                if type(room) is not Decimal or not room.is_finite():
+                    return None
+                with localcontext(self._decimal_context()) as inverse_context:
+                    inverse_context.traps[Inexact] = False
+                    inverse_context.rounding = ROUND_DOWN
+                    stake_cap = room / capital_factor
+                if type(stake_cap) is not Decimal or not stake_cap.is_finite():
+                    return None
+                capital_stake_caps.append(stake_cap)
+
+            caps = [
+                signal_limit,
+                ticket_limit,
+                turnover_room,
+                *capital_stake_caps,
             ]
             if goal.max_stake_amount is not None:
                 caps.append(goal.max_stake_amount)
             amount = min(caps)
-        except (ArithmeticError, TypeError, ValueError):
+            exact_capital = (
+                amount
+                if context is None
+                else _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                    amount,
+                    context.legs,
+                )
+            )
+            if amount > 0 and any(
+                exact_capital > room for room in capital_rooms
+            ):
+                return None
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
             return None
 
         if type(amount) is not Decimal or not amount.is_finite() or amount <= 0:
+            return None
+        if self._derived_risk_values(
+            initial_bankroll,
+            balance,
+            committed_stake,
+            amount,
+            exact_capital,
+        ) is None:
             return None
         if goal.max_risk_of_ruin < Decimal("1"):
             assert context is not None

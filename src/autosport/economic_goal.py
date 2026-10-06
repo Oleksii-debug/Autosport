@@ -269,53 +269,77 @@ _CANONICAL_CONTRACT_TYPE: Final = EconomicGoalContract
 _CANONICAL_CONTRACT_VALIDATOR: Final = EconomicGoalContract.__post_init__
 
 
-def _require_same(name: str, previous: object, candidate: object) -> None:
+def _require_same(
+    name: str,
+    previous: object,
+    candidate: object,
+    _error_type=EconomicGoalContractError,
+) -> None:
     if candidate != previous:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must preserve {name}"
         )
 
 
-def _require_cap_not_increased(name: str, previous: Decimal, candidate: Decimal) -> None:
+def _require_cap_not_increased(
+    name: str,
+    previous: Decimal,
+    candidate: Decimal,
+    _error_type=EconomicGoalContractError,
+) -> None:
     if candidate > previous:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must not increase {name}"
         )
 
 
 def _require_optional_cap_not_increased(
-    name: str, previous: Decimal | None, candidate: Decimal | None
+    name: str,
+    previous: Decimal | None,
+    candidate: Decimal | None,
+    _error_type=EconomicGoalContractError,
 ) -> None:
     if previous is None:
         # Moving from no contract-level absolute cap to a finite one is tighter.
         return
     if candidate is None or candidate > previous:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must not increase or remove {name}"
         )
 
 
 def _require_floor_not_decreased(
-    name: str, previous: Decimal, candidate: Decimal
+    name: str,
+    previous: Decimal,
+    candidate: Decimal,
+    _error_type=EconomicGoalContractError,
 ) -> None:
     if candidate < previous:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must not decrease {name}"
         )
 
 
-def _require_int_cap_not_increased(name: str, previous: int, candidate: int) -> None:
+def _require_int_cap_not_increased(
+    name: str,
+    previous: int,
+    candidate: int,
+    _error_type=EconomicGoalContractError,
+) -> None:
     if candidate > previous:
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must not increase {name}"
         )
 
 
 def _require_restrictions_not_removed(
-    name: str, previous: frozenset[str], candidate: frozenset[str]
+    name: str,
+    previous: frozenset[str],
+    candidate: frozenset[str],
+    _error_type=EconomicGoalContractError,
 ) -> None:
     if not previous.issubset(candidate):
-        raise EconomicGoalContractError(
+        raise _error_type(
             f"automatic transition must not remove {name} restrictions"
         )
 
@@ -358,7 +382,7 @@ def validate_automatic_transition(
     _same_guard("objective", previous.objective, candidate.objective)
 
     if candidate.revision != previous.revision + 1:
-        raise EconomicGoalContractError(
+        raise _error_type(
             "automatic transition must advance revision by exactly one"
         )
 
@@ -443,11 +467,11 @@ def validate_automatic_transition(
         "max_parlay_legs", previous.max_parlay_legs, candidate.max_parlay_legs
     )
     if candidate.automation_level > previous.automation_level:
-        raise EconomicGoalContractError(
+        raise _error_type(
             "automatic transition must not increase automation_level"
         )
     if previous.emergency_stop and not candidate.emergency_stop:
-        raise EconomicGoalContractError(
+        raise _error_type(
             "automatic transition must not clear emergency_stop"
         )
 

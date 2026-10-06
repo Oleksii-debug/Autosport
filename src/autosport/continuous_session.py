@@ -1757,8 +1757,10 @@ class _ContinuousSessionState:
             durable_path_lock is not _durable_path_lock
             or getattr(_durable_path_lock, "__code__", None)
             is not _durable_path_lock_code
+            or type(self)._error_checkpoint_present is not _error_checkpoint_present
             or getattr(_error_checkpoint_present, "__code__", None)
             is not _error_checkpoint_present_code
+            or type(self)._read_error_checkpoint is not _read_error_checkpoint
             or getattr(_read_error_checkpoint, "__code__", None)
             is not _read_error_checkpoint_code
             or type(self)._write_error_checkpoint is not _write_error_checkpoint

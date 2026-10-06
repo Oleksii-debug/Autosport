@@ -32,7 +32,7 @@ from .risk import PaperRiskPolicy, ProposedTicketRiskContext, StakeVectorDecisio
 from .workspace_lock import WorkspaceEconomicLock
 
 
-_SCHEMA = "autosport.proposal-risk-target-precommit.v1"
+_SCHEMA = "autosport.proposal-risk-target-precommit.v2"
 _ACTION = "PROPOSAL_RISK_TARGET_PRECOMMIT"
 _AGENT = "autosport.proposal-risk-target-authority.v1"
 _ALLOCATION_ALGORITHM = (

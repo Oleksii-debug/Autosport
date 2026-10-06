@@ -2259,3 +2259,226 @@ def test_record_success_rejects_noncanonical_resolution_type() -> None:
             assert "exact SettlementResolution" in str(exc)
         else:
             raise AssertionError("derived settlement resolution was accepted")
+
+
+def _projection_delta(
+    index: int,
+    *,
+    delta_id: str | None = None,
+    epoch: str = "epoch-a",
+    position: int | None = None,
+) -> continuous_session.CollectorDelta:
+    resolved_position = index if position is None else position
+    return continuous_session.CollectorDelta(
+        schema_version=1,
+        delta_id=delta_id or f"delta-{index}",
+        source_id="provider-a",
+        lawful_terms_ref="lawful:provider-a",
+        retention_ref="retention:default",
+        stream_epoch=epoch,
+        source_cursor=f"cursor-{resolved_position}",
+        cursor_position=resolved_position,
+        event_dedupe_key=f"event-dedupe-{index}",
+        event_id=f"event-{index}",
+        source_payload_digest=f"{index + 1:064x}"[-64:],
+        canonical_event_digest=f"{index + 101:064x}"[-64:],
+        source_observed_at=_AT,
+        collector_received_at=_AT,
+        collector_committed_at=_AT,
+        desktop_available_at=_AT,
+        gap_state=continuous_session.GapState.NONE,
+        sync_state=continuous_session.SyncState.READY,
+    )
+
+
+def test_source_projection_change_advances_generation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        before = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+
+        state.record_source_projection(
+            deltas=(_projection_delta(1),),
+            backlog=False,
+        )
+
+        after = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        assert after["generation"] == before.get("generation", 0) + 1
+        assert after["source_state_delta_id"] == "delta-1"
+        assert after["source_projection_stream_epoch"] == "epoch-a"
+
+
+def test_empty_source_projection_noop_is_generation_neutral() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        before = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+
+        state.record_source_projection(deltas=(), backlog=False)
+
+        after = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        assert after.get("generation", 0) == before.get("generation", 0)
+
+
+def test_projection_change_invalidates_predecessor_failure_overlay() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="PRE_PROJECTION_FAILURE")
+        assert state.snapshot().last_error_code == "PRE_PROJECTION_FAILURE"
+
+        state.record_source_projection(
+            deltas=(_projection_delta(1),),
+            backlog=False,
+        )
+
+        assert state.snapshot().last_error_code is None
+
+
+def test_failure_after_projection_binds_to_new_generation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_source_projection(
+            deltas=(_projection_delta(1),),
+            backlog=False,
+        )
+        state.record_failure(code="POST_PROJECTION_FAILURE")
+
+        snapshot = state.snapshot()
+        assert snapshot.last_error_code == "POST_PROJECTION_FAILURE"
+        main = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        sidecar = json.loads(
+            (root / "continuous_session.json.operational_error.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert sidecar["observed_generation"] == main["generation"]
+
+
+def test_projection_noop_preserves_current_failure_overlay() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CURRENT_FAILURE")
+
+        state.record_source_projection(deltas=(), backlog=False)
+
+        assert state.snapshot().last_error_code == "CURRENT_FAILURE"
+
+
+def test_source_projection_rejects_duplicate_delta_ids_without_state_change() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        before = (root / "continuous_session.json").read_bytes()
+
+        try:
+            state.record_source_projection(
+                deltas=(
+                    _projection_delta(1, delta_id="same-delta"),
+                    _projection_delta(2, delta_id="same-delta"),
+                ),
+                backlog=False,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "delta ids must be unique" in str(exc)
+        else:
+            raise AssertionError("duplicate projection delta ids were accepted")
+
+        assert (root / "continuous_session.json").read_bytes() == before
+
+
+def test_source_projection_rejects_regressive_positions_within_epoch() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        try:
+            state.record_source_projection(
+                deltas=(
+                    _projection_delta(1, position=2),
+                    _projection_delta(2, position=1),
+                ),
+                backlog=False,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "positions must increase" in str(exc)
+        else:
+            raise AssertionError("regressive projection positions were accepted")
+
+
+def test_source_projection_rejects_equal_positions_within_epoch() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        try:
+            state.record_source_projection(
+                deltas=(
+                    _projection_delta(1, position=2),
+                    _projection_delta(2, position=2),
+                ),
+                backlog=False,
+            )
+        except continuous_session.ContinuousSessionError as exc:
+            assert "positions must increase" in str(exc)
+        else:
+            raise AssertionError("duplicate projection positions were accepted")
+
+
+def test_source_projection_allows_position_reset_on_epoch_change() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        state.record_source_projection(
+            deltas=(
+                _projection_delta(1, epoch="epoch-a", position=10),
+                _projection_delta(2, epoch="epoch-b", position=0),
+            ),
+            backlog=False,
+        )
+
+        snapshot = state.snapshot()
+        assert snapshot.source_state_delta_id == "delta-2"
+        assert snapshot.source_projection_stream_epoch == "epoch-b"
+
+
+def test_source_projection_backlog_requires_a_delta() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        try:
+            state.record_source_projection(deltas=(), backlog=True)
+        except continuous_session.ContinuousSessionError as exc:
+            assert "backlog requires at least one delta" in str(exc)
+        else:
+            raise AssertionError("backlog without projection delta was accepted")
+
+
+def test_source_projection_requires_exact_tuple() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        try:
+            state.record_source_projection(
+                deltas=[_projection_delta(1)],  # type: ignore[arg-type]
+                backlog=False,
+            )
+        except TypeError as exc:
+            assert "exact tuple" in str(exc)
+        else:
+            raise AssertionError("non-tuple projection batch was accepted")

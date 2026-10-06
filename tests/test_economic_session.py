@@ -346,6 +346,63 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                 finally:
                     setattr(lock_type, method_name, original)
 
+    def test_constructor_dependency_rebinding_fails_before_session_authority_creation(self) -> None:
+        import autosport.economic_session as economic_session
+
+        original_goal_store = economic_session.EconomicGoalStore
+        original_goal_init = EconomicGoalStore.__init__
+        original_authority = economic_session.MonotonicWorkspaceAuthority
+        original_authority_init = MonotonicWorkspaceAuthority.__init__
+
+        class HostileGoalStore:
+            def __new__(cls, *_args, **_kwargs):
+                raise AssertionError("hostile EconomicGoalStore constructor executed")
+
+        class HostileAuthority:
+            def __new__(cls, *_args, **_kwargs):
+                raise AssertionError("hostile MonotonicWorkspaceAuthority constructor executed")
+
+        def hostile_goal_init(self, *_args, **_kwargs):
+            raise AssertionError("hostile EconomicGoalStore.__init__ executed")
+
+        def hostile_authority_init(self, *_args, **_kwargs):
+            raise AssertionError("hostile MonotonicWorkspaceAuthority.__init__ executed")
+
+        mutations = (
+            ("goal store alias", "goal_alias", HostileGoalStore),
+            ("goal store init", "goal_init", hostile_goal_init),
+            ("authority alias", "authority_alias", HostileAuthority),
+            ("authority init", "authority_init", hostile_authority_init),
+        )
+
+        for label, target, replacement in mutations:
+            with self.subTest(label=label):
+                try:
+                    if target == "goal_alias":
+                        economic_session.EconomicGoalStore = replacement
+                    elif target == "goal_init":
+                        EconomicGoalStore.__init__ = replacement
+                    elif target == "authority_alias":
+                        economic_session.MonotonicWorkspaceAuthority = replacement
+                    else:
+                        MonotonicWorkspaceAuthority.__init__ = replacement
+
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        r"constructor (authority changed|changed)",
+                    ):
+                        ProductEconomicSessionStore(
+                            self.workspace,
+                            authority_root=self.authority_root,
+                            _test_clock=self.clock,
+                        )
+                finally:
+                    economic_session.EconomicGoalStore = original_goal_store
+                    EconomicGoalStore.__init__ = original_goal_init
+                    economic_session.MonotonicWorkspaceAuthority = original_authority
+                    MonotonicWorkspaceAuthority.__init__ = original_authority_init
+
+
     def test_instance_configuration_rebinding_fails_closed(self) -> None:
         store = self._store()
         store.current()

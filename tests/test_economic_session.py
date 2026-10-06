@@ -1233,7 +1233,14 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             raise AssertionError("mutated transitive authority executed")
 
         exercised = 0
-        for label, authority, code in economic_session._ECONOMIC_SESSION_CODE_AUTHORITIES:
+        for (
+            label,
+            authority,
+            code,
+            _defaults,
+            _kwdefaults,
+            _kwdefault_items,
+        ) in economic_session._ECONOMIC_SESSION_CODE_AUTHORITIES:
             if code is None or code.co_freevars:
                 continue
             with self.subTest(label=label):
@@ -1262,7 +1269,7 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             authority.__code__ = hostile.__code__
             with self.assertRaisesRegex(
                 EconomicSessionIntegrityError,
-                "uuid4 callable code authority changed",
+                "uuid4 callable authority changed",
             ):
                 ProductEconomicSessionStore(
                     self.workspace,
@@ -1271,6 +1278,125 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                 )
         finally:
             authority.__code__ = original_code
+
+    def test_helper_kwdefault_mutation_fails_before_hostile_dispatch(self) -> None:
+        store = self._store()
+        helper = economic_session._opening_paperbook_sha256
+        kwdefaults = helper.__kwdefaults__
+        assert kwdefaults is not None
+        original = kwdefaults["_load_bytes"]
+        calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("mutated PaperBook loader kwdefault executed")
+
+        try:
+            kwdefaults["_load_bytes"] = hostile
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+        finally:
+            kwdefaults["_load_bytes"] = original
+
+        self.assertEqual(calls, 0)
+
+    def test_helper_kwdefaults_object_replacement_fails_closed(self) -> None:
+        store = self._store()
+        helper = economic_session._decode_state
+        original = helper.__kwdefaults__
+        assert original is not None
+        replacement = dict(original)
+
+        try:
+            helper.__kwdefaults__ = replacement
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+        finally:
+            helper.__kwdefaults__ = original
+
+    def test_constructor_rejects_preexisting_helper_kwdefault_mutation(self) -> None:
+        helper = economic_session._opening_paperbook_sha256
+        kwdefaults = helper.__kwdefaults__
+        assert kwdefaults is not None
+        original = kwdefaults["_load_bytes"]
+        calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("preexisting mutated PaperBook loader executed")
+
+        try:
+            kwdefaults["_load_bytes"] = hostile
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "opening_paperbook_sha256 callable authority changed",
+            ):
+                ProductEconomicSessionStore(
+                    self.workspace,
+                    authority_root=self.authority_root,
+                    _test_clock=self.clock,
+                )
+        finally:
+            kwdefaults["_load_bytes"] = original
+
+        self.assertEqual(calls, 0)
+
+    def test_configuration_guard_default_replacement_fails_before_dispatch(self) -> None:
+        store = self._store()
+        authority = ProductEconomicSessionStore._require_configuration_authority
+        original = authority.__defaults__
+        assert original is not None
+        mutated = list(original)
+        calls = 0
+
+        def hostile_any(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return False
+
+        mutated[2] = hostile_any
+        try:
+            authority.__defaults__ = tuple(mutated)
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority method defaults changed",
+            ):
+                store.current()
+        finally:
+            authority.__defaults__ = original
+
+        self.assertEqual(calls, 0)
+
+    def test_protected_method_kwdefaults_replacement_fails_before_dispatch(self) -> None:
+        store = self._store()
+        authority = ProductEconomicSessionStore.current
+        original = authority.__kwdefaults__
+        calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("unexpected protected kwdefault executed")
+
+        try:
+            authority.__kwdefaults__ = {"_hostile": hostile}
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority method keyword defaults changed",
+            ):
+                store.current()
+        finally:
+            authority.__kwdefaults__ = original
+
+        self.assertEqual(calls, 0)
 
     def test_instance_configuration_rebinding_fails_closed(self) -> None:
         store = self._store()

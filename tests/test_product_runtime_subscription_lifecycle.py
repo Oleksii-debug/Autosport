@@ -392,5 +392,58 @@ class ProductRuntimeSubscriptionLifecycleTests(unittest.TestCase):
             self.assertEqual(reopened.status()["provider_failures"], 0)
 
 
+    def test_post_subscription_construction_failure_releases_runtime_graph(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            with patch(
+                "autosport.product_runtime.MarketEventBus",
+                _TrackingMarketEventBus,
+            ):
+                with patch(
+                    "autosport.product_runtime.CanonicalDesktopApplication",
+                    side_effect=RuntimeError(
+                        "seeded post-subscription construction failure"
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "seeded post-subscription construction failure",
+                    ):
+                        build_autonomous_product_runtime(
+                            workspace=root,
+                            source=_Source(),
+                            clock=clock,
+                            sleep=lambda _: None,
+                            initial_bankroll="100",
+                        )
+
+                self.assertEqual(len(_TrackingMarketEventBus.instances), 1)
+                abandoned_bus = _TrackingMarketEventBus.instances[0]
+                _assert_single_runtime_subscription(abandoned_bus)
+
+                restored = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=clock,
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                try:
+                    self.assertEqual(len(_TrackingMarketEventBus.instances), 2)
+                    active_bus = _TrackingMarketEventBus.instances[-1]
+                    self.assertIsNot(active_bus, abandoned_bus)
+                    _assert_single_runtime_subscription(active_bus)
+
+                    restored.start()
+                    _assert_single_runtime_subscription(active_bus)
+                    restored.stop("post-subscription-construction-recovered")
+                    _assert_single_runtime_subscription(active_bus)
+                finally:
+                    restored.close()
+
+
 if __name__ == "__main__":
     unittest.main()

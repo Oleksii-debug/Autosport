@@ -763,6 +763,20 @@ _DECODE_STATE_CODE: Final = _decode_state.__code__
 class ProductEconomicSessionStore:
     """Issue/re-resolve one active economic session for one workspace."""
 
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in (
+            "current",
+            "require_current",
+            "transition_to_current_goal",
+            "_publish_new",
+            "_evidence",
+            "_require_configuration_authority",
+        ):
+            raise EconomicSessionIntegrityError(
+                "economic-session authority method cannot be instance-shadowed"
+            )
+        object.__setattr__(self, name, value)
+
     def __init__(
         self,
         workspace: str | Path,

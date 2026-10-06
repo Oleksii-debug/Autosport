@@ -811,7 +811,8 @@ def test_successor_rejects_oversized_predecessor_before_transition_or_write(tmp_
         raise AssertionError("writer executed")
 
     with pytest.raises(EconomicGoalContractError, match="JSON text exceeds"):
-        store.persist_automatic_successor(
+        economic_goal_store_module._BOUND_STORE_PERSIST_AUTOMATIC_SUCCESSOR(
+            store,
             replace(_goal(), revision=2, max_stake_fraction=Decimal("0.01")),
             _json_decoder=forged_decoder,
             _transition_validator=forged_transition,
@@ -1068,7 +1069,11 @@ def test_owner_initialization_does_not_publish_oversize_persisted_image(tmp_path
         EconomicGoalContractError,
         match="persistence text-size limit",
     ):
-        store.initialize_owner(goal, _writer=forged_writer)
+        economic_goal_store_module._BOUND_STORE_INITIALIZE_OWNER(
+            store,
+            goal,
+            _writer=forged_writer,
+        )
 
     assert calls == []
     assert not store.path.exists()
@@ -1081,7 +1086,10 @@ def test_payload_encoder_enforces_utf8_byte_envelope() -> None:
         EconomicGoalContractError,
         match="persistence byte-size limit",
     ):
-        economic_goal_to_payload(goal, _max_json_bytes=1)
+        economic_goal_store_module._BOUND_ECONOMIC_GOAL_TO_PAYLOAD(
+            goal,
+            _max_json_bytes=1,
+        )
 
 
 def test_json_decoder_normalizes_pathological_nesting() -> None:

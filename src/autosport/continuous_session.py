@@ -608,8 +608,10 @@ class _ContinuousSessionState:
             or os.SEEK_SET != _os_seek_set
             or stat.S_ISLNK is not _stat_islnk
             or stat.S_ISREG is not _stat_isreg
+            or type(self)._bounded_descriptor_read is not _bounded_descriptor_read
             or getattr(_bounded_descriptor_read, "__code__", None)
             is not _bounded_descriptor_read_code
+            or type(self)._file_identity is not _file_identity
             or getattr(_file_identity, "__code__", None) is not _file_identity_code
         ):
             raise ContinuousSessionError(
@@ -708,6 +710,7 @@ class _ContinuousSessionState:
     ) -> dict[str, Any]:
         if (
             getattr(_strict_json_loads, "__code__", None) is not _strict_json_loads_code
+            or type(self)._read_error_checkpoint_bytes is not _read_error_checkpoint_bytes
             or getattr(_read_error_checkpoint_bytes, "__code__", None)
             is not _read_error_checkpoint_bytes_code
             or _text is not _text_validator
@@ -1090,8 +1093,10 @@ class _ContinuousSessionState:
         _durable_path_lock_code: object = durable_path_lock.__code__,
     ) -> ContinuousSessionStatus:
         if (
-            getattr(_error_checkpoint_present, "__code__", None)
+            type(self)._error_checkpoint_present is not _error_checkpoint_present
+            or getattr(_error_checkpoint_present, "__code__", None)
             is not _error_checkpoint_present_code
+            or type(self)._read_error_checkpoint is not _read_error_checkpoint
             or getattr(_read_error_checkpoint, "__code__", None)
             is not _read_error_checkpoint_code
             or durable_path_lock is not _durable_path_lock

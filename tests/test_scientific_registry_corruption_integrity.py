@@ -317,8 +317,8 @@ def test_pristine_registry_can_reopen_and_first_append_establishes_authority(tmp
     reopened = ScientificRegistry(path)
     assert path.read_bytes() == pristine_bytes
 
-    record_id = reopened.append(_question())
-    assert record_id == "question-1"
+    record_sha256 = reopened.append(_question())
+    assert record_sha256 == ScientificRegistry._entry(_question())["record_sha256"]
     committed_bytes = path.read_bytes()
     assert committed_bytes != pristine_bytes
 

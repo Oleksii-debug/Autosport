@@ -247,3 +247,48 @@ def test_inflight_request_builder_rebind_is_rejected_before_https_dispatch(
 
     assert mutated is True
     assert opener.calls == []
+
+def test_request_builder_et_dependency_rebind_fails_before_hostile_code(
+    monkeypatch,
+):
+    client, opener = _economic_client(monkeypatch)
+    hostile_calls = []
+
+    def hostile_subelement(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile XML builder dependency executed")
+
+    monkeypatch.setattr(settlement_module.ET, "SubElement", hostile_subelement)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ economic XML request authority was replaced",
+    ):
+        client.read_order_details(123)
+
+    assert hostile_calls == []
+    assert opener.calls == []
+
+
+def test_response_parser_et_dependency_rebind_fails_before_hostile_code(
+    monkeypatch,
+):
+    hostile_calls = []
+
+    def hostile_fromstring(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile XML parser dependency executed")
+
+    monkeypatch.setattr(settlement_module.ET, "fromstring", hostile_fromstring)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ economic XML response authority was replaced",
+    ):
+        settlement_module._parse_economic_soap_result(
+            b"<provider-bytes-must-not-reach-hostile-parser/>",
+            "GetOrderDetails",
+        )
+
+    assert hostile_calls == []
+

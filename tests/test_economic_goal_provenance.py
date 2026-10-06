@@ -95,6 +95,18 @@ def test_decision_identity_rejects_provenance_mutation_between_snapshots() -> No
     assert mutated is True
 
 
+def test_provenance_authority_seal_cannot_be_cleared() -> None:
+    assert EconomicGoalProvenance._authority_operations_sealed is True
+
+    with pytest.raises(
+        TypeError,
+        match="provenance public authority binding is immutable",
+    ):
+        EconomicGoalProvenance._authority_operations_sealed = False
+
+    assert EconomicGoalProvenance._authority_operations_sealed is True
+
+
 def test_decision_identity_public_property_cannot_be_rebound() -> None:
     original = EconomicGoalProvenance.decision_identity
 

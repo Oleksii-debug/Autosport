@@ -1995,3 +1995,40 @@ def test_invalid_settlement_evidence_digest_is_normalized_to_domain_error() -> N
             assert "invalid durable field" in str(exc)
         else:
             raise AssertionError("invalid settlement evidence digest escaped validation")
+
+
+def test_duplicate_settlement_evidence_id_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state_path = root / "continuous_session.json"
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        duplicate = dict(payload["settlement_evidence"][0])
+        payload["settlement_evidence"].append(duplicate)
+        state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        try:
+            state._read()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "evidence_id values must be unique" in str(exc)
+        else:
+            raise AssertionError("duplicate settlement evidence id was accepted")
+
+
+def test_conflicting_duplicate_settlement_evidence_id_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state_path = root / "continuous_session.json"
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        conflicting = dict(payload["settlement_evidence"][0])
+        conflicting["settlement_ref"] = "conflicting-ref"
+        payload["settlement_evidence"].append(conflicting)
+        state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        try:
+            state._read()
+        except continuous_session.ContinuousSessionError as exc:
+            assert "evidence_id values must be unique" in str(exc)
+        else:
+            raise AssertionError("conflicting duplicate evidence id was accepted")

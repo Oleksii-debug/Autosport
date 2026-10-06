@@ -141,6 +141,30 @@ def test_market_weight_and_order_pool_are_canonical_not_caller_asserted() -> Non
         )
 
 
+def test_rpc_origin_composes_with_parent_canonical_ordering() -> None:
+    params = {
+        "marketIds": ["1.200", "1.100"],
+        "priceProjection": {"priceData": ["SP_AVAILABLE", "EX_TRADED"]},
+    }
+    intent = market_book_intent_from_rpc_params(
+        "canonical-order",
+        BetfairRequestPriority.EXECUTION_READ,
+        params=params,
+    )
+
+    assert intent.market_ids == ("1.100", "1.200")
+    assert intent.price_data == ("EX_TRADED", "SP_AVAILABLE")
+    intent.assert_matches_market_book_params(params)
+
+    with pytest.raises(BetfairRequestBudgetError, match="transport params do not match"):
+        intent.assert_matches_market_book_params(
+            {
+                "marketIds": ["1.100", "1.200"],
+                "priceProjection": {"priceData": ["EX_TRADED", "SP_AVAILABLE"]},
+            }
+        )
+
+
 def test_tampered_market_projection_cannot_rebind_positive_budget_or_pool() -> None:
     intent = _market("tamper")
     object.__setattr__(intent, "price_data", ("EX_FAKE",))

@@ -60,7 +60,7 @@ class CandidateLeg:
         """
 
         if (
-            not isinstance(self.event_id, str)
+            type(self.event_id) is not str
             or not self.event_id
             or self.event_id.strip() != self.event_id
         ):
@@ -76,7 +76,7 @@ class CandidateLeg:
                 ("market_id", self.market_id),
                 ("selection_id", self.selection_id),
             ):
-                if not isinstance(value, str) or not value or value.strip() != value:
+                if type(value) is not str or not value or value.strip() != value:
                     raise ValueError(
                         f"candidate leg {field_name} must be a non-empty canonical string"
                     )
@@ -233,10 +233,10 @@ class BeamParlayCandidateSearch:
     def _validate_input_legs(legs: list[CandidateLeg]) -> None:
         seen_quote_keys: set[str] = set()
         for index, leg in enumerate(legs):
-            if not isinstance(leg, CandidateLeg):
-                raise ValueError(f"candidate leg {index} must be a CandidateLeg")
+            if type(leg) is not CandidateLeg:
+                raise ValueError(f"candidate leg {index} must be an exact CandidateLeg")
             if (
-                not isinstance(leg.quote_key, str)
+                type(leg.quote_key) is not str
                 or not leg.quote_key
                 or leg.quote_key != leg.quote_key.strip()
             ):
@@ -244,7 +244,7 @@ class BeamParlayCandidateSearch:
                     f"candidate leg {index} quote_key must be a non-empty canonical string"
                 )
             if (
-                not isinstance(leg.event_id, str)
+                type(leg.event_id) is not str
                 or not leg.event_id
                 or leg.event_id != leg.event_id.strip()
             ):

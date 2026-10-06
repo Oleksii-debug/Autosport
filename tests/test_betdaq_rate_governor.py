@@ -808,6 +808,7 @@ def test_unknown_blacklist_observation_cannot_replace_known_operation_fence(
         governor.admit("GetPrices")
     assert denied.value.reason == "provider_api_blacklisted"
 
+
 def test_getoddsladder_uses_conservative_shared_any_other_default_axis(
     tmp_path: Path,
 ) -> None:
@@ -863,7 +864,10 @@ def test_getoddsladder_blacklist_identity_is_api_scoped_and_canonical(
     )
 
     assert observation.operation_id == "GetOddsLadder"
-    assert governor.blacklist_status("GetOddsLadder") is BetdaqBlacklistStatus.BLACKLISTED
+    assert (
+        governor.blacklist_status("GetOddsLadder")
+        is BetdaqBlacklistStatus.BLACKLISTED
+    )
     assert governor.blacklist_status("GetPrices") is BetdaqBlacklistStatus.UNKNOWN
 
     with pytest.raises(BetdaqRateDeferred) as denied:

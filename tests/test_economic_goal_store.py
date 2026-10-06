@@ -1323,6 +1323,31 @@ def test_verified_read_rejects_path_replacement_after_final_byte_read(
         )
 
 
+def test_verified_read_rejects_in_place_mutation_after_final_byte_read(
+    tmp_path,
+) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+    original_open = economic_goal_store_module._CANONICAL_OPEN_READ_ONLY_DESCRIPTOR
+    calls = 0
+
+    def racing_open(path):
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            path.write_text('{"schema":"attacker"}', encoding="utf-8")
+        return original_open(path)
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="bytes changed after verified read",
+    ):
+        economic_goal_store_module._read_economic_goal_text(
+            store.path,
+            _open_descriptor=racing_open,
+        )
+
+
 def _maximally_escaped_restrictions() -> frozenset[str]:
     return frozenset(
         ('"' * 500) + f"{index:012d}"

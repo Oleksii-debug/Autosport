@@ -436,18 +436,46 @@ def _read_market_book_batch(
         ) from exc
 
 
+def _make_attempt_history(
+    plan: MarketBookReadPlan,
+    records: tuple[MarketBookAttemptRecord, ...],
+    *,
+    history_type: type[MarketBookAttemptHistory] = MarketBookAttemptHistory,
+    validate_history: Callable[[MarketBookAttemptHistory], None] = MarketBookAttemptHistory.__post_init__,
+) -> MarketBookAttemptHistory:
+    """Construct exact canonical history without mutable dataclass init dispatch."""
+
+    history = object.__new__(history_type)
+    object.__setattr__(history, "plan", plan)
+    object.__setattr__(history, "records", records)
+    validate_history(history)
+    return history
+
+
 def append_market_book_transport_attempt(
     history: MarketBookAttemptHistory,
     result: MarketBookBatchTransportResult,
     *,
     attempt_id: str,
     required: bool,
+    history_type: type[MarketBookAttemptHistory] = MarketBookAttemptHistory,
+    result_type: type[MarketBookBatchTransportResult] = MarketBookBatchTransportResult,
+    canonical_batch: Callable[[MarketBookReadPlan, str], MarketBookReadBatch] = _canonical_batch,
+    issue_record: Callable[..., MarketBookAttemptRecord] = MarketBookAttemptRecord.issue,
+    make_history: Callable[
+        [MarketBookReadPlan, tuple[MarketBookAttemptRecord, ...]],
+        MarketBookAttemptHistory,
+    ] = _make_attempt_history,
+    exact_status: BatchReceiptStatus = BatchReceiptStatus.EXACT_RESPONSE,
+    incomplete_status: BatchReceiptStatus = BatchReceiptStatus.INCOMPLETE_RESPONSE,
+    exact_outcome: MarketBookAttemptOutcome = MarketBookAttemptOutcome.EXACT_RESPONSE,
+    incomplete_outcome: MarketBookAttemptOutcome = MarketBookAttemptOutcome.INCOMPLETE_RESPONSE,
 ) -> MarketBookAttemptHistory:
     """Append one issued transport result to canonical retry/gap history."""
 
-    if type(history) is not MarketBookAttemptHistory:
+    if type(history) is not history_type:
         raise TypeError("history must be an exact MarketBookAttemptHistory")
-    if type(result) is not MarketBookBatchTransportResult:
+    if type(result) is not result_type:
         raise TypeError("result must be an exact MarketBookBatchTransportResult")
     # Canonical issuance is enforced by the closure-bound public wrapper installed
     # below. Do not redispatch through the mutable class method here: a rebound
@@ -462,20 +490,20 @@ def append_market_book_transport_attempt(
             "transport result is bound to another MarketBook request contract"
         )
 
-    _canonical_batch(history.plan, result.batch_id)
+    canonical_batch(history.plan, result.batch_id)
     previous = history.records[-1] if history.records else None
-    if result.receipt.status is BatchReceiptStatus.EXACT_RESPONSE:
-        outcome = MarketBookAttemptOutcome.EXACT_RESPONSE
+    if result.receipt.status is exact_status:
+        outcome = exact_outcome
         exact_receipt = result.receipt
-    elif result.receipt.status is BatchReceiptStatus.INCOMPLETE_RESPONSE:
-        outcome = MarketBookAttemptOutcome.INCOMPLETE_RESPONSE
+    elif result.receipt.status is incomplete_status:
+        outcome = incomplete_outcome
         exact_receipt = None
     else:
         raise MarketBookBatchTransportError(
             "transport result receipt has unsupported dispatch outcome"
         )
 
-    record = MarketBookAttemptRecord.issue(
+    record = issue_record(
         history.plan,
         attempt_id=attempt_id,
         sequence=len(history.records) + 1,
@@ -485,7 +513,7 @@ def append_market_book_transport_attempt(
         exact_receipt=exact_receipt,
         previous_record=previous,
     )
-    return MarketBookAttemptHistory(history.plan, history.records + (record,))
+    return make_history(history.plan, history.records + (record,))
 
 
 def _append_nonresponse_attempt(
@@ -495,20 +523,29 @@ def _append_nonresponse_attempt(
     attempt_id: str,
     required: bool,
     outcome: MarketBookAttemptOutcome,
+    canonical_batch: Callable[[MarketBookReadPlan, str], MarketBookReadBatch] = _canonical_batch,
+    issue_record: Callable[..., MarketBookAttemptRecord] = MarketBookAttemptRecord.issue,
+    make_history: Callable[
+        [MarketBookReadPlan, tuple[MarketBookAttemptRecord, ...]],
+        MarketBookAttemptHistory,
+    ] = _make_attempt_history,
+    allowed_outcomes: frozenset[MarketBookAttemptOutcome] = frozenset(
+        {
+            MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
+            MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY,
+            MarketBookAttemptOutcome.PROVIDER_FAILURE,
+            MarketBookAttemptOutcome.TRANSPORT_FAILURE,
+            MarketBookAttemptOutcome.PARSE_FAILURE,
+        }
+    ),
 ) -> MarketBookAttemptHistory:
-    if outcome not in {
-        MarketBookAttemptOutcome.NOT_DISPATCHED_RATE,
-        MarketBookAttemptOutcome.NOT_DISPATCHED_CONCURRENCY,
-        MarketBookAttemptOutcome.PROVIDER_FAILURE,
-        MarketBookAttemptOutcome.TRANSPORT_FAILURE,
-        MarketBookAttemptOutcome.PARSE_FAILURE,
-    }:
+    if outcome not in allowed_outcomes:
         raise MarketBookBatchTransportError(
             "nonresponse attempt outcome is not supported by this coordinator"
         )
-    _canonical_batch(history.plan, batch_id)
+    canonical_batch(history.plan, batch_id)
     previous = history.records[-1] if history.records else None
-    record = MarketBookAttemptRecord.issue(
+    record = issue_record(
         history.plan,
         attempt_id=attempt_id,
         sequence=len(history.records) + 1,
@@ -518,7 +555,7 @@ def _append_nonresponse_attempt(
         exact_receipt=None,
         previous_record=previous,
     )
-    return MarketBookAttemptHistory(history.plan, history.records + (record,))
+    return make_history(history.plan, history.records + (record,))
 
 
 @dataclass(frozen=True, slots=True)

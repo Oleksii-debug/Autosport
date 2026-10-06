@@ -1735,7 +1735,7 @@ def test_record_failure_rejects_class_writer_rebinding(monkeypatch) -> None:
         try:
             state.record_failure(code="FAIL")
         except continuous_session.ContinuousSessionError as exc:
-            assert "failure publication authority changed" in str(exc)
+            assert "failure publication lock authority" in str(exc)
         else:
             raise AssertionError("class-rebound failure writer was accepted")
 

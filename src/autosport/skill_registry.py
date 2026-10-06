@@ -437,6 +437,16 @@ def _remove_handler_result_spool(
     return True
 
 
+def _cleanup_interrupted_handler_process(process: Any, spool_path: Path) -> None:
+    """Reap after process-control interruption without unlinking a live child's spool."""
+
+    stop_error = _stop_process_bounded(process, suppress_base_exceptions=True)
+    if stop_error != "STOP_FAILED":
+        _remove_handler_result_spool(
+            spool_path, suppress_base_exceptions=True
+        )
+
+
 def _decode_handler_result_spool(
     path: Path,
 ) -> tuple[SkillExecutionResult | None, str | None]:
@@ -595,10 +605,7 @@ def _execute_handler_spooled_bounded(
             return finish(None, "HANDLER_START_STOP_FAILED")
         return finish(None, "HANDLER_START_" + exc.__class__.__name__.upper())
     except BaseException:
-        _stop_process_bounded(process, suppress_base_exceptions=True)
-        _remove_handler_result_spool(
-            spool_path, suppress_base_exceptions=True
-        )
+        _cleanup_interrupted_handler_process(process, spool_path)
         raise
 
     try:
@@ -611,10 +618,7 @@ def _execute_handler_spooled_bounded(
             return finish(None, "HANDLER_PROCESS_STOP_FAILED")
         return finish(None, "HANDLER_PROCESS_JOIN_FAILED")
     except BaseException:
-        _stop_process_bounded(process, suppress_base_exceptions=True)
-        _remove_handler_result_spool(
-            spool_path, suppress_base_exceptions=True
-        )
+        _cleanup_interrupted_handler_process(process, spool_path)
         raise
 
     try:
@@ -627,10 +631,7 @@ def _execute_handler_spooled_bounded(
             return finish(None, "HANDLER_PROCESS_STOP_FAILED")
         return finish(None, "HANDLER_PROCESS_STATE_UNAVAILABLE")
     except BaseException:
-        _stop_process_bounded(process, suppress_base_exceptions=True)
-        _remove_handler_result_spool(
-            spool_path, suppress_base_exceptions=True
-        )
+        _cleanup_interrupted_handler_process(process, spool_path)
         raise
 
     if alive:

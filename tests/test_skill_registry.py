@@ -2885,3 +2885,63 @@ def test_stop_process_baseexception_reaps_before_reraise():
     assert process.alive is False
     assert process.closed is True
 
+def test_interrupted_child_stop_failure_preserves_live_spool(tmp_path, monkeypatch):
+    spool_path = tmp_path / "handler-result.json"
+
+    class InterruptingProcess:
+        def start(self):
+            raise KeyboardInterrupt("original parent interrupt")
+
+    process = InterruptingProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_spooled_process
+            assert args[2] == str(spool_path)
+            assert daemon is True
+            return process
+
+    def fake_mkstemp(*, prefix, suffix):
+        assert prefix == "autosport-skill-result-"
+        assert suffix == ".json"
+        descriptor = skill_registry_module.os.open(
+            spool_path,
+            skill_registry_module.os.O_CREAT
+            | skill_registry_module.os.O_RDWR,
+        )
+        return descriptor, str(spool_path)
+
+    cleanup_calls = []
+
+    def fake_remove(path, *, suppress_base_exceptions=False):
+        cleanup_calls.append((path, suppress_base_exceptions))
+        path.unlink(missing_ok=True)
+        return True
+
+    monkeypatch.setattr(skill_registry_module.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_stop_process_bounded",
+        lambda _process, *, suppress_base_exceptions=False: "STOP_FAILED",
+    )
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_remove_handler_result_spool",
+        fake_remove,
+    )
+
+    try:
+        with pytest.raises(KeyboardInterrupt, match="original parent interrupt"):
+            skill_registry_module._execute_handler_spooled_bounded(
+                FakeContext(),
+                _slow_handler,
+                {},
+                1,
+            )
+
+        assert cleanup_calls == []
+        assert spool_path.exists()
+    finally:
+        spool_path.unlink(missing_ok=True)
+

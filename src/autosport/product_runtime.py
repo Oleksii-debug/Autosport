@@ -18,7 +18,12 @@ from .causal_collector import (
     DesktopDeltaCheckpointStore,
     DesktopDeltaConsumer,
 )
-from .collector_service import CollectorServiceSource, HeadlessCollectorService
+from .collector_service import (
+    CollectorServiceConfig,
+    CollectorServiceSource,
+    HeadlessCollectorService,
+    _SignalStopRequest,
+)
 from .continuous_session import (
     ContinuousSessionCoordinator,
     ContinuousSessionStatus,
@@ -568,6 +573,22 @@ class AutonomousProductRuntime:
                 "product START transition requires recovery before positive lifecycle use"
             )
 
+    def _canonical_product_stop_source(self) -> _SignalStopRequest:
+        stop_source = self.collector.stop_requested
+        if type(stop_source) is not _SignalStopRequest:
+            raise ProductCompositionError(
+                "canonical product collector STOP source binding changed"
+            )
+        reason_callback = self.collector.stop_reason
+        if (
+            getattr(reason_callback, "__self__", None) is not stop_source
+            or getattr(reason_callback, "__func__", None) is not _SignalStopRequest.reason
+        ):
+            raise ProductCompositionError(
+                "canonical product collector STOP reason binding changed"
+            )
+        return stop_source
+
     def _coherent_status(
         self,
         *,
@@ -709,6 +730,7 @@ class AutonomousProductRuntime:
             session_pre_state=current_state,
         )
         try:
+            self._canonical_product_stop_source().clear()
             self.collector.resume()
             self.coordinator.resume()
             resolved = self._coherent_status(allow_pending_start=True)
@@ -742,58 +764,62 @@ class AutonomousProductRuntime:
     def resume(self) -> ContinuousSessionStatus:
         return self.start()
 
-    @_serialized_runtime_operation
     def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
+        # Wake an in-flight scheduled wait before contending for the lifecycle fence
+        # held by tick(). The exact same collector-owned source supplies STOP truth.
         self._require_runtime_authority()
-        pending = self._start_transition_store.pending()
-        collector_error: BaseException | None = None
-        coordinator_error: BaseException | None = None
-        try:
-            self.collector.stop(reason)
-        except BaseException as exc:
-            collector_error = exc
-        try:
-            self.coordinator.stop(reason)
-        except BaseException as exc:
-            coordinator_error = exc
+        self._canonical_product_stop_source().request(reason)
+        with self._operation_fence:
+            self._require_runtime_authority()
+            pending = self._start_transition_store.pending()
+            collector_error: BaseException | None = None
+            coordinator_error: BaseException | None = None
+            try:
+                self.collector.stop(reason)
+            except BaseException as exc:
+                collector_error = exc
+            try:
+                self.coordinator.stop(reason)
+            except BaseException as exc:
+                coordinator_error = exc
 
-        if collector_error is not None:
+            if collector_error is not None:
+                if coordinator_error is not None:
+                    self._note_secondary_failure(
+                        collector_error,
+                        action="session STOP",
+                        secondary_error=coordinator_error,
+                    )
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        collector_error,
+                    )
+                raise collector_error
             if coordinator_error is not None:
-                self._note_secondary_failure(
-                    collector_error,
-                    action="session STOP",
-                    secondary_error=coordinator_error,
-                )
-            if pending is not None:
-                self._mark_start_recovery_required(
-                    int(pending["generation"]),
-                    collector_error,
-                )
-            raise collector_error
-        if coordinator_error is not None:
-            if pending is not None:
-                self._mark_start_recovery_required(
-                    int(pending["generation"]),
-                    coordinator_error,
-                )
-            raise coordinator_error
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        coordinator_error,
+                    )
+                raise coordinator_error
 
-        resolved = self._coherent_status(allow_pending_start=True)
-        if self._state_value(resolved) != SessionState.STOPPED.value:
-            error = ProductCompositionError(
-                "canonical product STOP did not reach coherent STOPPED state"
-            )
-            if pending is not None:
-                self._mark_start_recovery_required(
-                    int(pending["generation"]),
-                    error,
+            resolved = self._coherent_status(allow_pending_start=True)
+            if self._state_value(resolved) != SessionState.STOPPED.value:
+                error = ProductCompositionError(
+                    "canonical product STOP did not reach coherent STOPPED state"
                 )
-            raise error
-        if pending is not None:
-            self._start_transition_store.mark_rolled_back(
-                int(pending["generation"])
-            )
-        return resolved
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        error,
+                    )
+                raise error
+            if pending is not None:
+                self._start_transition_store.mark_rolled_back(
+                    int(pending["generation"])
+                )
+            return resolved
 
     @_serialized_runtime_operation
     def status(self) -> ContinuousSessionStatus:
@@ -830,6 +856,7 @@ def build_autonomous_product_runtime(
     source: ProductCollectorSource,
     clock: Callable[[], str] | None = None,
     sleep: Callable[[float], None] | None = None,
+    collector_config: CollectorServiceConfig | None = None,
     initial_bankroll: str = "10000",
     outcome_authority: SettlementOutcomeAuthority | None = None,
     settlement_learning_handoff: SettlementLearningHandoff | None = None,
@@ -849,6 +876,8 @@ def build_autonomous_product_runtime(
         raise ProductCompositionError("source.source_id must be a non-empty trimmed string")
     if not callable(getattr(source, "resolve_event", None)):
         raise ProductCompositionError("source.resolve_event must be callable")
+    if collector_config is not None and type(collector_config) is not CollectorServiceConfig:
+        raise TypeError("collector_config must be CollectorServiceConfig or None")
 
     try:
         normalized_bankroll = str(initial_bankroll)
@@ -904,6 +933,7 @@ def build_autonomous_product_runtime(
 
         dependencies = FocusedMirrorDependencyIndex(mirror)
         collector_store = CollectorDeltaStore(root / "collector_deltas.json")
+        stop_source = _SignalStopRequest()
         collector = HeadlessCollectorService(
             delta_store=collector_store,
             lifecycle=lifecycle,
@@ -912,6 +942,9 @@ def build_autonomous_product_runtime(
             run_id=f"product:{source_id}",
             clock=resolved_clock,
             sleep=sleep,
+            config=collector_config,
+            stop_requested=stop_source,
+            stop_reason=stop_source.reason,
         )
         desktop = DesktopDeltaConsumer(
             collector_store,
@@ -932,6 +965,7 @@ def build_autonomous_product_runtime(
             settlement_learning_handoff=settlement_learning_handoff,
             clock=resolved_clock,
             initial_bankroll=manifest.initial_bankroll,
+            prospective_collection=True,
         )
         runtime = AutonomousProductRuntime(
             workspace=root,

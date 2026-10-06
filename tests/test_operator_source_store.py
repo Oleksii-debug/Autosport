@@ -328,3 +328,27 @@ def test_invalid_mutated_config_fails_before_replacing_last_good_state(
 
     assert store.read() == last_good
 
+def test_write_readback_is_bound_to_prevalidated_snapshot_not_caller_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "operator-source.json"
+    store = OperatorSourceConfigStore(path)
+    candidate = build_operator_source_config("betfair-exchange")
+    canonical_atomic_write = operator_source_store.atomic_write_json
+
+    def mutate_caller_then_publish(destination, payload):
+        object.__setattr__(candidate, "source_id", "paper-fixture")
+        return canonical_atomic_write(destination, payload)
+
+    monkeypatch.setattr(
+        operator_source_store,
+        "atomic_write_json",
+        mutate_caller_then_publish,
+    )
+    persisted = store.write(candidate)
+
+    assert candidate.source_id == "paper-fixture"
+    assert persisted.source_id == "betfair-exchange"
+    assert store.read() == persisted
+

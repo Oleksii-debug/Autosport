@@ -91,10 +91,20 @@ def build_operator_source_config(source_id: str) -> OperatorSourceConfig:
 def parse_operator_source_config(payload: bytes | bytearray | memoryview) -> OperatorSourceConfig:
     if not isinstance(payload, (bytes, bytearray, memoryview)):
         raise TypeError("payload must be bytes-like")
-    payload_size = payload.nbytes if isinstance(payload, memoryview) else len(payload)
+    try:
+        payload_size = payload.nbytes if isinstance(payload, memoryview) else len(payload)
+    except ValueError:
+        raise OperatorSourceConfigError(
+            "operator source configuration byte view is invalid"
+        ) from None
     if payload_size < 1 or payload_size > 4096:
         raise OperatorSourceConfigError("operator source configuration payload size is invalid")
-    raw = bytes(payload)
+    try:
+        raw = bytes(payload)
+    except ValueError:
+        raise OperatorSourceConfigError(
+            "operator source configuration byte view is invalid"
+        ) from None
     if len(raw) != payload_size:
         raise OperatorSourceConfigError("operator source configuration byte view is inconsistent")
     try:

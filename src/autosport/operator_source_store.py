@@ -117,7 +117,7 @@ class OperatorSourceConfigStore:
             raise OperatorSourceStoreError(
                 "operator source configuration could not be published"
             ) from exc
-        if persisted != config:
+        if persisted != canonical:
             raise OperatorSourceStoreError(
                 "published operator source configuration readback mismatch"
             )

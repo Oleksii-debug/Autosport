@@ -217,3 +217,20 @@ def test_memoryview_size_uses_bytes_not_element_count() -> None:
     with pytest.raises(OperatorSourceConfigError, match="size"):
         parse_operator_source_config(payload)
 
+def test_released_memoryview_fails_closed_in_parser_and_selection() -> None:
+    view = memoryview(
+        build_operator_source_config("betfair-exchange").to_json_bytes()
+    )
+    view.release()
+
+    with pytest.raises(OperatorSourceConfigError, match="byte view"):
+        parse_operator_source_config(view)
+
+    result = resolve_operator_source_selection(
+        persisted_payload=view,
+        admin_override_source_id=None,
+    )
+    assert result.state is OperatorSourceSelectionState.INVALID
+    assert result.source_id is None
+    assert result.runtime_authorized is False
+

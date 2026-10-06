@@ -1699,3 +1699,47 @@ def test_record_failure_rejects_runtime_session_lock_rebinding(monkeypatch) -> N
             assert "failure publication lock authority" in str(exc)
         else:
             raise AssertionError("runtime-rebound failure lock was accepted")
+
+
+def test_stale_instance_failure_rebinds_to_current_canonical_generation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        stale = _state_with_history(root, _SMALL_HISTORY)
+        current = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        current.record_success(
+            at="2026-10-06T04:53:00+00:00",
+            full_refresh=False,
+            settlement_evidence=(),
+        )
+        assert current.snapshot().cycles_completed == 5
+
+        stale.record_failure(code="POST_SUCCESS_FAILURE")
+
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        snapshot = reopened.snapshot()
+        assert snapshot.cycles_completed == 5
+        assert snapshot.last_error_code == "POST_SUCCESS_FAILURE"
+
+        payload = json.loads(
+            (root / "continuous_session.json.operational_error.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        canonical = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        assert payload["observed_generation"] == canonical["generation"]
+        assert payload["observed_cycles_completed"] == canonical["cycles_completed"]
+        assert payload["observed_last_success_at"] == canonical["last_success_at"]
+        assert payload["observed_state"] == canonical["state"]

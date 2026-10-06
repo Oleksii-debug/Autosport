@@ -9,6 +9,7 @@ authority.
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -1137,10 +1138,11 @@ def _install_attempt_executor() -> None:
     canonical_append_nonresponse = _append_nonresponse_attempt
     canonical_execution_type = MarketBookBatchAttemptExecution
     canonical_execution_validate = MarketBookBatchAttemptExecution.__post_init__
-    canonical_plan_to_json = MarketBookReadPlan.to_json
-    canonical_plan_from_json = MarketBookReadPlan.from_json
-    canonical_history_to_json = MarketBookAttemptHistory.to_json
-    canonical_history_from_json = MarketBookAttemptHistory.from_json
+    canonical_plan_type = MarketBookReadPlan
+    canonical_plan_validate = MarketBookReadPlan.__post_init__
+    canonical_history_validate = MarketBookAttemptHistory.__post_init__
+    canonical_make_history = _make_attempt_history
+    deep_copy = deepcopy
     canonical_token = _token
     canonical_batch = _canonical_batch
     canonical_admission_error_type = MarketBookBatchAdmissionError
@@ -1156,13 +1158,22 @@ def _install_attempt_executor() -> None:
     canonical_exact_response_status = BatchReceiptStatus.EXACT_RESPONSE
 
     def freeze_plan(plan: MarketBookReadPlan) -> MarketBookReadPlan:
-        return canonical_plan_from_json(canonical_plan_to_json(plan))
+        frozen = deep_copy(plan)
+        if type(frozen) is not canonical_plan_type:
+            raise TypeError("plan snapshot must preserve exact MarketBookReadPlan type")
+        canonical_plan_validate(frozen)
+        return frozen
 
     def freeze_history(
         plan: MarketBookReadPlan,
         history: MarketBookAttemptHistory,
     ) -> MarketBookAttemptHistory:
-        return canonical_history_from_json(plan, canonical_history_to_json(history))
+        records = deep_copy(history.records)
+        return canonical_make_history(
+            plan,
+            records,
+            validate_history=canonical_history_validate,
+        )
 
     def make_execution(
         history: MarketBookAttemptHistory,

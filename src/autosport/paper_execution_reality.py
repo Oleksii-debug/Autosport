@@ -175,7 +175,7 @@ def _derive_run_economics(
     if len(attempts) > len(action_ids):
         raise PaperExecutionIntegrityError("durable attempts exceed reserved action list")
 
-    known_exposure = _decimal_from_coefficient(0, 0)
+    known_exposure = from_coefficient(0, 0)
     worst_case = _decimal_from_coefficient(0, 0)
     terminal_seen = False
     for index, attempt in enumerate(attempts):
@@ -679,6 +679,10 @@ def _synthetic_attempt(
     )
 
 
+_CANONICAL_SYNTHETIC_ATTEMPT = _synthetic_attempt
+_CANONICAL_SYNTHETIC_ATTEMPT_CODE = _synthetic_attempt.__code__
+
+
 def execute_paper_plan(
     *,
     plan: ExecutionPlan,
@@ -691,6 +695,20 @@ def execute_paper_plan(
     suspended_action_ids: frozenset[str] = frozenset(),
 ) -> PaperExecutionRun:
     """Execute/resume one PAPER/SHADOW run without provider writes or real money."""
+    decimal_add = _decimal_add_exact
+    from_coefficient = _decimal_from_coefficient
+    synthetic_attempt = _synthetic_attempt
+    if (
+        decimal_add is not _CANONICAL_DECIMAL_ADD_EXACT
+        or decimal_add.__code__ is not _CANONICAL_DECIMAL_ADD_EXACT_CODE
+        or from_coefficient is not _CANONICAL_DECIMAL_FROM_COEFFICIENT
+        or from_coefficient.__code__ is not _CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE
+        or synthetic_attempt is not _CANONICAL_SYNTHETIC_ATTEMPT
+        or synthetic_attempt.__code__ is not _CANONICAL_SYNTHETIC_ATTEMPT_CODE
+    ):
+        raise PaperExecutionIntegrityError(
+            "PAPER execution Decimal authority changed"
+        )
     if not isinstance(plan, _CANONICAL_EXECUTION_PLAN_TYPE):
         raise TypeError("plan must be ExecutionPlan")
     if not isinstance(config, _CANONICAL_PAPER_EXECUTION_MODEL_CONFIG_TYPE):
@@ -772,12 +790,12 @@ def execute_paper_plan(
         assert result is not None
         return result
 
-    known_exposure = _decimal_from_coefficient(0, 0)
-    worst_case_exposure = _decimal_from_coefficient(0, 0)
+    known_exposure = from_coefficient(0, 0)
+    worst_case_exposure = from_coefficient(0, 0)
     for prior in attempts:
         assert prior.outcome is _OUTCOME_ACCEPTED
         assert prior.execution_stake is not None
-        known_exposure = _decimal_add_exact(
+        known_exposure = decimal_add(
             known_exposure,
             prior.execution_stake,
         )
@@ -802,7 +820,7 @@ def execute_paper_plan(
                 started_at=started_at,
             )
         else:
-            attempt = _synthetic_attempt(
+            attempt = synthetic_attempt(
                 run_id=run_id,
                 plan=plan,
                 action=action,
@@ -819,7 +837,7 @@ def execute_paper_plan(
             _OUTCOME_PARTIAL,
         }:
             assert attempt.execution_stake is not None
-            known_exposure = _decimal_add_exact(
+            known_exposure = decimal_add(
                 known_exposure,
                 attempt.execution_stake,
             )
@@ -827,7 +845,7 @@ def execute_paper_plan(
         elif attempt.outcome is _OUTCOME_UNKNOWN:
             worst_case_exposure = max(
                 worst_case_exposure,
-                _decimal_add_exact(
+                decimal_add(
                     known_exposure,
                     attempt.requested_stake,
                 ),

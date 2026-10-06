@@ -701,7 +701,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         delta.validate()
         payload_json, digest, quote_key, dedupe_key = cls._canonical_event_payload(event)
         if (
-            digest != delta.canonical_event_digest
+            event.source_id != delta.source_id
+            or digest != delta.canonical_event_digest
             or event.event_id != delta.event_id
             or dedupe_key != delta.event_dedupe_key
         ):
@@ -946,7 +947,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             event = MarketEvent.from_dict(raw)
             payload_json, digest, quote_key, dedupe_key = self._canonical_event_payload(event)
             if (
-                payload_json != row["payload_json"]
+                event.source_id != delta.source_id
+                or payload_json != row["payload_json"]
                 or digest != row["canonical_event_digest"]
                 or quote_key != row["quote_key"]
                 or dedupe_key != row["dedupe_key"]

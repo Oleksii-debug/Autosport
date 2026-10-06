@@ -1643,10 +1643,9 @@ def test_rebound_place_response_parser_cannot_mint_provider_origin_authority(
             )
 
         assert transport.calls == []
-        assert (
-            ledger.verified_attempt(
-                "attempt-rebound-place-parser"
-            )
-            is None
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        assert all(
+            item.attempt.attempt_id != "attempt-rebound-place-parser"
+            for item in view.attempts
         )
 

@@ -47,12 +47,19 @@ class AbstentionReason(str, Enum):
     SOURCE_ACTIONABILITY_UNPROVEN = "SOURCE_ACTIONABILITY_UNPROVEN"
     EXPLICIT_AMBIGUITY = "EXPLICIT_AMBIGUITY"
     INSUFFICIENT_INTERMEDIATE_GRANULARITY = "INSUFFICIENT_INTERMEDIATE_GRANULARITY"
+    PRODUCT_ORIGIN_UNPROVEN = "PRODUCT_ORIGIN_UNPROVEN"
 
 
 def _require_aware(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime):
-        raise LiveMarketAbstentionError(f"{name} must be datetime")
-    if value.tzinfo is None or value.utcoffset() is None:
+    if type(value) is not datetime:
+        raise LiveMarketAbstentionError(f"{name} must be exact datetime")
+    try:
+        offset = value.utcoffset()
+    except Exception as exc:
+        raise LiveMarketAbstentionError(
+            f"{name} timezone offset must be readable"
+        ) from exc
+    if value.tzinfo is None or offset is None:
         raise LiveMarketAbstentionError(f"{name} must be timezone-aware")
     return value
 
@@ -91,18 +98,18 @@ class LiveMarketEligibilityInput:
     def __post_init__(self) -> None:
         _require_aware(self.quote_observed_at, "quote_observed_at")
         _require_aware(self.decision_observed_at, "decision_observed_at")
-        if not isinstance(self.max_quote_age, timedelta) or self.max_quote_age <= timedelta(0):
+        if type(self.max_quote_age) is not timedelta or self.max_quote_age <= timedelta(0):
             raise LiveMarketAbstentionError("max_quote_age must be a positive timedelta")
-        if not isinstance(self.market_status, MarketStatus):
+        if type(self.market_status) is not MarketStatus:
             raise LiveMarketAbstentionError("market_status must be MarketStatus")
         if self.market_data_delayed is not None:
             _require_bool(self.market_data_delayed, "market_data_delayed")
-        if not isinstance(self.continuity_status, ContinuityStatus):
+        if type(self.continuity_status) is not ContinuityStatus:
             raise LiveMarketAbstentionError("continuity_status must be ContinuityStatus")
         _require_bool(self.response_coverage_complete, "response_coverage_complete")
         _require_epoch(self.continuity_epoch, "continuity_epoch")
         _require_epoch(self.expected_continuity_epoch, "expected_continuity_epoch")
-        if not isinstance(self.provider_health, ProviderHealth):
+        if type(self.provider_health) is not ProviderHealth:
             raise LiveMarketAbstentionError("provider_health must be ProviderHealth")
         _require_bool(self.source_actionability_proven, "source_actionability_proven")
         _require_bool(self.explicit_ambiguity, "explicit_ambiguity")
@@ -130,17 +137,22 @@ class LiveMarketEligibilityDecision:
             raise LiveMarketAbstentionError(
                 "reasons must be a tuple of exact AbstentionReason values"
             )
-        if not isinstance(self.quote_age, timedelta):
-            raise LiveMarketAbstentionError("quote_age must be timedelta")
+        if type(self.quote_age) is not timedelta:
+            raise LiveMarketAbstentionError("quote_age must be exact timedelta")
         if self.status is LiveMarketEligibility.WAIT and not self.reasons:
             raise LiveMarketAbstentionError("WAIT decision requires abstention reasons")
-        if (
-            self.status is LiveMarketEligibility.ELIGIBLE_FOR_DOWNSTREAM_EVALUATION
-            and self.reasons
-        ):
+        if self.status is LiveMarketEligibility.ELIGIBLE_FOR_DOWNSTREAM_EVALUATION:
             raise LiveMarketAbstentionError(
-                "ELIGIBLE decision cannot contain abstention reasons"
+                "standalone decision cannot carry positive downstream eligibility"
             )
+
+    @property
+    def is_product_issued(self) -> bool:
+        return False
+
+    @property
+    def product_origin_proven(self) -> bool:
+        return False
 
     @property
     def execution_authorized(self) -> bool:
@@ -152,7 +164,7 @@ class LiveMarketEligibilityDecision:
 
     @property
     def eligible_for_downstream_evaluation(self) -> bool:
-        return self.status is LiveMarketEligibility.ELIGIBLE_FOR_DOWNSTREAM_EVALUATION
+        return False
 
 
 def evaluate_live_market_eligibility(
@@ -166,7 +178,7 @@ def evaluate_live_market_eligibility(
     may inspect the snapshot. A positive result never authorizes execution.
     """
 
-    if not isinstance(evidence, LiveMarketEligibilityInput):
+    if type(evidence) is not LiveMarketEligibilityInput:
         raise LiveMarketAbstentionError(
             "evidence must be canonical LiveMarketEligibilityInput"
         )
@@ -206,15 +218,11 @@ def evaluate_live_market_eligibility(
     if evidence.stream_conflated and evidence.requires_intermediate_granularity:
         reasons.append(AbstentionReason.INSUFFICIENT_INTERMEDIATE_GRANULARITY)
 
-    if reasons:
-        return LiveMarketEligibilityDecision(
-            status=LiveMarketEligibility.WAIT,
-            reasons=tuple(reasons),
-            quote_age=age,
-        )
+    if not reasons:
+        reasons.append(AbstentionReason.PRODUCT_ORIGIN_UNPROVEN)
 
     return LiveMarketEligibilityDecision(
-        status=LiveMarketEligibility.ELIGIBLE_FOR_DOWNSTREAM_EVALUATION,
-        reasons=(),
+        status=LiveMarketEligibility.WAIT,
+        reasons=tuple(reasons),
         quote_age=age,
     )

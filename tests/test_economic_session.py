@@ -233,6 +233,29 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         ):
             store.require_current(evidence)
 
+    def test_require_current_rejects_instance_shadow_without_dispatch(self) -> None:
+        store = ProductEconomicSessionStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+        evidence = store.current()
+        called = False
+
+        def hostile_current():
+            nonlocal called
+            called = True
+            raise AssertionError("caller-shadowed current must not execute")
+
+        store.current = hostile_current
+
+        with self.assertRaisesRegex(
+            EconomicSessionIntegrityError,
+            "authority composition changed after construction",
+        ):
+            store.require_current(evidence)
+
+        self.assertFalse(called)
+
     def test_transition_rejects_rebound_product_session_equality(self) -> None:
         store = self._store()
         first = store.current()

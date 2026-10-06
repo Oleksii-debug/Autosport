@@ -250,7 +250,7 @@ def capture_historical_acquisition_bundle(
             snapshots_with_odds=snapshots_with_odds,
             result_capture_sha256=result_report.capture_sha256,
         )
-    except Exception:
+    except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
 

@@ -4647,6 +4647,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
             if (
                 BoundedMirrorInvalidationBuffer is not _invalidation_buffer_type
+                or _validate_canonical_invalidation_buffer_state
+                is not _invalidation_state_validator
+                or getattr(_invalidation_state_validator, "__code__", None)
+                is not _invalidation_state_validator_code
                 or getattr(invalidation_drain, "__self__", None)
                 is not invalidation_buffer
                 or getattr(invalidation_drain, "__func__", None)

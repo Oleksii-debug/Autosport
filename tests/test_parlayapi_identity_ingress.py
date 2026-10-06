@@ -8,6 +8,24 @@ from autosport.parlayapi_provider import (
 )
 
 
+class _ExplosiveString(str):
+    def strip(self, *args: object, **kwargs: object) -> str:
+        raise AssertionError("identity guard must reject str subclasses before strip")
+
+    def replace(self, *args: object, **kwargs: object) -> str:
+        raise AssertionError("identity guard must reject str subclasses before replace")
+
+
+class _ExplosiveList(list):
+    def __iter__(self):
+        raise AssertionError("identity guard must reject list subclasses before iteration")
+
+
+class _ExplosiveDict(dict):
+    def get(self, *args: object, **kwargs: object):
+        raise AssertionError("identity guard must reject dict subclasses before get")
+
+
 _BASE_EVENT = {
     "id": "tt-100",
     "sport_key": "table_tennis",
@@ -41,6 +59,23 @@ class ParlayApiIdentityIngressTests(unittest.TestCase):
     @classmethod
     def _read(cls, event: dict) -> tuple:
         return cls._read_events([event])
+
+    def test_declared_identity_rejects_str_subclass_before_virtual_methods(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["commence_time"] = _ExplosiveString("2026-09-12T20:30:00Z")
+        with self.assertRaisesRegex(ProviderPayloadError, "commence_time must be a string"):
+            self._read(event)
+
+    def test_bookmaker_container_rejects_list_subclass_before_iteration(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["bookmakers"] = _ExplosiveList(event["bookmakers"])
+        with self.assertRaisesRegex(ProviderPayloadError, "bookmakers must be a list"):
+            self._read(event)
+
+    def test_event_container_rejects_dict_subclass_before_get(self):
+        event = _ExplosiveDict(copy.deepcopy(_BASE_EVENT))
+        with self.assertRaisesRegex(ProviderPayloadError, "event entries must be objects"):
+            self._read(event)
 
     def test_non_string_event_id_does_not_fall_back_or_coerce(self):
         event = copy.deepcopy(_BASE_EVENT)

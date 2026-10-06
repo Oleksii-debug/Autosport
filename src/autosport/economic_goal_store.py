@@ -172,6 +172,7 @@ _CANONICAL_PATH_TYPE: Final = Path
 _CANONICAL_STORE_FILE_NAME: Final = "economic_goal_contract.json"
 
 _STORE_BINDINGS_BY_ID: Final = {}
+_CANONICAL_OBJECT_GETATTRIBUTE: Final = object.__getattribute__
 
 
 def _resolve_store_binding(
@@ -183,9 +184,10 @@ def _resolve_store_binding(
     if entry is None or entry[0]() is not store:
         raise _error_type("economic goal store binding is unavailable")
     workspace, path, path_exists, path_read_text = entry[1:]
-    if getattr(store, "workspace", None) is not workspace:
+    instance_state = _CANONICAL_OBJECT_GETATTRIBUTE(store, "__dict__")
+    if instance_state.get("workspace") is not workspace:
         raise _error_type("economic goal store workspace binding was rebound")
-    if getattr(store, "path", None) is not path:
+    if instance_state.get("path") is not path:
         raise _error_type("economic goal store path binding was rebound")
     return workspace, path, path_exists, path_read_text
 

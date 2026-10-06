@@ -317,6 +317,52 @@ class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
         self.assertEqual(impact.candidate, canonical)
         self.assertEqual(impact.stake, Decimal("1"))
 
+    def test_optimizer_uses_canonical_scenario_snapshot_before_ranking(self) -> None:
+        candidate = _candidate("e1")
+        canonical_group = _groups()[0]
+        optimizer = PortfolioAwareCandidateOptimizer()
+
+        class ScenarioGroupSubclass(ScenarioGroup):
+            pass
+
+        group_subclass = ScenarioGroupSubclass(
+            canonical_group.group_id,
+            canonical_group.outcomes,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact ScenarioGroup",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [candidate],
+                [group_subclass],
+                stake="1",
+            )
+
+        class HostileGroupList(list):
+            def __iter__(self):
+                raise AssertionError("non-canonical group container must not be iterated")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "scenario groups must be a list or tuple",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [candidate],
+                HostileGroupList([canonical_group]),  # type: ignore[arg-type]
+                stake="1",
+            )
+
+        impact = optimizer.evaluate_candidates(
+            [],
+            [candidate],
+            [canonical_group],
+            stake="1",
+        )[0]
+        self.assertEqual(impact.candidate, candidate)
+
     def test_result_limit_requires_positive_non_boolean_integer(self) -> None:
         for invalid in (True, False, 1.5, Decimal("2"), "2", None):
             with self.subTest(value=repr(invalid)):

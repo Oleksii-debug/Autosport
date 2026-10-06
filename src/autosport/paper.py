@@ -885,7 +885,11 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
     snapshot_path_fspath = snapshot_path_type.__fspath__
     snapshot_path_fspath_code = getattr(snapshot_path_fspath, "__code__", None)
     snapshot_path_parent = snapshot_path_type.parent
+    snapshot_path_parent_fget = snapshot_path_parent.fget
+    snapshot_path_parent_fget_code = getattr(snapshot_path_parent_fget, "__code__", None)
     snapshot_path_name = snapshot_path_type.name
+    snapshot_path_name_fget = snapshot_path_name.fget
+    snapshot_path_name_fget_code = getattr(snapshot_path_name_fget, "__code__", None)
     snapshot_helper_authorities = None
     snapshot_helper_names = (
         "_require_finite",
@@ -1073,8 +1077,24 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             raise ValueError("PaperBook snapshot filesystem path callable authority changed")
         if snapshot_path_type.parent is not snapshot_path_parent:
             raise ValueError("PaperBook snapshot parent descriptor authority changed")
+        if snapshot_path_parent.fget is not snapshot_path_parent_fget:
+            raise ValueError("PaperBook snapshot parent getter authority changed")
+        if (
+            snapshot_path_parent_fget_code is not None
+            and getattr(snapshot_path_parent_fget, "__code__", None)
+            is not snapshot_path_parent_fget_code
+        ):
+            raise ValueError("PaperBook snapshot parent getter callable authority changed")
         if snapshot_path_type.name is not snapshot_path_name:
             raise ValueError("PaperBook snapshot name descriptor authority changed")
+        if snapshot_path_name.fget is not snapshot_path_name_fget:
+            raise ValueError("PaperBook snapshot name getter authority changed")
+        if (
+            snapshot_path_name_fget_code is not None
+            and getattr(snapshot_path_name_fget, "__code__", None)
+            is not snapshot_path_name_fget_code
+        ):
+            raise ValueError("PaperBook snapshot name getter callable authority changed")
 
     def require_directory_fsync_dependencies() -> None:
         if os is not directory_fsync_os_module:

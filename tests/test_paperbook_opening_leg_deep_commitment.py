@@ -2491,3 +2491,41 @@ def test_public_operation_rejects_in_place_runtime_helper_code_mutation(
             _ = book.committed_stake
     finally:
         authority.__code__ = original_code
+
+@pytest.mark.parametrize(
+    ("property_name", "error_match"),
+    [
+        ("parent", "snapshot parent getter callable authority changed"),
+        ("name", "snapshot name getter callable authority changed"),
+    ],
+)
+def test_save_rejects_in_place_snapshot_path_property_getter_code_mutation_before_execution(
+    tmp_path,
+    property_name: str,
+    error_match: str,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    path_type = type(Path("."))
+    descriptor = getattr(path_type, property_name)
+    getter = descriptor.fget
+    assert getter is not None
+    original_code = getter.__code__
+    attacker_called = False
+
+    def hostile(self):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated pathlib property getter executed")
+
+    assert len(hostile.__code__.co_freevars) == len(original_code.co_freevars)
+    try:
+        getter.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match=error_match):
+            book.save(tmp_path / "paper-book.json")
+    finally:
+        getter.__code__ = original_code
+
+    assert attacker_called is False
+    assert not (tmp_path / "paper-book.json").exists()
+

@@ -510,6 +510,37 @@ def test_class_rebound_assert_issued_cannot_append_forged_result(monkeypatch):
 
 
 
+def test_class_rebound_authority_fingerprint_cannot_bless_mutated_result(monkeypatch):
+    plan = _plan()
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    rebound_called = False
+
+    def forged_fingerprint(self):
+        nonlocal rebound_called
+        rebound_called = True
+        return "0" * 64
+
+    monkeypatch.setattr(
+        MarketBookBatchTransportResult,
+        "_authority_fingerprint",
+        forged_fingerprint,
+    )
+
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    issued.assert_issued()
+    assert rebound_called is False
+
+    object.__setattr__(issued, "request_payload_sha256", "0" * 64)
+    with pytest.raises(
+        MarketBookBatchTransportError,
+        match="changed after canonical issuance",
+    ):
+        issued.assert_issued()
+
+    assert rebound_called is False
+
+
 def test_class_rebound_assert_issued_cannot_mutate_valid_append_semantics(monkeypatch):
     plan = _plan()
     history = MarketBookAttemptHistory(plan, ())

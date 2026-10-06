@@ -1,6 +1,6 @@
-"""Causal, restart-safe participant identity and alias lineage.
+"""Causal, restart-safe sport/competition/participant identity and alias lineage.
 
-This is deliberately an identity authority only.  It does not score participants,
+This is deliberately an identity authority only.  It does not score entities,
 infer behaviour, replace provider event identity, or grant strategy/execution power.
 """
 
@@ -22,9 +22,11 @@ _VERSION = 1
 
 
 class EntityKind(StrEnum):
+    SPORT = "SPORT"
+    LEAGUE = "LEAGUE"
+    SEASON = "SEASON"
     PARTICIPANT = "PARTICIPANT"
     TEAM = "TEAM"
-    LEAGUE = "LEAGUE"
 
 
 class IdentityView(StrEnum):

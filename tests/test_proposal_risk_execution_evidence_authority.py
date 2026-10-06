@@ -695,6 +695,14 @@ from autosport.proposal_risk_terminal_state_mapping_authority import (
 )
 
 
+import autosport.proposal_risk_terminal_payoff_authority as terminal_payoff_authority
+from autosport.proposal_risk_terminal_payoff_authority import (
+    ProductProposalRiskTerminalPayoffEvaluation,
+    ProductProposalRiskTerminalPayoffEvaluationError,
+    resolve_product_proposal_risk_terminal_payoff_evaluation,
+)
+
+
 class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
 
     def setUp(self) -> None:
@@ -1875,6 +1883,639 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
         finally:
             method.__code__ = original_code
 
+
+
+class ProductProposalRiskTerminalPayoffEvaluationTests(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.precommit = _canonical_precommit(self)
+        self.workspace = getattr(self, "_proposal_risk_workspace")
+        self.terminal_population = getattr(self, "_proposal_terminal_population")
+        self.authorities = getattr(self, "_proposal_terminal_authorities")
+        self.assertFalse(self.terminal_population.terminal_space_exact)
+
+    def _binding(
+        self,
+        state_ids: tuple[str, ...],
+    ):
+        return derive_product_proposal_terminal_scenario_binding(
+            self.workspace,
+            precommit=self.precommit,
+            authorities=self.authorities,
+            market_state_ids=state_ids,
+        )
+
+    def _bindings(self):
+        return (
+            self._binding(("canonical:win,loss", "canonical:loss,win")),
+            self._binding(("canonical:loss,win", "canonical:win,loss")),
+        )
+
+    def _issue_mapping_parent(self, bindings=None) -> None:
+        first, second = bindings or self._bindings()
+        issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self.terminal_population,
+            (
+                CounterfactualScenarioMemberBinding(
+                    member_id=self.precommit.planned_member_ids[0],
+                    scenario_id=first.scenario_id,
+                    mapping_sha256=first.mapping_sha256,
+                ),
+                CounterfactualScenarioMemberBinding(
+                    member_id=self.precommit.planned_member_ids[1],
+                    scenario_id=second.scenario_id,
+                    mapping_sha256=second.mapping_sha256,
+                ),
+            ),
+        )
+
+    def _resolve(self, bindings=None) -> ProductProposalRiskTerminalPayoffEvaluation:
+        first, second = bindings or self._bindings()
+        return resolve_product_proposal_risk_terminal_payoff_evaluation(
+            self.workspace,
+            precommit=self.precommit,
+            authorities=self.authorities,
+            member_market_state_ids=(
+                first.market_state_ids,
+                second.market_state_ids,
+            ),
+        )
+
+    def test_exact_terminal_payoffs_use_canonical_paperbook_economics_only(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        result = self._resolve(bindings)
+        stake_a, stake_b = self.precommit.evaluated_stakes
+
+        self.assertTrue(result.evaluation_identity_proven)
+        self.assertTrue(result.terminal_mapping_consumed_proven)
+        self.assertTrue(result.paperbook_settlement_arithmetic_proven)
+        self.assertTrue(result.fixed_n_member_payoff_complete)
+        self.assertTrue(result.target_terminal_payoff_evaluation_proven)
+        self.assertFalse(result.per_market_terminal_space_exact)
+        self.assertEqual(
+            result.settlement_evaluator_protocol,
+            (
+                "portfolio-engine.scenario-profit-settlements+"
+                "paperbook.settlement-result.v1"
+            ),
+        )
+        self.assertEqual(len(result.scenario_population_sha256), 64)
+        self.assertFalse(result.joint_terminal_space_exact)
+        self.assertEqual(
+            result.member_mapping_sha256s,
+            tuple(binding.mapping_sha256 for binding in bindings),
+        )
+        self.assertEqual(
+            result.member_candidate_paper_profit_vectors,
+            (
+                (-stake_a, stake_b),
+                (stake_a, -stake_b),
+            ),
+        )
+        self.assertEqual(
+            result.member_paper_terminal_profits,
+            (
+                stake_b - stake_a,
+                stake_a - stake_b,
+            ),
+        )
+        self.assertFalse(result.product_scenario_source_provenance_proven)
+        self.assertFalse(result.iid_member_mapping_proven)
+        self.assertFalse(result.joint_scenario_support_proven)
+        self.assertFalse(result.minimum_equity_path_proven)
+        self.assertFalse(result.execution_costs_proven)
+        self.assertFalse(result.slippage_realization_proven)
+        self.assertFalse(result.net_execution_pnl_proven)
+        self.assertFalse(result.cashflow_chronology_proven)
+        self.assertFalse(result.scenario_execution_proven)
+        self.assertFalse(result.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(result.risk_upper_bound_for_target)
+        self.assertFalse(result.grants_risk_approval_authority)
+        self.assertFalse(result.grants_ticket_authority)
+        self.assertFalse(result.grants_broker_execution_authority)
+        self.assertFalse(result.grants_real_money_authority)
+        self.assertFalse(result.grants_state_mutation_authority)
+        self.assertEqual(len(result.evaluation_sha256), 64)
+        self.assertEqual(self._resolve(bindings), result)
+
+    def test_zero_stake_candidate_is_zero_exposure_even_when_state_wins(self) -> None:
+        target = terminal_payoff_authority._TARGET_RESOLVER(
+            self.workspace,
+            self.precommit.target_sha256,
+        )
+        tickets = list(terminal_payoff_authority._candidate_tickets(target))
+        tickets[0].stake = Decimal("0")
+        authority_by_sha = terminal_payoff_authority._authority_map(
+            self.authorities
+        )
+        groups = terminal_payoff_authority._terminal_groups(
+            self.terminal_population,
+            authority_by_sha,
+        )
+        candidate_profits, total_profit = terminal_payoff_authority._scenario_payoff(
+            tickets=tuple(tickets),
+            population=self.terminal_population,
+            groups=groups,
+            authority_by_sha=authority_by_sha,
+            member_state_ids=(
+                "canonical:loss,win",
+                "canonical:loss,win",
+            ),
+        )
+
+        self.assertEqual(candidate_profits[0], Decimal("0"))
+        self.assertEqual(
+            candidate_profits[1],
+            self.precommit.evaluated_stakes[1],
+        )
+        self.assertEqual(
+            total_profit,
+            self.precommit.evaluated_stakes[1],
+        )
+
+    def test_zero_stake_still_requires_canonical_paperbook_leg_economics(self) -> None:
+        target = terminal_payoff_authority._TARGET_RESOLVER(
+            self.workspace,
+            self.precommit.target_sha256,
+        )
+        contexts = list(target.candidate_context_json)
+        self.assertIn('"locked_odds":"2"', contexts[0])
+        contexts[0] = contexts[0].replace(
+            '"locked_odds":"2"',
+            '"locked_odds":"1"',
+            1,
+        )
+        object.__setattr__(
+            target,
+            "candidate_context_json",
+            tuple(contexts),
+        )
+        object.__setattr__(
+            target,
+            "evaluated_stakes",
+            (
+                Decimal("0"),
+                target.evaluated_stakes[1],
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalPayoffEvaluationError,
+            "outside canonical PaperBook settlement economics",
+        ):
+            terminal_payoff_authority._candidate_tickets(target)
+
+    def test_scenario_payoff_refuses_candidate_vector_cardinality_drift(self) -> None:
+        target = terminal_payoff_authority._TARGET_RESOLVER(
+            self.workspace,
+            self.precommit.target_sha256,
+        )
+        tickets = terminal_payoff_authority._candidate_tickets(target)
+        authority_by_sha = terminal_payoff_authority._authority_map(
+            self.authorities
+        )
+        groups = terminal_payoff_authority._terminal_groups(
+            self.terminal_population,
+            authority_by_sha,
+        )
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalPayoffEvaluationError,
+            "candidate vector no longer matches",
+        ):
+            terminal_payoff_authority._scenario_payoff(
+                tickets=tickets[:-1],
+                population=self.terminal_population,
+                groups=groups,
+                authority_by_sha=authority_by_sha,
+                member_state_ids=(
+                    "canonical:loss,win",
+                    "canonical:loss,win",
+                ),
+            )
+
+    def test_all_void_terminal_member_uses_exact_paperbook_refund_semantics(self) -> None:
+        void_member = self._binding(
+            (
+                "canonical:void,void",
+                "canonical:void,void",
+            )
+        )
+        baseline_second = self._bindings()[1]
+        bindings = (void_member, baseline_second)
+        self._issue_mapping_parent(bindings)
+
+        result = self._resolve(bindings)
+        stake_a, stake_b = self.precommit.evaluated_stakes
+
+        self.assertEqual(
+            result.member_candidate_paper_profit_vectors[0],
+            (Decimal("0"), Decimal("0")),
+        )
+        self.assertEqual(
+            result.member_paper_terminal_profits[0],
+            Decimal("0"),
+        )
+        self.assertEqual(
+            result.member_candidate_paper_profit_vectors[1],
+            (stake_a, -stake_b),
+        )
+        self.assertEqual(
+            result.member_paper_terminal_profits[1],
+            stake_a - stake_b,
+        )
+        self.assertTrue(result.paperbook_settlement_arithmetic_proven)
+        self.assertTrue(result.target_terminal_payoff_evaluation_proven)
+        self.assertFalse(result.per_market_terminal_space_exact)
+        self.assertFalse(result.joint_scenario_support_proven)
+        self.assertFalse(result.risk_upper_bound_for_target)
+
+    def test_negative_evaluated_stake_is_rejected_before_payoff(self) -> None:
+        target = terminal_payoff_authority._TARGET_RESOLVER(
+            self.workspace,
+            self.precommit.target_sha256,
+        )
+        object.__setattr__(
+            target,
+            "evaluated_stakes",
+            (
+                Decimal("-1"),
+                target.evaluated_stakes[1],
+            ),
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalPayoffEvaluationError,
+            "cannot be negative",
+        ):
+            terminal_payoff_authority._candidate_tickets(target)
+
+    def test_repeated_terminal_member_preserves_multiplicity_not_iid_truth(self) -> None:
+        repeated = self._binding(("canonical:loss,win", "canonical:loss,win"))
+        bindings = (repeated, repeated)
+        self._issue_mapping_parent(bindings)
+        result = self._resolve(bindings)
+
+        self.assertEqual(
+            result.member_candidate_paper_profit_vectors[0],
+            result.member_candidate_paper_profit_vectors[1],
+        )
+        self.assertEqual(
+            result.member_paper_terminal_profits[0],
+            result.member_paper_terminal_profits[1],
+        )
+        self.assertTrue(result.target_terminal_payoff_evaluation_proven)
+        self.assertFalse(result.iid_member_mapping_proven)
+        self.assertFalse(result.product_scenario_source_provenance_proven)
+        self.assertFalse(result.proposal_target_counterfactual_execution_proven)
+
+    def test_direct_or_forged_result_cannot_mint_payoff_authority(self) -> None:
+        with self.assertRaises(TypeError):
+            ProductProposalRiskTerminalPayoffEvaluation()
+
+        forged = object.__new__(ProductProposalRiskTerminalPayoffEvaluation)
+        self.assertFalse(forged.evaluation_identity_proven)
+        self.assertFalse(forged.terminal_mapping_consumed_proven)
+        self.assertFalse(forged.paperbook_settlement_arithmetic_proven)
+        self.assertFalse(forged.fixed_n_member_payoff_complete)
+        self.assertFalse(forged.target_terminal_payoff_evaluation_proven)
+        self.assertFalse(forged.execution_costs_proven)
+        self.assertFalse(forged.slippage_realization_proven)
+        self.assertFalse(forged.net_execution_pnl_proven)
+        self.assertFalse(forged.cashflow_chronology_proven)
+        self.assertFalse(forged.scenario_execution_proven)
+        self.assertFalse(forged.risk_upper_bound_for_target)
+        self.assertFalse(forged.grants_ticket_authority)
+        self.assertFalse(forged.grants_real_money_authority)
+
+    def test_internal_validated_values_are_not_authority(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        self.assertFalse(hasattr(terminal_payoff_authority, "_BIND_IDENTITY"))
+        self.assertFalse(hasattr(terminal_payoff_authority, "_mint"))
+
+        values = terminal_payoff_authority._resolve_values(
+            self.workspace,
+            precommit=self.precommit,
+            authorities=self.authorities,
+            member_market_state_ids=(
+                bindings[0].market_state_ids,
+                bindings[1].market_state_ids,
+            ),
+        )
+        self.assertEqual(type(values), dict)
+        forged = object.__new__(ProductProposalRiskTerminalPayoffEvaluation)
+        for name in terminal_payoff_authority._RESULT_FIELDS_EXPECTED:
+            object.__setattr__(forged, name, values[name])
+        self.assertFalse(forged.evaluation_identity_proven)
+        self.assertFalse(forged.target_terminal_payoff_evaluation_proven)
+
+    def test_post_precommit_terminal_state_substitution_fails_upstream(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalPayoffEvaluationError,
+            "terminal mapping cannot be re-resolved",
+        ):
+            resolve_product_proposal_risk_terminal_payoff_evaluation(
+                self.workspace,
+                precommit=self.precommit,
+                authorities=self.authorities,
+                member_market_state_ids=(
+                    ("canonical:loss,win", "canonical:loss,win"),
+                    bindings[1].market_state_ids,
+                ),
+            )
+
+    def test_unknown_terminal_state_fails_before_payoff_arithmetic(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalPayoffEvaluationError,
+            "terminal mapping cannot be re-resolved",
+        ):
+            resolve_product_proposal_risk_terminal_payoff_evaluation(
+                self.workspace,
+                precommit=self.precommit,
+                authorities=self.authorities,
+                member_market_state_ids=(
+                    ("canonical:missing", "canonical:loss,win"),
+                    bindings[1].market_state_ids,
+                ),
+            )
+
+    def test_missing_provider_authority_fails_before_payoff_arithmetic(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalPayoffEvaluationError,
+            "terminal mapping cannot be re-resolved",
+        ):
+            resolve_product_proposal_risk_terminal_payoff_evaluation(
+                self.workspace,
+                precommit=self.precommit,
+                authorities=(self.authorities[0],),
+                member_market_state_ids=(
+                    bindings[0].market_state_ids,
+                    bindings[1].market_state_ids,
+                ),
+            )
+
+    def test_fixed_n_member_cardinality_is_not_shrunk(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalPayoffEvaluationError,
+            "terminal mapping cannot be re-resolved",
+        ):
+            resolve_product_proposal_risk_terminal_payoff_evaluation(
+                self.workspace,
+                precommit=self.precommit,
+                authorities=self.authorities,
+                member_market_state_ids=(bindings[0].market_state_ids,),
+            )
+
+    def test_superseded_target_invalidates_payoff_evaluation(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("0.9"), Decimal("0.7")),
+            contexts=getattr(self, "_proposal_risk_contexts"),
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalPayoffEvaluationError,
+            "terminal mapping cannot be re-resolved",
+        ):
+            self._resolve(bindings)
+
+    def test_portfolio_settlement_method_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        method = terminal_payoff_authority.PortfolioEngine.scenario_profit_settlements
+        original_code = method.__code__
+
+        def forged_profit(_tickets, _settlements):
+            return Decimal("999999")
+
+        try:
+            method.__code__ = forged_profit.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            method.__code__ = original_code
+
+    def test_paperbook_settlement_method_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        descriptor = terminal_payoff_authority.PaperBook.__dict__[
+            "_settlement_result"
+        ]
+        method = descriptor.__func__
+        original_code = method.__code__
+
+        def forged_settlement(_cls, _ticket, balance, _winners, _voids):
+            return (
+                terminal_payoff_authority.TicketStatus.WON,
+                Decimal("999999"),
+                balance + Decimal("999999"),
+            )
+
+        try:
+            method.__code__ = forged_settlement.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            method.__code__ = original_code
+
+    def test_paperbook_leg_validator_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        descriptor = terminal_payoff_authority.PaperBook.__dict__[
+            "_validate_ticket_leg"
+        ]
+        method = descriptor.__func__
+        original_code = method.__code__
+
+        def forged_validate(_cls, leg, *, ticket_id=None):
+            return leg
+
+        try:
+            method.__code__ = forged_validate.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            method.__code__ = original_code
+
+    def test_portfolio_decimal_context_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        context = terminal_payoff_authority._portfolio_module._PORTFOLIO_DECIMAL_CONTEXT
+        original_precision = context.prec
+        try:
+            context.prec = 9
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            context.prec = original_precision
+
+    def test_positive_capability_proof_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        getter = ProductProposalRiskTerminalPayoffEvaluation.__dict__[
+            "target_terminal_payoff_evaluation_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        proof = getter.__defaults__[0]
+        original_code = proof.__code__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            proof.__code__ = forged_proof.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "result authority surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            proof.__code__ = original_code
+
+    def test_hard_false_execution_getter_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        getter = ProductProposalRiskTerminalPayoffEvaluation.__dict__[
+            "scenario_execution_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        original_code = getter.__code__
+
+        def forged_execution(_self):
+            return True
+
+        try:
+            getter.__code__ = forged_execution.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "result authority surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            getter.__code__ = original_code
+
+    def test_public_resolver_closure_binder_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        resolver = (
+            terminal_payoff_authority
+            .resolve_product_proposal_risk_terminal_payoff_evaluation
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        binder_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "bind"
+        ]
+        self.assertEqual(len(binder_cells), 1)
+        cell = binder_cells[0]
+        original = cell.cell_contents
+
+        def forged_bind(_instance):
+            return None
+
+        try:
+            cell.cell_contents = forged_bind
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "public resolver closure changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
+    def test_public_resolver_rejects_module_global_core_rebind(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = terminal_payoff_authority._resolve_values
+        try:
+            terminal_payoff_authority._resolve_values = (
+                lambda *args, **kwargs: {
+                    "workspace_instance_id": "forged",
+                }
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "helper root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            terminal_payoff_authority._resolve_values = original
+
+    def test_public_resolver_rejects_captured_core_code_mutation(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        resolver = (
+            terminal_payoff_authority
+            .resolve_product_proposal_risk_terminal_payoff_evaluation
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        core_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None)
+            == "_resolve_values"
+        ]
+        self.assertEqual(len(core_cells), 1)
+        core = core_cells[0].cell_contents
+        original_code = core.__code__
+
+        def forged_core(*_args, **_kwargs):
+            return {
+                "workspace_instance_id": self.precommit.workspace_instance_id,
+            }
+
+        try:
+            core.__code__ = forged_core.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "public resolver closure changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            core.__code__ = original_code
+
+    def test_protocol_constant_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = terminal_payoff_authority._SCHEMA
+        try:
+            terminal_payoff_authority._SCHEMA = "forged.payoff.v999"
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            terminal_payoff_authority._SCHEMA = original
 
 if __name__ == "__main__":
     unittest.main()

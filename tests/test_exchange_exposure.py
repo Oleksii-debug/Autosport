@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 
 import autosport.exchange_exposure as exposure
+import autosport.real_execution_ledger as ledger_module
 from autosport.exchange_exposure import locked_capital_for_exchange_side
 
 
@@ -65,6 +66,24 @@ def test_exchange_capital_rejects_helper_code_mutation() -> None:
             )
     finally:
         helper.__code__ = original_code
+
+
+def test_exchange_capital_rejects_resource_limit_rebinding() -> None:
+    original_limit = ledger_module._MAX_EXECUTION_DECIMAL_TEXT_LENGTH
+    ledger_module._MAX_EXECUTION_DECIMAL_TEXT_LENGTH = original_limit + 1
+
+    try:
+        with pytest.raises(
+            ValueError,
+            match="exchange exposure resource authority drifted",
+        ):
+            locked_capital_for_exchange_side(
+                stake=Decimal("10"),
+                odds=Decimal("3.00"),
+                exchange_side="LAY",
+            )
+    finally:
+        ledger_module._MAX_EXECUTION_DECIMAL_TEXT_LENGTH = original_limit
 
 
 def test_exchange_capital_rejects_calculator_code_mutation() -> None:

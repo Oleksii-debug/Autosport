@@ -804,6 +804,7 @@ def _build_canonical_place_action_dispatch():
     canonical_plan_type = ExecutionPlan
     canonical_ledger_type = RealExecutionLedger
     canonical_workspace_lock_type = WorkspaceEconomicLock
+    canonical_acknowledgement_type = ExternalAcknowledgement
     canonical_instruction_report_type = BetfairInstructionReport
     canonical_execution_report_type = BetfairPlaceExecutionReport
 
@@ -848,6 +849,12 @@ def _build_canonical_place_action_dispatch():
         canonical_approval_ledger_identity_descriptor,
         "fget",
         None,
+    )
+    canonical_acknowledgement_post_init = canonical_acknowledgement_type.__dict__.get(
+        "__post_init__"
+    )
+    canonical_acknowledgement_to_dict = canonical_acknowledgement_type.__dict__.get(
+        "to_dict"
     )
     canonical_instruction_post_init = canonical_instruction_report_type.__dict__.get(
         "__post_init__"
@@ -929,6 +936,16 @@ def _build_canonical_place_action_dispatch():
     )
     canonical_approval_ledger_identity_getter_code = getattr(
         canonical_approval_ledger_identity_getter,
+        "__code__",
+        None,
+    )
+    canonical_acknowledgement_post_init_code = getattr(
+        canonical_acknowledgement_post_init,
+        "__code__",
+        None,
+    )
+    canonical_acknowledgement_to_dict_code = getattr(
+        canonical_acknowledgement_to_dict,
         "__code__",
         None,
     )
@@ -1033,6 +1050,10 @@ def _build_canonical_place_action_dispatch():
         or canonical_approval_fingerprint_getter_code is None
         or not callable(canonical_approval_ledger_identity_getter)
         or canonical_approval_ledger_identity_getter_code is None
+        or not callable(canonical_acknowledgement_post_init)
+        or canonical_acknowledgement_post_init_code is None
+        or not callable(canonical_acknowledgement_to_dict)
+        or canonical_acknowledgement_to_dict_code is None
         or not callable(canonical_instruction_post_init)
         or canonical_instruction_post_init_code is None
         or not callable(canonical_execution_report_post_init)
@@ -1150,6 +1171,19 @@ def _build_canonical_place_action_dispatch():
     profile_binding_field_descriptors = tuple(
         (name, canonical_profile_binding_type.__dict__.get(name))
         for name in profile_binding_field_names
+    )
+    acknowledgement_field_names = (
+        "attempt_id",
+        "external_receipt_id",
+        "status",
+        "acknowledged_at",
+        "accepted_odds",
+        "accepted_stake",
+        "reconciliation_evidence_id",
+    )
+    acknowledgement_field_descriptors = tuple(
+        (name, canonical_acknowledgement_type.__dict__.get(name))
+        for name in acknowledgement_field_names
     )
     instruction_field_names = (
         "status",
@@ -1271,6 +1305,7 @@ def _build_canonical_place_action_dispatch():
             and ExecutionPlan is canonical_plan_type
             and RealExecutionLedger is canonical_ledger_type
             and WorkspaceEconomicLock is canonical_workspace_lock_type
+            and ExternalAcknowledgement is canonical_acknowledgement_type
             and BetfairInstructionReport is canonical_instruction_report_type
             and BetfairPlaceExecutionReport is canonical_execution_report_type
             and canonical_profile_type.__dict__.get("require")
@@ -1329,6 +1364,14 @@ def _build_canonical_place_action_dispatch():
             is canonical_approval_ledger_identity_getter
             and getattr(canonical_approval_ledger_identity_getter, "__code__", None)
             is canonical_approval_ledger_identity_getter_code
+            and canonical_acknowledgement_type.__dict__.get("__post_init__")
+            is canonical_acknowledgement_post_init
+            and getattr(canonical_acknowledgement_post_init, "__code__", None)
+            is canonical_acknowledgement_post_init_code
+            and canonical_acknowledgement_type.__dict__.get("to_dict")
+            is canonical_acknowledgement_to_dict
+            and getattr(canonical_acknowledgement_to_dict, "__code__", None)
+            is canonical_acknowledgement_to_dict_code
             and canonical_instruction_report_type.__dict__.get("__post_init__")
             is canonical_instruction_post_init
             and getattr(canonical_instruction_post_init, "__code__", None)
@@ -1398,6 +1441,10 @@ def _build_canonical_place_action_dispatch():
             and all(
                 canonical_profile_binding_type.__dict__.get(name) is descriptor
                 for name, descriptor in profile_binding_field_descriptors
+            )
+            and all(
+                canonical_acknowledgement_type.__dict__.get(name) is descriptor
+                for name, descriptor in acknowledgement_field_descriptors
             )
             and all(
                 canonical_instruction_report_type.__dict__.get(name) is descriptor

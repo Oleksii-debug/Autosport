@@ -180,12 +180,13 @@ def _resolve_store_binding(
     store: object,
     _bindings=_STORE_BINDINGS_BY_ID,
     _error_type=EconomicGoalContractError,
+    _object_getattribute=_CANONICAL_OBJECT_GETATTRIBUTE,
 ):
     entry = _bindings.get(id(store))
     if entry is None or entry[0]() is not store:
         raise _error_type("economic goal store binding is unavailable")
     workspace, path, path_exists, path_open = entry[1:]
-    instance_state = _CANONICAL_OBJECT_GETATTRIBUTE(store, "__dict__")
+    instance_state = _object_getattribute(store, "__dict__")
     if instance_state.get("workspace") is not workspace:
         raise _error_type("economic goal store workspace binding was rebound")
     if instance_state.get("path") is not path:

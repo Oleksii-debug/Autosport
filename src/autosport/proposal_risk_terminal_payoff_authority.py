@@ -170,6 +170,20 @@ _PAPER_REQUIRE_UTF8_FUNCTION_CODE = getattr(
 
 _PORTFOLIO_SNAPSHOT = _portfolio_module._snapshot_open_tickets_for_analysis
 _PORTFOLIO_SNAPSHOT_CODE = getattr(_PORTFOLIO_SNAPSHOT, "__code__", None)
+_PORTFOLIO_TICKET_FINGERPRINT = _portfolio_module._analysis_ticket_fingerprint
+_PORTFOLIO_TICKET_FINGERPRINT_CODE = getattr(
+    _PORTFOLIO_TICKET_FINGERPRINT,
+    "__code__",
+    None,
+)
+_PORTFOLIO_LOCKED_CAPITAL = (
+    _portfolio_module._CANONICAL_LOCKED_CAPITAL_FOR_TICKET
+)
+_PORTFOLIO_LOCKED_CAPITAL_CODE = getattr(
+    _PORTFOLIO_LOCKED_CAPITAL,
+    "__code__",
+    None,
+)
 _PORTFOLIO_REQUIRE_FINITE = _portfolio_module._require_finite_decimal
 _PORTFOLIO_REQUIRE_FINITE_CODE = getattr(
     _PORTFOLIO_REQUIRE_FINITE,
@@ -1661,6 +1675,14 @@ def _require_dispatch() -> None:
         is not _PORTFOLIO_SNAPSHOT
         or getattr(_PORTFOLIO_SNAPSHOT, "__code__", None)
         is not _PORTFOLIO_SNAPSHOT_CODE
+        or _portfolio_module._analysis_ticket_fingerprint
+        is not _PORTFOLIO_TICKET_FINGERPRINT
+        or getattr(_PORTFOLIO_TICKET_FINGERPRINT, "__code__", None)
+        is not _PORTFOLIO_TICKET_FINGERPRINT_CODE
+        or _portfolio_module._CANONICAL_LOCKED_CAPITAL_FOR_TICKET
+        is not _PORTFOLIO_LOCKED_CAPITAL
+        or getattr(_PORTFOLIO_LOCKED_CAPITAL, "__code__", None)
+        is not _PORTFOLIO_LOCKED_CAPITAL_CODE
         or _portfolio_module._require_finite_decimal
         is not _PORTFOLIO_REQUIRE_FINITE
         or getattr(_PORTFOLIO_REQUIRE_FINITE, "__code__", None)

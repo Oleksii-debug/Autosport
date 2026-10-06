@@ -975,6 +975,30 @@ def test_listblacklistinformation_is_explicit_any_other_allowlist_member(
 
 
 
+def test_named_provider_rows_dominate_generic_any_other_policy() -> None:
+    configured = default_betdaq_rate_policy()
+    by_method = configured.by_method()
+
+    assert by_method["ListSelectionTrades"].rate_policy_key == "ListSelectionTrades"
+    assert by_method["ListSelectionTrades"].capacity == 1
+    assert by_method["GetPrices"].rate_policy_key == "GetPrices"
+    assert by_method["GetPrices"].capacity == 130
+    assert (
+        by_method["UpdateOrdersNoReceipt"].rate_policy_key
+        == "ChangeOrderNoReceipt"
+    )
+    assert by_method["UpdateOrdersNoReceipt"].capacity == 100
+
+    for operation_id in (
+        "GetMarketInformation",
+        "GetAccountBalances",
+        "Pulse",
+        "CancelOrders",
+    ):
+        assert by_method[operation_id].rate_policy_key == "Any Other"
+        assert by_method[operation_id].capacity == 100
+
+
 def test_default_policy_covers_exact_current_provider_service_inventory() -> None:
     configured = default_betdaq_rate_policy()
     expected_operations = {

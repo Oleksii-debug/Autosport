@@ -893,21 +893,21 @@ def test_verified_reader_preserves_primary_failure_when_cleanup_also_fails(
     store = EconomicGoalStore(tmp_path)
     store.initialize_owner(_goal())
 
-    original_open = economic_goal_store_module._open_read_only_descriptor
+    def forged_validate(*args, **kwargs):
+        raise EconomicGoalContractError("primary validation failure")
 
-    def forged_open(path):
-        raise OSError("primary open failure")
+    original_close = economic_goal_store_module._CANONICAL_OS_CLOSE
 
     def forged_close(fd):
+        original_close(fd)
         raise OSError("secondary close failure")
 
     with pytest.raises(
-        EconomicGoalContractError,
-        match="cannot safely read persisted economic goal",
+        EconomicGoalContractError, match="primary validation failure"
     ):
         economic_goal_store_module._read_economic_goal_text(
             store.path,
-            _open_descriptor=forged_open,
+            _validate_file=forged_validate,
             _close=forged_close,
         )
 

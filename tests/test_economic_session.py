@@ -285,6 +285,86 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                         evidence.authority_generation,
                     )
 
+    def test_session_evidence_validator_uses_captured_builtin_authority(self) -> None:
+        import autosport.economic_session as economic_session
+
+        evidence = self._store().current()
+        names = ("type", "str", "int", "bool", "len", "any", "getattr")
+        missing = object()
+        originals = {
+            name: economic_session.__dict__.get(name, missing)
+            for name in names
+        }
+        original_hex = economic_session._HEX
+        calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("rebound evidence builtin alias executed")
+
+        try:
+            for name in names:
+                setattr(economic_session, name, hostile)
+            economic_session._HEX = frozenset({"x"})
+            rebuilt = ProductEconomicSession(
+                workspace_instance_id=evidence.workspace_instance_id,
+                session_id=evidence.session_id,
+                goal_id=evidence.goal_id,
+                goal_revision=evidence.goal_revision,
+                bankroll_id=evidence.bankroll_id,
+                currency=evidence.currency,
+                goal_contract_sha256=evidence.goal_contract_sha256,
+                started_at=evidence.started_at,
+                opening_paperbook_sha256=evidence.opening_paperbook_sha256,
+                state_sha256=evidence.state_sha256,
+                authority_generation=evidence.authority_generation,
+                product_clock_authoritative=evidence.product_clock_authoritative,
+                predecessor_session_id=evidence.predecessor_session_id,
+                predecessor_state_sha256=evidence.predecessor_state_sha256,
+                predecessor_ended_at=evidence.predecessor_ended_at,
+            )
+        finally:
+            economic_session._HEX = original_hex
+            for name, original in originals.items():
+                if original is missing:
+                    economic_session.__dict__.pop(name, None)
+                else:
+                    setattr(economic_session, name, original)
+
+        self.assertEqual(rebuilt, evidence)
+        self.assertEqual(calls, 0)
+
+    def test_session_clock_uses_captured_builtin_authority(self) -> None:
+        import autosport.economic_session as economic_session
+
+        names = ("type", "int", "divmod")
+        missing = object()
+        originals = {
+            name: economic_session.__dict__.get(name, missing)
+            for name in names
+        }
+        calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("rebound clock builtin alias executed")
+
+        try:
+            for name in names:
+                setattr(economic_session, name, hostile)
+            observed = economic_session._clock_instant(self.clock)
+        finally:
+            for name, original in originals.items():
+                if original is missing:
+                    economic_session.__dict__.pop(name, None)
+                else:
+                    setattr(economic_session, name, original)
+
+        self.assertEqual(observed, "2026-10-05T12:00:00Z")
+        self.assertEqual(calls, 0)
+
     def test_midnight_does_not_reset_economic_session(self) -> None:
         first = self._store().current()
         self.clock.set("2026-10-06T12:00:00Z")

@@ -319,6 +319,15 @@ class ProductEconomicSession:
         self,
         _sha_validator=_is_sha256,
         _instant_parser=_parse_instant,
+        _type=type,
+        _str=str,
+        _int=int,
+        _bool=bool,
+        _len=len,
+        _any=any,
+        _getattr=getattr,
+        _hex=_HEX,
+        _error_type=EconomicSessionIntegrityError,
     ) -> None:
         for field in (
             "workspace_instance_id",
@@ -331,31 +340,31 @@ class ProductEconomicSession:
             "opening_paperbook_sha256",
             "state_sha256",
         ):
-            value = getattr(self, field)
-            if type(value) is not str or not value or value != value.strip():
-                raise EconomicSessionIntegrityError(
+            value = _getattr(self, field)
+            if _type(value) is not _str or not value or value != value.strip():
+                raise _error_type(
                     f"{field} must be exact non-empty canonical text"
                 )
         if (
-            len(self.session_id) != 32
-            or any(character not in _HEX for character in self.session_id)
+            _len(self.session_id) != 32
+            or _any(character not in _hex for character in self.session_id)
         ):
-            raise EconomicSessionIntegrityError(
+            raise _error_type(
                 "session_id must be canonical UUID hex"
             )
-        if type(self.goal_revision) is not int or self.goal_revision < 1:
-            raise EconomicSessionIntegrityError("goal_revision must be a positive exact integer")
-        if type(self.authority_generation) is not int or self.authority_generation < 1:
-            raise EconomicSessionIntegrityError(
+        if _type(self.goal_revision) is not _int or self.goal_revision < 1:
+            raise _error_type("goal_revision must be a positive exact integer")
+        if _type(self.authority_generation) is not _int or self.authority_generation < 1:
+            raise _error_type(
                 "authority_generation must be a positive exact integer"
             )
-        if type(self.product_clock_authoritative) is not bool:
-            raise EconomicSessionIntegrityError(
+        if _type(self.product_clock_authoritative) is not _bool:
+            raise _error_type(
                 "product_clock_authoritative must be an exact boolean"
             )
         for field in ("goal_contract_sha256", "opening_paperbook_sha256", "state_sha256"):
-            if not _sha_validator(getattr(self, field)):
-                raise EconomicSessionIntegrityError(f"{field} must be canonical SHA-256")
+            if not _sha_validator(_getattr(self, field)):
+                raise _error_type(f"{field} must be canonical SHA-256")
         _instant_parser(self.started_at)
         predecessor_values = (
             self.predecessor_session_id,
@@ -364,8 +373,8 @@ class ProductEconomicSession:
         )
         if predecessor_values == (None, None, None):
             pass
-        elif any(value is None for value in predecessor_values):
-            raise EconomicSessionIntegrityError(
+        elif _any(value is None for value in predecessor_values):
+            raise _error_type(
                 "predecessor session identity must be complete or absent"
             )
         else:
@@ -373,24 +382,24 @@ class ProductEconomicSession:
             assert self.predecessor_state_sha256 is not None
             assert self.predecessor_ended_at is not None
             if (
-                type(self.predecessor_session_id) is not str
-                or len(self.predecessor_session_id) != 32
-                or any(
-                    character not in _HEX
+                _type(self.predecessor_session_id) is not _str
+                or _len(self.predecessor_session_id) != 32
+                or _any(
+                    character not in _hex
                     for character in self.predecessor_session_id
                 )
             ):
-                raise EconomicSessionIntegrityError(
+                raise _error_type(
                     "predecessor_session_id must be canonical UUID hex"
                 )
             if not _sha_validator(self.predecessor_state_sha256):
-                raise EconomicSessionIntegrityError(
+                raise _error_type(
                     "predecessor_state_sha256 must be canonical SHA-256"
                 )
             ended = _instant_parser(self.predecessor_ended_at)
             started = _instant_parser(self.started_at)
             if ended != started:
-                raise EconomicSessionIntegrityError(
+                raise _error_type(
                     "successor must start exactly at predecessor terminal boundary"
                 )
 
@@ -433,17 +442,24 @@ def _clock_instant(
     *,
     _fromtimestamp=_DATETIME_FROMTIMESTAMP,
     _utc=timezone.utc,
+    _type=type,
+    _int=int,
+    _divmod=divmod,
+    _overflow_error=OverflowError,
+    _os_error=OSError,
+    _value_error=ValueError,
+    _error_type=EconomicSessionIntegrityError,
 ) -> str:
     epoch_ns = clock()
-    if type(epoch_ns) is not int or epoch_ns < 0:
-        raise EconomicSessionIntegrityError("economic-session clock is invalid")
-    seconds, nanoseconds = divmod(epoch_ns, 1_000_000_000)
+    if _type(epoch_ns) is not _int or epoch_ns < 0:
+        raise _error_type("economic-session clock is invalid")
+    seconds, nanoseconds = _divmod(epoch_ns, 1_000_000_000)
     try:
         instant = _fromtimestamp(seconds, _utc).replace(
             microsecond=nanoseconds // 1000
         )
-    except (OverflowError, OSError, ValueError) as exc:
-        raise EconomicSessionIntegrityError(
+    except (_overflow_error, _os_error, _value_error) as exc:
+        raise _error_type(
             "economic-session clock is outside supported range"
         ) from exc
     return instant.isoformat().replace("+00:00", "Z")

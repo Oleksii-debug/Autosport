@@ -342,6 +342,7 @@ class _ContinuousSessionState:
         clock: Callable[[], str],
         _schema: str = _CONTINUOUS_SESSION_SCHEMA,
         _version: int = _CONTINUOUS_SESSION_VERSION,
+        _atomic_write_json: Callable[..., Any] = atomic_write_json,
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -368,7 +369,7 @@ class _ContinuousSessionState:
             )
             started_at = clock()
             _instant(started_at, "started_at")
-            atomic_write_json(
+            _atomic_write_json(
                 self.path,
                 {
                     "schema": _schema,
@@ -507,6 +508,7 @@ class _ContinuousSessionState:
         self,
         *,
         _fields: frozenset[str] = _CONTINUOUS_SESSION_ERROR_FIELDS,
+        _strict_json_loads: Callable[..., Any] = strict_json_loads,
         _schema: str = _CONTINUOUS_SESSION_ERROR_SCHEMA,
         _version: int = _CONTINUOUS_SESSION_ERROR_VERSION,
         _max_bytes: int = _CONTINUOUS_SESSION_ERROR_MAX_BYTES,
@@ -660,11 +662,12 @@ class _ContinuousSessionState:
         self,
         *,
         _fields: frozenset[str] = _CONTINUOUS_SESSION_FIELDS,
+        _strict_json_loads: Callable[..., Any] = strict_json_loads,
         _schema: str = _CONTINUOUS_SESSION_SCHEMA,
         _version: int = _CONTINUOUS_SESSION_VERSION,
     ) -> dict[str, Any]:
         try:
-            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
+            raw = _strict_json_loads(self.path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
             raise ContinuousSessionError(
                 "cannot verify continuous session state"

@@ -74,20 +74,38 @@ def _canonical_digest(payload: object) -> str:
     ).hexdigest()
 
 
+def _source_identity_component(value: object) -> str:
+    source_id = _text(value, "source_id")
+    if "|" in source_id:
+        raise ValueError("source_id must not contain reserved identity delimiter '|'")
+    return source_id
+
+
+def _provider_event_identity_component(value: object) -> str:
+    event_id = _text(value, "event_id")
+    if "|" in event_id:
+        raise ValueError("event_id must not contain reserved identity delimiter '|'")
+    if ":" in event_id:
+        raise ValueError(
+            "event_id must not contain reserved source-scope delimiter ':'"
+        )
+    return event_id
+
+
 def _legacy_event_identity(*, source_id: str, event_id: str) -> str:
     return _scoped_identity(
-        _text(source_id, "source_id"),
-        _text(event_id, "event_id"),
+        _source_identity_component(source_id),
+        _provider_event_identity_component(event_id),
     )
 
 
 def canonical_event_identity(*, source_id: str, sport: str, event_id: str) -> str:
-    """Return a sport-scoped catalog identity disjoint from legacy event keys."""
+    """Return a sport-scoped catalog identity compatible with deployed selectors."""
     return _encoded_sport_identity(
         "catalog-event",
         _canonical_sport_value(sport),
-        _text(source_id, "source_id"),
-        _text(event_id, "event_id"),
+        _source_identity_component(source_id),
+        _provider_event_identity_component(event_id),
     )
 
 
@@ -103,9 +121,9 @@ class CatalogEvent:
     settlement_ref: str | None = None
 
     def validate(self) -> None:
-        _text(self.source_id, "source_id")
+        _source_identity_component(self.source_id)
         _canonical_sport_value(self.sport)
-        _text(self.event_id, "event_id")
+        _provider_event_identity_component(self.event_id)
         if not isinstance(self.phase, EventPhase):
             try:
                 EventPhase(self.phase)
@@ -158,7 +176,7 @@ class CatalogPage:
     epoch_changed: bool = False
 
     def validate(self) -> None:
-        _text(self.source_id, "source_id")
+        _source_identity_component(self.source_id)
         _text(self.stream_epoch, "stream_epoch")
         _text(self.cursor, "cursor")
         if type(self.position) is not int or self.position < 0:
@@ -200,7 +218,7 @@ class CatalogCheckpoint:
     page_sha256: str
 
     def __post_init__(self) -> None:
-        _text(self.source_id, "source_id")
+        _source_identity_component(self.source_id)
         _text(self.stream_epoch, "stream_epoch")
         _text(self.cursor, "cursor")
         if type(self.position) is not int or self.position < 0:
@@ -229,9 +247,9 @@ class EventLifecycleRecord:
 
     def __post_init__(self) -> None:
         _text(self.identity, "identity")
-        _text(self.source_id, "source_id")
+        _source_identity_component(self.source_id)
         _canonical_sport_value(self.sport)
-        _text(self.event_id, "event_id")
+        _provider_event_identity_component(self.event_id)
         if not isinstance(self.phase, EventPhase):
             raise ValueError("phase must be EventPhase")
         first_discovered = _instant(self.first_discovered_at, "first_discovered_at")

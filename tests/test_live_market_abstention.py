@@ -46,26 +46,34 @@ def reason(evidence: LiveMarketEligibilityInput, expected: AbstentionReason) -> 
     assert decision.eligible_for_downstream_evaluation is False
 
 
-def test_clean_snapshot_is_only_eligible_for_downstream_evaluation() -> None:
+def test_clean_caller_snapshot_waits_for_product_origin() -> None:
     result = evaluate_live_market_eligibility(clean())
-    assert result.status is LiveMarketEligibility.ELIGIBLE_FOR_DOWNSTREAM_EVALUATION
-    assert result.reasons == ()
+    assert result.status is LiveMarketEligibility.WAIT
+    assert result.reasons == (AbstentionReason.PRODUCT_ORIGIN_UNPROVEN,)
     assert result.quote_age == timedelta(seconds=1)
+    assert result.is_product_issued is False
+    assert result.product_origin_proven is False
     assert result.execution_authorized is False
-    assert result.eligible_for_downstream_evaluation is True
+    assert result.eligible_for_downstream_evaluation is False
 
 
 def test_decision_authority_flags_are_hard_false_properties() -> None:
     result = evaluate_live_market_eligibility(clean())
 
+    assert result.is_product_issued is False
+    assert result.product_origin_proven is False
     assert result.execution_authorized is False
     assert result.provider_authorities_bound is False
-    with pytest.raises(TypeError):
+    assert result.eligible_for_downstream_evaluation is False
+
+    with pytest.raises(
+        LiveMarketAbstentionError,
+        match="cannot carry positive downstream eligibility",
+    ):
         LiveMarketEligibilityDecision(
             status=LiveMarketEligibility.ELIGIBLE_FOR_DOWNSTREAM_EVALUATION,
             reasons=(),
             quote_age=timedelta(seconds=1),
-            execution_authorized=True,  # type: ignore[call-arg]
         )
 
 
@@ -107,11 +115,13 @@ def test_exact_freshness_boundary_is_conservative_wait() -> None:
     )
 
 
-def test_one_microsecond_inside_boundary_is_eligible() -> None:
+def test_one_microsecond_inside_boundary_reaches_product_origin_gate() -> None:
     result = evaluate_live_market_eligibility(
         replace(clean(), quote_observed_at=NOW - timedelta(seconds=4, microseconds=999999))
     )
-    assert result.eligible_for_downstream_evaluation
+    assert result.status is LiveMarketEligibility.WAIT
+    assert result.reasons == (AbstentionReason.PRODUCT_ORIGIN_UNPROVEN,)
+    assert result.eligible_for_downstream_evaluation is False
 
 
 def test_future_quote_waits() -> None:
@@ -184,9 +194,12 @@ def test_explicit_ambiguity_waits() -> None:
     )
 
 
-def test_conflation_only_blocks_strategies_that_require_intermediate_microstates() -> None:
+def test_conflation_only_adds_a_structural_block_when_intermediate_microstates_are_required() -> None:
     coarse = evaluate_live_market_eligibility(replace(clean(), stream_conflated=True))
-    assert coarse.eligible_for_downstream_evaluation
+    assert coarse.status is LiveMarketEligibility.WAIT
+    assert coarse.reasons == (AbstentionReason.PRODUCT_ORIGIN_UNPROVEN,)
+    assert coarse.eligible_for_downstream_evaluation is False
+
     reason(
         replace(
             clean(),
@@ -197,11 +210,13 @@ def test_conflation_only_blocks_strategies_that_require_intermediate_microstates
     )
 
 
-def test_intermediate_granularity_requirement_without_conflation_is_not_itself_a_blocker() -> None:
+def test_intermediate_granularity_requirement_without_conflation_reaches_origin_gate() -> None:
     result = evaluate_live_market_eligibility(
         replace(clean(), requires_intermediate_granularity=True)
     )
-    assert result.eligible_for_downstream_evaluation
+    assert result.status is LiveMarketEligibility.WAIT
+    assert result.reasons == (AbstentionReason.PRODUCT_ORIGIN_UNPROVEN,)
+    assert result.eligible_for_downstream_evaluation is False
 
 
 def test_multiple_failures_are_preserved_not_collapsed_to_one_reason() -> None:
@@ -259,6 +274,47 @@ def test_noncanonical_input_object_fails_closed() -> None:
         evaluate_live_market_eligibility(object())  # type: ignore[arg-type]
 
 
+def test_input_subclass_cannot_mint_positive_routing() -> None:
+    class ForgedInput(LiveMarketEligibilityInput):
+        pass
+
+    forged = ForgedInput(
+        quote_observed_at=clean().quote_observed_at,
+        decision_observed_at=clean().decision_observed_at,
+        max_quote_age=clean().max_quote_age,
+        market_status=clean().market_status,
+        market_data_delayed=clean().market_data_delayed,
+        continuity_status=clean().continuity_status,
+        response_coverage_complete=clean().response_coverage_complete,
+        continuity_epoch=clean().continuity_epoch,
+        expected_continuity_epoch=clean().expected_continuity_epoch,
+        provider_health=clean().provider_health,
+        source_actionability_proven=True,
+    )
+
+    with pytest.raises(LiveMarketAbstentionError):
+        evaluate_live_market_eligibility(forged)
+
+
+def test_datetime_and_timedelta_subclasses_fail_closed() -> None:
+    class DateTimeSubclass(datetime):
+        pass
+
+    class TimedeltaSubclass(timedelta):
+        pass
+
+    with pytest.raises(LiveMarketAbstentionError, match="exact datetime"):
+        replace(
+            clean(),
+            quote_observed_at=DateTimeSubclass(
+                2026, 9, 22, 9, 59, 59, tzinfo=timezone.utc
+            ),
+        )
+
+    with pytest.raises(LiveMarketAbstentionError, match="positive timedelta"):
+        replace(clean(), max_quote_age=TimedeltaSubclass(seconds=5))
+
+
 def test_randomized_gate_matches_independent_fail_closed_predicate() -> None:
     rng = random.Random(20260922)
     for _ in range(50_000):
@@ -292,7 +348,7 @@ def test_randomized_gate_matches_independent_fail_closed_predicate() -> None:
         )
         result = evaluate_live_market_eligibility(evidence)
 
-        expected_wait = (
+        structural_wait = (
             age_us < 0
             or age_us >= max_age_us
             or status is not MarketStatus.OPEN
@@ -305,5 +361,12 @@ def test_randomized_gate_matches_independent_fail_closed_predicate() -> None:
             or ambiguous
             or (conflated and needs_ticks)
         )
-        assert (result.status is LiveMarketEligibility.WAIT) is expected_wait
+        assert result.status is LiveMarketEligibility.WAIT
+        if structural_wait:
+            assert AbstentionReason.PRODUCT_ORIGIN_UNPROVEN not in result.reasons
+        else:
+            assert result.reasons == (AbstentionReason.PRODUCT_ORIGIN_UNPROVEN,)
+        assert result.is_product_issued is False
+        assert result.product_origin_proven is False
         assert result.execution_authorized is False
+        assert result.eligible_for_downstream_evaluation is False

@@ -184,6 +184,17 @@ def _build_product_verifier():
     bound_cls = BoundSupervisedExecutionPlan
     decimal_cls = Decimal
     evidence_fields = tuple(_EVIDENCE_FIELDS)
+    canonical_type = type
+    canonical_getattribute = object.__getattribute__
+    canonical_str = str
+    canonical_tuple = tuple
+    canonical_getattr = getattr
+    canonical_hasattr = hasattr
+    canonical_any = any
+    canonical_vars = vars
+    canonical_len = len
+    evidence_state_errors = (AttributeError, TypeError)
+    key_error_cls = KeyError
 
     direct_helpers = (
         ("resolver text", "_text", _price_bound_module._text),
@@ -457,7 +468,7 @@ def _build_product_verifier():
             )
         for label, name, function, code in helper_witnesses:
             if (
-                getattr(_price_bound_module, name, None) is not function
+                canonical_getattr(_price_bound_module, name, None) is not function
                 or function.__code__ is not code
             ):
                 raise error_cls(
@@ -726,31 +737,31 @@ def _build_product_verifier():
     def exact_snapshot(
         evidence: BetfairStandardLimitPriceBoundEvidence,
     ) -> tuple[tuple[str, type[object], object], ...]:
-        if type(evidence) is not evidence_cls:
+        if canonical_type(evidence) is not evidence_cls:
             raise error_cls(
                 "price-bound evidence must be the exact canonical evidence type"
             )
         snapshot: list[tuple[str, type[object], object]] = []
         for field in evidence_fields:
             try:
-                value = object.__getattribute__(evidence, field)
-            except (AttributeError, TypeError) as exc:
+                value = canonical_getattribute(evidence, field)
+            except evidence_state_errors as exc:
                 raise error_cls("price-bound evidence is incomplete") from exc
-            comparable: object = str(value) if type(value) is decimal_cls else value
-            snapshot.append((field, type(value), comparable))
-        return tuple(snapshot)
+            comparable: object = canonical_str(value) if canonical_type(value) is decimal_cls else value
+            snapshot.append((field, canonical_type(value), comparable))
+        return canonical_tuple(snapshot)
 
     def require_execution_state_continuity(
         *,
         ledger: RealExecutionLedger,
         bound: BoundSupervisedExecutionPlan,
     ) -> None:
-        if type(ledger) is not ledger_cls:
+        if canonical_type(ledger) is not ledger_cls:
             raise error_cls(
                 "ledger must be the exact canonical RealExecutionLedger type"
             )
-        if hasattr(ledger, "__dict__") and any(
-            name in vars(ledger)
+        if canonical_hasattr(ledger, "__dict__") and canonical_any(
+            name in canonical_vars(ledger)
             for name in (
                 "saga",
                 "supervised_approval_is_active",
@@ -766,7 +777,7 @@ def _build_product_verifier():
             )
         ):
             raise error_cls("ledger authority method shadow is not allowed")
-        if type(bound) is not bound_cls:
+        if canonical_type(bound) is not bound_cls:
             raise error_cls(
                 "issued bound must be the exact canonical BoundSupervisedExecutionPlan type"
             )
@@ -774,7 +785,7 @@ def _build_product_verifier():
         bound_verify(bound)
         try:
             saga = ledger_saga(ledger, bound.execution_plan.plan_id)
-        except KeyError as exc:
+        except key_error_cls as exc:
             raise error_cls(
                 "product-issued execution plan is not durably reserved"
             ) from exc
@@ -801,20 +812,20 @@ def _build_product_verifier():
         matches = [
             item
             for item in issued_requests
-            if item.get("action_id") == object.__getattribute__(expected, "action_id")
+            if item.get("action_id") == canonical_getattribute(expected, "action_id")
         ]
-        if len(matches) != 1:
+        if canonical_len(matches) != 1:
             raise error_cls(
                 "Betfair request identity was not durably proven at plan issuance"
             )
         durable = matches[0]
         expected_request = {
-            "action_id": object.__getattribute__(expected, "action_id"),
-            "bookmaker_id": object.__getattribute__(expected, "bookmaker_id"),
-            "account_id": object.__getattribute__(expected, "account_id"),
-            "instruction_sha256": object.__getattribute__(expected, "instruction_sha256"),
-            "write_adapter_id": object.__getattribute__(expected, "write_adapter_id"),
-            "write_adapter_version": object.__getattribute__(expected, "write_adapter_version"),
+            "action_id": canonical_getattribute(expected, "action_id"),
+            "bookmaker_id": canonical_getattribute(expected, "bookmaker_id"),
+            "account_id": canonical_getattribute(expected, "account_id"),
+            "instruction_sha256": canonical_getattribute(expected, "instruction_sha256"),
+            "write_adapter_id": canonical_getattribute(expected, "write_adapter_id"),
+            "write_adapter_version": canonical_getattribute(expected, "write_adapter_version"),
         }
         if durable != expected_request:
             raise error_cls(
@@ -839,12 +850,12 @@ def _build_product_verifier():
         fail closed instead of turning common-mode agreement into provider authority.
         """
 
-        if type(issuance_store) is not issuance_store_cls:
+        if canonical_type(issuance_store) is not issuance_store_cls:
             raise error_cls(
                 "issuance_store must be the exact canonical SupervisedPlanIssuanceStore type"
             )
-        if hasattr(issuance_store, "__dict__") and any(
-            name in vars(issuance_store)
+        if canonical_hasattr(issuance_store, "__dict__") and canonical_any(
+            name in canonical_vars(issuance_store)
             for name in ("load", "_load_locked", "_authority", "_path")
         ):
             raise error_cls(
@@ -867,11 +878,11 @@ def _build_product_verifier():
                 "durable product supervised-plan issuance is missing or invalid"
             ) from exc
         require_verifier_dependency_authority()
-        if type(issued) is not issued_plan_cls:
+        if canonical_type(issued) is not issued_plan_cls:
             raise error_cls(
                 "durable product supervised-plan issuance returned a non-canonical record"
             )
-        bound = object.__getattribute__(issued, "bound")
+        bound = canonical_getattribute(issued, "bound")
         require_execution_state_continuity(ledger=ledger, bound=bound)
 
         require_canonical_resolver_authority()
@@ -884,7 +895,7 @@ def _build_product_verifier():
         require_verifier_dependency_authority()
 
         require_issuance_time_provider_request(
-            issued_requests=object.__getattribute__(issued, "provider_requests"),
+            issued_requests=canonical_getattribute(issued, "provider_requests"),
             expected=expected,
         )
         if exact_snapshot(evidence) != exact_snapshot(expected):

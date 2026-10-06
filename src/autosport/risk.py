@@ -1618,7 +1618,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         _, _, committed_stake, _ = state
 
         try:
-            total_exposure = cls._exact_positive_sum((committed_stake, amount))
+            proposed_locked_capital = _CANONICAL_LOCKED_CAPITAL_FOR_PROPOSAL(
+                amount,
+                context.legs,
+            )
+            total_exposure = cls._exact_positive_sum(
+                (committed_stake, proposed_locked_capital)
+            )
             exposure_by_identity: dict[str, Decimal] = {}
             for ticket in book.tickets.values():
                 if ticket.status is not TicketStatus.OPEN:
@@ -1649,7 +1655,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     exposure_by_identity[identity] = cls._exact_positive_sum(
                         (
                             exposure_by_identity.get(identity, Decimal("0")),
-                            ticket.stake,
+                            _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket),
                         )
                     )
 
@@ -1657,7 +1663,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 proposed_exposure = cls._exact_positive_sum(
                     (
                         exposure_by_identity.get(identity, Decimal("0")),
-                        amount,
+                        proposed_locked_capital,
                     )
                 )
                 if cls._fraction_exceeds(
@@ -2221,8 +2227,9 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         self,
         initial_bankroll: Decimal,
         balance: Decimal,
-        committed_stake: Decimal,
-        amount: Decimal,
+        committed_capital: Decimal,
+        stake_amount: Decimal,
+        capital_amount: Decimal,
     ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | None:
         try:
             ticket_fraction, committed_fraction = self._effective_fraction_limits()
@@ -2230,11 +2237,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             with localcontext(self._decimal_context()):
                 ticket_limit = initial_bankroll * ticket_fraction
                 committed_limit = initial_bankroll * committed_fraction
-                remaining_balance = balance - amount
+                remaining_balance = balance - capital_amount
                 reserve_limit = initial_bankroll * self.minimum_cash_reserve_fraction
             # Exposure itself can legitimately require more than 28 significant digits even
             # when every PaperBook debit was canonical, so aggregate it exactly.
-            aggregate_committed = self._exact_positive_sum((committed_stake, amount))
+            aggregate_committed = self._exact_positive_sum(
+                (committed_capital, capital_amount)
+            )
         except (ArithmeticError, TypeError, ValueError):
             return None
 

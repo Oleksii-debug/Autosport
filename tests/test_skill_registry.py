@@ -496,7 +496,11 @@ def test_handler_timeout_kill_failure_falls_back_to_bounded_terminate(monkeypatc
             self.terminated = True
             self.alive = False
 
+        def close(self):
+            self.closed = True
+
     process = FakeProcess()
+    process.closed = False
 
     class FakeContext:
         @staticmethod
@@ -523,8 +527,71 @@ def test_handler_timeout_kill_failure_falls_back_to_bounded_terminate(monkeypatc
     assert result is None
     assert error == "HANDLER_TIMEOUT"
     assert process.terminated is True
+    assert process.closed is True
     assert process.join_timeouts[0] == 1
     assert len(process.join_timeouts) == 3
+    assert all(0 < timeout < 1 for timeout in process.join_timeouts[1:])
+
+
+def test_handler_timeout_stop_failure_is_distinct_and_leaves_handle_open(monkeypatch):
+    class FakeEndpoint:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.join_timeouts = []
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_timeouts.append(timeout)
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            raise OSError("simulated kill failure")
+
+        def terminate(self):
+            raise OSError("simulated terminate failure")
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeEndpoint(), FakeEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_TIMEOUT_STOP_FAILED"
+    assert process.is_alive() is True
+    assert process.closed is False
+    assert len(process.join_timeouts) == 3
+    assert process.join_timeouts[0] == 1
     assert all(0 < timeout < 1 for timeout in process.join_timeouts[1:])
 
 

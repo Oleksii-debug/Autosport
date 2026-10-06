@@ -2155,10 +2155,12 @@ def admit_paper_ticket(
 
     This function does not create a second risk, turnover, reservation, or ledger
     authority. It composes PaperRiskPolicy + PaperBook mutation inside the canonical
-    WorkspaceEconomicLock. When a current product-issued UTC-day turnover snapshot
-    is available, only the policy's conservative whole-history turnover room may be
-    replaced; every other canonical risk gate remains authoritative. Incomplete or
-    stale day evidence always falls back to the old conservative behavior.
+    WorkspaceEconomicLock. A conservative whole-history turnover rejection may be
+    replaced only when both current product-issued UTC-day evidence and current
+    durable economic-session evidence prove sufficient residual room; the effective
+    room is the minimum of those independent scopes. Every other canonical risk gate
+    remains authoritative. Missing, stale or inconsistent scope evidence falls back
+    to the conservative whole-history rejection.
 
     The lock is intentionally acquired *before* risk evaluation. A contender that
     cannot acquire the lock fails closed through WorkspaceEconomicLock rather than

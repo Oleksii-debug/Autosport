@@ -183,6 +183,29 @@ def test_corrupt_operational_error_checkpoint_fails_closed() -> None:
             raise AssertionError("corrupt operational error checkpoint was accepted")
 
 
+def test_boolean_operational_checkpoint_schema_version_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
+        error_path = root / "continuous_session.json.operational_error.json"
+        payload = json.loads(error_path.read_text(encoding="utf-8"))
+        payload["schema_version"] = True
+        error_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        try:
+            continuous_session._ContinuousSessionState(
+                root / "continuous_session.json",
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError("boolean operational checkpoint schema_version was accepted")
+
+
 def test_failure_checkpoint_leaves_canonical_settlement_file_byte_identical() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

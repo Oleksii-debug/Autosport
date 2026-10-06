@@ -6757,3 +6757,87 @@ def test_provider_unavailable_rechecks_authority_after_failure_publication(
         assert coordinator._state is canonical_state
         assert coordinator.dependency_index is canonical_index
 
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    (
+        (
+            "state",
+            "continuous session state authority changed during tick",
+        ),
+        (
+            "dependency_storage",
+            "dependency routing authority changed during success publication",
+        ),
+        (
+            "economic_context",
+            "settlement economic configuration changed during tick",
+        ),
+    ),
+)
+def test_tick_rechecks_authority_after_success_publication(
+    mutation: str,
+    expected_error: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = index
+        canonical_state = coordinator._state
+        canonical_matched_keys = index._matched_keys
+
+        replacement_state = continuous_session._ContinuousSessionState(
+            root / "post_success_replacement.json",
+            session_id="post-success-replacement",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        class HookLock:
+            def __init__(self) -> None:
+                self.fired = False
+
+            def __enter__(self):
+                if canonical_state._cycles_completed == 1 and not self.fired:
+                    self.fired = True
+                    if mutation == "state":
+                        coordinator._state = replacement_state
+                    elif mutation == "dependency_storage":
+                        index._matched_keys = {}
+                    else:
+                        coordinator.initial_bankroll = "999"
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        hook_lock = HookLock()
+        buffer._lock = hook_lock
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        coordinator.collector = _Collector()
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match=expected_error,
+        ):
+            coordinator.tick()
+
+        assert hook_lock.fired is True
+        if mutation == "state":
+            assert coordinator._state is canonical_state
+        if mutation == "dependency_storage":
+            assert index._matched_keys is canonical_matched_keys
+

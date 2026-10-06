@@ -5156,3 +5156,120 @@ def test_successful_invalidation_routing_does_not_force_recovery_refresh() -> No
     assert backlog is False
     assert buffer.full_refresh_required is False
 
+def test_tick_rejects_invalidation_drain_dispatch_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop ran after invalidation dispatch mutation")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after invalidation dispatch mutation")
+
+        def mutate() -> None:
+            monkeypatch.setattr(
+                continuous_session.BoundedMirrorInvalidationBuffer,
+                "drain",
+                lambda self, *, max_items=250: continuous_session.MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=False,
+                    has_more=False,
+                ),
+            )
+
+        coordinator.collector = _Collector(callback=mutate)
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical invalidation buffer dispatch authority changed",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_tick_rejects_invalidation_pending_descriptor_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        mirror = MarketMirror()
+        buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+        coordinator.invalidation_buffer = buffer
+        coordinator.dependency_index = (
+            continuous_session.FocusedMirrorDependencyIndex(mirror)
+        )
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                raise AssertionError("desktop ran after invalidation descriptor mutation")
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                raise AssertionError("lifecycle ran after invalidation descriptor mutation")
+
+        def mutate() -> None:
+            monkeypatch.setattr(
+                continuous_session.BoundedMirrorInvalidationBuffer,
+                "pending_count",
+                property(lambda self: 0),
+            )
+
+        coordinator.collector = _Collector(callback=mutate)
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="canonical invalidation buffer dispatch authority changed",
+        ):
+            coordinator.tick()
+
+        assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+def test_direct_invalidation_helper_rejects_canonical_buffer_drain_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    mirror = MarketMirror()
+    buffer = continuous_session.BoundedMirrorInvalidationBuffer(mirror)
+    index = continuous_session.FocusedMirrorDependencyIndex(mirror)
+
+    monkeypatch.setattr(
+        continuous_session.BoundedMirrorInvalidationBuffer,
+        "drain",
+        lambda self, *, max_items=250: continuous_session.MirrorInvalidationBatch(
+            changed_keys=(),
+            full_refresh_required=False,
+            has_more=False,
+        ),
+    )
+
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="canonical invalidation buffer dispatch authority changed",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=index.affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )
+

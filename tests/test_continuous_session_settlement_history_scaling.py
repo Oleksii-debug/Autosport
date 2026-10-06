@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import threading
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 

@@ -66,6 +66,8 @@ ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY = "economic_goal_provenance"
 RISK_POLICY_PROVENANCE_PAYLOAD_KEY = "risk_policy_provenance"
 MATERIAL_ACTION_ID_PAYLOAD_KEY = "material_action_id"
 
+_MAX_DECISION_LEDGER_BYTES = 64 * 1024 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class EconomicDecisionAuthority:
@@ -356,11 +358,19 @@ class JsonlDecisionLedger:
                 "Decision Ledger file is missing or unreadable"
             ) from exc
         self._require_regular_single_link(path_before)
+        if path_before.st_size > _MAX_DECISION_LEDGER_BYTES:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger exceeds durable resource limit"
+            )
         try:
             with self.path.open("rb") as handle:
                 opened = os.fstat(handle.fileno())
                 path_opened = os.stat(self.path, follow_symlinks=False)
                 self._require_same_file_identity(opened, path_opened)
+                if opened.st_size > _MAX_DECISION_LEDGER_BYTES:
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger exceeds durable resource limit"
+                    )
                 raw = handle.read()
                 opened_after = os.fstat(handle.fileno())
                 path_after = os.stat(self.path, follow_symlinks=False)
@@ -575,7 +585,8 @@ class JsonlDecisionLedger:
                         path_after_read,
                     )
                     if (
-                        opened.st_dev != opened_after_read.st_dev
+                        opened_after_read.st_size > _MAX_DECISION_LEDGER_BYTES
+                        or opened.st_dev != opened_after_read.st_dev
                         or opened.st_ino != opened_after_read.st_ino
                         or opened.st_size != opened_after_read.st_size
                         or opened.st_mtime_ns != opened_after_read.st_mtime_ns
@@ -589,6 +600,10 @@ class JsonlDecisionLedger:
                 opened_for_write = os.fstat(handle.fileno())
                 path_for_write = os.stat(self.path, follow_symlinks=False)
                 self._require_same_file_identity(opened_for_write, path_for_write)
+                if len(existing) + len(encoded) > _MAX_DECISION_LEDGER_BYTES:
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger append exceeds durable resource limit"
+                    )
                 self._verify_bytes(
                     existing,
                     reserved_decision_id=payload["decision_id"],

@@ -541,6 +541,8 @@ class MarketBookBatchAttemptExecution:
 def _install_transport_result_authority() -> None:
     issued: dict[int, tuple[object, str, bool]] = {}
     validate = MarketBookBatchTransportResult.__post_init__
+    rate_reserve = BetfairMarketBookPerMarketRateGate.reserve
+    concurrency_begin = BetfairMarketBookProjectionConcurrencyGate.begin
 
     def read_market_book_batch(
         client: _base.BetfairReadOnlyClient,
@@ -573,7 +575,8 @@ def _install_transport_result_authority() -> None:
 
         contract = plan.request_contract_payload
         try:
-            concurrency_decision = concurrency_gate.begin(
+            concurrency_decision = concurrency_begin(
+                concurrency_gate,
                 request,
                 observed_at=instant,
                 has_order_projection=contract["order_projection"] is not None,
@@ -592,7 +595,8 @@ def _install_transport_result_authority() -> None:
 
         lease_generation = concurrency_decision.lease_generation
         try:
-            rate_decision = rate_gate.reserve(
+            rate_decision = rate_reserve(
+                rate_gate,
                 batch.market_ids,
                 scheduled_at=instant,
             )

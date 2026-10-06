@@ -9,7 +9,23 @@ import threading
 from pathlib import Path
 from typing import Any, Iterator
 
-from .monotonic_workspace_authority import AuthorityPhase, MonotonicWorkspaceAuthority
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicAuthorityRollbackError,
+    MonotonicWorkspaceAuthority,
+)
+
+# ScientificRegistry shares the product's monotonic machine authority. Compose the
+# canonical root-selection guards before freezing constructor identity below:
+# package __init__ normally installs these later, after ScientificRegistry imports
+# integrity, which would otherwise make the legitimate sealed constructor look like
+# hostile post-capture drift.
+from . import (  # noqa: E402,F401
+    _monotonic_root_selection_os_resolver_guard as _monotonic_root_selection_os_resolver_guard,
+)
+from . import (  # noqa: E402,F401
+    _monotonic_root_selection_dispatch_guard as _monotonic_root_selection_dispatch_guard,
+)
 
 if os.name == "nt":
     import msvcrt
@@ -27,6 +43,23 @@ _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCK_LOCAL = threading.local()
 
 _SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN = "autosport.scientific-registry.v1"
+_CANONICAL_MONOTONIC_AUTHORITY_TYPE = MonotonicWorkspaceAuthority
+_MISSING_MONOTONIC_CLASS_MEMBER = object()
+_CANONICAL_MONOTONIC_NEW = vars(MonotonicWorkspaceAuthority).get(
+    "__new__",
+    _MISSING_MONOTONIC_CLASS_MEMBER,
+)
+_CANONICAL_MONOTONIC_NEW_CODE = getattr(
+    _CANONICAL_MONOTONIC_NEW,
+    "__code__",
+    None,
+)
+_CANONICAL_MONOTONIC_INIT = MonotonicWorkspaceAuthority.__init__
+_CANONICAL_MONOTONIC_INIT_CODE = MonotonicWorkspaceAuthority.__init__.__code__
+_CANONICAL_MONOTONIC_READ_HISTORY = MonotonicWorkspaceAuthority.read_history
+_CANONICAL_MONOTONIC_READ_HISTORY_CODE = MonotonicWorkspaceAuthority.read_history.__code__
+_CANONICAL_MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
+_CANONICAL_MONOTONIC_RECOVER_CODE = MonotonicWorkspaceAuthority.recover.__code__
 _SCIENTIFIC_REGISTRY_ENTRY_KEYS = frozenset(
     {
         "record_type",
@@ -163,13 +196,90 @@ def _looks_like_scientific_registry_state(payload: dict[str, Any]) -> bool:
     return True
 
 
+def _assert_scientific_registry_monotonic_read_dispatch(
+    authority: MonotonicWorkspaceAuthority,
+) -> None:
+    class_dict = vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE)
+    current_new = class_dict.get("__new__", _MISSING_MONOTONIC_CLASS_MEMBER)
+    if (
+        MonotonicWorkspaceAuthority is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE
+        or type(authority) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE
+        or current_new is not _CANONICAL_MONOTONIC_NEW
+        or (
+            _CANONICAL_MONOTONIC_NEW_CODE is not None
+            and getattr(current_new, "__code__", None)
+            is not _CANONICAL_MONOTONIC_NEW_CODE
+        )
+        or class_dict.get("__init__")
+        is not _CANONICAL_MONOTONIC_INIT
+        or _CANONICAL_MONOTONIC_INIT.__code__
+        is not _CANONICAL_MONOTONIC_INIT_CODE
+        or vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE).get("read_history")
+        is not _CANONICAL_MONOTONIC_READ_HISTORY
+        or _CANONICAL_MONOTONIC_READ_HISTORY.__code__
+        is not _CANONICAL_MONOTONIC_READ_HISTORY_CODE
+        or vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE).get("recover")
+        is not _CANONICAL_MONOTONIC_RECOVER
+        or _CANONICAL_MONOTONIC_RECOVER.__code__
+        is not _CANONICAL_MONOTONIC_RECOVER_CODE
+    ):
+        raise RuntimeError(
+            "ScientificRegistry monotonic read/recovery dispatch changed"
+        )
+    instance_dict = object.__getattribute__(authority, "__dict__")
+    if "read_history" in instance_dict or "recover" in instance_dict:
+        raise RuntimeError(
+            "ScientificRegistry monotonic read/recovery instance dispatch changed"
+        )
+
+
+def _authority_read_history(
+    authority: MonotonicWorkspaceAuthority,
+):
+    _assert_scientific_registry_monotonic_read_dispatch(authority)
+    return _CANONICAL_MONOTONIC_READ_HISTORY(authority)
+
+
+def _authority_recover(
+    authority: MonotonicWorkspaceAuthority,
+    *,
+    observed_state_sha256: str | None,
+    tx_id: str | None = None,
+    semantic_binding_sha256: str | None = None,
+):
+    _assert_scientific_registry_monotonic_read_dispatch(authority)
+    return _CANONICAL_MONOTONIC_RECOVER(
+        authority,
+        observed_state_sha256=observed_state_sha256,
+        tx_id=tx_id,
+        semantic_binding_sha256=semantic_binding_sha256,
+    )
+
+
 def _scientific_registry_authority(destination: Path) -> MonotonicWorkspaceAuthority:
     workspace = destination.parent.resolve(strict=False)
-    return MonotonicWorkspaceAuthority(
+    class_dict = vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE)
+    current_new = class_dict.get("__new__", _MISSING_MONOTONIC_CLASS_MEMBER)
+    if (
+        MonotonicWorkspaceAuthority is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE
+        or current_new is not _CANONICAL_MONOTONIC_NEW
+        or (
+            _CANONICAL_MONOTONIC_NEW_CODE is not None
+            and getattr(current_new, "__code__", None)
+            is not _CANONICAL_MONOTONIC_NEW_CODE
+        )
+        or class_dict.get("__init__") is not _CANONICAL_MONOTONIC_INIT
+        or _CANONICAL_MONOTONIC_INIT.__code__
+        is not _CANONICAL_MONOTONIC_INIT_CODE
+    ):
+        raise RuntimeError("ScientificRegistry monotonic authority constructor changed")
+    authority = _CANONICAL_MONOTONIC_AUTHORITY_TYPE(
         workspace=workspace,
         domain=_SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN,
         key=destination.name,
     )
+    _assert_scientific_registry_monotonic_read_dispatch(authority)
+    return authority
 
 
 def _authority_binding(destination: Path, observed: str | None, intended: str, *, kind: str) -> str:
@@ -190,7 +300,7 @@ def _recover_or_bootstrap_scientific_registry_authority(
     destination: Path,
     observed: str | None,
 ) -> None:
-    history = authority.read_history()
+    history = _authority_read_history(authority)
     if not history:
         if observed is None:
             return
@@ -211,13 +321,58 @@ def _recover_or_bootstrap_scientific_registry_authority(
 
     pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
     if pending is None:
-        authority.recover(observed_state_sha256=observed)
+        _authority_recover(authority, observed_state_sha256=observed)
         return
-    authority.recover(
+    _authority_recover(
+        authority,
         observed_state_sha256=observed,
         tx_id=pending.tx_id,
         semantic_binding_sha256=pending.semantic_binding_sha256,
     )
+
+
+_CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY = _scientific_registry_authority
+_CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY_CODE = (
+    _scientific_registry_authority.__code__
+)
+_CANONICAL_AUTHORITY_READ_HISTORY_HELPER = _authority_read_history
+_CANONICAL_AUTHORITY_READ_HISTORY_HELPER_CODE = _authority_read_history.__code__
+_CANONICAL_AUTHORITY_RECOVER_HELPER = _authority_recover
+_CANONICAL_AUTHORITY_RECOVER_HELPER_CODE = _authority_recover.__code__
+_CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER = (
+    _recover_or_bootstrap_scientific_registry_authority
+)
+_CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER_CODE = (
+    _recover_or_bootstrap_scientific_registry_authority.__code__
+)
+
+
+def _assert_scientific_registry_authority_helpers() -> None:
+    if (
+        _scientific_registry_authority
+        is not _CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY
+        or _CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY.__code__
+        is not _CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY_CODE
+        or _authority_read_history is not _CANONICAL_AUTHORITY_READ_HISTORY_HELPER
+        or _CANONICAL_AUTHORITY_READ_HISTORY_HELPER.__code__
+        is not _CANONICAL_AUTHORITY_READ_HISTORY_HELPER_CODE
+        or _authority_recover is not _CANONICAL_AUTHORITY_RECOVER_HELPER
+        or _CANONICAL_AUTHORITY_RECOVER_HELPER.__code__
+        is not _CANONICAL_AUTHORITY_RECOVER_HELPER_CODE
+        or _recover_or_bootstrap_scientific_registry_authority
+        is not _CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER
+        or _CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER.__code__
+        is not _CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER_CODE
+    ):
+        raise RuntimeError("ScientificRegistry authority helper dispatch changed")
+
+
+_CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD = (
+    _assert_scientific_registry_authority_helpers
+)
+_CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD_CODE = (
+    _assert_scientific_registry_authority_helpers.__code__
+)
 
 
 def read_verified_scientific_registry_text(path: str | Path) -> str:
@@ -226,8 +381,8 @@ def read_verified_scientific_registry_text(path: str | Path) -> str:
     Record/schema validation must run before monotonic authority judges the image.
     That ordering preserves precise corruption diagnostics without weakening
     rollback protection: after validation, the baseline helper reacquires this
-    same path lock, exact-matches the validated bytes, and then bootstraps or
-    recovers the independent authority against their digest.
+    same path lock, exact-matches the validated bytes, and requires existing
+    independent authority for every non-pristine image before recovery.
     """
 
     destination = Path(path)
@@ -241,13 +396,14 @@ def establish_validated_scientific_registry_read_baseline(
     path: str | Path,
     validated_text: str,
 ) -> None:
-    """Bind the first validated non-pristine registry image to machine authority.
+    """Revalidate a non-pristine registry against existing machine authority.
 
-    The verified reader cannot safely bootstrap a historyless legacy image before
-    the ScientificRegistry parser has validated its complete schema and record
-    digests. The caller therefore returns here only after validation. Re-read the
-    exact bytes under the durable path lock before creating the trust-on-first-use
-    baseline so a concurrent replacement cannot be certified from stale text.
+    A historyless non-pristine image is ambiguous: it may be legacy data, a copied
+    workspace, a restored valid-old file, or caller-authored bytes. Read-time TOFU
+    cannot distinguish those cases and therefore cannot mint product authority.
+    The normal writer establishes authority from the already-durable pristine image
+    before the first real append. Any legacy/import migration needs an explicit
+    separate product contract instead of silent first-read bootstrap.
     """
 
     if type(validated_text) is not str:
@@ -274,9 +430,23 @@ def establish_validated_scientific_registry_read_baseline(
             # authority when its first real scientific record is published.
             return
 
+        if (
+            _assert_scientific_registry_authority_helpers
+            is not _CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD
+            or _CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD.__code__
+            is not _CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD_CODE
+        ):
+            raise RuntimeError(
+                "ScientificRegistry authority helper guard dispatch changed"
+            )
+        _CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD()
         observed = hashlib.sha256(current_bytes).hexdigest()
-        authority = _scientific_registry_authority(destination)
-        _recover_or_bootstrap_scientific_registry_authority(
+        authority = _CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY(destination)
+        if not _CANONICAL_AUTHORITY_READ_HISTORY_HELPER(authority):
+            raise MonotonicAuthorityRollbackError(
+                "validated non-pristine scientific registry lacks independent authority history"
+            )
+        _CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER(
             authority,
             destination,
             observed,

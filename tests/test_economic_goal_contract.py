@@ -393,20 +393,16 @@ def test_public_transition_rejects_bound_validator_default_rebinding() -> None:
         validator.__defaults__ = original_defaults
 
 
-def test_public_transition_rejects_nested_snapshotter_default_rebinding() -> None:
+def test_public_transition_rejects_nested_snapshot_default_rebinding() -> None:
     previous = _goal()
     candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
-    snapshotter = economic_goal_module._snapshot_transition_contract
+    snapshotter = economic_goal_module._canonical_contract_snapshot
     original_defaults = snapshotter.__defaults__
     assert original_defaults is not None
 
     snapshotter.__defaults__ = (
-        original_defaults[0],
+        (),
         original_defaults[1],
-        object.__new__,
-        original_defaults[3],
-        original_defaults[4],
-        original_defaults[5],
     )
     try:
         with pytest.raises(
@@ -778,23 +774,13 @@ def test_contract_successor_method_rejects_validator_injection() -> None:
         previous.validate_automatic_successor(candidate)
 
 
-def test_transition_proof_uses_isolated_candidate_snapshot() -> None:
-    previous = _goal()
-    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
-    canonical_snapshotter = economic_goal_module._snapshot_transition_contract
+def test_transition_snapshot_isolated_from_later_source_mutation() -> None:
+    candidate = _goal(revision=2, max_stake_fraction=Decimal("0.01"))
+    snapshot = economic_goal_module._snapshot_transition_contract(candidate)
 
-    def snapshot_then_mutate(contract):
-        snapshot = canonical_snapshotter(contract)
-        if contract is candidate:
-            object.__setattr__(candidate, "max_stake_fraction", Decimal("0.99"))
-        return snapshot
+    object.__setattr__(candidate, "max_stake_fraction", Decimal("0.99"))
 
-    economic_goal_module._validate_automatic_transition_bound(
-        previous,
-        candidate,
-        _snapshotter=snapshot_then_mutate,
-    )
-
+    assert snapshot.max_stake_fraction == Decimal("0.01")
     assert candidate.max_stake_fraction == Decimal("0.99")
 
 

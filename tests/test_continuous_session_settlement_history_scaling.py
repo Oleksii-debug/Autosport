@@ -1879,3 +1879,45 @@ def test_bootstrap_rejects_runtime_session_lock_rebinding(monkeypatch) -> None:
             assert "bootstrap authority changed" in str(exc)
         else:
             raise AssertionError("runtime-rebound bootstrap lock was accepted")
+
+
+def test_repeated_pause_is_generation_neutral_and_preserves_failure() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.set_state(continuous_session.SessionState.PAUSED)
+        state.record_failure(code="PAUSED_FAILURE")
+
+        before = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        state.set_state(continuous_session.SessionState.PAUSED)
+        after = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+
+        assert after["generation"] == before["generation"]
+        assert state.snapshot().last_error_code == "PAUSED_FAILURE"
+
+
+def test_repeated_stop_same_reason_is_generation_neutral() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.set_state(
+            continuous_session.SessionState.STOPPED,
+            reason="OPERATOR_STOP",
+        )
+        before = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+
+        state.set_state(
+            continuous_session.SessionState.STOPPED,
+            reason="OPERATOR_STOP",
+        )
+        after = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        assert after["generation"] == before["generation"]
+        assert after["last_error_code"] == "OPERATOR_STOP"

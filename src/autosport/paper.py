@@ -1419,6 +1419,27 @@ def _seal_paperbook_snapshot_install_authority(method):
     canonical_load_bytes_code = canonical_load_bytes.__code__
     canonical_snapshot_path = _canonical_paperbook_snapshot_path
     canonical_snapshot_path_code = canonical_snapshot_path.__code__
+    load_globals = globals()
+    path_factory = Path
+    path_type = type(path_factory("."))
+    read_bytes = path_type.read_bytes
+    read_bytes_code = read_bytes.__code__
+
+    def require_load_filesystem_dependencies() -> None:
+        if load_globals.get("Path") is not path_factory:
+            raise ValueError("PaperBook load Path authority changed")
+        if path_type.read_bytes is not read_bytes:
+            raise ValueError("PaperBook snapshot read authority changed")
+        if read_bytes.__code__ is not read_bytes_code:
+            raise ValueError("PaperBook snapshot read callable authority changed")
+
+    def canonical_read(path: object) -> bytes:
+        require_load_filesystem_dependencies()
+        if type(path) is not path_type:
+            raise ValueError("PaperBook snapshot read path type changed")
+        payload = read_bytes(path)
+        require_load_filesystem_dependencies()
+        return payload
 
     def require_type(target: object) -> None:
         if type_authority.__code__ is not type_authority_code:
@@ -1452,14 +1473,17 @@ def _seal_paperbook_snapshot_install_authority(method):
             raise ValueError("PaperBook byte loader dispatch authority changed")
         if canonical_snapshot_path.__code__ is not canonical_snapshot_path_code:
             raise ValueError("PaperBook snapshot path dispatch authority changed")
+        require_load_filesystem_dependencies()
         result = method(
             cls,
             *args,
             _snapshot_authority_install=install,
             _canonical_load_bytes=canonical_load_bytes,
             _snapshot_path=canonical_snapshot_path,
+            _read_bytes=canonical_read,
             **kwargs,
         )
+        require_load_filesystem_dependencies()
         if method.__code__ is not method_code:
             raise ValueError("PaperBook snapshot install callable authority changed")
         return result
@@ -2848,9 +2872,10 @@ class PaperBook:
         _snapshot_authority_install=None,
         _canonical_load_bytes=None,
         _snapshot_path=None,
+        _read_bytes=None,
     ) -> "PaperBook":
         destination = _snapshot_path(cls, path)
-        book = _canonical_load_bytes(cls, destination.read_bytes())
+        book = _canonical_load_bytes(cls, _read_bytes(destination))
         _snapshot_authority_install(book)
         return book
 

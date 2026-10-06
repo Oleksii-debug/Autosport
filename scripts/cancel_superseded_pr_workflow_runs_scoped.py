@@ -1150,6 +1150,22 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     scan_pages = tuple(range(1, initial_pages + 2))
                 else:
                     scan_pages = (1, 2, initial_pages)
+            elif (
+                scan_page_index == 1
+                and len(scan_pages) == 3
+                and scan_pages[:2] == (1, 2)
+                and scan_pages[2] > 2
+            ):
+                # Page 2 gives one fresher bounded view of a queue that may have grown
+                # after page 1. Retarget the single tail observation to that newer
+                # observed horizon without adding a fourth snapshot request or chasing
+                # subsequent growth indefinitely.
+                latest_pages = max(
+                    1,
+                    (total_count + _runs_per_page - 1) // _runs_per_page,
+                )
+                if latest_pages > 2:
+                    scan_pages = (1, 2, latest_pages)
             unique_before_page = len(seen_run_ids)
             if len(page_runs) > _runs_per_page:
                 raise CancellationError("invalid workflow-runs page size")

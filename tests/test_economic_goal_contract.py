@@ -560,6 +560,23 @@ def test_transition_ignores_rebound_module_contract_type(monkeypatch) -> None:
     with pytest.raises(EconomicGoalContractError, match="must not increase"):
         validate_automatic_transition(previous, candidate)
 
+def test_transition_snapshot_helper_ignores_rebound_contract_descriptors(monkeypatch) -> None:
+    goal = _goal(max_stake_fraction=Decimal("0.03"))
+
+    class ForgedDescriptor:
+        def __get__(self, instance, owner=None):
+            return Decimal("0.02")
+
+    monkeypatch.setattr(
+        EconomicGoalContract,
+        "max_stake_fraction",
+        ForgedDescriptor(),
+    )
+
+    snapshot = economic_goal_module._snapshot_transition_contract(goal)
+    assert snapshot.max_stake_fraction == Decimal("0.03")
+
+
 def test_contract_validation_ignores_rebound_snapshot_helper(monkeypatch) -> None:
     goal = _goal()
     called = False

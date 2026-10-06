@@ -883,6 +883,7 @@ def test_tick_keeps_collector_projection_fields_after_provider_rebinding() -> No
                 return ()
 
         original = _Collector()
+        original_store = original.delta_store
         replacement_store = _DeltaStore(forbidden=True)
 
         def rebind() -> None:
@@ -899,6 +900,7 @@ def test_tick_keeps_collector_projection_fields_after_provider_rebinding() -> No
 
         assert result.source_id == "provider-a"
         assert original.delta_store is replacement_store
+        assert original_store.calls == 1
         assert replacement_store.calls == 0
 
 
@@ -1142,4 +1144,67 @@ def test_tick_does_not_report_retirement_when_index_reports_no_effect() -> None:
         result = coordinator.tick()
 
         assert result.retired_input_ids == ()
+
+def test_tick_keeps_collector_projection_reader_after_provider_rebinding() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+
+        class Desktop:
+            def drain(self, **_kwargs):
+                return ()
+
+        class Lifecycle:
+            def register_eligible(self, *_args, **_kwargs):
+                return ()
+
+        collector = _Collector()
+        original_store = collector.delta_store
+
+        def attacker_reader(**_kwargs):
+            raise AssertionError("provider-time rebound projection reader executed")
+
+        def rebind() -> None:
+            original_store.deltas_after_commit = attacker_reader  # type: ignore[method-assign]
+
+        collector.callback = rebind
+        coordinator.collector = collector
+        coordinator.desktop_consumer = Desktop()
+        coordinator.lifecycle = Lifecycle()
+
+        result = coordinator.tick()
+
+        assert result.cycle_index == 1
+        assert original_store.calls == 1
+
+
+@pytest.mark.parametrize(
+    "invalid_deltas",
+    (
+        [],
+        (object(),),
+    ),
+)
+def test_source_projection_rejects_noncanonical_delta_collection(
+    invalid_deltas: object,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        coordinator = _base_coordinator(root)
+        collector = _Collector()
+
+        def invalid_reader(**_kwargs):
+            return invalid_deltas
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="collector projection returned invalid deltas",
+        ):
+            coordinator._refresh_source_state_projection(
+                collector=collector,
+                source_id="provider-a",
+                delta_store=collector.delta_store,
+                read_deltas=invalid_reader,
+                max_items=1,
+            )
 

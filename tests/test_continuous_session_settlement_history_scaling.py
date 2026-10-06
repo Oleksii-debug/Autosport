@@ -4334,3 +4334,54 @@ def test_bounded_running_guard_skips_full_history_when_checkpoint_unchanged() ->
 
         with patch.object(state, "_read", forbidden_reader):
             coordinator._require_running()
+
+
+def test_stale_failure_writer_rejects_main_commit_without_tombstone() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        stale = _state_with_history(root, _SMALL_HISTORY)
+        current = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        error_path = root / "continuous_session.json.operational_error.json"
+
+        def crash_before_tombstone(_code: str | None) -> None:
+            raise RuntimeError("simulated crash before tombstone publication")
+
+        with patch.object(current, "_write_error_checkpoint", crash_before_tombstone):
+            try:
+                current.record_success(
+                    at="2026-10-06T05:17:00+00:00",
+                    full_refresh=False,
+                    settlement_evidence=(),
+                )
+            except RuntimeError as exc:
+                assert "simulated crash before tombstone publication" in str(exc)
+            else:
+                raise AssertionError("post-commit tombstone crash was not simulated")
+
+        assert current.snapshot().cycles_completed == _SMALL_HISTORY + 1
+        assert not error_path.exists()
+
+        try:
+            stale.record_failure(code="STALE_POST_COMMIT_FAILURE")
+        except continuous_session.ContinuousSessionError as exc:
+            assert "canonical checkpoint changed" in str(exc)
+        else:
+            raise AssertionError(
+                "stale failure writer published after a main-only generation commit"
+            )
+
+        assert not error_path.exists()
+        reopened = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        snapshot = reopened.snapshot()
+        assert snapshot.cycles_completed == _SMALL_HISTORY + 1
+        assert snapshot.last_error_code is None

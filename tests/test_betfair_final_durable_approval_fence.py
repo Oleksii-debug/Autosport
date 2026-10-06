@@ -3209,3 +3209,143 @@ def test_economic_goal_store_file_name_equality_spoof_fails_closed_before_attemp
 
         assert transport.calls == []
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_real_execution_ledger_getattribute_rebinding_fails_closed_before_attempt(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        def hostile_getattribute(self, name):
+            return object.__getattribute__(self, name)
+
+        monkeypatch.setattr(
+            betfair_execution.RealExecutionLedger,
+            "__getattribute__",
+            hostile_getattribute,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-ledger-getattribute-rebind",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+
+
+def test_real_execution_ledger_setattr_rebinding_fails_closed_before_attempt(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        def hostile_setattr(self, name, value):
+            object.__setattr__(self, name, value)
+
+        monkeypatch.setattr(
+            betfair_execution.RealExecutionLedger,
+            "__setattr__",
+            hostile_setattr,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-ledger-setattr-rebind",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+
+
+def test_bound_execution_getattribute_rebinding_fails_closed_before_attempt(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        def hostile_getattribute(self, name):
+            return object.__getattribute__(self, name)
+
+        monkeypatch.setattr(
+            betfair_execution.BoundSupervisedExecutionPlan,
+            "__getattribute__",
+            hostile_getattribute,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-bound-getattribute-rebind",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+
+
+def test_execution_action_getattribute_rebinding_fails_closed_before_attempt(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        def hostile_getattribute(self, name):
+            return object.__getattribute__(self, name)
+
+        monkeypatch.setattr(
+            betfair_execution.ExecutionAction,
+            "__getattribute__",
+            hostile_getattribute,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair client dispatch changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-action-getattribute-rebind",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []

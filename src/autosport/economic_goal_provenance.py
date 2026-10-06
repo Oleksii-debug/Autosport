@@ -583,7 +583,7 @@ def _verify_provenance_bound(
     if provenance_before != provenance_after:
         raise _provenance_error("economic-goal provenance changed during verification")
 
-    _, _, goal_id, revision, bankroll_id = contract_after[:5]
+    goal_id, revision, bankroll_id = contract_after[:3]
     proven_goal_id = provenance_after[2]
     proven_revision = provenance_after[3]
     proven_bankroll_id = provenance_after[4]

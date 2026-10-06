@@ -2339,6 +2339,7 @@ def _place_action_with_final_durable_authority(
     confirmation_receipt_id: str | None,
     confirmation_review_sha256: str | None,
     _canonical_dispatch,
+    _confirmation_guard,
 ) -> BetfairPlaceExecutionReport:
     """Hold durable approval + exact operator confirmation through the provider boundary."""
 
@@ -2354,7 +2355,7 @@ def _place_action_with_final_durable_authority(
         confirmation_review_sha256,
         "confirmation_review_sha256",
     )
-    if not _betfair_confirmation_graph_unchanged():
+    if not _confirmation_guard():
         raise BetfairSupervisedExecutionError(
             "durable Betfair confirmation authority changed"
         )
@@ -2442,7 +2443,7 @@ def _place_action_with_final_durable_authority(
             submitted_request_sha256 = request_sha256
             submitted = True
 
-            if not _betfair_confirmation_graph_unchanged():
+            if not _confirmation_guard():
                 raise BetfairFinalConfirmationDenied(
                     "durable Betfair confirmation authority changed before consumption"
                 )
@@ -2464,7 +2465,7 @@ def _place_action_with_final_durable_authority(
                 ) from exc
 
             final_send_at = _supervised_execution_runtime._trusted_now()
-            if not _betfair_confirmation_graph_unchanged():
+            if not _confirmation_guard():
                 raise BetfairFinalConfirmationDenied(
                     "durable Betfair confirmation authority changed after consumption"
                 )
@@ -2549,7 +2550,7 @@ def _place_action_with_final_durable_authority(
                 raise BetfairFinalConfirmationDenied(
                     "Betfair action quote expired at provider send seam"
                 )
-            if not _betfair_confirmation_graph_unchanged():
+            if not _confirmation_guard():
                 raise BetfairFinalConfirmationDenied(
                     "durable Betfair confirmation authority changed at provider seam"
                 )
@@ -2811,6 +2812,8 @@ def _build_final_send_helper_boundary(
     raw_helper_code,
     canonical_execute_code,
     canonical_dispatch,
+    confirmation_guard,
+    confirmation_guard_code,
     frame_getter,
 ):
     def protected_final_send_helper(
@@ -2839,6 +2842,10 @@ def _build_final_send_helper_boundary(
             raise BetfairSupervisedExecutionError(
                 "canonical Betfair final-send helper authority changed"
             )
+        if getattr(confirmation_guard, "__code__", None) is not confirmation_guard_code:
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair confirmation guard authority changed"
+            )
         return raw_helper(
             ledger,
             bound,
@@ -2852,6 +2859,7 @@ def _build_final_send_helper_boundary(
             confirmation_receipt_id=confirmation_receipt_id,
             confirmation_review_sha256=confirmation_review_sha256,
             _canonical_dispatch=canonical_dispatch,
+            _confirmation_guard=confirmation_guard,
         )
 
     return protected_final_send_helper
@@ -2862,6 +2870,8 @@ _PROTECTED_FINAL_SEND_HELPER = _build_final_send_helper_boundary(
     _RAW_FINAL_SEND_HELPER_CODE,
     _CANONICAL_EXECUTE_CORE_CODE,
     _CANONICAL_PROVIDER_DISPATCH,
+    _betfair_confirmation_graph_unchanged,
+    _betfair_confirmation_graph_unchanged.__code__,
     sys._getframe,
 )
 del _build_final_send_helper_boundary

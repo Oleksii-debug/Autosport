@@ -320,6 +320,7 @@ def _make_ticket_opening_authority_registry():
     guard = threading.RLock()
     snapshot_revoke_caller_code = None
     snapshot_install_caller_code = None
+    opening_record_caller_code = None
     frame = _getframe
     require_registry_key = _require_registry_book_key_authority
     require_registry_key_code = require_registry_key.__code__
@@ -362,6 +363,12 @@ def _make_ticket_opening_authority_registry():
             raise RuntimeError("PaperBook opening snapshot install caller already bound")
         snapshot_install_caller_code = code
 
+    def bind_opening_record_caller(code) -> None:
+        nonlocal opening_record_caller_code
+        if opening_record_caller_code is not None:
+            raise RuntimeError("PaperBook opening record caller already bound")
+        opening_record_caller_code = code
+
     def register_book(book: object) -> None:
         require_registry_key_authority(book)
         with guard:
@@ -372,6 +379,13 @@ def _make_ticket_opening_authority_registry():
             authorities[book] = {}
 
     def record(book: object, ticket: PaperTicket) -> None:
+        if (
+            opening_record_caller_code is None
+            or frame(1).f_code is not opening_record_caller_code
+        ):
+            raise ValueError(
+                "PaperBook opening record requires trusted open_ticket authority"
+            )
         require_registry_key_authority(book)
         require_commitment_authority()
         commitment = commitment_for(ticket)
@@ -480,6 +494,7 @@ def _make_ticket_opening_authority_registry():
         require_candidate,
         bind_snapshot_revoke_caller,
         bind_snapshot_install_caller,
+        bind_opening_record_caller,
     )
 
 
@@ -492,6 +507,7 @@ def _make_ticket_opening_authority_registry():
     _require_snapshot_candidate_opening_authority,
     _bind_ticket_opening_snapshot_revoke_caller,
     _bind_ticket_opening_snapshot_install_caller,
+    _bind_ticket_opening_record_caller,
 ) = _make_ticket_opening_authority_registry()
 
 
@@ -513,6 +529,8 @@ def _make_paperbook_causal_history_authority_registry():
     guard = threading.RLock()
     snapshot_revoke_caller_code = None
     snapshot_install_caller_code = None
+    causal_open_caller_code = None
+    causal_settle_caller_code = None
     frame = _getframe
     require_registry_key = _require_registry_book_key_authority
     require_registry_key_code = require_registry_key.__code__
@@ -541,6 +559,18 @@ def _make_paperbook_causal_history_authority_registry():
         if snapshot_install_caller_code is not None:
             raise RuntimeError("PaperBook causal snapshot install caller already bound")
         snapshot_install_caller_code = code
+
+    def bind_causal_open_caller(code) -> None:
+        nonlocal causal_open_caller_code
+        if causal_open_caller_code is not None:
+            raise RuntimeError("PaperBook causal open caller already bound")
+        causal_open_caller_code = code
+
+    def bind_causal_settle_caller(code) -> None:
+        nonlocal causal_settle_caller_code
+        if causal_settle_caller_code is not None:
+            raise RuntimeError("PaperBook causal settle caller already bound")
+        causal_settle_caller_code = code
 
     def register_book(book: object) -> None:
         require_registry_key_authority(book)
@@ -616,6 +646,13 @@ def _make_paperbook_causal_history_authority_registry():
             )
 
     def advance_open(book: object, ticket_id: str) -> None:
+        if (
+            causal_open_caller_code is None
+            or frame(1).f_code is not causal_open_caller_code
+        ):
+            raise ValueError(
+                "PaperBook causal open advance requires trusted open_ticket authority"
+            )
         require_registry_key_authority(book)
         with guard:
             expected = authorities.get(book)
@@ -636,6 +673,13 @@ def _make_paperbook_causal_history_authority_registry():
         voids: tuple[str, ...],
         settled_at: str | None,
     ) -> None:
+        if (
+            causal_settle_caller_code is None
+            or frame(1).f_code is not causal_settle_caller_code
+        ):
+            raise ValueError(
+                "PaperBook causal settle advance requires trusted settle authority"
+            )
         require_registry_key_authority(book)
         with guard:
             expected = authorities.get(book)
@@ -665,6 +709,8 @@ def _make_paperbook_causal_history_authority_registry():
         advance_settle,
         bind_snapshot_revoke_caller,
         bind_snapshot_install_caller,
+        bind_causal_open_caller,
+        bind_causal_settle_caller,
     )
 
 
@@ -678,6 +724,8 @@ def _make_paperbook_causal_history_authority_registry():
     _advance_paperbook_causal_history_settle,
     _bind_paperbook_causal_snapshot_revoke_caller,
     _bind_paperbook_causal_snapshot_install_caller,
+    _bind_paperbook_causal_open_caller,
+    _bind_paperbook_causal_settle_caller,
 ) = _make_paperbook_causal_history_authority_registry()
 
 
@@ -1613,6 +1661,9 @@ def _make_paperbook_economic_helper_dispatch_authority():
 def _seal_paperbook_open_transition_authority(method):
     """Inject closure-captured write authorities into open_ticket."""
     method_code = method.__code__
+    frame = _getframe
+    bind_opening_record = _bind_ticket_opening_record_caller
+    bind_causal_open = _bind_paperbook_causal_open_caller
     opening_record = _record_ticket_opening_authority
     opening_record_code = opening_record.__code__
     causal_advance = _advance_paperbook_causal_history_open
@@ -1654,6 +1705,10 @@ def _seal_paperbook_open_transition_authority(method):
         return ticket
 
     def record_opening(book: object, ticket: PaperTicket) -> None:
+        if frame(1).f_code is not method_code:
+            raise ValueError(
+                "PaperBook opening writer wrapper requires trusted open_ticket"
+            )
         if opening_record.__code__ is not opening_record_code:
             raise ValueError("PaperBook opening write authority changed")
         opening_record(book, ticket)
@@ -1661,11 +1716,18 @@ def _seal_paperbook_open_transition_authority(method):
             raise ValueError("PaperBook opening write authority changed")
 
     def advance_open(book: object, ticket_id: str) -> None:
+        if frame(1).f_code is not method_code:
+            raise ValueError(
+                "PaperBook causal-open writer wrapper requires trusted open_ticket"
+            )
         if causal_advance.__code__ is not causal_advance_code:
             raise ValueError("PaperBook causal-history open write authority changed")
         causal_advance(book, ticket_id)
         if causal_advance.__code__ is not causal_advance_code:
             raise ValueError("PaperBook causal-history open write authority changed")
+
+    bind_opening_record(record_opening.__code__)
+    bind_causal_open(advance_open.__code__)
 
     @wraps(method)
     def sealed(self, *args, **kwargs):
@@ -2134,6 +2196,8 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
 def _seal_paperbook_settle_transition_authority(method):
     """Inject closure-captured write and economic authorities into settle."""
     method_code = method.__code__
+    frame = _getframe
+    bind_causal_settle = _bind_paperbook_causal_settle_caller
     causal_advance = _advance_paperbook_causal_history_settle
     causal_advance_code = causal_advance.__code__
     settlement_result = _canonical_paperbook_settlement_result
@@ -2146,11 +2210,17 @@ def _seal_paperbook_settle_transition_authority(method):
         voids: tuple[str, ...],
         settled_at: str | None,
     ) -> None:
+        if frame(1).f_code is not method_code:
+            raise ValueError(
+                "PaperBook causal-settle writer wrapper requires trusted settle"
+            )
         if causal_advance.__code__ is not causal_advance_code:
             raise ValueError("PaperBook causal-history settle write authority changed")
         causal_advance(book, ticket_id, winners, voids, settled_at)
         if causal_advance.__code__ is not causal_advance_code:
             raise ValueError("PaperBook causal-history settle write authority changed")
+
+    bind_causal_settle(advance_settle.__code__)
 
     @wraps(method)
     def sealed(self, *args, **kwargs):
@@ -3570,4 +3640,7 @@ del _bind_ticket_opening_snapshot_revoke_caller
 del _bind_ticket_opening_snapshot_install_caller
 del _bind_paperbook_causal_snapshot_revoke_caller
 del _bind_paperbook_causal_snapshot_install_caller
+del _bind_ticket_opening_record_caller
+del _bind_paperbook_causal_open_caller
+del _bind_paperbook_causal_settle_caller
 

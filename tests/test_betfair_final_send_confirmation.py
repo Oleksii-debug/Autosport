@@ -22,6 +22,7 @@ from autosport.betfair_supervised_execution import (
 from autosport.real_execution_ledger import AttemptState
 from autosport.supervised_confirmation import SupervisedConfirmationAuthority
 from test_betfair_supervised_execution import (
+    QUOTE_EXPIRES_AT,
     RESERVED_AT,
     SUBMITTED_AT,
     _Transport,
@@ -370,3 +371,118 @@ def test_generic_confirmation_method_rebinding_fails_before_submission(
 
         assert transport.calls == []
         assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+
+
+
+def test_coordinated_cached_resolver_root_rebinding_fails_closed(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-coordinated-resolver-rebound"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        _authority, review, receipt = _issue_confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        _set_trusted_times(monkeypatch, RESERVED_AT)
+
+        original = (
+            confirmation_store_runtime.SupervisedConfirmationAuthority
+            .resolve_receipt_binding
+        )
+
+        def rebound(self, *args, **kwargs):
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            confirmation_store_runtime.SupervisedConfirmationAuthority,
+            "resolve_receipt_binding",
+            rebound,
+        )
+        monkeypatch.setattr(
+            confirmation_runtime,
+            "_RESOLVE_BINDING",
+            rebound,
+        )
+        monkeypatch.setattr(
+            confirmation_runtime,
+            "_RESOLVE_BINDING_CODE",
+            rebound.__code__,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="confirmation authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+
+
+def test_last_provider_seam_clock_sample_blocks_exact_quote_expiry(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-final-seam-quote-expiry"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _issue_confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        _set_trusted_times(
+            monkeypatch,
+            RESERVED_AT,
+            SUBMITTED_AT,
+            SUBMITTED_AT,
+            QUOTE_EXPIRES_AT,
+        )
+
+        with pytest.raises(
+            BetfairFinalConfirmationDenied,
+            match="quote expired at provider send seam",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.SUBMITTED
+        binding = authority.resolve_receipt_binding(
+            receipt_id=receipt.receipt_id,
+            expected_review_sha256=review.review_sha256,
+            require_unconsumed=False,
+        )
+        assert binding.receipt.consumed_at is not None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )

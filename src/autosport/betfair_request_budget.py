@@ -7,7 +7,9 @@ credentials, grants provider-write authority, or changes execution truth.
 The hard provider limits represented here are deliberately narrow:
 - one listMarketBook request must stay within 200 weighted market-data points;
 - one market must not be dispatched through listMarketBook more than five times in
-  a rolling one-second window.
+  a rolling one-second window;
+- place/cancel/update/replace requests must not submit more than 1000 individual
+  provider instructions in one rolling second.
 
 Concurrency limits are product policy, not claimed provider constants, so callers must
 provide them explicitly. Reconciliation capacity is reserved before ordinary traffic.
@@ -989,6 +991,13 @@ def record_market_book_dispatch(
         )
     intent._assert_market_book_origin()
     now = _nonnegative_int(now_monotonic_ns, "now_monotonic_ns")
+    if any(
+        dispatch.dispatched_monotonic_ns > now
+        for dispatch in state.recent_market_book_dispatches
+    ):
+        raise BetfairRequestBudgetError(
+            "market-book dispatch history cannot be from the future clock state"
+        )
     lower_bound = now - _ONE_SECOND_NS
     retained = tuple(
         dispatch
@@ -1024,6 +1033,13 @@ def record_mutation_instruction_dispatch(
         )
     assert intent.mutation_instruction_count is not None
     now = _nonnegative_int(now_monotonic_ns, "now_monotonic_ns")
+    if any(
+        dispatch.dispatched_monotonic_ns > now
+        for dispatch in state.recent_mutation_instruction_dispatches
+    ):
+        raise BetfairRequestBudgetError(
+            "mutation instruction dispatch history cannot be from the future clock state"
+        )
     lower_bound = now - _ONE_SECOND_NS
     retained = tuple(
         dispatch

@@ -31,7 +31,7 @@ from .bookmaker_capability import (
 )
 
 
-class ProviderFundsFeasibilityError(ValueError):
+_MAX_PROVIDER_FUNDS_DECIMAL_FIXED_TEXT_LENGTH = 8192\n_MAX_PROVIDER_FUNDS_EXACT_SUM_EXPONENT_SPAN = 8192\n\n\nclass ProviderFundsFeasibilityError(ValueError):
     """Raised when the projection request itself is ambiguous or non-canonical."""
 
 
@@ -92,6 +92,20 @@ def _nonnegative_decimal(value: object, name: str) -> Decimal:
         raise ProviderFundsFeasibilityError(
             f"{name} must be a non-negative finite exact Decimal"
         )
+    sign, digits, exponent = value.as_tuple()
+    if sign or not isinstance(exponent, int):
+        raise ProviderFundsFeasibilityError(
+            f"{name} must be a non-negative finite exact Decimal"
+        )
+    if exponent >= 0:
+        rendered_length = len(digits) + exponent
+    else:
+        point = len(digits) + exponent
+        rendered_length = len(digits) + 1 if point > 0 else 2 - exponent
+    if rendered_length > _MAX_PROVIDER_FUNDS_DECIMAL_FIXED_TEXT_LENGTH:
+        raise ProviderFundsFeasibilityError(
+            f"{name} fixed-point representation exceeds resource limit"
+        )
     return value
 
 
@@ -124,7 +138,20 @@ def _exact_positive_sum(values: tuple[Decimal, ...]) -> Decimal:
         return Decimal("0")
     for value in values:
         _positive_decimal(value, "required_account_cash")
-    min_exponent = min(int(value.as_tuple().exponent) for value in values)
+    exponents = tuple(int(value.as_tuple().exponent) for value in values)
+    min_exponent = min(exponents)
+    max_exponent = max(exponents)
+    # Fail before the integer power/scaling operation below.  Individually
+    # bounded Decimals can still have a very large cross-value exponent span,
+    # and allocating 10 ** span is not acceptable for caller-controlled
+    # economic evidence.
+    if (
+        max_exponent - min_exponent
+        > _MAX_PROVIDER_FUNDS_EXACT_SUM_EXPONENT_SPAN
+    ):
+        raise ProviderFundsFeasibilityError(
+            "required_account_cash exponent span exceeds resource limit"
+        )
     total = 0
     for value in values:
         sign, digits, exponent = value.as_tuple()

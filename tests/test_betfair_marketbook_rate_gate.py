@@ -802,7 +802,7 @@ def test_rate_decision_construction_ignores_rebound_field_descriptor(
 
     with monkeypatch.context() as context:
         context.setattr(
-            MarketBookRateDecision,
+            _rate_gate_module.MarketBookRateDecision,
             "allowed",
             property(lambda self: False),
         )
@@ -819,7 +819,7 @@ def test_rate_decision_time_property_ignores_rebound_timestamp_descriptor(
     decision = value.reserve(("1.234",), scheduled_at=T0)
 
     monkeypatch.setattr(
-        MarketBookRateDecision,
+        _rate_gate_module.MarketBookRateDecision,
         "scheduled_at_utc_us",
         property(lambda self: 0),
     )

@@ -257,6 +257,7 @@ def _close_process_handle(process: Any) -> bool:
 
 def _stop_process_bounded(process: Any) -> str | None:
     """Best-effort bounded stop with explicit stop-vs-handle-close truth."""
+    last_alive: bool | None = None
     for method_name in ("kill", "terminate"):
         method = getattr(process, method_name, None)
         if method is not None:
@@ -272,14 +273,16 @@ def _stop_process_bounded(process: Any) -> str | None:
             alive = process.is_alive()
         except Exception:
             alive = None
+        last_alive = alive
         if alive is False:
             if _close_process_handle(process):
                 return None
             return "HANDLE_CLOSE_FAILED"
 
-    # A platform/runtime state query may itself fail even after a successful stop.
-    # A successful close is sufficient proof that the process is no longer running.
-    if _close_process_handle(process):
+    # If the runtime cannot report process state after both stop attempts, a
+    # successful close is sufficient proof that the child is no longer running.
+    # Never use close() to override an explicit final is_alive() == True.
+    if last_alive is None and _close_process_handle(process):
         return None
     return "STOP_FAILED"
 

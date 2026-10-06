@@ -3581,3 +3581,46 @@ def test_core_records_post_response_history_finalization_gap():
             "outcome": MarketBookAttemptOutcome.TRANSPORT_FAILURE,
         }
     ]
+
+
+def test_response_append_uses_canonical_error_after_module_rebind(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    other_plan = _plan(market_ids=("1.002",))
+    batch = plan.batches[0]
+    client, _ = _client(_payload(batch.market_ids))
+    issued = _read(client, plan, batch_id=batch.batch_id)
+    history = MarketBookAttemptHistory(other_plan, ())
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookBatchTransportError",
+        RuntimeError,
+    )
+
+    with pytest.raises(MarketBookBatchTransportError):
+        append_market_book_transport_attempt(
+            history,
+            issued,
+            attempt_id="sealed-append-error-type",
+            required=True,
+        )
+
+
+def test_nonresponse_append_uses_canonical_error_after_module_rebind(monkeypatch):
+    plan = _plan(market_ids=("1.001",))
+    history = MarketBookAttemptHistory(plan, ())
+
+    monkeypatch.setattr(
+        _batch_transport_module,
+        "MarketBookBatchTransportError",
+        RuntimeError,
+    )
+
+    with pytest.raises(MarketBookBatchTransportError):
+        _batch_transport_module._append_nonresponse_attempt(
+            history,
+            batch_id=plan.batches[0].batch_id,
+            attempt_id="sealed-nonresponse-error-type",
+            required=True,
+            outcome=MarketBookAttemptOutcome.EXACT_RESPONSE,
+        )

@@ -313,6 +313,15 @@ def test_automatic_transition_revalidates_post_construction_scalar_mutation() ->
         validate_automatic_transition(previous, candidate)
 
 
+def test_automatic_transition_rejects_post_construction_signed_zero() -> None:
+    previous = _goal()
+    candidate = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+    object.__setattr__(candidate, "max_stake_fraction", Decimal("-0"))
+
+    with pytest.raises(EconomicGoalContractError, match="signed zero"):
+        validate_automatic_transition(previous, candidate)
+
+
 def test_automatic_transition_rejects_contract_subclasses() -> None:
     class ContractSubclass(EconomicGoalContract):
         pass

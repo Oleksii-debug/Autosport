@@ -1042,3 +1042,150 @@ def test_timestamp_helper_rebinding_cannot_backdate_late_terminal(monkeypatch) -
 
     assert hostile_calls == []
 
+def test_rebound_digest_cannot_authorize_mutated_issued_failure(monkeypatch) -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            status="PROVIDER_UNAVAILABLE",
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        evidence = _build(
+            store,
+            path,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+            end_slot=0,
+        )
+        original_digest = evidence.evidence_sha256
+        object.__setattr__(evidence, "provider_unavailable_count", 0)
+        object.__setattr__(evidence, "success_empty_count", 1)
+        object.__setattr__(evidence, "acquisition_complete_by_universe_freeze", True)
+        object.__setattr__(
+            evidence,
+            "coverage_strength",
+            AcquisitionCoverageStrength.SCHEDULED_CYCLE_WINDOW_COMPLETE,
+        )
+        hostile_calls: list[object] = []
+
+        def hostile_digest(value):
+            hostile_calls.append(value)
+            return original_digest
+
+        monkeypatch.setattr(acquisition_denominator_evidence, "_digest", hostile_digest)
+
+        with pytest.raises(
+            AcquisitionDenominatorEvidenceError,
+            match="canonical acquisition semantic dispatch changed",
+        ):
+            require_complete_acquisition_coverage(evidence)
+
+        assert hostile_calls == []
+
+
+def test_rebound_payload_projection_cannot_authorize_mutated_issued_failure(
+    monkeypatch,
+) -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            status="PROVIDER_UNAVAILABLE",
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        evidence = _build(
+            store,
+            path,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+            end_slot=0,
+        )
+        original_payload = evidence.to_payload(include_digest=False)
+        object.__setattr__(evidence, "provider_unavailable_count", 0)
+        object.__setattr__(evidence, "success_empty_count", 1)
+        object.__setattr__(evidence, "acquisition_complete_by_universe_freeze", True)
+        object.__setattr__(
+            evidence,
+            "coverage_strength",
+            AcquisitionCoverageStrength.SCHEDULED_CYCLE_WINDOW_COMPLETE,
+        )
+        hostile_calls: list[object] = []
+
+        def hostile_payload(self, *, include_digest=True):
+            hostile_calls.append((self, include_digest))
+            payload = dict(original_payload)
+            if include_digest:
+                payload["evidence_sha256"] = self.evidence_sha256
+            return payload
+
+        monkeypatch.setattr(
+            AcquisitionDenominatorEvidence,
+            "to_payload",
+            hostile_payload,
+        )
+
+        with pytest.raises(
+            AcquisitionDenominatorEvidenceError,
+            match="canonical acquisition semantic dispatch changed",
+        ):
+            require_complete_acquisition_coverage(evidence)
+
+        assert hostile_calls == []
+
+
+def test_issue_descriptor_rebinding_cannot_forge_builder_result(monkeypatch) -> None:
+    hostile_calls: list[object] = []
+
+    def hostile_issue(cls, payload):
+        hostile_calls.append((cls, payload))
+        raise AssertionError("rebound issuance descriptor must not execute")
+
+    monkeypatch.setattr(
+        AcquisitionDenominatorEvidence,
+        "_issue",
+        classmethod(hostile_issue),
+    )
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        source = build_source_universe_commitment(
+            store,
+            expected_store_path=path,
+            source_id=SOURCE_ID,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+        )
+
+        with pytest.raises(
+            AcquisitionDenominatorEvidenceError,
+            match="canonical acquisition semantic dispatch changed",
+        ):
+            build_acquisition_denominator_evidence(
+                store,
+                source,
+                _universe(),
+                expected_store_path=path,
+                expected_source_id=SOURCE_ID,
+                expected_run_id=RUN_ID,
+                expected_start_slot_ordinal=0,
+                expected_end_slot_ordinal=0,
+            )
+
+    assert hostile_calls == []
+

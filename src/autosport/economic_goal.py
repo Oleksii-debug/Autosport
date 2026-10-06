@@ -239,7 +239,10 @@ class EconomicGoalContract:
         boundary.
         """
 
-        validate_automatic_transition(self, candidate)
+        _CANONICAL_TRANSITION_VALIDATOR(self, candidate)
+
+_CANONICAL_CONTRACT_TYPE: Final = EconomicGoalContract
+_CANONICAL_CONTRACT_VALIDATOR: Final = EconomicGoalContract.__post_init__
 
 
 def _require_same(name: str, previous: object, candidate: object) -> None:
@@ -305,13 +308,16 @@ def validate_automatic_transition(
     *non-expansion*, not that every revision necessarily tightens a limit.
     """
 
-    if type(previous) is not EconomicGoalContract or type(candidate) is not EconomicGoalContract:
+    if (
+        type(previous) is not _CANONICAL_CONTRACT_TYPE
+        or type(candidate) is not _CANONICAL_CONTRACT_TYPE
+    ):
         raise EconomicGoalContractError(
             "automatic transition requires EconomicGoalContract instances"
         )
 
-    EconomicGoalContract.__post_init__(previous)
-    EconomicGoalContract.__post_init__(candidate)
+    _CANONICAL_CONTRACT_VALIDATOR(previous)
+    _CANONICAL_CONTRACT_VALIDATOR(candidate)
 
     _require_same("goal_id", previous.goal_id, candidate.goal_id)
     _require_same("bankroll_id", previous.bankroll_id, candidate.bankroll_id)
@@ -421,3 +427,6 @@ def validate_automatic_transition(
     _require_restrictions_not_removed(
         "blocked_markets", previous.blocked_markets, candidate.blocked_markets
     )
+
+
+_CANONICAL_TRANSITION_VALIDATOR: Final = validate_automatic_transition

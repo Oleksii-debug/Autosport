@@ -35,6 +35,10 @@ def _slow_handler(_payload):
     return SkillExecutionResult(output={})
 
 
+def _large_result_handler(_payload):
+    return SkillExecutionResult(output={"payload": "x" * (1024 * 1024)})
+
+
 def _undeclared_mutation_handler(_payload):
     return SkillExecutionResult(output={}, applied_mutations=("LOCAL_WRITE",))
 
@@ -504,6 +508,18 @@ def test_handler_result_pipe_is_drained_before_process_exit_wait(monkeypatch):
     assert receiver.closed is True
     assert "recv" in events
     assert "join" not in events[: events.index("recv")]
+
+
+def test_handler_large_result_crosses_pipe_without_false_timeout():
+    result, error = SkillRegistry._execute_handler_bounded(
+        _large_result_handler,
+        {},
+        10,
+    )
+
+    assert error is None
+    assert result is not None
+    assert len(result.output["payload"]) == 1024 * 1024
 
 
 def test_handler_timeout_cleanup_hard_kills_before_bounded_reap(monkeypatch):

@@ -425,6 +425,10 @@ class IncidentRiskEntry:
 
     @classmethod
     def from_dict(cls, raw: object) -> "IncidentRiskEntry":
+        if cls is not IncidentRiskEntry:
+            raise TypeError(
+                "incident/model-risk deserialization requires exact IncidentRiskEntry"
+            )
         if type(raw) is not dict or set(raw) != _ENTRY_KEYS:
             raise IncidentRiskRegisterError(
                 "incident/model-risk entry must contain exactly canonical fields"

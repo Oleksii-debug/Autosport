@@ -769,3 +769,133 @@ def test_retire_accepts_exact_noop_when_target_is_absent() -> None:
         unregister_input=index.unregister,
     )
     assert index.input_ids == ("keep-a", "keep-b")
+
+
+
+def test_tick_rejects_collateral_dependency_registration_from_lifecycle() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        coordinator = _coordinator(Path(directory))
+
+        class Index:
+            def __init__(self) -> None:
+                self.input_ids = ()
+
+            def affected_inputs(self, _batch):
+                return ()
+
+            def register(self, input_id: str, **_selectors: object) -> None:
+                self.input_ids = (input_id, "collateral")
+
+            def unregister(self, _input_id: str) -> bool:
+                return False
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                register_input,
+                **_kwargs,
+            ):
+                register_input("input-new")
+                return ("input-new",)
+
+        coordinator.dependency_index = Index()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="registration changed unrelated input identities",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
+def test_tick_rejects_false_retirement_receipt_from_lifecycle() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        coordinator = _coordinator(Path(directory))
+
+        class Index:
+            def __init__(self) -> None:
+                self.input_ids = ("retire-me", "keep")
+
+            def affected_inputs(self, _batch):
+                return ()
+
+            def register(self, input_id: str, **_selectors: object) -> None:
+                self.input_ids = (*self.input_ids, input_id)
+
+            def unregister(self, _input_id: str) -> bool:
+                return False
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                retire_input,
+                **_kwargs,
+            ):
+                retire_input("retire-me")
+                return ()
+
+        coordinator.dependency_index = Index()
+        coordinator.lifecycle = Lifecycle()
+
+        with pytest.raises(
+            continuous_session.ContinuousSessionError,
+            match="retirement receipt conflicts with identity state",
+        ):
+            coordinator.tick()
+
+        assert (
+            coordinator._state.snapshot().last_error_code
+            == "ContinuousSessionError"
+        )
+
+
+def test_tick_accepts_exact_dependency_registration_transition() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        coordinator = _coordinator(Path(directory))
+
+        class Index:
+            def __init__(self) -> None:
+                self.input_ids = ("existing",)
+
+            def affected_inputs(self, _batch):
+                return ()
+
+            def register(self, input_id: str, **_selectors: object) -> None:
+                self.input_ids = (*self.input_ids, input_id)
+
+            def unregister(self, input_id: str) -> bool:
+                if input_id not in self.input_ids:
+                    return False
+                self.input_ids = tuple(
+                    value for value in self.input_ids if value != input_id
+                )
+                return True
+
+        class Lifecycle:
+            def register_eligible(
+                self,
+                _market_store,
+                *,
+                register_input,
+                **_kwargs,
+            ):
+                register_input("input-new")
+                return ("input-new",)
+
+        index = Index()
+        coordinator.dependency_index = index
+        coordinator.lifecycle = Lifecycle()
+
+        result = coordinator.tick()
+
+        assert result.registered_input_ids == ("input-new",)
+        assert index.input_ids == ("existing", "input-new")

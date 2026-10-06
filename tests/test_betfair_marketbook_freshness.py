@@ -225,6 +225,33 @@ def test_provider_delayed_true_from_injected_transport_is_only_negative_authorit
         observation.assert_positive_authoritative()
 
 
+def test_physical_marketbook_boundary_rejects_transport_swap_before_dispatch():
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        venue_id="betfair-global",
+        account_id="configured-account",
+    )
+    injected = FakeTransport(_payload(delayed=False))
+
+    def swap_transport_during_request_id_allocation():
+        client._transport = injected
+        return 1
+
+    client._next_request_id = swap_transport_during_request_id_allocation
+
+    with pytest.raises(
+        betfair_marketbook_freshness.BetfairMarketBookPreDispatchError,
+        match="transport changed before MarketBook dispatch",
+    ):
+        betfair_marketbook_freshness._post_market_book_readonly(
+            client,
+            params={"marketIds": ["1.234"]},
+            resolve_application_context=False,
+        )
+
+    assert injected.calls == []
+
+
 def test_unmodified_default_http_transport_is_the_only_positive_network_origin_shape():
     client = BetfairReadOnlyClient(
         BetfairSessionCredentials("app-secret", "session-secret")

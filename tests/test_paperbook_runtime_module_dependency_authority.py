@@ -40,3 +40,20 @@ def test_committed_stake_rejects_in_place_runtime_module_dependency_code_mutatio
             _ = book.committed_stake
     finally:
         authority.__code__ = original_code
+
+
+def test_open_ticket_rejects_rebound_timestamp_parser_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    book = PaperBook("100")
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("rebound parse_iso_timestamp executed")
+
+    monkeypatch.setattr(paper_module, "parse_iso_timestamp", hostile)
+
+    with pytest.raises(
+        ValueError,
+        match=r"runtime module dependency changed: parse_iso_timestamp",
+    ):
+        book.open_ticket([], "1")

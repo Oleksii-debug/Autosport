@@ -572,10 +572,69 @@ class ParticipantIdentityRegistry:
             )
         ):
             raise ParticipantIdentityError("unsupported identity registry schema")
+        record_fields = {
+            "entities": {
+                "entity_id",
+                "kind",
+                "source_reference",
+                "evidence_sha256",
+                "first_known_at",
+                "available_at",
+            },
+            "aliases": {
+                "source_id",
+                "alias",
+                "entity_id",
+                "valid_from",
+                "valid_until",
+                "available_at",
+                "evidence_sha256",
+                "recorded_at",
+                "relation",
+                "supersedes_record_id",
+            },
+            "rosters": {
+                "event_id",
+                "source_id",
+                "entity_id",
+                "member_from",
+                "member_until",
+                "available_at",
+                "evidence_sha256",
+            },
+            "lineages": {
+                "predecessor_entity_id",
+                "successor_entity_id",
+                "relation",
+                "effective_from",
+                "available_at",
+                "recorded_at",
+                "evidence_sha256",
+                "valid_until",
+            },
+        }
+        for collection, expected in record_fields.items():
+            for item in raw[collection]:
+                if type(item) is not dict or set(item) != expected:
+                    raise ParticipantIdentityError(
+                        f"unsupported identity registry {collection} record schema"
+                    )
+
         self._loading = True
         try:
             for item in raw["entities"]:
-                entity = EntityIdentity(item["entity_id"], EntityKind(item["kind"]), item["source_reference"], item["evidence_sha256"], item["first_known_at"], item["available_at"])
+                try:
+                    kind = EntityKind(item["kind"])
+                except ValueError as exc:
+                    raise ParticipantIdentityError("unsupported entity identity kind") from exc
+                entity = EntityIdentity(
+                    item["entity_id"],
+                    kind,
+                    item["source_reference"],
+                    item["evidence_sha256"],
+                    item["first_known_at"],
+                    item["available_at"],
+                )
                 if entity.entity_id in self._entities:
                     raise ParticipantIdentityError("duplicate entity identity")
                 self._entities[entity.entity_id] = entity
@@ -584,11 +643,15 @@ class ParticipantIdentityRegistry:
             for item in raw["rosters"]:
                 self.add_roster_membership(RosterMembership(**item))
             for item in raw["lineages"]:
+                try:
+                    relation = LineageRelation(item["relation"])
+                except ValueError as exc:
+                    raise ParticipantIdentityError("unsupported identity lineage relation") from exc
                 self.add_lineage(EntityLineage(
                     item["predecessor_entity_id"], item["successor_entity_id"],
-                    LineageRelation(item["relation"]), item["effective_from"],
+                    relation, item["effective_from"],
                     item["available_at"], item["recorded_at"], item["evidence_sha256"],
-                    item.get("valid_until"),
+                    item["valid_until"],
                 ))
         finally:
             self._loading = False

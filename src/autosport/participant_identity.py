@@ -325,6 +325,11 @@ class ParticipantIdentityRegistry:
             raise TypeError("membership must be RosterMembership")
         if membership.entity_id not in self._entities:
             raise ParticipantIdentityError("roster membership references unknown entity")
+        entity = self._entities[membership.entity_id]
+        if entity.kind not in {EntityKind.PARTICIPANT, EntityKind.TEAM}:
+            raise ParticipantIdentityError(
+                "event roster membership requires PARTICIPANT or TEAM identity"
+            )
         if membership in self._rosters:
             return
         candidate_rosters = [*self._rosters, membership]

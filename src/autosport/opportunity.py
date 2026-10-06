@@ -278,6 +278,7 @@ class QuoteRef:
     def __post_init__(
         self,
         _finite_decimal_fn=_finite_decimal,
+        _market_semantics_fn=_optional_market_semantics_id,
     ) -> None:
         for name in (
             "event_id",
@@ -301,7 +302,7 @@ class QuoteRef:
             )
         _canonical_hash(self.market_event_hash, "market_event_hash")
         _optional_hash(self.market_snapshot_hash, "market_snapshot_hash")
-        _optional_market_semantics_id(self.market_semantics_id)
+        _market_semantics_fn(self.market_semantics_id)
 
     @property
     def quote_key(self, _quote_key_fn=_quote_key) -> str:
@@ -374,7 +375,12 @@ class QuoteRef:
         return payload
 
     @classmethod
-    def from_dict(cls, raw: object) -> "QuoteRef":
+    def from_dict(
+        cls,
+        raw: object,
+        *,
+        _market_semantics_fn=_optional_market_semantics_id,
+    ) -> "QuoteRef":
         expected = {
             "event_id",
             "market_id",
@@ -425,7 +431,7 @@ class QuoteRef:
                 raw["market_snapshot_hash"], "market_snapshot_hash"
             ),
             sport=_optional_sport(raw.get("sport")),
-            market_semantics_id=_optional_market_semantics_id(
+            market_semantics_id=_market_semantics_fn(
                 raw.get("market_semantics_id"),
             ),
         )
@@ -461,7 +467,6 @@ class PredictiveEligibilityEvidence:
         self,
         _parse_iso_timestamp=parse_iso_timestamp,
         _finite_decimal_fn=_finite_decimal,
-        _market_semantics_fn=_optional_market_semantics_id,
     ) -> None:
         _canonical_text(self.evaluation_id, "predictive evaluation_id")
         _canonical_hash(self.evaluation_sha256, "predictive evaluation_sha256")
@@ -831,7 +836,12 @@ class ForecastRef:
         return payload
 
     @classmethod
-    def from_dict(cls, raw: object) -> "ForecastRef":
+    def from_dict(
+        cls,
+        raw: object,
+        *,
+        _market_semantics_fn=_optional_market_semantics_id,
+    ) -> "ForecastRef":
         legacy = {
             "forecast_id",
             "forecast_hash",
@@ -896,7 +906,7 @@ class ForecastRef:
                 raise OpportunityContractError(
                     "unsupported forecast reference schema"
                 )
-            market_semantics_id = _optional_market_semantics_id(
+            market_semantics_id = _market_semantics_fn(
                 raw["market_semantics_id"],
                 "forecast market_semantics_id",
             )
@@ -1582,9 +1592,11 @@ def _seal_public_dependency_boundaries() -> None:
     quote_post_init_impl = QuoteRef.__post_init__
     quote_key_impl = QuoteRef.__dict__["quote_key"].fget
     quote_from_event_impl = QuoteRef.__dict__["from_market_event"].__func__
+    quote_from_dict_impl = QuoteRef.__dict__["from_dict"].__func__
     predictive_post_init_impl = PredictiveEligibilityEvidence.__post_init__
     forecast_post_init_impl = ForecastRef.__post_init__
     forecast_from_forecast_impl = ForecastRef.__dict__["from_forecast"].__func__
+    forecast_from_dict_impl = ForecastRef.__dict__["from_dict"].__func__
     forecast_eligibility_impl = ForecastRef.predictive_eligibility_reason
     opportunity_post_init_impl = Opportunity.__post_init__
     uncertainty_haircut_impl = Opportunity.__dict__[
@@ -1602,6 +1614,7 @@ def _seal_public_dependency_boundaries() -> None:
         quote_post_init_impl(
             self,
             _finite_decimal_fn=finite_decimal_fn,
+            _market_semantics_fn=market_semantics_fn,
         )
 
     def quote_key(self) -> str:
@@ -1622,6 +1635,13 @@ def _seal_public_dependency_boundaries() -> None:
             market_snapshot_hash=market_snapshot_hash,
             _canonical_market_event_copy_fn=canonical_market_event_copy_fn,
             _canonical_json_hash_fn=canonical_json_hash_fn,
+        )
+
+    def quote_from_dict(cls, raw: object) -> "QuoteRef":
+        return quote_from_dict_impl(
+            cls,
+            raw,
+            _market_semantics_fn=market_semantics_fn,
         )
 
     def predictive_post_init(self) -> None:
@@ -1653,6 +1673,13 @@ def _seal_public_dependency_boundaries() -> None:
             quote,
             predictive_eligibility=predictive_eligibility,
             _require_exact_forecast_binding_fn=require_exact_forecast_binding_fn,
+        )
+
+    def forecast_from_dict(cls, raw: object) -> "ForecastRef":
+        return forecast_from_dict_impl(
+            cls,
+            raw,
+            _market_semantics_fn=market_semantics_fn,
         )
 
     def forecast_predictive_eligibility_reason(
@@ -1736,9 +1763,11 @@ def _seal_public_dependency_boundaries() -> None:
     QuoteRef.__post_init__ = quote_post_init
     QuoteRef.quote_key = property(quote_key)
     QuoteRef.from_market_event = classmethod(quote_from_market_event)
+    QuoteRef.from_dict = classmethod(quote_from_dict)
     PredictiveEligibilityEvidence.__post_init__ = predictive_post_init
     ForecastRef.__post_init__ = forecast_post_init
     ForecastRef.from_forecast = classmethod(forecast_from_forecast)
+    ForecastRef.from_dict = classmethod(forecast_from_dict)
     ForecastRef.predictive_eligibility_reason = (
         forecast_predictive_eligibility_reason
     )

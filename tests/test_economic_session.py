@@ -111,7 +111,8 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         expected = path.read_bytes()
         seen: list[bytes] = []
 
-        def load_exact(payload: bytes) -> PaperBook:
+        def load_exact(paperbook_type: type[PaperBook], payload: bytes) -> PaperBook:
+            self.assertIs(paperbook_type, PaperBook)
             seen.append(payload)
             return PaperBook.load_bytes(payload)
 
@@ -1043,6 +1044,70 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
             authority.__code__ = original_code
 
         self.assertEqual(calls, 0)
+
+    def test_paperbook_classmethod_descriptor_rebinding_fails_before_execution(self) -> None:
+        import autosport.economic_session as economic_session
+
+        store = self._store()
+        store.current()
+        cases = (
+            ("load_bytes", "_paperbook_load_bytes_descriptor_witness"),
+            (
+                "_validate_loaded_state",
+                "_paperbook_validate_descriptor_witness",
+            ),
+        )
+        for name, witness_name in cases:
+            with self.subTest(name=name):
+                original = PaperBook.__dict__[name]
+                calls = 0
+
+                def hostile(_cls, *_args, **_kwargs):
+                    nonlocal calls
+                    calls += 1
+                    raise AssertionError(
+                        f"rebound PaperBook classmethod {name} executed"
+                    )
+
+                setattr(PaperBook, name, classmethod(hostile))
+                try:
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.current()
+                    self.assertIs(
+                        getattr(store, witness_name),
+                        original,
+                    )
+                    self.assertEqual(calls, 0)
+                finally:
+                    setattr(PaperBook, name, original)
+
+    def test_paperbook_classmethod_underlying_code_mutation_fails_before_execution(self) -> None:
+        store = self._store()
+        store.current()
+
+        for name in ("load_bytes", "_validate_loaded_state"):
+            with self.subTest(name=name):
+                descriptor = PaperBook.__dict__[name]
+                authority = descriptor.__func__
+                original_code = authority.__code__
+
+                def hostile(*_args, **_kwargs):
+                    raise AssertionError(
+                        f"mutated PaperBook classmethod {name} executed"
+                    )
+
+                try:
+                    authority.__code__ = hostile.__code__
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.current()
+                finally:
+                    authority.__code__ = original_code
 
     def test_transitive_callable_code_mutation_fails_before_execution(self) -> None:
         store = self._store()

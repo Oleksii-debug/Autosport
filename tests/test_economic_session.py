@@ -10,7 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from autosport.economic_goal import EconomicGoalContract
+from autosport.economic_goal import EconomicGoalContract, EconomicGoalContractError
 from autosport.economic_goal_store import EconomicGoalStore, economic_goal_to_payload
 from autosport.integrity import atomic_write_json
 from autosport.economic_session import (
@@ -2199,7 +2199,7 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 with self.assertRaisesRegex(
-                    Exception,
+                    EconomicGoalContractError,
                     f"automatic transition must preserve {field}",
                 ):
                     goal_store.persist_automatic_successor(candidate)

@@ -5,6 +5,8 @@ from dataclasses import replace
 
 import pytest
 
+import autosport.skill_registry as skill_registry_module
+
 from autosport.agent_loop import AgentLoopRuntime
 from autosport.learning_environment import CausalLearningEnvironment, EnvironmentIdentity
 from autosport.skill_registry import (
@@ -409,6 +411,62 @@ def test_executable_builtin_definition_cannot_be_pre_registered_with_weaker_poli
         match="exactly match source-owned contract",
     ):
         registry.register(forged)
+
+
+def test_handler_timeout_cleanup_hard_kills_before_bounded_reap(monkeypatch):
+    class FakeEndpoint:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.join_timeouts = []
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_timeouts.append(timeout)
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeEndpoint(), FakeEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_TIMEOUT"
+    assert process.killed is True
+    assert process.join_timeouts[0] == 1
+    assert len(process.join_timeouts) == 2
+    assert 0 < process.join_timeouts[1] < 1
 
 
 def test_handler_timeout_terminates_and_persists_terminal_failure(tmp_path):

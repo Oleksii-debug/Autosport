@@ -54,13 +54,31 @@ def _make_locked_capital_authority():
     def calculate(ticket: PaperTicket) -> Decimal:
         if calculator.__code__ is not calculator_code:
             raise ValueError("portfolio locked-capital exposure authority changed")
-        if type(ticket) is not PaperTicket or type(ticket.legs) is not tuple:
+        if (
+            type(ticket) is not PaperTicket
+            or type(ticket.stake) is not Decimal
+            or not ticket.stake.is_finite()
+            or ticket.stake < Decimal("0")
+            or type(ticket.legs) is not tuple
+            or not ticket.legs
+        ):
             raise ValueError("portfolio ticket must be canonical")
+        for leg in ticket.legs:
+            if (
+                type(leg) is not TicketLeg
+                or type(leg.locked_odds) is not Decimal
+                or not leg.locked_odds.is_finite()
+                or leg.locked_odds <= Decimal("1")
+                or leg.exchange_side not in {None, "back", "lay"}
+            ):
+                raise ValueError("portfolio ticket leg must be canonical")
         if any(leg.exchange_side == "lay" for leg in ticket.legs):
-            if len(ticket.legs) != 1 or type(ticket.legs[0]) is not TicketLeg:
+            if len(ticket.legs) != 1:
                 raise ValueError(
                     "portfolio LAY exposure requires exactly one canonical single-leg ticket"
                 )
+            if ticket.stake.is_zero():
+                return Decimal("0")
             return calculator(
                 stake=ticket.stake,
                 odds=ticket.legs[0].locked_odds,
@@ -87,6 +105,22 @@ def _analysis_ticket_fingerprint(
 ]:
     """Return exactly the mutable ticket fields consumed by scenario analysis."""
 
+    if type(ticket) is not PaperTicket:
+        raise ValueError("portfolio analysis requires exact PaperTicket values")
+    _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
+    if (
+        type(ticket.ticket_id) is not str
+        or not ticket.ticket_id
+        or type(ticket.placed_at) is not str
+        or not ticket.placed_at
+        or type(ticket.status) is not TicketStatus
+        or type(ticket.provider_source_ids) is not tuple
+        or any(
+            type(source_id) is not str or not source_id
+            for source_id in ticket.provider_source_ids
+        )
+    ):
+        raise ValueError("portfolio analysis ticket identity is not canonical")
     return (
         ticket.ticket_id,
         ticket.stake,

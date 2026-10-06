@@ -53,6 +53,9 @@ _CANONICAL_OS_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _CANONICAL_OS_O_CREAT = os.O_CREAT
 _CANONICAL_OS_O_EXCL = os.O_EXCL
 _CANONICAL_OS_O_WRONLY = os.O_WRONLY
+_CANONICAL_EXECUTION_ACTION_TYPE = ExecutionAction
+_CANONICAL_EXECUTION_PLAN_TYPE = ExecutionPlan
+_CANONICAL_MAPPING_TYPE = Mapping
 
 
 class PaperExecutionRealityError(RuntimeError):
@@ -365,6 +368,9 @@ class PaperExecutionModelConfig:
         )
 
 
+_CANONICAL_PAPER_EXECUTION_MODEL_CONFIG_TYPE = PaperExecutionModelConfig
+
+
 @dataclass(frozen=True, slots=True)
 class PaperExecutionEvidenceRecord:
     action_id: str
@@ -527,6 +533,9 @@ class PaperExecutionEvidenceRecord:
             raise PaperExecutionIntegrityError("invalid evidence record") from exc
 
 
+_CANONICAL_PAPER_EXECUTION_EVIDENCE_RECORD_TYPE = PaperExecutionEvidenceRecord
+
+
 @dataclass(frozen=True, slots=True)
 class ObservedPaperExecution:
     action_id: str
@@ -570,6 +579,9 @@ class ObservedPaperExecution:
             object.__setattr__(self, "accepted_stake", stake)
         elif self.accepted_odds is not None or self.accepted_stake is not None:
             raise ValueError("rejected/unknown observation cannot claim accepted odds/stake")
+
+
+_CANONICAL_OBSERVED_PAPER_EXECUTION_TYPE = ObservedPaperExecution
 
 
 @dataclass(frozen=True, slots=True)
@@ -784,6 +796,9 @@ class PaperLegAttempt:
             raise PaperExecutionIntegrityError("invalid attempt payload") from exc
 
 
+_CANONICAL_PAPER_LEG_ATTEMPT_TYPE = PaperLegAttempt
+
+
 @dataclass(frozen=True, slots=True)
 class PaperExecutionRun:
     run_id: str
@@ -805,8 +820,8 @@ class PaperExecutionRun:
         for name in ("run_id", "trigger_id", "plan_id", "plan_fingerprint", "model_fingerprint"):
             _CANONICAL_TEXT_VALIDATOR(getattr(self, name), name)
         _CANONICAL_TIMESTAMP_PARSER(self.started_at, "started_at")
-        if not all(isinstance(item, PaperLegAttempt) for item in self.attempts):
-            raise ValueError("attempts must contain PaperLegAttempt values")
+        if not all(type(item) is _CANONICAL_PAPER_LEG_ATTEMPT_TYPE for item in self.attempts):
+            raise ValueError("attempts must contain exact PaperLegAttempt values")
         if len({item.action_id for item in self.attempts}) != len(self.attempts):
             raise ValueError("run attempts must have unique action ids")
         if any(type(value) is not str or not value for value in self.pending_action_ids):
@@ -1115,8 +1130,8 @@ class PaperExecutionLedger:
     def register_observation_evidence(
         self, record: PaperExecutionEvidenceRecord
     ) -> None:
-        if not isinstance(record, PaperExecutionEvidenceRecord):
-            raise TypeError("record must be PaperExecutionEvidenceRecord")
+        if type(record) is not _CANONICAL_PAPER_EXECUTION_EVIDENCE_RECORD_TYPE:
+            raise TypeError("record must be exact PaperExecutionEvidenceRecord")
         payload = {
             "evidence_id": record.evidence_id,
             "evidence_sha256": record.evidence_sha256,
@@ -1309,12 +1324,15 @@ class PaperExecutionLedger:
         )
 
 
+_CANONICAL_PAPER_EXECUTION_LEDGER_TYPE = PaperExecutionLedger
+
+
 class PaperExecutionEvidenceRegistry:
     """Immutable resolver for configured/empirical PAPER execution observations."""
 
     def __init__(self, ledger: PaperExecutionLedger) -> None:
-        if not isinstance(ledger, PaperExecutionLedger):
-            raise TypeError("ledger must be PaperExecutionLedger")
+        if type(ledger) is not _CANONICAL_PAPER_EXECUTION_LEDGER_TYPE:
+            raise TypeError("ledger must be exact PaperExecutionLedger")
         self._ledger = ledger
 
     def register(self, record: PaperExecutionEvidenceRecord) -> str:
@@ -1470,8 +1488,8 @@ def _verify_observation_authority(
     observation: ObservedPaperExecution,
     registry: PaperExecutionEvidenceRegistry,
 ) -> PaperExecutionEvidenceRecord:
-    if not isinstance(observation, ObservedPaperExecution):
-        raise TypeError("observation values must be ObservedPaperExecution")
+    if type(observation) is not _CANONICAL_OBSERVED_PAPER_EXECUTION_TYPE:
+        raise TypeError("observation values must be exact ObservedPaperExecution")
     record = registry.resolve(observation.evidence_id)
     if observation.evidence_sha256 != record.evidence_sha256:
         raise PaperExecutionStateError("observation evidence digest mismatch")
@@ -1570,6 +1588,9 @@ def _observed_attempt(
     )
 
 
+_CANONICAL_PAPER_EXECUTION_EVIDENCE_REGISTRY_TYPE = PaperExecutionEvidenceRegistry
+
+
 def execute_paper_plan(
     *,
     plan: ExecutionPlan,
@@ -1582,17 +1603,17 @@ def execute_paper_plan(
     suspended_action_ids: frozenset[str] = frozenset(),
 ) -> PaperExecutionRun:
     """Execute/resume one PAPER/SHADOW run without provider writes or real money."""
-    if not isinstance(plan, ExecutionPlan):
-        raise TypeError("plan must be ExecutionPlan")
-    if not isinstance(config, PaperExecutionModelConfig):
-        raise TypeError("config must be PaperExecutionModelConfig")
-    if not isinstance(ledger, PaperExecutionLedger):
-        raise TypeError("ledger must be PaperExecutionLedger")
+    if type(plan) is not _CANONICAL_EXECUTION_PLAN_TYPE:
+        raise TypeError("plan must be exact ExecutionPlan")
+    if type(config) is not _CANONICAL_PAPER_EXECUTION_MODEL_CONFIG_TYPE:
+        raise TypeError("config must be exact PaperExecutionModelConfig")
+    if type(ledger) is not _CANONICAL_PAPER_EXECUTION_LEDGER_TYPE:
+        raise TypeError("ledger must be exact PaperExecutionLedger")
     trigger_id = _CANONICAL_TEXT_VALIDATOR(trigger_id, "trigger_id")
     _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at")
     if observations is None:
         observations = {}
-    if not isinstance(observations, Mapping):
+    if not isinstance(observations, _CANONICAL_MAPPING_TYPE):
         raise TypeError("observations must be a mapping")
     action_by_id = {action.action_id: action for action in plan.actions}
     unknown_observation_ids = set(observations) - set(action_by_id)
@@ -1601,9 +1622,9 @@ def execute_paper_plan(
     unknown_suspended = set(suspended_action_ids) - set(action_by_id)
     if unknown_suspended:
         raise PaperExecutionStateError("suspended_action_ids contain action outside execution plan")
-    if observations and not isinstance(evidence_registry, PaperExecutionEvidenceRegistry):
+    if observations and type(evidence_registry) is not _CANONICAL_PAPER_EXECUTION_EVIDENCE_REGISTRY_TYPE:
         raise PaperExecutionStateError(
-            "configured/empirical observations require a durable evidence registry"
+            "configured/empirical observations require an exact durable evidence registry"
         )
 
     observation_evidence_ids: dict[str, str] = {}

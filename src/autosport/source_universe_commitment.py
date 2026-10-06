@@ -23,6 +23,7 @@ _CANONICAL_CLASS_READ_SEAMS = {
     name: inspect.getattr_static(CollectorDeltaStore, name)
     for name in _CANONICAL_READ_SEAM_NAMES
 }
+_CANONICAL_PATH_EQUALITY = Path.__eq__
 
 
 class SourceUniverseCommitmentError(ValueError):
@@ -46,31 +47,24 @@ def _require_canonical_class_read_seams() -> None:
 
 def _require_product_expected_store_path(
     store: CollectorDeltaStore,
-    expected_store_path: str | Path,
+    expected_store_path: Path,
 ) -> Path:
     """Fail closed if a caller redirects the canonical store object to another DB."""
-
-    if isinstance(expected_store_path, str):
-        if not expected_store_path or expected_store_path.strip() != expected_store_path:
-            raise SourceUniverseCommitmentError(
-                "expected_store_path must be a non-empty trimmed path"
-            )
-        expected = Path(expected_store_path)
-    elif isinstance(expected_store_path, Path):
-        expected = expected_store_path
-    else:
-        raise TypeError("expected_store_path must be str or Path")
 
     current = getattr(store, "path", None)
     if not isinstance(current, Path):
         raise SourceUniverseCommitmentError(
             "canonical collector store path identity is unavailable"
         )
-    if current != expected:
+    if type(expected_store_path) is not type(current):
+        raise TypeError(
+            "expected_store_path must be the exact canonical Path type"
+        )
+    if _CANONICAL_PATH_EQUALITY(current, expected_store_path) is not True:
         raise SourceUniverseCommitmentError(
             "canonical collector store path does not match product-expected authority path"
         )
-    return expected
+    return expected_store_path
 
 
 def _canonical_json(value: object) -> bytes:
@@ -157,7 +151,7 @@ class SourceUniverseCommitment:
 def build_source_universe_commitment(
     store: CollectorDeltaStore,
     *,
-    expected_store_path: str | Path,
+    expected_store_path: Path,
     source_id: str,
     start_cycle_seq: int,
     end_cycle_seq: int,
@@ -351,7 +345,7 @@ def verify_source_universe_commitment(
     store: CollectorDeltaStore,
     candidate: SourceUniverseCommitment,
     *,
-    expected_store_path: str | Path,
+    expected_store_path: Path,
     expected_source_id: str,
     expected_start_cycle_seq: int,
     expected_end_cycle_seq: int,
@@ -388,3 +382,499 @@ def verify_source_universe_commitment(
             "source-universe commitment is structurally incomplete"
         ) from exc
     return rebuilt
+
+def _seal_source_universe_dispatch() -> None:
+    """Seal positive source-universe dispatch against ordinary runtime rebinding.
+
+    This keeps the existing evidence algorithm/schema unchanged.  The public builder
+    and verifier fail closed when their canonical module/class helper graph is
+    replaced after import instead of silently trusting the replacement.
+    """
+
+    module_globals = globals()
+    expected_store_type = CollectorDeltaStore
+    expected_commitment_type = SourceUniverseCommitment
+    expected_error_type = SourceUniverseCommitmentError
+    expected_path_type = Path
+    expected_hashlib = hashlib
+    expected_sha256 = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_json_dumps_code = getattr(expected_json_dumps, "__code__", None)
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_getattr_static_code = getattr(
+        expected_getattr_static, "__code__", None
+    )
+    expected_path_equality = _CANONICAL_PATH_EQUALITY
+    expected_path_equality_code = getattr(
+        expected_path_equality, "__code__", None
+    )
+    expected_cycle_evidence = _CANONICAL_COLLECTOR_CYCLE_EVIDENCE
+    expected_cycle_evidence_code = getattr(expected_cycle_evidence, "__code__", None)
+    # The canonical store method is a Python function: keeping its class surface and
+    # code object unchanged is not enough if authority-bearing names in its defining
+    # module are rebound.  Freeze the narrow terminal-decoding dependency graph too.
+    expected_cycle_globals = expected_cycle_evidence.__globals__
+    expected_cycle_text = expected_cycle_globals.get("_text")
+    expected_cycle_text_code = getattr(expected_cycle_text, "__code__", None)
+    expected_cycle_statuses = expected_cycle_globals.get("_CYCLE_TERMINAL_STATUSES")
+    expected_cycle_hashlib = expected_cycle_globals.get("hashlib")
+    expected_cycle_sha256 = getattr(expected_cycle_hashlib, "sha256", None)
+    expected_cycle_json = expected_cycle_globals.get("json")
+    expected_cycle_json_loads = getattr(expected_cycle_json, "loads", None)
+    expected_cycle_json_loads_code = getattr(
+        expected_cycle_json_loads, "__code__", None
+    )
+    expected_read_names = _CANONICAL_READ_SEAM_NAMES
+    expected_class_seams = _CANONICAL_CLASS_READ_SEAMS
+    expected_class_seam_witnesses = tuple(
+        (
+            name,
+            expected,
+            getattr(expected, "__func__", expected),
+            getattr(
+                getattr(expected, "__func__", expected),
+                "__code__",
+                None,
+            ),
+        )
+        for name, expected in sorted(expected_class_seams.items())
+    )
+    expected_store_base_type = expected_store_type.__mro__[1]
+    expected_base_connect_surface = expected_getattr_static(
+        expected_store_base_type, "_connect"
+    )
+    expected_base_connect_callable = getattr(
+        expected_base_connect_surface, "__func__", expected_base_connect_surface
+    )
+    expected_base_connect_code = getattr(
+        expected_base_connect_callable, "__code__", None
+    )
+    expected_base_connect_path_surface = expected_getattr_static(
+        expected_store_base_type, "_connect_path"
+    )
+    expected_base_connect_path_callable = getattr(
+        expected_base_connect_path_surface,
+        "__func__",
+        expected_base_connect_path_surface,
+    )
+    expected_base_connect_path_code = getattr(
+        expected_base_connect_path_callable, "__code__", None
+    )
+    expected_base_connect_path_globals = expected_base_connect_path_callable.__globals__
+    expected_base_sqlite3 = expected_base_connect_path_globals.get("sqlite3")
+    expected_base_sqlite_connect = getattr(expected_base_sqlite3, "connect", None)
+    expected_base_sqlite_row = getattr(expected_base_sqlite3, "Row", None)
+    expected_path_identity_surface = expected_class_seams["_path_file_identity"]
+    expected_path_identity_callable = getattr(
+        expected_path_identity_surface, "__func__", expected_path_identity_surface
+    )
+    expected_path_identity_globals = expected_path_identity_callable.__globals__
+    expected_path_os = expected_path_identity_globals.get("os")
+    expected_path_os_stat = getattr(expected_path_os, "stat", None)
+    expected_field_names = _COMMITMENT_FIELD_NAMES
+    expected_commitment_field_surfaces = tuple(
+        (
+            name,
+            expected_getattr_static(expected_commitment_type, name),
+        )
+        for name in expected_field_names
+    )
+    expected_issue_surface = expected_getattr_static(
+        expected_commitment_type, "_issue"
+    )
+    expected_issue_function = getattr(expected_issue_surface, "__func__", None)
+    expected_issue_function_code = getattr(
+        expected_issue_function, "__code__", None
+    )
+    helper_witnesses = tuple(
+        (
+            name,
+            helper,
+            getattr(helper, "__code__", None),
+        )
+        for name, helper in (
+            (
+                "_require_canonical_class_read_seams",
+                _require_canonical_class_read_seams,
+            ),
+            (
+                "_require_product_expected_store_path",
+                _require_product_expected_store_path,
+            ),
+            ("_canonical_json", _canonical_json),
+        )
+    )
+    original_build = build_source_universe_commitment
+    original_build_code = original_build.__code__
+    original_verify = verify_source_universe_commitment
+    original_verify_code = original_verify.__code__
+
+    def require_dispatch_integrity(
+        *, allow_sqlite_connect_override: bool = False
+    ) -> None:
+        if module_globals.get("CollectorDeltaStore") is not expected_store_type:
+            raise expected_error_type(
+                "source-universe collector type authority is rebound"
+            )
+        if module_globals.get("SourceUniverseCommitment") is not expected_commitment_type:
+            raise expected_error_type(
+                "source-universe commitment type authority is rebound"
+            )
+        if module_globals.get("SourceUniverseCommitmentError") is not expected_error_type:
+            raise expected_error_type(
+                "source-universe error authority is rebound"
+            )
+        if module_globals.get("Path") is not expected_path_type:
+            raise expected_error_type("source-universe path authority is rebound")
+        if (
+            module_globals.get("_CANONICAL_PATH_EQUALITY")
+            is not expected_path_equality
+            or getattr(expected_path_equality, "__code__", None)
+            is not expected_path_equality_code
+        ):
+            raise expected_error_type(
+                "source-universe path comparison authority is rebound or mutated"
+            )
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256
+        ):
+            raise expected_error_type("source-universe digest authority is rebound")
+        if (
+            module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+            or getattr(expected_json_dumps, "__code__", None)
+            is not expected_json_dumps_code
+        ):
+            raise expected_error_type(
+                "source-universe canonical JSON authority is rebound"
+            )
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+            or getattr(expected_getattr_static, "__code__", None)
+            is not expected_getattr_static_code
+        ):
+            raise expected_error_type(
+                "source-universe reflection authority is rebound"
+            )
+        if (
+            module_globals.get("_CANONICAL_COLLECTOR_CYCLE_EVIDENCE")
+            is not expected_cycle_evidence
+            or getattr(expected_cycle_evidence, "__code__", None)
+            is not expected_cycle_evidence_code
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle evidence authority is rebound"
+            )
+        current_cycle_globals = getattr(
+            expected_cycle_evidence, "__globals__", None
+        )
+        if current_cycle_globals is not expected_cycle_globals:
+            raise expected_error_type(
+                "source-universe collector-cycle global authority drifted"
+            )
+        if (
+            current_cycle_globals.get("_text") is not expected_cycle_text
+            or getattr(expected_cycle_text, "__code__", None)
+            is not expected_cycle_text_code
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle text authority is rebound or mutated"
+            )
+        if (
+            current_cycle_globals.get("_CYCLE_TERMINAL_STATUSES")
+            is not expected_cycle_statuses
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle status authority is rebound"
+            )
+        if (
+            current_cycle_globals.get("hashlib") is not expected_cycle_hashlib
+            or getattr(expected_cycle_hashlib, "sha256", None)
+            is not expected_cycle_sha256
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle digest authority is rebound"
+            )
+        current_cycle_json = current_cycle_globals.get("json")
+        if (
+            current_cycle_json is not expected_cycle_json
+            or getattr(expected_cycle_json, "loads", None)
+            is not expected_cycle_json_loads
+            or getattr(expected_cycle_json_loads, "__code__", None)
+            is not expected_cycle_json_loads_code
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle JSON authority is rebound or mutated"
+            )
+        if module_globals.get("_CANONICAL_READ_SEAM_NAMES") is not expected_read_names:
+            raise expected_error_type(
+                "source-universe durable read-seam identity is rebound"
+            )
+        current_class_seams = module_globals.get("_CANONICAL_CLASS_READ_SEAMS")
+        if (
+            current_class_seams is not expected_class_seams
+            or type(current_class_seams) is not dict
+        ):
+            raise expected_error_type(
+                "source-universe class read-seam witness map is rebound"
+            )
+        for (
+            name,
+            expected_surface,
+            expected_callable,
+            expected_code,
+        ) in expected_class_seam_witnesses:
+            current_surface = expected_getattr_static(
+                expected_store_type, name, None
+            )
+            current_callable = getattr(
+                current_surface,
+                "__func__",
+                current_surface,
+            )
+            if current_class_seams.get(name) is not expected_surface:
+                raise expected_error_type(
+                    "source-universe canonical durable read seam drifted: " + name
+                )
+            if current_surface is not expected_surface:
+                raise expected_error_type(
+                    "store canonical durable read seam is class-rebound: " + name
+                )
+            if (
+                current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "source-universe canonical durable read seam drifted: " + name
+                )
+        if expected_store_type.__mro__[1] is not expected_store_base_type:
+            raise expected_error_type(
+                "source-universe collector base type authority is rebound"
+            )
+        current_base_connect_surface = expected_getattr_static(
+            expected_store_base_type, "_connect", None
+        )
+        current_base_connect_callable = getattr(
+            current_base_connect_surface,
+            "__func__",
+            current_base_connect_surface,
+        )
+        if (
+            current_base_connect_surface is not expected_base_connect_surface
+            or current_base_connect_callable is not expected_base_connect_callable
+            or getattr(current_base_connect_callable, "__code__", None)
+            is not expected_base_connect_code
+        ):
+            raise expected_error_type(
+                "source-universe collector base connection authority is rebound or mutated"
+            )
+        current_base_connect_path_surface = expected_getattr_static(
+            expected_store_base_type, "_connect_path", None
+        )
+        current_base_connect_path_callable = getattr(
+            current_base_connect_path_surface,
+            "__func__",
+            current_base_connect_path_surface,
+        )
+        if (
+            current_base_connect_path_surface is not expected_base_connect_path_surface
+            or current_base_connect_path_callable
+            is not expected_base_connect_path_callable
+            or getattr(current_base_connect_path_callable, "__code__", None)
+            is not expected_base_connect_path_code
+            or getattr(current_base_connect_path_callable, "__globals__", None)
+            is not expected_base_connect_path_globals
+            or expected_base_connect_path_globals.get("sqlite3")
+            is not expected_base_sqlite3
+            or (
+                not allow_sqlite_connect_override
+                and getattr(expected_base_sqlite3, "connect", None)
+                is not expected_base_sqlite_connect
+            )
+            or getattr(expected_base_sqlite3, "Row", None)
+            is not expected_base_sqlite_row
+        ):
+            raise expected_error_type(
+                "source-universe collector SQLite connection authority drifted"
+            )
+        current_path_identity_surface = expected_getattr_static(
+            expected_store_type, "_path_file_identity", None
+        )
+        current_path_identity_callable = getattr(
+            current_path_identity_surface,
+            "__func__",
+            current_path_identity_surface,
+        )
+        if (
+            current_path_identity_surface is not expected_path_identity_surface
+            or current_path_identity_callable is not expected_path_identity_callable
+            or getattr(current_path_identity_callable, "__globals__", None)
+            is not expected_path_identity_globals
+            or expected_path_identity_globals.get("os") is not expected_path_os
+            or getattr(expected_path_os, "stat", None) is not expected_path_os_stat
+        ):
+            raise expected_error_type(
+                "source-universe collector file-identity authority drifted"
+            )
+        if module_globals.get("_COMMITMENT_FIELD_NAMES") is not expected_field_names:
+            raise expected_error_type(
+                "source-universe verification field authority is rebound"
+            )
+        for name, expected_surface in expected_commitment_field_surfaces:
+            if (
+                expected_getattr_static(expected_commitment_type, name, None)
+                is not expected_surface
+            ):
+                raise expected_error_type(
+                    "source-universe result field surface is rebound: " + name
+                )
+        current_issue_surface = expected_getattr_static(
+            expected_commitment_type, "_issue", None
+        )
+        if (
+            current_issue_surface is not expected_issue_surface
+            or getattr(current_issue_surface, "__func__", None)
+            is not expected_issue_function
+            or getattr(expected_issue_function, "__code__", None)
+            is not expected_issue_function_code
+        ):
+            raise expected_error_type(
+                "source-universe result issuance surface is rebound or mutated"
+            )
+        for name, expected_helper, expected_code in helper_witnesses:
+            current_helper = module_globals.get(name)
+            if (
+                current_helper is not expected_helper
+                or getattr(expected_helper, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "source-universe helper authority is rebound: " + name
+                )
+        if original_build.__code__ is not original_build_code:
+            raise expected_error_type(
+                "source-universe builder implementation drifted"
+            )
+        if original_verify.__code__ is not original_verify_code:
+            raise expected_error_type(
+                "source-universe verifier implementation drifted"
+            )
+
+    def sealed_build_source_universe_commitment(
+        store: CollectorDeltaStore,
+        *,
+        expected_store_path: Path,
+        source_id: str,
+        start_cycle_seq: int,
+        end_cycle_seq: int,
+    ) -> SourceUniverseCommitment:
+        if (
+            module_globals.get("build_source_universe_commitment")
+            is not sealed_build_source_universe_commitment
+        ):
+            raise expected_error_type(
+                "source-universe public builder authority is rebound"
+            )
+        runtime_sqlite_connect = getattr(expected_base_sqlite3, "connect", None)
+        require_dispatch_integrity(
+            allow_sqlite_connect_override=(
+                runtime_sqlite_connect is not expected_base_sqlite_connect
+            )
+        )
+        result = original_build(
+            store,
+            expected_store_path=expected_store_path,
+            source_id=source_id,
+            start_cycle_seq=start_cycle_seq,
+            end_cycle_seq=end_cycle_seq,
+        )
+        if runtime_sqlite_connect is not expected_base_sqlite_connect:
+            raise expected_error_type(
+                "source-universe collector SQLite connection authority drifted "
+                "during authority dispatch"
+            )
+        require_dispatch_integrity()
+        if type(result) is not expected_commitment_type:
+            raise expected_error_type(
+                "source-universe builder returned non-canonical result type"
+            )
+        return result
+
+    def sealed_verify_source_universe_commitment(
+        store: CollectorDeltaStore,
+        candidate: SourceUniverseCommitment,
+        *,
+        expected_store_path: Path,
+        expected_source_id: str,
+        expected_start_cycle_seq: int,
+        expected_end_cycle_seq: int,
+    ) -> SourceUniverseCommitment:
+        if (
+            module_globals.get("verify_source_universe_commitment")
+            is not sealed_verify_source_universe_commitment
+        ):
+            raise expected_error_type(
+                "source-universe public verifier authority is rebound"
+            )
+        if (
+            module_globals.get("build_source_universe_commitment")
+            is not sealed_build_source_universe_commitment
+        ):
+            raise expected_error_type(
+                "source-universe verifier builder authority is rebound"
+            )
+        runtime_sqlite_connect = getattr(expected_base_sqlite3, "connect", None)
+        require_dispatch_integrity(
+            allow_sqlite_connect_override=(
+                runtime_sqlite_connect is not expected_base_sqlite_connect
+            )
+        )
+        result = original_verify(
+            store,
+            candidate,
+            expected_store_path=expected_store_path,
+            expected_source_id=expected_source_id,
+            expected_start_cycle_seq=expected_start_cycle_seq,
+            expected_end_cycle_seq=expected_end_cycle_seq,
+        )
+        if runtime_sqlite_connect is not expected_base_sqlite_connect:
+            raise expected_error_type(
+                "source-universe collector SQLite connection authority drifted "
+                "during authority dispatch"
+            )
+        require_dispatch_integrity()
+        if type(result) is not expected_commitment_type:
+            raise expected_error_type(
+                "source-universe verifier returned non-canonical result type"
+            )
+        return result
+
+    sealed_build_source_universe_commitment.__name__ = original_build.__name__
+    sealed_build_source_universe_commitment.__qualname__ = original_build.__qualname__
+    sealed_build_source_universe_commitment.__doc__ = original_build.__doc__
+    sealed_build_source_universe_commitment.__module__ = original_build.__module__
+    sealed_build_source_universe_commitment.__annotations__ = dict(
+        original_build.__annotations__
+    )
+    sealed_verify_source_universe_commitment.__name__ = original_verify.__name__
+    sealed_verify_source_universe_commitment.__qualname__ = original_verify.__qualname__
+    sealed_verify_source_universe_commitment.__doc__ = original_verify.__doc__
+    sealed_verify_source_universe_commitment.__module__ = original_verify.__module__
+    sealed_verify_source_universe_commitment.__annotations__ = dict(
+        original_verify.__annotations__
+    )
+
+    module_globals["build_source_universe_commitment"] = (
+        sealed_build_source_universe_commitment
+    )
+    module_globals["verify_source_universe_commitment"] = (
+        sealed_verify_source_universe_commitment
+    )
+
+
+_seal_source_universe_dispatch()
+del _seal_source_universe_dispatch
+

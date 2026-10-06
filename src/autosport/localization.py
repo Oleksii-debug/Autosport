@@ -11,7 +11,7 @@ from .localization_windows_surfaces import WINDOWS_SURFACE_CONTENT_UK_UA
 
 
 DEFAULT_LOCALE = _v2.DEFAULT_LOCALE
-CATALOG_VERSION = 8
+CATALOG_VERSION = 9
 
 # Public v4 keeps one localization API while preserving the proven v2 catalog
 # as an immutable base resource. Windows shell chrome and surface-contract

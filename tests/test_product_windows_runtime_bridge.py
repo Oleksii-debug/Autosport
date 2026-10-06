@@ -9,7 +9,10 @@ import pytest
 from autosport.localization import text
 from autosport.operator_source_registry import list_product_source_entries
 from autosport.product_gui_worker import ProductGuiMessage
-from autosport.product_windows_gui import ProductWindowsAutosportApp
+from autosport.product_windows_gui import (
+    ProductWindowsAutosportApp,
+    _localized_product_stop_reason,
+)
 from autosport.research_strategy import ResearchStrategyPlan
 
 
@@ -173,6 +176,36 @@ def test_product_runtime_refuses_active_workspace_identity_drift(
     assert app.product_status.value == text(
         "ui.product_runtime.status.workspace_identity_mismatch"
     )
+
+
+def test_product_stop_reason_projection_never_exposes_unknown_internal_token() -> None:
+    assert _localized_product_stop_reason("operator_stop") == text(
+        "ui.product_runtime.stop_reason.operator"
+    )
+    assert _localized_product_stop_reason("app_close") == text(
+        "ui.product_runtime.stop_reason.app_close"
+    )
+    hostile = "provider:secret-internal-stop-token"
+    projected = _localized_product_stop_reason(hostile)
+    assert projected == text("ui.product_runtime.stop_reason.other")
+    assert hostile not in projected
+
+
+def test_product_start_actionability_tracks_exact_recovery_quarantine(tmp_path) -> None:
+    app = _headless_app(tmp_path)
+    runtime_workspace = tmp_path / "autosport" / "strategies" / "runtime"
+    app._product_runtime_workspace = runtime_workspace
+    app._set_replay_controls_busy = lambda _busy: None
+
+    app._block_workspace_for_recovery(runtime_workspace)
+    app._set_product_controls_running(False)
+
+    assert app.product_start_button.states[-1] == ("disabled",)
+
+    app._unblock_workspace_after_recovery(runtime_workspace)
+
+    assert app.product_start_button.states[-1] == ("!disabled",)
+    assert not app._workspace_requires_recovery(runtime_workspace)
 
 
 def test_product_runtime_failure_quarantines_bound_runtime_workspace(tmp_path) -> None:

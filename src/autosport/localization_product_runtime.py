@@ -19,6 +19,9 @@ PRODUCT_RUNTIME_UK_UA: Mapping[str, str] = MappingProxyType(
             "розраховано {settled}; останнє успішне оновлення {last_success_at}."
         ),
         "ui.product_runtime.status.stopping": "Надіслано команду STOP; очікується безпечне завершення канонічної роботи.",
+        "ui.product_runtime.stop_reason.operator": "зупинка оператором",
+        "ui.product_runtime.stop_reason.app_close": "закриття програми",
+        "ui.product_runtime.stop_reason.other": "внутрішнє безпечне завершення",
         "ui.product_runtime.status.stopped": "Тривалу PAPER-роботу зупинено: причина {reason}; циклів {cycles}.",
         "ui.product_runtime.status.error": (
             "Тривала PAPER-робота завершилась помилкою типу {error_type}. "

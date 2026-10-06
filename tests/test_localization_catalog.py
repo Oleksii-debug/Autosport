@@ -133,6 +133,9 @@ _RUNTIME_RECOVERY_KEYS = {
     "ui.product_runtime.status.running",
     "ui.product_runtime.status.tick",
     "ui.product_runtime.status.stopping",
+    "ui.product_runtime.stop_reason.operator",
+    "ui.product_runtime.stop_reason.app_close",
+    "ui.product_runtime.stop_reason.other",
     "ui.product_runtime.status.stopped",
     "ui.product_runtime.status.error",
     "ui.product_runtime.status.configuration_missing",
@@ -151,7 +154,7 @@ _RUNTIME_RECOVERY_KEYS = {
 
 def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
     assert DEFAULT_LOCALE == "uk-UA"
-    assert CATALOG_VERSION == 8
+    assert CATALOG_VERSION == 9
     assert text("ui.ticket.empty") == "Паперові квитки ще відсутні."
     assert text("ui.boolean.true") == "так"
     assert text("ui.boolean.false") == "ні"
@@ -192,6 +195,9 @@ def test_critical_catalog_strings_are_exact_ukrainian_presentation() -> None:
     assert text("ui.accessibility.bankroll.name") == "Віртуальний банк"
     assert text("ui.product_runtime.button.start") == "PAPER: старт"
     assert text("ui.product_runtime.accessibility.status.name") == "Стан тривалої PAPER-роботи"
+    assert text("ui.product_runtime.stop_reason.operator") == "зупинка оператором"
+    assert text("ui.product_runtime.stop_reason.app_close") == "закриття програми"
+    assert text("ui.product_runtime.stop_reason.other") == "внутрішнє безпечне завершення"
 
 
 def test_whole_product_chrome_has_no_version_finish_line_token() -> None:

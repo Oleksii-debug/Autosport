@@ -24,6 +24,16 @@ _PRODUCT_SOURCE_FACTORY_ENV = "AUTOSPORT_PRODUCT_SOURCE_FACTORY"
 _PRODUCT_POLL_SECONDS = 30.0
 
 
+def _localized_product_stop_reason(reason: object) -> str:
+    """Project only product-owned STOP reason labels into operator-visible text."""
+
+    if type(reason) is str and reason == "operator_stop":
+        return text("ui.product_runtime.stop_reason.operator")
+    if type(reason) is str and reason == "app_close":
+        return text("ui.product_runtime.stop_reason.app_close")
+    return text("ui.product_runtime.stop_reason.other")
+
+
 class ProductWindowsAutosportApp(WindowsAutosportApp):
     """Windows shell that orchestrates the existing canonical durable PAPER runtime."""
 
@@ -169,8 +179,18 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self._set_replay_controls_busy(True)
             return
         self.product_stop_button.state(["disabled"])
-        self.product_start_button.state(["!disabled"])
+        if self._workspace_requires_recovery(
+            self._product_runtime_target_workspace()
+        ):
+            self.product_start_button.state(["disabled"])
+        else:
+            self.product_start_button.state(["!disabled"])
         self._set_replay_controls_busy(False)
+
+    def _unblock_workspace_after_recovery(self, workspace: Path) -> None:
+        super()._unblock_workspace_after_recovery(workspace)
+        if not self._product_busy and not self.__dict__.get("_closing", False):
+            self._set_product_controls_running(False)
 
     def _product_blocks_base_operation(self) -> bool:
         if not self._product_busy:
@@ -464,7 +484,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self._product_last_stop = message
             status_text = text(
                 "ui.product_runtime.status.stopped",
-                reason=message.stop_reason or "operator_stop",
+                reason=_localized_product_stop_reason(message.stop_reason),
                 cycles=message.status.cycles_completed,
             )
             self.product_status.set(status_text)
@@ -503,8 +523,8 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.after(0, self._poll_product_worker)
             return
 
-        self._set_product_controls_running(False)
         if self.__dict__.get("_product_close_pending", False):
+            self._set_product_controls_running(False)
             super().close_app()
             return
         if self._product_last_stop is not None:
@@ -515,6 +535,10 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             )
             self.bank.set(self._bank_text())
             self._refresh_tickets()
+        # Synchronize actionability only after terminal economic truth is known.
+        # ERROR/no-terminal and reopen failures keep START disabled until canonical
+        # recovery removes the exact workspace quarantine.
+        self._set_product_controls_running(False)
 
     def close_app(self) -> None:
         if self._product_close_pending:

@@ -23,6 +23,7 @@ _ANCHOR_SCHEMA_VERSION = 1
 _CANONICAL_DECIMAL_TYPE = Decimal
 _CANONICAL_INVALID_OPERATION = InvalidOperation
 _CANONICAL_DECIMAL_RESOURCE_VALIDATOR = _validate_decimal_text_resource_bound
+_CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE = _validate_decimal_text_resource_bound.__code__
 _CANONICAL_DECIMAL_FORMATTER = Decimal.__format__
 _CANONICAL_TEXT_COERCION = str
 
@@ -93,8 +94,11 @@ def _decimal(
     _decimal_type=_CANONICAL_DECIMAL_TYPE,
     _invalid_operation=_CANONICAL_INVALID_OPERATION,
     _resource_validator=_CANONICAL_DECIMAL_RESOURCE_VALIDATOR,
+    _resource_validator_code=_CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE,
     _text_coercion=_CANONICAL_TEXT_COERCION,
 ) -> Decimal:
+    if _resource_validator.__code__ is not _resource_validator_code:
+        raise ValueError("decimal resource validator authority changed")
     try:
         parsed = (
             value
@@ -116,8 +120,11 @@ def _preflight_decimal_text_fields(
     *values: Decimal | None,
     _decimal_type=_CANONICAL_DECIMAL_TYPE,
     _resource_validator=_CANONICAL_DECIMAL_RESOURCE_VALIDATOR,
+    _resource_validator_code=_CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE,
 ) -> None:
     """Validate every sibling Decimal before any fixed-point string is allocated."""
+    if _resource_validator.__code__ is not _resource_validator_code:
+        raise ValueError("decimal resource validator authority changed")
     for value in values:
         if value is None:
             continue

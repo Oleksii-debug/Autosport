@@ -739,3 +739,53 @@ def test_operational_checkpoint_open_is_nonblocking_before_type_verification() -
         nonblock = getattr(continuous_session.os, "O_NONBLOCK", 0)
         if nonblock:
             assert observed_flags[0] & nonblock
+
+
+def test_sidecar_parser_authority_ignores_runtime_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        def attacker_parser(_text: str) -> object:
+            return {
+                "schema": "attacker",
+                "schema_version": 999,
+            }
+
+        monkeypatch.setattr(
+            continuous_session,
+            "strict_json_loads",
+            attacker_parser,
+        )
+
+        checkpoint = state._read_error_checkpoint()
+        assert checkpoint["last_error_code"] == "CANONICAL_FAILURE"
+        assert checkpoint["schema"] == "autosport.continuous_session.operational_error"
+
+
+def test_sidecar_serializer_and_publisher_ignore_runtime_rebinding(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        def attacker_dumps(*_args: object, **_kwargs: object) -> str:
+            raise AssertionError("runtime-rebound json.dumps gained sidecar authority")
+
+        def attacker_write(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("runtime-rebound atomic_write_json gained sidecar authority")
+
+        monkeypatch.setattr(continuous_session.json, "dumps", attacker_dumps)
+        monkeypatch.setattr(
+            continuous_session,
+            "atomic_write_json",
+            attacker_write,
+        )
+
+        state.record_failure(code="CANONICAL_FAILURE")
+
+        error_path = root / "continuous_session.json.operational_error.json"
+        payload = json.loads(error_path.read_text(encoding="utf-8"))
+        assert payload["schema"] == "autosport.continuous_session.operational_error"
+        assert payload["schema_version"] == 2
+        assert payload["last_error_code"] == "CANONICAL_FAILURE"

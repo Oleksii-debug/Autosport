@@ -1616,3 +1616,77 @@ def test_result_semantic_type_rebind_revokes_authoritative_feasibility(
                 max_snapshot_age=timedelta(seconds=2),
             )
 
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_append_if",
+        "_liquidity_overlap_key",
+        "_evidence_digest",
+        "_provider_timestamp",
+        "_canonical_digest",
+        "_timestamp",
+        "_require_aware",
+    ),
+)
+def test_authoritative_feasibility_helper_rebind_is_rejected_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    called = False
+
+    def substituted(*args, **kwargs):
+        nonlocal called
+        called = True
+        if helper_name == "_append_if":
+            return None
+        raise AssertionError("substituted feasibility helper must not execute")
+
+    monkeypatch.setattr(feasibility_module, helper_name, substituted)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical feasibility helper graph changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+    assert called is False
+
+
+def test_append_reason_code_mutation_cannot_suppress_fail_closed_limit_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    canonical = feasibility_module._append_if
+
+    def suppress_all_reasons(reasons, condition, reason):
+        return None
+
+    monkeypatch.setattr(canonical, "__code__", suppress_all_reasons.__code__)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical feasibility helper graph changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+

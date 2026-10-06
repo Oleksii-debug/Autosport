@@ -742,6 +742,20 @@ def _install_execution_feasibility_result_authority():
     feasibility_state_type = FeasibilityState
     source_mode_type = SourceMode
     projection_kind_type = ProjectionKind
+    append_reason = _append_if
+    append_reason_code = append_reason.__code__
+    liquidity_overlap_key = _liquidity_overlap_key
+    liquidity_overlap_key_code = liquidity_overlap_key.__code__
+    evidence_digest = _evidence_digest
+    evidence_digest_code = evidence_digest.__code__
+    provider_timestamp = _provider_timestamp
+    provider_timestamp_code = provider_timestamp.__code__
+    canonical_digest = _canonical_digest
+    canonical_digest_code = canonical_digest.__code__
+    canonical_timestamp = _timestamp
+    canonical_timestamp_code = canonical_timestamp.__code__
+    require_aware = _require_aware
+    require_aware_code = require_aware.__code__
     assert_market_book_authority = assert_market_book_depth_authoritative
     assert_market_book_authority_code = assert_market_book_authority.__code__
     market_book_acquisition_started = market_book_depth_acquisition_started_at
@@ -771,6 +785,25 @@ def _install_execution_feasibility_result_authority():
         ):
             raise RuntimeError(
                 "canonical execution feasibility assessor changed"
+            )
+        if (
+            _append_if is not append_reason
+            or append_reason.__code__ is not append_reason_code
+            or _liquidity_overlap_key is not liquidity_overlap_key
+            or liquidity_overlap_key.__code__ is not liquidity_overlap_key_code
+            or _evidence_digest is not evidence_digest
+            or evidence_digest.__code__ is not evidence_digest_code
+            or _provider_timestamp is not provider_timestamp
+            or provider_timestamp.__code__ is not provider_timestamp_code
+            or _canonical_digest is not canonical_digest
+            or canonical_digest.__code__ is not canonical_digest_code
+            or _timestamp is not canonical_timestamp
+            or canonical_timestamp.__code__ is not canonical_timestamp_code
+            or _require_aware is not require_aware
+            or require_aware.__code__ is not require_aware_code
+        ):
+            raise RuntimeError(
+                "canonical feasibility helper graph changed"
             )
         if (
             ProviderLimitAuthority is not provider_limit_type

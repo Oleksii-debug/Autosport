@@ -110,6 +110,8 @@ def test_verifier_ignores_rebound_builtin_and_object_dispatch(monkeypatch) -> No
     monkeypatch.setattr(verifier_module, "AttributeError", RuntimeError, raising=False)
     monkeypatch.setattr(verifier_module, "TypeError", RuntimeError, raising=False)
     monkeypatch.setattr(verifier_module, "KeyError", RuntimeError, raising=False)
+    monkeypatch.setattr(verifier_module, "ExecutionAction", object)
+    monkeypatch.setattr(verifier_module, "BoundSupervisedExecutionPlan", object)
 
     result = _verify(
         evidence=evidence,

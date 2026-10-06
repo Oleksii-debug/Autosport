@@ -1775,9 +1775,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "settlement engine constructor origin changed"
             )
+        if type(resolutions) is not tuple:
+            raise TypeError("resolutions must be an exact tuple")
         unique: dict[str, SettlementResolution] = {}
         for resolution in resolutions:
-            unique.setdefault(resolution.evidence_id, resolution)
+            if type(resolution) is not SettlementResolution:
+                raise ContinuousSessionError(
+                    "settlement consumer requires exact SettlementResolution values"
+                )
+            existing = unique.get(resolution.evidence_id)
+            if existing is not None:
+                if existing != resolution:
+                    raise ContinuousSessionError(
+                        "settlement consumer received conflicting duplicate evidence_id"
+                    )
+                continue
+            unique[resolution.evidence_id] = resolution
 
         with WorkspaceEconomicLock(self.workspace):
             book = self._load_book()

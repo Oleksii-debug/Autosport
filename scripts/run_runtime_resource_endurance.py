@@ -10,10 +10,12 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
+from unittest.mock import patch
 
 from autosport.dataset_worker import OneShotDatasetValidationWorker
 from autosport.event_lifecycle import CatalogPage
 from autosport.live_observation import OneShotObservationWorker
+from autosport.market_bus import MarketEventBus
 from autosport.product_runtime import build_autonomous_product_runtime
 from autosport.replay_worker import OneShotReplayWorker
 from autosport.runtime_resource_census import (
@@ -85,6 +87,14 @@ class _DeterministicClock:
         instant = self._base + timedelta(seconds=self._step)
         self._step += 1
         return instant.isoformat()
+
+
+class _TrackingMarketEventBus(MarketEventBus):
+    instances: list["_TrackingMarketEventBus"] = []
+
+    def __init__(self, store) -> None:
+        super().__init__(store)
+        type(self).instances.append(self)
 
 
 class _IdleProductSource:
@@ -189,6 +199,53 @@ def _seeded_leak_detector_check() -> tuple[bool, int]:
     if restored_comparison.status is not ThreadCensusStatus.PASS:
         raise RuntimeError("seeded leak negative control did not restore a complete baseline")
     return detected, detected_count
+
+
+def _exercise_subscription_lifecycle(
+    workspace: Path,
+    *,
+    source: _IdleProductSource,
+    clock: Callable[[], str],
+) -> None:
+    _TrackingMarketEventBus.instances.clear()
+    with patch("autosport.product_runtime.MarketEventBus", _TrackingMarketEventBus):
+        runtime = build_autonomous_product_runtime(
+            workspace=workspace,
+            source=source,
+            clock=clock,
+            sleep=lambda _seconds: None,
+        )
+        try:
+            first_bus = _TrackingMarketEventBus.instances[-1]
+            if len(first_bus.subscribers) != 1:
+                raise RuntimeError("product runtime must own exactly one market subscription")
+            runtime.start()
+            if len(first_bus.subscribers) != 1:
+                raise RuntimeError("runtime start duplicated market subscription")
+            runtime.stop("resource_subscription_probe")
+            if len(first_bus.subscribers) != 1:
+                raise RuntimeError("runtime stop changed market subscription cardinality")
+
+            first_bus.subscribe(lambda _event: None)
+            if len(first_bus.subscribers) != 2:
+                raise RuntimeError("seeded duplicate market subscription was not observable")
+        finally:
+            runtime.close()
+
+        restored = build_autonomous_product_runtime(
+            workspace=workspace,
+            source=source,
+            clock=clock,
+            sleep=lambda _seconds: None,
+        )
+        try:
+            if len(_TrackingMarketEventBus.instances) != 2:
+                raise RuntimeError("runtime reopen did not reconstruct one market bus")
+            second_bus = _TrackingMarketEventBus.instances[-1]
+            if second_bus is first_bus or len(second_bus.subscribers) != 1:
+                raise RuntimeError("runtime reopen duplicated process-local subscription")
+        finally:
+            restored.close()
 
 
 def _runtime_temp_artifacts(root: Path) -> tuple[str, ...]:
@@ -300,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
     move_round_trip_passes = 0
     move_delete_passes = 0
     temporary_artifact_checks = 0
+    subscription_lifecycle_checked = False
     source = _IdleProductSource()
     clock = _DeterministicClock()
 
@@ -310,6 +368,14 @@ def main(argv: list[str] | None = None) -> int:
             seeded_leak_detected, seeded_leak_residual_count = _seeded_leak_detector_check()
             if not seeded_leak_detected:
                 failures.append("seeded leak negative control was not detected")
+
+        if not failures:
+            _exercise_subscription_lifecycle(
+                root / "subscription-runtime",
+                source=source,
+                clock=clock,
+            )
+            subscription_lifecycle_checked = True
 
         shared_workspace = root / "shared-runtime"
         for cycle in range(1, args.cycles + 1):
@@ -421,8 +487,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     observed_resource_classes = list(_BASE_OBSERVED_RESOURCE_CLASSES)
+    if subscription_lifecycle_checked:
+        observed_resource_classes.append("subscriptions_listeners")
     if windows_probe_status == "PASS":
         observed_resource_classes.append("workspace_handles")
+        observed_resource_classes.append("persistence_handles")
     observed_resource_classes = tuple(sorted(observed_resource_classes))
     applicable_required_resource_classes = tuple(
         resource_class
@@ -480,6 +549,7 @@ def main(argv: list[str] | None = None) -> int:
         "missing_resource_classes": list(missing_resource_classes),
         "resource_coverage_complete": not missing_resource_classes,
         "internal_queue_owners_checked_per_cycle": 3,
+        "subscription_lifecycle_checked": subscription_lifecycle_checked,
         "temporary_artifact_checks": temporary_artifact_checks,
         "workspace_move_round_trip_passes": move_round_trip_passes,
         "workspace_move_delete_passes": move_delete_passes,

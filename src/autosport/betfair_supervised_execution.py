@@ -792,6 +792,160 @@ def _build_canonical_place_action_dispatch():
     canonical_credentials_type = BetfairSessionCredentials
     canonical_gate_type = BetfairSupervisedExecutionGate
     canonical_default_transport_type = UrllibBetfairHttpTransport
+    canonical_profile_type = BookmakerCapabilityProfile
+    canonical_bound_type = BoundSupervisedExecutionPlan
+    canonical_action_type = ExecutionAction
+    canonical_ledger_type = RealExecutionLedger
+    canonical_workspace_lock_type = WorkspaceEconomicLock
+    canonical_instruction_report_type = BetfairInstructionReport
+    canonical_execution_report_type = BetfairPlaceExecutionReport
+
+    canonical_profile_require = canonical_profile_type.__dict__.get("require")
+    canonical_profile_id_descriptor = canonical_profile_type.__dict__.get("profile_id")
+    canonical_profile_id_getter = getattr(
+        canonical_profile_id_descriptor,
+        "fget",
+        None,
+    )
+    canonical_action_to_dict = canonical_action_type.__dict__.get("to_dict")
+    canonical_instruction_post_init = canonical_instruction_report_type.__dict__.get(
+        "__post_init__"
+    )
+    canonical_execution_report_post_init = canonical_execution_report_type.__dict__.get(
+        "__post_init__"
+    )
+    canonical_evidence_id_descriptor = canonical_execution_report_type.__dict__.get(
+        "evidence_id"
+    )
+    canonical_evidence_id_getter = getattr(
+        canonical_evidence_id_descriptor,
+        "fget",
+        None,
+    )
+    canonical_trusted_now = _supervised_execution_runtime._trusted_now
+    canonical_workspace_lock_enter = canonical_workspace_lock_type.__dict__.get(
+        "__enter__"
+    )
+    canonical_workspace_lock_exit = canonical_workspace_lock_type.__dict__.get(
+        "__exit__"
+    )
+    bound_method_names = ("action_for", "profile_for", "constraint_for")
+    bound_methods = tuple(
+        (
+            name,
+            canonical_bound_type.__dict__.get(name),
+            getattr(canonical_bound_type.__dict__.get(name), "__code__", None),
+        )
+        for name in bound_method_names
+    )
+    ledger_method_names = (
+        "_append",
+        "_mutate",
+        "verified_execution_view",
+        "bind_provider_order_reference",
+        "provider_order_reference",
+        "bind_provider_evidence",
+        "mark_unknown",
+        "acknowledge",
+        "attempt_state",
+        "saga",
+    )
+    ledger_methods = tuple(
+        (
+            name,
+            canonical_ledger_type.__dict__.get(name),
+            getattr(canonical_ledger_type.__dict__.get(name), "__code__", None),
+        )
+        for name in ledger_method_names
+    )
+    if (
+        not callable(canonical_profile_require)
+        or getattr(canonical_profile_require, "__code__", None) is None
+        or not callable(canonical_profile_id_getter)
+        or getattr(canonical_profile_id_getter, "__code__", None) is None
+        or not callable(canonical_action_to_dict)
+        or getattr(canonical_action_to_dict, "__code__", None) is None
+        or not callable(canonical_instruction_post_init)
+        or getattr(canonical_instruction_post_init, "__code__", None) is None
+        or not callable(canonical_execution_report_post_init)
+        or getattr(canonical_execution_report_post_init, "__code__", None) is None
+        or not callable(canonical_evidence_id_getter)
+        or getattr(canonical_evidence_id_getter, "__code__", None) is None
+        or not callable(canonical_trusted_now)
+        or getattr(canonical_trusted_now, "__code__", None) is None
+        or not callable(canonical_workspace_lock_enter)
+        or getattr(canonical_workspace_lock_enter, "__code__", None) is None
+        or not callable(canonical_workspace_lock_exit)
+        or getattr(canonical_workspace_lock_exit, "__code__", None) is None
+        or any(method is None or code is None for _, method, code in bound_methods)
+        or any(method is None or code is None for _, method, code in ledger_methods)
+    ):
+        raise RuntimeError("canonical Betfair execution class authority is unavailable")
+
+    profile_field_names = (
+        "venue_id",
+        "account_id",
+        "adapter_id",
+        "adapter_version",
+        "profile_version",
+        "facts",
+        "observed_at",
+        "source_ref",
+        "source_payload_sha256",
+    )
+    profile_field_descriptors = tuple(
+        (name, canonical_profile_type.__dict__.get(name))
+        for name in profile_field_names
+    )
+    action_field_names = (
+        "action_id",
+        "bookmaker_id",
+        "account_id",
+        "event_id",
+        "market_id",
+        "selection_id",
+        "side",
+        "requested_odds",
+        "requested_stake",
+        "quote_id",
+        "quote_observed_at",
+        "expires_at",
+    )
+    action_field_descriptors = tuple(
+        (name, canonical_action_type.__dict__.get(name))
+        for name in action_field_names
+    )
+    instruction_field_names = (
+        "status",
+        "error_code",
+        "bet_id",
+        "placed_date",
+        "average_price_matched",
+        "size_matched",
+    )
+    instruction_field_descriptors = tuple(
+        (name, canonical_instruction_report_type.__dict__.get(name))
+        for name in instruction_field_names
+    )
+    execution_report_field_names = (
+        "bookmaker_id",
+        "account_id",
+        "action_id",
+        "provider_order_ref",
+        "market_id",
+        "request_id",
+        "request_sha256",
+        "response_sha256",
+        "observed_at",
+        "status",
+        "error_code",
+        "instruction",
+        "provider_origin_authoritative",
+    )
+    execution_report_field_descriptors = tuple(
+        (name, canonical_execution_report_type.__dict__.get(name))
+        for name in execution_report_field_names
+    )
     canonical_default_clock = _now
     canonical_default_clock_code = getattr(canonical_default_clock, "__code__", None)
     canonical_client_getattribute = client_type.__getattribute__
@@ -872,6 +1026,74 @@ def _build_canonical_place_action_dispatch():
             and BetfairSessionCredentials is canonical_credentials_type
             and BetfairSupervisedExecutionGate is canonical_gate_type
             and UrllibBetfairHttpTransport is canonical_default_transport_type
+            and BookmakerCapabilityProfile is canonical_profile_type
+            and BoundSupervisedExecutionPlan is canonical_bound_type
+            and ExecutionAction is canonical_action_type
+            and RealExecutionLedger is canonical_ledger_type
+            and WorkspaceEconomicLock is canonical_workspace_lock_type
+            and BetfairInstructionReport is canonical_instruction_report_type
+            and BetfairPlaceExecutionReport is canonical_execution_report_type
+            and canonical_profile_type.__dict__.get("require")
+            is canonical_profile_require
+            and getattr(canonical_profile_require, "__code__", None)
+            is canonical_profile_require.__code__
+            and canonical_profile_type.__dict__.get("profile_id")
+            is canonical_profile_id_descriptor
+            and getattr(canonical_profile_id_descriptor, "fget", None)
+            is canonical_profile_id_getter
+            and canonical_action_type.__dict__.get("to_dict")
+            is canonical_action_to_dict
+            and getattr(canonical_action_to_dict, "__code__", None)
+            is canonical_action_to_dict.__code__
+            and canonical_instruction_report_type.__dict__.get("__post_init__")
+            is canonical_instruction_post_init
+            and getattr(canonical_instruction_post_init, "__code__", None)
+            is canonical_instruction_post_init.__code__
+            and canonical_execution_report_type.__dict__.get("__post_init__")
+            is canonical_execution_report_post_init
+            and getattr(canonical_execution_report_post_init, "__code__", None)
+            is canonical_execution_report_post_init.__code__
+            and canonical_execution_report_type.__dict__.get("evidence_id")
+            is canonical_evidence_id_descriptor
+            and getattr(canonical_evidence_id_descriptor, "fget", None)
+            is canonical_evidence_id_getter
+            and _supervised_execution_runtime._trusted_now is canonical_trusted_now
+            and getattr(canonical_trusted_now, "__code__", None)
+            is canonical_trusted_now.__code__
+            and canonical_workspace_lock_type.__dict__.get("__enter__")
+            is canonical_workspace_lock_enter
+            and getattr(canonical_workspace_lock_enter, "__code__", None)
+            is canonical_workspace_lock_enter.__code__
+            and canonical_workspace_lock_type.__dict__.get("__exit__")
+            is canonical_workspace_lock_exit
+            and getattr(canonical_workspace_lock_exit, "__code__", None)
+            is canonical_workspace_lock_exit.__code__
+            and all(
+                canonical_bound_type.__dict__.get(name) is method
+                and getattr(method, "__code__", None) is code
+                for name, method, code in bound_methods
+            )
+            and all(
+                canonical_ledger_type.__dict__.get(name) is method
+                and getattr(method, "__code__", None) is code
+                for name, method, code in ledger_methods
+            )
+            and all(
+                canonical_profile_type.__dict__.get(name) is descriptor
+                for name, descriptor in profile_field_descriptors
+            )
+            and all(
+                canonical_action_type.__dict__.get(name) is descriptor
+                for name, descriptor in action_field_descriptors
+            )
+            and all(
+                canonical_instruction_report_type.__dict__.get(name) is descriptor
+                for name, descriptor in instruction_field_descriptors
+            )
+            and all(
+                canonical_execution_report_type.__dict__.get(name) is descriptor
+                for name, descriptor in execution_report_field_descriptors
+            )
             and _now is canonical_default_clock
             and getattr(canonical_default_clock, "__code__", None)
             is canonical_default_clock_code
@@ -1525,12 +1747,17 @@ def execute_betfair_supervised_action(
 ) -> BetfairSupervisedExecutionResult:
     """Reserve -> submit -> placeOrders -> report -> canonical ledger transition."""
 
-    if not isinstance(ledger, RealExecutionLedger):
-        raise TypeError("ledger must be RealExecutionLedger")
+    if type(ledger) is not RealExecutionLedger:
+        raise TypeError("ledger must be exact RealExecutionLedger")
+    if type(bound) is not BoundSupervisedExecutionPlan:
+        raise TypeError("bound must be exact BoundSupervisedExecutionPlan")
+    if type(profile) is not BookmakerCapabilityProfile:
+        raise TypeError("profile must be exact BookmakerCapabilityProfile")
     if type(client) is not BetfairSupervisedPlaceOrdersClient:
         raise TypeError(
             "client must be exact BetfairSupervisedPlaceOrdersClient"
         )
+    _canonical_place_client_preflight(client)
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
     # API compatibility only: execution-authority time is product-owned.

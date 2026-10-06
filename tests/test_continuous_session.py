@@ -1108,7 +1108,11 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             coordinator, store, *_ = _build_coordinator(root, source, clock)
             try:
                 invalidations = coordinator.invalidation_buffer
-                invalidations._dirty = {("provider-a", "quote-a"): object()}
+                invalidations._max_dirty_keys = 1
+                invalidations._dirty = {
+                    ("provider-a", "quote-a"): None,
+                    ("provider-a", "quote-b"): None,
+                }
                 with self.assertRaisesRegex(
                     ContinuousSessionError,
                     "canonical invalidation buffer state is invalid",

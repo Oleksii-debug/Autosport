@@ -106,12 +106,13 @@ def _decimal_text(
     _decimal_type=Decimal,
     _invalid_operation=InvalidOperation,
     _error_type=EconomicGoalContractError,
+    _max_chars=_MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS,
 ) -> Decimal:
     if type(value) is not str:
         raise _error_type(f"{name} must be a Decimal string")
     if not value or value != value.strip():
         raise _error_type(f"{name} must be a canonical Decimal string")
-    if len(value) > _MAX_ECONOMIC_GOAL_DECIMAL_TEXT_CHARS:
+    if len(value) > _max_chars:
         raise _error_type(
             f"{name} Decimal text exceeds the canonical size limit"
         )
@@ -130,10 +131,12 @@ def _restriction_set(
     name: str,
     value: object,
     _error_type=EconomicGoalContractError,
+    _max_members=_MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS,
+    _max_text_chars=_MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS,
 ) -> frozenset[str]:
     if type(value) is not list:
         raise _error_type(f"{name} must be a sorted JSON array")
-    if len(value) > _MAX_ECONOMIC_GOAL_RESTRICTION_MEMBERS:
+    if len(value) > _max_members:
         raise _error_type(
             f"{name} exceeds the canonical restriction-count limit"
         )
@@ -143,7 +146,7 @@ def _restriction_set(
         if (
             not item
             or item != item.strip()
-            or len(item) > _MAX_ECONOMIC_GOAL_RESTRICTION_TEXT_CHARS
+            or len(item) > _max_text_chars
             or "\x00" in item
         ):
             raise _error_type(

@@ -492,7 +492,10 @@ class SkillRegistry:
             return None,"HANDLER_TIMEOUT"
         try:
             has_result = receiver.poll()
-        except (OSError, ValueError):
+        except Exception:
+            # Polling/deserializing a child result is an infrastructure boundary.
+            # Any ordinary pipe/protocol exception must become durable terminal
+            # truth instead of escaping with the run still marked RUNNING.
             close_ok = _close_process_handle(process)
             receiver.close()
             if not close_ok:
@@ -506,7 +509,7 @@ class SkillRegistry:
             return None,"HANDLER_PROCESS_EXITED"
         try:
             kind,value=receiver.recv()
-        except (EOFError,OSError,ValueError):
+        except Exception:
             close_ok = _close_process_handle(process)
             receiver.close()
             if not close_ok:

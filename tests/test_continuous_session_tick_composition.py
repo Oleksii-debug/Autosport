@@ -4300,3 +4300,52 @@ def test_tick_rejects_in_place_mutation_after_lifecycle_registration_callback() 
             coordinator.tick()
 
         assert coordinator._state.snapshot().last_error_code == "ContinuousSessionError"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    (
+        ("changed_keys", (("provider-a", "quote-mutated"),)),
+        ("full_refresh_required", True),
+        ("has_more", True),
+    ),
+)
+def test_invalidation_rejects_post_validation_batch_truth_mutation(
+    field_name: str,
+    replacement: object,
+) -> None:
+    coordinator = object.__new__(continuous_session.ContinuousSessionCoordinator)
+    index = continuous_session.FocusedMirrorDependencyIndex(MarketMirror())
+    index.register("input-a", source_ids="provider-a")
+    batch = continuous_session.MirrorInvalidationBatch(
+        changed_keys=(),
+        full_refresh_required=False,
+        has_more=False,
+    )
+
+    class Buffer:
+        pending_count = 0
+        full_refresh_required = False
+
+        def drain(self, *, max_items: int):
+            assert max_items == 250
+            return batch
+
+    def affected_inputs(received):
+        assert received is batch
+        object.__setattr__(received, field_name, replacement)
+        return ()
+
+    buffer = Buffer()
+    with pytest.raises(
+        continuous_session.ContinuousSessionError,
+        match="routing mutated invalidation batch truth",
+    ):
+        coordinator._drain_invalidations(
+            invalidation_buffer=buffer,
+            dependency_index=index,
+            drain_invalidation=buffer.drain,
+            affected_inputs=affected_inputs,
+            max_batches=4,
+            max_items=250,
+        )

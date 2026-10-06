@@ -420,6 +420,42 @@ class IncidentRiskStoreTests(unittest.TestCase):
         ):
             self.store.load()
 
+    def test_store_rejects_hard_link_alias_before_state_is_loaded(self) -> None:
+        self.store.append(self._entry())
+        alias = self.workspace / "incident_model_risk_store.alias.json"
+        try:
+            try:
+                os.link(self.store.path, alias)
+            except OSError as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+            with self.assertRaisesRegex(
+                IncidentRiskStoreError,
+                "regular non-aliased file",
+            ):
+                self.store.load()
+        finally:
+            alias.unlink(missing_ok=True)
+
+    def test_store_rejects_symlink_alias_before_state_is_loaded(self) -> None:
+        self.store.append(self._entry())
+        target = self.workspace / "incident_model_risk_store.target.json"
+        target.write_bytes(self.store.path.read_bytes())
+        self.store.path.unlink()
+        try:
+            try:
+                os.symlink(target, self.store.path)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            with self.assertRaisesRegex(
+                IncidentRiskStoreError,
+                "regular non-aliased file",
+            ):
+                self.store.load()
+        finally:
+            self.store.path.unlink(missing_ok=True)
+            self.store.path.write_bytes(target.read_bytes())
+            target.unlink(missing_ok=True)
+
     def test_content_hash_tamper_fails_closed(self) -> None:
         self.store.append(self._entry())
         payload = json.loads(

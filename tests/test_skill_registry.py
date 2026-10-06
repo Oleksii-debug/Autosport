@@ -469,6 +469,65 @@ def test_handler_timeout_cleanup_hard_kills_before_bounded_reap(monkeypatch):
     assert 0 < process.join_timeouts[1] < 1
 
 
+def test_handler_timeout_kill_failure_falls_back_to_bounded_terminate(monkeypatch):
+    class FakeEndpoint:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.terminated = False
+            self.join_timeouts = []
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_timeouts.append(timeout)
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            raise OSError("simulated kill race/failure")
+
+        def terminate(self):
+            self.terminated = True
+            self.alive = False
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeEndpoint(), FakeEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_TIMEOUT"
+    assert process.terminated is True
+    assert process.join_timeouts[0] == 1
+    assert len(process.join_timeouts) == 3
+    assert all(0 < timeout < 1 for timeout in process.join_timeouts[1:])
+
+
 def test_handler_timeout_terminates_and_persists_terminal_failure(tmp_path):
     registry = SkillRegistry.initialize(tmp_path / "skills.json")
     definition = SkillDefinition(

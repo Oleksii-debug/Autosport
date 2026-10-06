@@ -5,7 +5,6 @@ from decimal import Decimal
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
-from autosport.real_execution_ledger import ExecutionPlan
 import autosport._paper_value_execution_authority as authority
 
 
@@ -45,7 +44,7 @@ def test_restart_risk_rebuild_preserves_market_identity() -> None:
         market_semantics_id="winner-v2",
         exchange_side="lay",
     )
-    authority._first_execution_risk_authority(
+    result = authority._first_execution_risk_authority(
         agent,
         context,
         record,
@@ -60,6 +59,7 @@ def test_restart_risk_rebuild_preserves_market_identity() -> None:
         },
     )
 
+    assert result == "fresh-risk-evaluation"
     leg = policy.context.legs[0]
     assert leg.event_id == durable_event.event_id
     assert leg.market_id == durable_event.market_id

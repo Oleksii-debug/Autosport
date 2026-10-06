@@ -260,6 +260,54 @@ class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
                 stake="1",
             )
 
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("candidate identity string methods must not dispatch")
+
+            def startswith(self, *args, **kwargs):
+                raise AssertionError("candidate identity string methods must not dispatch")
+
+        hostile_identity_cases = (
+            CandidateLeg(
+                HostileText(leg.quote_key),
+                leg.event_id,
+                Decimal("2"),
+                Decimal("0.5"),
+            ),
+            CandidateLeg(
+                leg.quote_key,
+                HostileText(leg.event_id),
+                Decimal("2"),
+                Decimal("0.5"),
+            ),
+            CandidateLeg(
+                leg.quote_key,
+                leg.event_id,
+                Decimal("2"),
+                Decimal("0.5"),
+                market_id=HostileText("winner"),
+                selection_id="a",
+            ),
+        )
+        for hostile_leg in hostile_identity_cases:
+            with self.subTest(hostile_field=repr(hostile_leg)):
+                hostile_candidate = ParlayCandidate(
+                    (hostile_leg,),
+                    Decimal("2"),
+                    Decimal("0.5"),
+                    Decimal("0"),
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "must be exact canonical text",
+                ):
+                    optimizer.evaluate_candidates(
+                        [],
+                        [hostile_candidate],
+                        [group],
+                        stake="1",
+                    )
+
         impact = optimizer.evaluate_candidates(
             [],
             [canonical],

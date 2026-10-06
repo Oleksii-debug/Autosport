@@ -2308,6 +2308,66 @@ class ProductProposalRiskTerminalPayoffEvaluationTests(unittest.TestCase):
         self.assertEqual(len(result.evaluation_sha256), 64)
         self.assertEqual(self._resolve(bindings), result)
 
+    def test_lay_candidate_uses_semantic_settlement_key_and_liability_pnl(self) -> None:
+        target = terminal_payoff_authority._TARGET_RESOLVER(
+            self.workspace,
+            self.precommit.target_sha256,
+        )
+        contexts = list(target.candidate_context_json)
+        payload = json.loads(contexts[0])
+        payload["legs"][0]["locked_odds"] = "5"
+        payload["legs"][0]["exchange_side"] = "lay"
+        payload["legs"][0]["market_semantics_id"] = "exchange.match.odds.v1"
+        contexts[0] = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        object.__setattr__(target, "candidate_context_json", tuple(contexts))
+
+        tickets = terminal_payoff_authority._candidate_tickets(target)
+        lay_ticket = tickets[0]
+        leg = lay_ticket.legs[0]
+        liability = lay_ticket.stake * Decimal("4")
+
+        self.assertEqual(leg.exchange_side, "lay")
+        self.assertEqual(
+            leg.market_semantics_id,
+            "exchange.match.odds.v1",
+        )
+        self.assertNotEqual(leg.settlement_key, leg.quote_key)
+        self.assertEqual(
+            terminal_payoff_authority._PORTFOLIO_SCENARIO_PROFIT(
+                [lay_ticket],
+                {leg.settlement_key: "win"},
+            ),
+            -liability,
+        )
+        self.assertEqual(
+            terminal_payoff_authority._PORTFOLIO_SCENARIO_PROFIT(
+                [lay_ticket],
+                {leg.settlement_key: "loss"},
+            ),
+            lay_ticket.stake,
+        )
+        self.assertEqual(
+            terminal_payoff_authority._PORTFOLIO_SCENARIO_PROFIT(
+                [lay_ticket],
+                {leg.settlement_key: "void"},
+            ),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "missing terminal settlement evidence",
+        ):
+            terminal_payoff_authority._PORTFOLIO_SCENARIO_PROFIT(
+                [lay_ticket],
+                {leg.quote_key: "win"},
+            )
+
     def test_zero_stake_candidate_is_zero_exposure_even_when_state_wins(self) -> None:
         target = terminal_payoff_authority._TARGET_RESOLVER(
             self.workspace,
@@ -3922,6 +3982,50 @@ class ProductProposalRiskCounterfactualCashFloorTests(unittest.TestCase):
         self.assertFalse(result.iid_member_mapping_proven)
         self.assertFalse(result.scenario_selection_law_proven)
         self.assertFalse(result.risk_upper_bound_for_target)
+
+    def test_lay_cash_floor_reserves_liability_not_stake(self) -> None:
+        target = cash_floor_authority._TARGET_RESOLVER(
+            self.workspace,
+            self.precommit.target_sha256,
+        )
+        contexts = list(target.candidate_context_json)
+        payload = json.loads(contexts[0])
+        payload["legs"][0]["locked_odds"] = "5"
+        payload["legs"][0]["exchange_side"] = "lay"
+        payload["legs"][0]["market_semantics_id"] = "exchange.match.odds.v1"
+        contexts[0] = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        object.__setattr__(target, "candidate_context_json", tuple(contexts))
+
+        capital = cash_floor_authority._target_capital_vector(target)
+        stake_a, stake_b = target.evaluated_stakes
+        self.assertEqual(capital[0], stake_a * Decimal("4"))
+        self.assertEqual(capital[1], stake_b)
+
+        base = Decimal("100")
+        balances, post_open = cash_floor_authority._open_target_stakes(
+            base,
+            capital,
+        )
+        self.assertEqual(balances[0], base - capital[0])
+        self.assertEqual(post_open, base - capital[0] - capital[1])
+
+        payouts, terminal, minimum = cash_floor_authority._member_cash_path(
+            base_balance=base,
+            post_open_balance=post_open,
+            capital_at_risk=capital,
+            candidate_profits=(-capital[0], Decimal("0")),
+            total_profit=-capital[0],
+            member_index=0,
+        )
+        self.assertEqual(payouts, (Decimal("0"), capital[1]))
+        self.assertEqual(terminal, base - capital[0])
+        self.assertEqual(minimum, post_open)
 
     def test_unfundable_target_stake_vector_fails_closed(self) -> None:
         with self.assertRaisesRegex(

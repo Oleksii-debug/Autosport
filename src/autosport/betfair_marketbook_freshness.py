@@ -12,7 +12,7 @@ The module never performs provider writes or stores credentials in evidence.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -49,8 +49,113 @@ class BetfairMarketBookProtocolError(BetfairMarketBookFreshnessError):
     """Raised when a MarketBook response is malformed or contradicts JSON-RPC."""
 
 
+_TRANSIENT_PROVIDER_ERROR_CODES = frozenset(
+    {"TOO_MANY_REQUESTS", "SERVICE_BUSY", "TIMEOUT_ERROR"}
+)
+_REQUEST_CONTRACT_PROVIDER_ERROR_CODES = frozenset(
+    {"TOO_MUCH_DATA", "REQUEST_SIZE_EXCEEDS_LIMIT", "INVALID_INPUT_DATA"}
+)
+
+
 class BetfairMarketBookProviderError(BetfairMarketBookFreshnessError):
-    """Raised when Betfair explicitly rejects listMarketBook through JSON-RPC."""
+    """Secret-free identity for a Betfair listMarketBook JSON-RPC rejection."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        json_rpc_code: int | None,
+        provider_error_code: str | None,
+    ) -> None:
+        if json_rpc_code is not None and type(json_rpc_code) is not int:
+            raise TypeError("json_rpc_code must be an exact integer or None")
+        if provider_error_code is not None:
+            if (
+                type(provider_error_code) is not str
+                or not provider_error_code
+                or provider_error_code != provider_error_code.strip()
+                or provider_error_code != provider_error_code.upper()
+                or any(
+                    char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+                    for char in provider_error_code
+                )
+            ):
+                raise ValueError(
+                    "provider_error_code must be a canonical uppercase provider token"
+                )
+        super().__init__(message)
+        self.json_rpc_code = json_rpc_code
+        self.provider_error_code = provider_error_code
+
+    @property
+    def retryable_backpressure(self) -> bool:
+        return self.provider_error_code in _TRANSIENT_PROVIDER_ERROR_CODES
+
+    @property
+    def request_contract_failure(self) -> bool:
+        return self.provider_error_code in _REQUEST_CONTRACT_PROVIDER_ERROR_CODES
+
+
+def _provider_error_identity(error: object) -> tuple[int | None, str | None]:
+    if not isinstance(error, Mapping):
+        raise BetfairMarketBookProtocolError(
+            "Betfair JSON-RPC error must be an object"
+        )
+
+    raw_json_rpc_code = error.get("code")
+    if raw_json_rpc_code is not None and type(raw_json_rpc_code) is not int:
+        raise BetfairMarketBookProtocolError(
+            "Betfair JSON-RPC error code must be an exact integer"
+        )
+    json_rpc_code = raw_json_rpc_code
+
+    candidates: list[object] = []
+    if "errorCode" in error:
+        candidates.append(error.get("errorCode"))
+
+    data = error.get("data")
+    if isinstance(data, Mapping):
+        if "errorCode" in data:
+            candidates.append(data.get("errorCode"))
+        exception_name = data.get("exceptionname")
+        if exception_name is not None:
+            if (
+                type(exception_name) is not str
+                or not exception_name
+                or exception_name != exception_name.strip()
+            ):
+                raise BetfairMarketBookProtocolError(
+                    "Betfair provider exceptionname must be a canonical string"
+                )
+            nested = data.get(exception_name)
+            if isinstance(nested, Mapping) and "errorCode" in nested:
+                candidates.append(nested.get("errorCode"))
+        for nested in data.values():
+            if isinstance(nested, Mapping) and "errorCode" in nested:
+                candidates.append(nested.get("errorCode"))
+
+    codes: set[str] = set()
+    for candidate in candidates:
+        if (
+            type(candidate) is not str
+            or not candidate
+            or candidate != candidate.strip()
+            or candidate != candidate.upper()
+            or any(
+                char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+                for char in candidate
+            )
+        ):
+            raise BetfairMarketBookProtocolError(
+                "Betfair provider errorCode must be a canonical uppercase token"
+            )
+        codes.add(candidate)
+    if len(codes) > 1:
+        raise BetfairMarketBookProtocolError(
+            "Betfair provider error contains contradictory errorCode values"
+        )
+    provider_error_code = next(iter(codes), None)
+    return json_rpc_code, provider_error_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,8 +674,18 @@ def _post_market_book_readonly(
             raise BetfairMarketBookProtocolError(
                 "Betfair response contains both error and result"
             )
+        json_rpc_code, provider_error_code = _provider_error_identity(
+            envelope["error"]
+        )
+        suffix = (
+            f" ({provider_error_code})"
+            if provider_error_code is not None
+            else ""
+        )
         raise BetfairMarketBookProviderError(
-            "Betfair JSON-RPC returned an error for listMarketBook"
+            "Betfair JSON-RPC returned an error for listMarketBook" + suffix,
+            json_rpc_code=json_rpc_code,
+            provider_error_code=provider_error_code,
         )
     if "result" not in envelope:
         raise BetfairMarketBookProtocolError(

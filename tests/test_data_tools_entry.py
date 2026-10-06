@@ -195,7 +195,7 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertEqual(
             stderr.getvalue().strip(),
             "Autosport-Data: verify-dataset=FAIL_CLOSED error=ValueError: "
-            "exception details unavailable",
+            "invalid dataset second diagnostic line",
         )
         self.assertNotIn("Traceback", stderr.getvalue())
 
@@ -288,7 +288,7 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertEqual(
             stderr.getvalue().strip(),
             "Autosport-Data: verify-dataset=FAIL_CLOSED error=ValueError: "
-            "invalid dataset second diagnostic line",
+            "exception details unavailable",
         )
         self.assertNotIn("Traceback", stderr.getvalue())
 

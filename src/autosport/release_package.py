@@ -159,7 +159,14 @@ def _open_regular_source_stream(
     label: str,
     expected_snapshot: os.stat_result | None = None,
 ) -> Iterator[BinaryIO]:
-    """Open one stable regular source without following its final pathname alias."""
+    """Open one stable regular source without following its final pathname alias.
+
+    Path-stat and descriptor-stat identities are deliberately not compared directly.
+    Windows can expose different CRT identity metadata for the same file across those
+    two stat domains. Path stability is proved path-to-path, descriptor stability is
+    proved descriptor-to-descriptor, and fresh no-follow descriptors bind both domains
+    through authoritative sameopenfile identity.
+    """
 
     initial_snapshot = _require_regular_source_file(path, label=label)
     authority_snapshot = (
@@ -197,33 +204,62 @@ def _open_regular_source_stream(
         with stream:
             opened = os.fstat(stream.fileno())
             current = path.lstat()
-            if (
-                not _same_regular_source_snapshot(
-                    authority_snapshot,
-                    opened,
+            verification_descriptor: int | None = None
+            try:
+                verification_descriptor = _open_read_only_descriptor(path)
+                verification = os.fstat(verification_descriptor)
+                same_open_file = os.path.sameopenfile(
+                    stream.fileno(),
+                    verification_descriptor,
                 )
-                or stat.S_ISLNK(current.st_mode)
+            except OSError as exc:
+                raise ValueError(f"{label} changed during open: {path}") from exc
+            finally:
+                if verification_descriptor is not None:
+                    os.close(verification_descriptor)
+
+            if (
+                stat.S_ISLNK(current.st_mode)
                 or _is_windows_reparse_point(current)
                 or not stat.S_ISREG(current.st_mode)
-                or not _same_regular_source_snapshot(opened, current)
+                or not _same_regular_source_snapshot(authority_snapshot, current)
+                or not same_open_file
+                or not _same_regular_source_snapshot(opened, verification)
             ):
                 raise ValueError(f"{label} changed during open: {path}")
+
             yield stream
+
             after_open = os.fstat(stream.fileno())
             after = path.lstat()
+            final_verification_descriptor: int | None = None
+            try:
+                final_verification_descriptor = _open_read_only_descriptor(path)
+                final_verification = os.fstat(final_verification_descriptor)
+                same_final_open_file = os.path.sameopenfile(
+                    stream.fileno(),
+                    final_verification_descriptor,
+                )
+            except OSError as exc:
+                raise ValueError(f"{label} changed during read: {path}") from exc
+            finally:
+                if final_verification_descriptor is not None:
+                    os.close(final_verification_descriptor)
+
             if (
                 stat.S_ISLNK(after.st_mode)
                 or _is_windows_reparse_point(after)
                 or not stat.S_ISREG(after.st_mode)
                 or not _same_regular_source_snapshot(opened, after_open)
-                or not _same_regular_source_snapshot(after_open, after)
+                or not _same_regular_source_snapshot(current, after)
+                or not same_final_open_file
+                or not _same_regular_source_snapshot(after_open, final_verification)
             ):
                 raise ValueError(f"{label} changed during read: {path}")
     except ValueError:
         raise
     except OSError as exc:
         raise ValueError(f"{label} could not be read safely: {path}") from exc
-
 
 def _read_regular_source_bytes(
     path: Path,

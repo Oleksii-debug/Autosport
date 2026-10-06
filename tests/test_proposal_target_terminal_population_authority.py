@@ -90,6 +90,7 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
         market_id: str = "match_odds",
         selection_id: str = "home",
         exchange_side: str | None = None,
+        market_semantics_id: str | None = None,
     ) -> ProposedTicketRiskContext:
         leg = TicketLeg(
             event_id=event_id,
@@ -98,6 +99,7 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
             locked_odds=Decimal("2.3"),
             sport="table_tennis",
             exchange_side=exchange_side,
+            market_semantics_id=market_semantics_id,
         )
         quote = MarketEvent(
             event_id=leg.event_id,
@@ -112,6 +114,7 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
             ingest_ts=self.QUOTE_TS,
             sport="table_tennis",
             exchange_side=exchange_side,
+            market_semantics_id=market_semantics_id,
         )
         return ProposedTicketRiskContext(
             legs=(leg,),
@@ -336,21 +339,27 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
         self.assertTrue(population.terminal_space_exhaustive)
         self.assertFalse(population.terminal_space_exact)
 
-    def test_exchange_side_target_remains_outside_terminal_authority(self) -> None:
+    def test_exchange_side_target_maps_to_underlying_terminal_market(self) -> None:
         exchange_target = issue_product_proposal_risk_target(
             self.workspace,
             signal_strengths=(Decimal("1"),),
-            contexts=(self._context(exchange_side="back"),),
+            contexts=(
+                self._context(
+                    exchange_side="lay",
+                    market_semantics_id="exchange.match.odds.v1",
+                ),
+            ),
         )
-        with self.assertRaisesRegex(
-            ProductProposalTargetTerminalPopulationError,
-            "does not yet prove exchange-side semantics",
-        ):
-            issue_product_proposal_target_terminal_population(
-                self.workspace,
-                target_sha256=exchange_target.target_sha256,
-                authorities=(self._authority(),),
-            )
+        population = issue_product_proposal_target_terminal_population(
+            self.workspace,
+            target_sha256=exchange_target.target_sha256,
+            authorities=(self._authority(),),
+        )
+
+        self.assertTrue(population.provider_terminal_authority_proven)
+        self.assertEqual(population.terminal_market_count, 1)
+        self.assertEqual(len(population.candidate_market_authority_sha256s), 1)
+        self.assertEqual(len(population.candidate_market_authority_sha256s[0]), 1)
 
     def test_target_resolver_rebinding_is_rejected_before_dispatch(self) -> None:
         authority = self._authority()

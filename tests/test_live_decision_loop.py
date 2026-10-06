@@ -7090,7 +7090,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             result = loop.run_cycle()
 
             self.assertEqual(result.status, LiveCycleStatus.DECIDED)
-            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(factory.calls, [])
 
     def test_clean_restart_rejects_same_id_selector_swap_after_capture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -7546,7 +7546,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             factory.calls.clear()
             clock.value = self.START + timedelta(seconds=4)
             self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
-            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(factory.calls, [])
             loop.close()
 
     def test_future_source_timestamp_preserves_predecessor_until_source_boundary(self) -> None:
@@ -7737,7 +7737,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             factory.calls.clear()
             clock.value = self.START + timedelta(seconds=10)
             self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
-            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(factory.calls, [])
             loop.close()
 
     def test_future_local_availability_recomputes_at_exact_boundary_without_new_market_delta(self) -> None:
@@ -7768,7 +7768,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             first = loop.run_cycle()
             self.assertEqual(first.status, LiveCycleStatus.DECIDED)
-            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(factory.calls, [])
             self.assertEqual(
                 loop._availability_deadlines["input-a"],
                 self.START + timedelta(seconds=3),
@@ -7872,7 +7872,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             result = loop.run_cycle()
 
             self.assertEqual(result.status, LiveCycleStatus.DECIDED)
-            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(factory.calls, [])
             self.assertEqual(
                 loop._availability_deadlines["input-a"],
                 far_future,
@@ -7907,13 +7907,45 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             first = loop.run_cycle()
             self.assertEqual(first.status, LiveCycleStatus.DECIDED)
-            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(factory.calls, [])
             self.assertIsNone(loop._availability_deadlines["input-a"])
 
             factory.calls.clear()
             clock.value = self.START + timedelta(seconds=7)
             self.assertEqual(loop.run_cycle().status, LiveCycleStatus.NO_CHANGE)
             self.assertEqual(factory.calls, [])
+            loop.close()
+
+    def test_missing_registered_component_is_durable_wait_before_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [])
+            latest = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[-1]
+            self.assertEqual(latest.payload["schema_version"], 4)
+            self.assertEqual(latest.payload["gate"], "actionability_wait")
+            wait = latest.to_dict()["payload"]["actionability_wait_evidence"]
+            self.assertEqual(len(wait), 1)
+            self.assertEqual(wait[0]["input_id"], "input-a")
+            self.assertEqual(wait[0]["wait_reasons"], ["no_components"])
+            self.assertEqual(
+                wait[0]["recheck_triggers"],
+                ["matching_component_change"],
+            )
+            self.assertEqual(wait[0]["provider_health"], [])
             loop.close()
 
     def test_freshness_expiry_recomputes_without_market_delta(self) -> None:

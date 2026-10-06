@@ -16,7 +16,7 @@ import autosport._paper_value_execution_authority as authority
 EVENT_TS = "2026-09-20T09:00:00+00:00"
 
 
-def test_restart_risk_rebuild_preserves_market_identity() -> None:
+def test_restart_risk_rebuild_preserves_exchange_side_for_legacy_semantics() -> None:
     runtime = object.__new__(PaperExecutionAdoptionRuntime)
     runtime.ledger = SimpleNamespace(events=lambda _run_id=None: ())
 
@@ -46,7 +46,6 @@ def test_restart_risk_rebuild_preserves_market_identity() -> None:
         source_id="provider-a",
         sequence=1,
         sport="football",
-        market_semantics_id="winner-v2",
         exchange_side="lay",
     )
     result = authority._first_execution_risk_authority(
@@ -69,9 +68,54 @@ def test_restart_risk_rebuild_preserves_market_identity() -> None:
     assert leg.event_id == durable_event.event_id
     assert leg.market_id == durable_event.market_id
     assert leg.selection_id == durable_event.selection_id
-    assert leg.market_semantics_id == "winner-v2"
     assert leg.exchange_side == "lay"
     assert policy.context.quotes[0] is durable_event
+
+
+def test_restart_risk_market_semantics_fails_closed_until_ticket_leg_binds_it() -> None:
+    runtime = object.__new__(PaperExecutionAdoptionRuntime)
+    runtime.ledger = SimpleNamespace(events=lambda _run_id=None: ())
+
+    class RejectingRiskPolicy:
+        economic_goal = SimpleNamespace(bankroll_id="bankroll-1", currency="EUR")
+
+        def evaluate(self, _book, _stake, *, context):
+            raise AssertionError("risk evaluation must not run with unbound semantics")
+
+    durable_event = MarketEvent(
+        event_id="event-1",
+        market_id="market-1",
+        selection_id="selection-1",
+        decimal_odds=Decimal("2.50"),
+        observed_ts=EVENT_TS,
+        source_id="provider-a",
+        sequence=1,
+        sport="football",
+        market_semantics_id="winner-v2",
+        exchange_side="lay",
+    )
+
+    with pytest.raises(
+        PaperExecutionAdoptionError,
+        match="cannot prove market-semantics risk identity",
+    ):
+        authority._first_execution_risk_authority(
+            SimpleNamespace(risk_policy=RejectingRiskPolicy()),
+            SimpleNamespace(
+                paper_execution=runtime,
+                paper_book=PaperBook("100.00"),
+            ),
+            SimpleNamespace(decision_id="decision-1", observed_ts=EVENT_TS),
+            None,
+            durable_event,
+            Decimal("1.00"),
+            "run-1",
+            {
+                "bankroll_id": "bankroll-1",
+                "currency": "EUR",
+                "provider_account": ["provider-a", "account-a"],
+            },
+        )
 
 
 

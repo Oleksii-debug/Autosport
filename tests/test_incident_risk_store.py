@@ -647,6 +647,30 @@ class IncidentRiskStoreTests(unittest.TestCase):
         ):
             self._store(self.workspace).load()
 
+    def test_append_revalidates_post_construction_entry_tamper(self) -> None:
+        entry = self._entry()
+        object.__setattr__(entry, "requires_operator_action", 1)
+
+        with self.assertRaisesRegex(
+            IncidentRiskStoreError,
+            "history contains an invalid entry snapshot",
+        ):
+            self.store.append(entry)
+
+        self.assertFalse(self.store.path.exists())
+
+    def test_append_rejects_post_construction_enum_tamper_before_serialization(self) -> None:
+        entry = self._entry()
+        object.__setattr__(entry, "status", object())
+
+        with self.assertRaisesRegex(
+            IncidentRiskStoreError,
+            "history contains an invalid entry snapshot",
+        ):
+            self.store.append(entry)
+
+        self.assertFalse(self.store.path.exists())
+
     def test_root_schema_and_truth_boundary_are_exact(self) -> None:
         snapshot = self.store.append(self._entry())
         payload = json.loads(

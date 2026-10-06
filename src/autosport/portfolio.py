@@ -314,7 +314,15 @@ class PortfolioEngine:
                         winners,
                         voids,
                     )
-                    scenario_value = payout - stake
+                    economic_cost = (
+                        _CANONICAL_LOCKED_CAPITAL_FOR_TICKET(ticket)
+                        if any(
+                            leg.exchange_side == "lay"
+                            for leg in ticket.legs
+                        )
+                        else stake
+                    )
+                    scenario_value = payout - economic_cost
                     if not scenario_value.is_finite():
                         raise ValueError(
                             f"portfolio ticket {ticket.ticket_id} scenario profit must be finite"

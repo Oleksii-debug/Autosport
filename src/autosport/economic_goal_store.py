@@ -8,6 +8,7 @@ non-expanding successor of the already persisted owner contract.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import weakref
@@ -189,6 +190,7 @@ _CANONICAL_OS_FDOPEN: Final = os.fdopen
 _CANONICAL_OS_SAMEOPENFILE: Final = os.path.sameopenfile
 _CANONICAL_OS_CLOSE: Final = os.close
 _CANONICAL_STAT_ISREG: Final = stat.S_ISREG
+_CANONICAL_JSON_DUMPS: Final = json.dumps
 
 _STORE_BINDINGS_BY_ID: Final = {}
 _CANONICAL_OBJECT_GETATTRIBUTE: Final = object.__getattribute__
@@ -257,6 +259,9 @@ def economic_goal_to_payload(
     _schema=ECONOMIC_GOAL_SCHEMA,
     _schema_version=ECONOMIC_GOAL_SCHEMA_VERSION,
     _error_type=EconomicGoalContractError,
+    _json_dumps=_CANONICAL_JSON_DUMPS,
+    _max_json_chars=_MAX_ECONOMIC_GOAL_JSON_TEXT_CHARS,
+    _max_json_bytes=_MAX_ECONOMIC_GOAL_JSON_BYTES,
 ) -> dict[str, object]:
     """Return the canonical schema-v1 JSON payload for ``contract``."""
 
@@ -307,11 +312,33 @@ def economic_goal_to_payload(
         "blocked_providers": sorted(contract.blocked_providers),
         "blocked_markets": sorted(contract.blocked_markets),
     }
-    return {
+    payload: dict[str, object] = {
         "schema": _schema,
         "schema_version": _schema_version,
         "contract": body,
     }
+    try:
+        persisted_text = _json_dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        ) + "\n"
+        persisted_bytes = persisted_text.encode("utf-8", errors="strict")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise _error_type(
+            "economic goal payload is not canonically serializable"
+        ) from exc
+    if len(persisted_text) > _max_json_chars:
+        raise _error_type(
+            "economic goal payload exceeds the canonical persistence text-size limit"
+        )
+    if len(persisted_bytes) > _max_json_bytes:
+        raise _error_type(
+            "economic goal payload exceeds the canonical persistence byte-size limit"
+        )
+    return payload
 
 
 def economic_goal_from_payload(

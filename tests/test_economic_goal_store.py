@@ -1467,3 +1467,30 @@ def test_payload_uses_captured_contract_field_values_after_descriptor_rebinding(
     body = payload["contract"]
     assert isinstance(body, dict)
     assert body["max_stake_fraction"] == "0.03"
+
+def test_store_successor_ignores_runtime_post_init_rebinding(monkeypatch, tmp_path) -> None:
+    previous = _goal()
+    candidate = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.01"),
+    )
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(previous)
+
+    called = False
+
+    def forged(self) -> None:
+        nonlocal called
+        called = True
+        raise AssertionError("runtime-rebound EconomicGoalContract.__post_init__ executed")
+
+    monkeypatch.setattr(EconomicGoalContract, "__post_init__", forged)
+
+    store.persist_automatic_successor(candidate)
+
+    assert called is False
+    restored = EconomicGoalStore(tmp_path).load()
+    assert restored.revision == 2
+    assert restored.max_stake_fraction == Decimal("0.01")
+

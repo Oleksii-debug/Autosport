@@ -854,6 +854,32 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertFalse(store.state_path.exists())
 
+    def test_transition_rejects_in_place_post_init_helper_code_mutation(self) -> None:
+        store = self._store()
+        first = store.current()
+        import autosport.economic_session as economic_session
+
+        for name in ("_is_sha256", "_parse_instant"):
+            with self.subTest(helper=name):
+                helper = getattr(economic_session, name)
+                original_code = helper.__code__
+
+                def hostile(*args, **kwargs):
+                    raise AssertionError(
+                        f"mutated session helper {name} executed"
+                    )
+
+                try:
+                    helper.__code__ = hostile.__code__
+                    with self.assertRaisesRegex(
+                        EconomicSessionIntegrityError,
+                        "authority composition changed after construction",
+                    ):
+                        store.transition_to_current_goal(first)
+                finally:
+                    helper.__code__ = original_code
+
+
     def test_session_evidence_validation_is_detached_from_live_helpers(self) -> None:
         import autosport.economic_session as economic_session
 

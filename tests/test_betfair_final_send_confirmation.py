@@ -6,6 +6,8 @@ import tempfile
 
 import pytest
 
+import autosport.betfair_execution_confirmation as confirmation_runtime
+import autosport.supervised_confirmation as confirmation_store_runtime
 import autosport.supervised_execution as supervised_execution
 from autosport.betfair_execution_confirmation import (
     CONFIRMATION_FILENAME,
@@ -273,3 +275,98 @@ def test_confirmation_expiring_during_durable_recheck_never_reaches_post(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         )
+
+
+
+def test_confirmation_binding_validator_rebinding_fails_before_submission(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-confirmation-validator-rebound"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        _authority, review, receipt = _issue_confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        _set_trusted_times(monkeypatch, RESERVED_AT)
+
+        monkeypatch.setattr(
+            confirmation_runtime,
+            "_require_confirmation_binding",
+            lambda *args, **kwargs: None,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="confirmation authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+
+
+def test_generic_confirmation_method_rebinding_fails_before_submission(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-generic-confirmation-rebound"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        _authority, review, receipt = _issue_confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        _set_trusted_times(monkeypatch, RESERVED_AT)
+
+        original = (
+            confirmation_store_runtime.SupervisedConfirmationAuthority
+            .resolve_receipt_binding
+        )
+
+        def rebound(self, *args, **kwargs):
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            confirmation_store_runtime.SupervisedConfirmationAuthority,
+            "resolve_receipt_binding",
+            rebound,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="confirmation authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED

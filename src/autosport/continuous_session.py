@@ -2282,6 +2282,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 "dependency index registration selectors are invalid"
             )
         expected_dependency: FocusedMirrorDependency | None = None
+        before_dependencies: tuple[FocusedMirrorDependency, ...] | None = None
+        dependency_mirror: object | None = None
         if isinstance(dependency_index, FocusedMirrorDependencyIndex):
             try:
                 expected_dependency = FocusedMirrorDependency(
@@ -2311,6 +2313,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "dependency index registration selectors are invalid"
                 ) from exc
+            before_dependencies = tuple(
+                FocusedMirrorDependencyIndex._dependency(
+                    dependency_index,
+                    existing_input_id,
+                )
+                for existing_input_id in before_ids
+            )
+            dependency_mirror = dependency_index._mirror
         if input_id in before_ids:
             if expected_dependency is not None:
                 existing_dependency = FocusedMirrorDependencyIndex._dependency(
@@ -2349,6 +2359,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index registration changed unrelated input identities"
             )
+        if before_dependencies is not None:
+            if dependency_index._mirror is not dependency_mirror:
+                raise ContinuousSessionError(
+                    "dependency index registration changed mirror authority"
+                )
+            current_dependencies = tuple(
+                FocusedMirrorDependencyIndex._dependency(
+                    dependency_index,
+                    existing_input_id,
+                )
+                for existing_input_id in before_ids
+            )
+            if current_dependencies != before_dependencies:
+                raise ContinuousSessionError(
+                    "dependency index registration changed unrelated dependency selectors"
+                )
         if expected_dependency is not None:
             published_dependency = FocusedMirrorDependencyIndex._dependency(
                 dependency_index,
@@ -2401,6 +2427,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index input identity state is invalid"
             )
+        before_dependencies: tuple[FocusedMirrorDependency, ...] | None = None
+        dependency_mirror: object | None = None
+        if isinstance(dependency_index, FocusedMirrorDependencyIndex):
+            before_dependencies = tuple(
+                FocusedMirrorDependencyIndex._dependency(
+                    dependency_index,
+                    existing_input_id,
+                )
+                for existing_input_id in before_ids
+            )
+            dependency_mirror = dependency_index._mirror
         removed = unregister_input(input_id)
         if type(removed) is not bool:
             raise ContinuousSessionError(
@@ -2436,6 +2473,27 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "dependency index retirement changed unrelated input identities"
             )
+        if before_dependencies is not None:
+            if dependency_index._mirror is not dependency_mirror:
+                raise ContinuousSessionError(
+                    "dependency index retirement changed mirror authority"
+                )
+            expected_remaining_dependencies = tuple(
+                dependency
+                for dependency in before_dependencies
+                if dependency.input_id != input_id
+            )
+            current_remaining_dependencies = tuple(
+                FocusedMirrorDependencyIndex._dependency(
+                    dependency_index,
+                    remaining_input_id,
+                )
+                for remaining_input_id in after_ids
+            )
+            if current_remaining_dependencies != expected_remaining_dependencies:
+                raise ContinuousSessionError(
+                    "dependency index retirement changed unrelated dependency selectors"
+                )
         return removed
 
     def _drain_invalidations(

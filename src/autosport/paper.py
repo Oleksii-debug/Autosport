@@ -183,21 +183,29 @@ del _make_paperbook_locked_capital_authority
 
 def _make_paperbook_type_authority():
     canonical_type = None
+    exact_type = type
+    runtime_error_type = RuntimeError
+    declaration_error_type = TypeError
+    authority_error_type = ValueError
 
     def install(candidate: type) -> None:
         nonlocal canonical_type
         if canonical_type is not None:
-            raise RuntimeError("PaperBook canonical type authority already installed")
-        if type(candidate) is not type:
-            raise TypeError("PaperBook canonical type authority must be an exact class")
+            raise runtime_error_type("PaperBook canonical type authority already installed")
+        if exact_type(candidate) is not exact_type:
+            raise declaration_error_type(
+                "PaperBook canonical type authority must be an exact class"
+            )
         canonical_type = candidate
 
     def require(target: object) -> None:
         if canonical_type is None:
-            raise RuntimeError("PaperBook canonical type authority is unavailable")
-        target_type = target if type(target) is type else type(target)
+            raise runtime_error_type("PaperBook canonical type authority is unavailable")
+        target_type = target if exact_type(target) is exact_type else exact_type(target)
         if target_type is not canonical_type:
-            raise ValueError("PaperBook authority target must be the canonical PaperBook type")
+            raise authority_error_type(
+                "PaperBook authority target must be the canonical PaperBook type"
+            )
 
     return install, require
 

@@ -414,6 +414,7 @@ def test_save_rejects_directory_readonly_flag_authority_drift_before_parent_crea
         ("exists", r"snapshot exists authority changed"),
         ("mkdir", r"snapshot mkdir authority changed"),
         ("__eq__", r"snapshot equality authority changed"),
+        ("__fspath__", r"snapshot filesystem path authority changed"),
     ),
 )
 def test_save_rejects_rebound_snapshot_path_method_before_parent_creation(

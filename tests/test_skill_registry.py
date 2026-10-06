@@ -713,6 +713,170 @@ def test_handler_spool_decode_baseexception_cleans_spool_before_reraise(
     assert not spool_path.exists()
 
 
+@pytest.mark.parametrize(
+    ("stop_mode", "expected_error"),
+    (
+        ("stop_failed", "HANDLER_TIMEOUT_STOP_FAILED"),
+        ("handle_close_failed", "HANDLER_TIMEOUT_HANDLE_CLOSE_FAILED"),
+    ),
+)
+def test_handler_spool_cleanup_failure_does_not_mask_process_stop_truth(
+    tmp_path, monkeypatch, stop_mode, expected_error
+):
+    spool_path = tmp_path / "handler-result.json"
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            if stop_mode == "stop_failed":
+                raise OSError("simulated kill failure")
+            self.alive = False
+
+        def terminate(self):
+            if stop_mode == "stop_failed":
+                raise OSError("simulated terminate failure")
+            self.alive = False
+
+        def close(self):
+            if stop_mode == "handle_close_failed":
+                raise OSError("simulated process handle close failure")
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_spooled_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert args[2] == str(spool_path)
+            assert daemon is True
+            return process
+
+    def fake_mkstemp(*, prefix, suffix):
+        assert prefix == "autosport-skill-result-"
+        assert suffix == ".json"
+        descriptor = skill_registry_module.os.open(
+            spool_path,
+            skill_registry_module.os.O_CREAT
+            | skill_registry_module.os.O_RDWR,
+        )
+        return descriptor, str(spool_path)
+
+    monkeypatch.setattr(skill_registry_module.tempfile, "mkstemp", fake_mkstemp)
+    cleanup_attempts = []
+
+    def fail_spool_cleanup(path, *, suppress_base_exceptions=False):
+        assert suppress_base_exceptions is False
+        cleanup_attempts.append(path)
+        return False
+
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_remove_handler_result_spool",
+        fail_spool_cleanup,
+    )
+
+    try:
+        result, error = skill_registry_module._execute_handler_spooled_bounded(
+            FakeContext(),
+            _slow_handler,
+            {},
+            1,
+        )
+
+        assert result is None
+        assert error == expected_error
+        assert cleanup_attempts == [spool_path]
+        assert process.closed is False
+    finally:
+        spool_path.unlink(missing_ok=True)
+
+
+def test_handler_spool_cleanup_failure_still_invalidates_success(
+    tmp_path, monkeypatch
+):
+    spool_path = tmp_path / "handler-result.json"
+    expected = SkillExecutionResult(output={})
+
+    class FakeProcess:
+        def __init__(self):
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_spooled_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert args[2] == str(spool_path)
+            assert daemon is True
+            return process
+
+    def fake_mkstemp(*, prefix, suffix):
+        assert prefix == "autosport-skill-result-"
+        assert suffix == ".json"
+        descriptor = skill_registry_module.os.open(
+            spool_path,
+            skill_registry_module.os.O_CREAT
+            | skill_registry_module.os.O_RDWR,
+        )
+        return descriptor, str(spool_path)
+
+    monkeypatch.setattr(skill_registry_module.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_decode_handler_result_spool",
+        lambda _path: (expected, None),
+    )
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_remove_handler_result_spool",
+        lambda _path, *, suppress_base_exceptions=False: False,
+    )
+
+    try:
+        result, error = skill_registry_module._execute_handler_spooled_bounded(
+            FakeContext(),
+            _slow_handler,
+            {},
+            1,
+        )
+
+        assert result is None
+        assert error == "HANDLER_RESULT_SPOOL_CLEANUP_FAILED"
+        assert process.closed is True
+    finally:
+        spool_path.unlink(missing_ok=True)
+
+
 def test_handler_timeout_cleanup_hard_kills_before_bounded_reap(monkeypatch):
     class FakeEndpoint:
         def close(self):

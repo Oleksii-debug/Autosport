@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from typing import Any
 from .causal_integrity import contains_forbidden_future_key
 from .domain import utc_now_iso
 from .economic_goal import EconomicGoalContract
+from .integrity import durable_path_lock
 from .economic_goal_provenance import (
     EconomicGoalProvenance,
     EconomicGoalProvenanceError,
@@ -312,8 +314,74 @@ class JsonlDecisionLedger:
     )
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+        # Canonicalize symlink aliases before deriving the durable lock domain.
+        # Hard-link aliases cannot be collapsed by pathname resolution, so every
+        # authoritative read/write additionally requires a single-link file identity.
+        self.path = Path(path).expanduser().resolve(strict=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _require_regular_single_link(path_stat: os.stat_result) -> None:
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path must be a regular non-symlink file"
+            )
+        if path_stat.st_nlink != 1:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path must not have hard-link aliases"
+            )
+
+    @classmethod
+    def _require_same_file_identity(
+        cls,
+        opened: os.stat_result,
+        path_stat: os.stat_result,
+    ) -> None:
+        cls._require_regular_single_link(opened)
+        cls._require_regular_single_link(path_stat)
+        if opened.st_dev != path_stat.st_dev or opened.st_ino != path_stat.st_ino:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path changed during durable access"
+            )
+
+    def _verified_read_under_lock(self) -> bytes:
+        try:
+            path_before = os.stat(self.path, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file is missing or unreadable"
+            ) from exc
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file is missing or unreadable"
+            ) from exc
+        self._require_regular_single_link(path_before)
+        try:
+            with self.path.open("rb") as handle:
+                opened = os.fstat(handle.fileno())
+                path_opened = os.stat(self.path, follow_symlinks=False)
+                self._require_same_file_identity(opened, path_opened)
+                raw = handle.read()
+                opened_after = os.fstat(handle.fileno())
+                path_after = os.stat(self.path, follow_symlinks=False)
+                self._require_same_file_identity(opened_after, path_after)
+                if (
+                    opened.st_dev != opened_after.st_dev
+                    or opened.st_ino != opened_after.st_ino
+                    or opened.st_size != opened_after.st_size
+                    or opened.st_mtime_ns != opened_after.st_mtime_ns
+                    or opened.st_ctime_ns != opened_after.st_ctime_ns
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger changed during durable read"
+                    )
+                return raw
+        except DecisionLedgerIntegrityError:
+            raise
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file is missing or unreadable"
+            ) from exc
 
     @staticmethod
     def _require_utf8_text(value: str, *, path: str) -> None:
@@ -478,25 +546,73 @@ class JsonlDecisionLedger:
             sort_keys=True,
             allow_nan=False,
         )
-        try:
-            existing = self.path.read_bytes()
-        except FileNotFoundError:
-            existing = b""
-        except OSError as exc:
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger file is unreadable before append"
-            ) from exc
-        self._verify_bytes(
-            existing,
-            reserved_decision_id=payload["decision_id"],
-            reserved_material_action_id=payload["payload"].get(
-                MATERIAL_ACTION_ID_PAYLOAD_KEY
-            ),
-        )
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(envelope + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        encoded = (envelope + "\n").encode("utf-8")
+
+        # The complete read -> collision proof -> append transaction is one
+        # cooperating-writer critical section.  durable_path_lock alone is
+        # pathname-scoped, so the ledger file itself is also required to be a
+        # single-link regular file: two hard-link aliases must never acquire
+        # different sidecar locks and race the same material_action_id.
+        with durable_path_lock(self.path):
+            handle = None
+            try:
+                try:
+                    handle = self.path.open("x+b")
+                    existing = b""
+                except FileExistsError:
+                    path_before = os.stat(self.path, follow_symlinks=False)
+                    self._require_regular_single_link(path_before)
+                    handle = self.path.open("r+b")
+                    opened = os.fstat(handle.fileno())
+                    path_opened = os.stat(self.path, follow_symlinks=False)
+                    self._require_same_file_identity(opened, path_opened)
+                    handle.seek(0)
+                    existing = handle.read()
+                    opened_after_read = os.fstat(handle.fileno())
+                    path_after_read = os.stat(self.path, follow_symlinks=False)
+                    self._require_same_file_identity(
+                        opened_after_read,
+                        path_after_read,
+                    )
+                    if (
+                        opened.st_dev != opened_after_read.st_dev
+                        or opened.st_ino != opened_after_read.st_ino
+                        or opened.st_size != opened_after_read.st_size
+                        or opened.st_mtime_ns != opened_after_read.st_mtime_ns
+                        or opened.st_ctime_ns != opened_after_read.st_ctime_ns
+                    ):
+                        raise DecisionLedgerIntegrityError(
+                            "Decision Ledger changed during pre-append verification"
+                        )
+
+                assert handle is not None
+                opened_for_write = os.fstat(handle.fileno())
+                path_for_write = os.stat(self.path, follow_symlinks=False)
+                self._require_same_file_identity(opened_for_write, path_for_write)
+                self._verify_bytes(
+                    existing,
+                    reserved_decision_id=payload["decision_id"],
+                    reserved_material_action_id=payload["payload"].get(
+                        MATERIAL_ACTION_ID_PAYLOAD_KEY
+                    ),
+                )
+                handle.seek(0, os.SEEK_END)
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+                written = os.fstat(handle.fileno())
+                path_written = os.stat(self.path, follow_symlinks=False)
+                self._require_same_file_identity(written, path_written)
+            except DecisionLedgerIntegrityError:
+                raise
+            except OSError as exc:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger durable append failed"
+                ) from exc
+            finally:
+                if handle is not None:
+                    handle.close()
         return digest
 
     def append(self, record: DecisionRecord) -> str:
@@ -655,12 +771,8 @@ class JsonlDecisionLedger:
         return line_count
 
     def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
-        try:
-            raw = self.path.read_bytes()
-        except OSError as exc:
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger file is missing or unreadable"
-            ) from exc
+        with durable_path_lock(self.path):
+            raw = self._verified_read_under_lock()
         record_count = self._verify_bytes(raw)
         return VerifiedDecisionLedgerSnapshot(
             payload=raw,

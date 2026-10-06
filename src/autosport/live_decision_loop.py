@@ -2655,6 +2655,28 @@ class PersistentLiveDecisionLoop:
             )
         canonical: list[dict[str, object]] = []
         previous_input_id: str | None = None
+        structural_trigger_by_reason = {
+            LiveInputWaitReason.NO_COMPONENTS.value: (
+                LiveInputRecheckTrigger.MATCHING_COMPONENT_CHANGE.value
+            ),
+            LiveInputWaitReason.NON_OPEN_STATUS.value: (
+                LiveInputRecheckTrigger.MARKET_STATUS_CHANGE.value
+            ),
+            LiveInputWaitReason.INVALID_CAUSAL_TIMESTAMP.value: (
+                LiveInputRecheckTrigger.VALID_CAUSAL_OBSERVATION.value
+            ),
+            LiveInputWaitReason.FUTURE_CAUSALITY.value: (
+                LiveInputRecheckTrigger.CAUSALLY_ADMISSIBLE_OBSERVATION.value
+            ),
+            LiveInputWaitReason.STALE.value: (
+                LiveInputRecheckTrigger.FRESH_OBSERVATION.value
+            ),
+        }
+        allowed_provider_reasons = {
+            f"provider_health:{eligibility.value}"
+            for eligibility in ProviderDecisionEligibility
+            if eligibility is not ProviderDecisionEligibility.ELIGIBLE
+        }
         for item in raw:
             if type(item) is not dict or set(item) != {
                 "input_id",
@@ -2764,6 +2786,41 @@ class PersistentLiveDecisionLoop:
                         "replay_boundary": bound.to_dict(),
                     }
                 )
+
+            reason_set = set(reasons)
+            structural_reason_set = reason_set.intersection(
+                structural_trigger_by_reason
+            )
+            provider_reason_set = reason_set.difference(structural_reason_set)
+            if not provider_reason_set.issubset(allowed_provider_reasons):
+                raise LiveDecisionProgressError(
+                    "actionability WAIT reason is not canonical"
+                )
+            if structural_reason_set and canonical_health:
+                raise LiveDecisionProgressError(
+                    "structural actionability WAIT cannot carry provider-health evidence"
+                )
+            health_reason_set = {
+                f"provider_health:{health['eligibility']}"
+                for health in canonical_health
+                if health["eligibility"]
+                != ProviderDecisionEligibility.ELIGIBLE.value
+            }
+            if provider_reason_set != health_reason_set:
+                raise LiveDecisionProgressError(
+                    "provider-health WAIT reasons do not match canonical evidence"
+                )
+            expected_triggers = {
+                structural_trigger_by_reason[reason]
+                for reason in structural_reason_set
+            }
+            if health_reason_set:
+                expected_triggers.add("provider_health_transition")
+            if set(triggers) != expected_triggers:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT recheck triggers do not match reasons"
+                )
+
             row_without_hash: dict[str, object] = {
                 "input_id": input_id,
                 "structural_evidence_sha256": structural_sha,

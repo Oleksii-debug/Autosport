@@ -7948,6 +7948,77 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(wait[0]["provider_health"], [])
             loop.close()
 
+    def test_actionability_wait_evidence_rejects_semantic_reason_laundering(self) -> None:
+        def evidence_row(
+            *,
+            reasons: list[str],
+            triggers: list[str],
+            provider_health: list[dict[str, object]] | None = None,
+        ) -> dict[str, object]:
+            core: dict[str, object] = {
+                "input_id": "input-a",
+                "structural_evidence_sha256": "0" * 64,
+                "wait_reasons": reasons,
+                "recheck_triggers": triggers,
+                "provider_health": provider_health or [],
+            }
+            encoded = json.dumps(
+                core,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            return {
+                **core,
+                "evidence_sha256": hashlib.sha256(encoded).hexdigest(),
+            }
+
+        provider_failure = {
+            "source_id": "provider-a",
+            "eligibility": "failed",
+            "source_status": "failed",
+            "last_success_at": None,
+            "replay_boundary": ProviderHealthReplayBoundary(
+                "provider-a",
+                None,
+                0,
+            ).to_dict(),
+        }
+        cases = (
+            (
+                evidence_row(
+                    reasons=["caller_claimed_current"],
+                    triggers=["fresh_observation"],
+                ),
+                "reason is not canonical",
+            ),
+            (
+                evidence_row(
+                    reasons=["stale"],
+                    triggers=["matching_component_change"],
+                ),
+                "recheck triggers do not match reasons",
+            ),
+            (
+                evidence_row(
+                    reasons=["provider_health:degraded"],
+                    triggers=["provider_health_transition"],
+                    provider_health=[provider_failure],
+                ),
+                "provider-health WAIT reasons do not match canonical evidence",
+            ),
+        )
+        for row, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    message,
+                ):
+                    PersistentLiveDecisionLoop._validated_actionability_wait_evidence(
+                        (row,)
+                    )
+
     def test_wait_reason_transition_at_same_cut_gets_new_decision_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

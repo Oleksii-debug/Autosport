@@ -642,8 +642,13 @@ def test_runtime_source_recovery_transition_uses_global_live_status_once(
     controller._poll_workers()
     assert controller._product_runtime_source_attention_required is True
 
+    recovered = _tick_message(provider_unavailable=False)
+    recovered.economic = _economic_snapshot(
+        tmp_path,
+        cycle_index=recovered.tick.cycle_index,
+    )
     controller.product_worker = _QueuedProductWorker(
-        _tick_message(provider_unavailable=False),
+        recovered,
         busy=True,
     )
     controller.status = "Попередній стан потребував уваги."

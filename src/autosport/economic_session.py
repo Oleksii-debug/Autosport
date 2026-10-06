@@ -278,7 +278,13 @@ def _parse_instant(
         raise EconomicSessionIntegrityError("started_at must be valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise EconomicSessionIntegrityError("started_at must be timezone-aware")
-    return parsed.astimezone(_utc)
+    normalized = parsed.astimezone(_utc)
+    canonical = normalized.isoformat().replace("+00:00", "Z")
+    if value != canonical:
+        raise EconomicSessionIntegrityError(
+            "started_at must be canonical UTC ISO-8601 text"
+        )
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)

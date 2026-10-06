@@ -571,6 +571,9 @@ class OperatorRiskProjection:
     severity_key: str
     status_key: str
     evidence_key: str
+    opened_at: str
+    updated_at: str
+    next_action_key: str
     title: str
     summary: str
     mitigation: str
@@ -581,6 +584,18 @@ class OperatorRiskProjection:
     model_version_ids: tuple[str, ...]
     requires_operator_action: bool
     fingerprint_sha256: str
+
+
+def _operator_next_action_key(entry: IncidentRiskEntry) -> str:
+    """Return a presentation-only localization key; never an action authority."""
+
+    if entry.status in _TERMINAL_RISK_STATUSES:
+        return "ui.risk_register.next_action.none"
+    if entry.status is RiskStatus.MITIGATING:
+        return "ui.risk_register.next_action.verify_mitigation"
+    if entry.requires_operator_action:
+        return "ui.risk_register.next_action.review"
+    return "ui.risk_register.next_action.monitor"
 
 
 def operator_projection(entry: IncidentRiskEntry) -> OperatorRiskProjection:
@@ -594,6 +609,9 @@ def operator_projection(entry: IncidentRiskEntry) -> OperatorRiskProjection:
         severity_key=f"ui.risk_register.severity.{entry.severity.token}",
         status_key=f"ui.risk_register.status.{entry.status.value}",
         evidence_key=f"ui.risk_register.evidence.{entry.evidence_state.value}",
+        opened_at=entry.opened_at,
+        updated_at=entry.updated_at,
+        next_action_key=_operator_next_action_key(entry),
         title=_operator_safe_text("title", entry.title),
         summary=_operator_safe_text("summary", entry.summary),
         mitigation=_operator_safe_text("mitigation", entry.mitigation, allow_empty=True),

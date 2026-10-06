@@ -4048,22 +4048,26 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if input_ids != tick_dependency_input_ids:
                 restore_tick_dependency_routing_authority()
                 raise ContinuousSessionError(message)
-            current_dependencies = tuple(
-                (
-                    input_id,
-                    dependency_fingerprint(
-                        _dependency_reader(dependency_index, input_id)
-                    ),
+            try:
+                current_dependencies = tuple(
+                    (
+                        input_id,
+                        dependency_fingerprint(
+                            _dependency_reader(dependency_index, input_id)
+                        ),
+                    )
+                    for input_id in input_ids
                 )
-                for input_id in input_ids
-            )
-            current_matching_keys = tuple(
-                (
-                    input_id,
-                    _matching_keys_reader(dependency_index, input_id),
+                current_matching_keys = tuple(
+                    (
+                        input_id,
+                        _matching_keys_reader(dependency_index, input_id),
+                    )
+                    for input_id in input_ids
                 )
-                for input_id in input_ids
-            )
+            except Exception as exc:
+                restore_tick_dependency_routing_authority()
+                raise ContinuousSessionError(message) from exc
             if (
                 current_dependencies != tick_dependency_fingerprints
                 or current_matching_keys != tick_matching_keys

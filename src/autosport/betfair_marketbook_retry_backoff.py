@@ -27,7 +27,11 @@ from .continuous_observation import (
     ContinuousObservationConfig,
     _provider_backoff_seconds,
 )
-from .ingestion_health import SourceHealthState, parse_source_timestamp
+from .ingestion_health import (
+    SourceHealthState,
+    SourceHealthStore,
+    parse_source_timestamp,
+)
 
 
 MARKETBOOK_RETRY_BACKOFF_POLICY_VERSION = (
@@ -592,6 +596,7 @@ def _install_retry_projection_authority() -> None:
     decision_type = MarketBookRetryDecision
     plan_type = MarketBookReadPlan
     health_type = SourceHealthState
+    health_store_type = SourceHealthStore
     config_type = ContinuousObservationConfig
     outcome_type = MarketBookAttemptOutcome
     disposition_type = MarketBookRetryDisposition
@@ -632,6 +637,8 @@ def _install_retry_projection_authority() -> None:
     parse_health_timestamp = parse_source_timestamp
     provider_backoff_seconds = _provider_backoff_seconds
     canonical_health_validate = SourceHealthState.validate
+    canonical_health_get = SourceHealthStore.get
+    canonical_health_writer_guard = SourceHealthStore._writer_guard
 
     object_new = object.__new__
     object_setattr = object.__setattr__
@@ -1512,118 +1519,132 @@ def _install_retry_projection_authority() -> None:
         raw_batch_id: str,
         *,
         observed_at: datetime,
-        health: SourceHealthState,
+        health_store: SourceHealthStore,
         config: ContinuousObservationConfig,
     ) -> MarketBookRetryDecision:
         batch = batch_id(self, raw_batch_id)
-        if type_of(health) is not health_type:
-            raise error_type("health must be exact SourceHealthState")
-        canonical_health_validate(health)
+        if type_of(health_store) is not health_store_type:
+            raise error_type(
+                "health_store must be exact SourceHealthStore"
+            )
         if type_of(config) is not config_type:
             raise error_type(
                 "config must be exact ContinuousObservationConfig"
             )
-        source = health_source.__get__(health, health_type)
-        if source != object_getattribute(
-            self, "_provider_source_id"
-        ):
-            raise error_type(
-                "provider health is bound to another source"
-            )
-        if (
-            health_status.__get__(health, health_type) != "failed"
-            or health_last_failure_kind.__get__(
+        source = object_getattribute(self, "_provider_source_id")
+
+        # #1878 owns durable provider-recovery truth. Hold its canonical writer
+        # lock while resolving current typed health and while committing this
+        # non-authoritative batch projection so a concurrent success/failure
+        # transition cannot be raced into a stale retry deadline.
+        with canonical_health_writer_guard(health_store):
+            health = canonical_health_get(health_store, source)
+            if type_of(health) is not health_type:
+                raise error_type(
+                    "SourceHealthStore returned noncanonical health state"
+                )
+            canonical_health_validate(health)
+            if health_source.__get__(health, health_type) != source:
+                raise error_type(
+                    "provider health is bound to another source"
+                )
+            if (
+                health_status.__get__(health, health_type) != "failed"
+                or health_last_failure_kind.__get__(
+                    health, health_type
+                )
+                != "provider_unavailable"
+            ):
+                raise error_type(
+                    "provider recovery requires durable provider_unavailable health"
+                )
+            streak = health_failure_count.__get__(health, health_type)
+            last_error_at = health_last_error_at.__get__(
                 health, health_type
             )
-            != "provider_unavailable"
-        ):
-            raise error_type(
-                "provider recovery requires durable provider_unavailable health"
-            )
-        streak = health_failure_count.__get__(health, health_type)
-        last_error_at = health_last_error_at.__get__(
-            health, health_type
-        )
-        if type_of(streak) is not int_type or streak <= 0:
-            raise error_type(
-                "provider recovery requires positive durable typed streak"
-            )
-        if (
-            type_of(last_error_at) is not str_type
-            or not last_error_at
-        ):
-            raise error_type(
-                "provider recovery requires durable failure timestamp"
-            )
-        failure_at = parse_health_timestamp(last_error_at)
-        failure_at_us = utc_microseconds(
-            failure_at, "provider_health_failure_at"
-        )
-
-        # Snapshot #1878 config through captured slot descriptors, then invoke
-        # the captured canonical backoff function with only those exact values.
-        interval = config_interval.__get__(config, config_type)
-        max_backoff = config_max_backoff.__get__(config, config_type)
-        backoff_config = BackoffConfigProjection(
-            interval, max_backoff
-        )
-        backoff_seconds = provider_backoff_seconds(
-            streak, backoff_config
-        )
-        deadline = failure_at + timedelta_type(
-            seconds=backoff_seconds
-        )
-        deadline_us = utc_microseconds(
-            deadline, "provider_retry_not_before"
-        )
-
-        lock = object_getattribute(self, "_lock")
-        with lock:
-            current = object_getattribute(
-                self, "_entries"
-            ).get(batch)
-            if (
-                current is None
-                or not object_getattribute(
-                    current, "provider_recovery_required"
+            if type_of(streak) is not int_type or streak <= 0:
+                raise error_type(
+                    "provider recovery requires positive durable typed streak"
                 )
+            if (
+                type_of(last_error_at) is not str_type
+                or not last_error_at
             ):
                 raise error_type(
-                    "batch is not awaiting provider recovery authority"
+                    "provider recovery requires durable failure timestamp"
                 )
-            failure_observed = object_getattribute(
-                current, "provider_failure_observed_at_utc_us"
+            failure_at = parse_health_timestamp(last_error_at)
+            failure_at_us = utc_microseconds(
+                failure_at, "provider_health_failure_at"
             )
-            if (
-                failure_observed is None
-                or failure_at_us < failure_observed
-            ):
-                raise error_type(
-                    "provider health predates current MarketBook failure"
+
+            # Snapshot #1878 config through captured slot descriptors, then
+            # invoke its captured canonical backoff function.
+            interval = config_interval.__get__(config, config_type)
+            max_backoff = config_max_backoff.__get__(
+                config, config_type
+            )
+            backoff_config = BackoffConfigProjection(
+                interval, max_backoff
+            )
+            backoff_seconds = provider_backoff_seconds(
+                streak, backoff_config
+            )
+            deadline = failure_at + timedelta_type(
+                seconds=backoff_seconds
+            )
+            deadline_us = utc_microseconds(
+                deadline, "provider_retry_not_before"
+            )
+
+            lock = object_getattribute(self, "_lock")
+            with lock:
+                current = object_getattribute(
+                    self, "_entries"
+                ).get(batch)
+                if (
+                    current is None
+                    or not object_getattribute(
+                        current, "provider_recovery_required"
+                    )
+                ):
+                    raise error_type(
+                        "batch is not awaiting provider recovery authority"
+                    )
+                failure_observed = object_getattribute(
+                    current,
+                    "provider_failure_observed_at_utc_us",
                 )
-            observed_us = observe(self, observed_at)
-            object_getattribute(
-                self, "_provider_deadlines"
-            )[batch] = (deadline_us, streak)
-            if observed_us < deadline_us:
+                if (
+                    failure_observed is None
+                    or failure_at_us < failure_observed
+                ):
+                    raise error_type(
+                        "provider health predates current MarketBook failure"
+                    )
+                observed_us = observe(self, observed_at)
+                object_getattribute(
+                    self, "_provider_deadlines"
+                )[batch] = (deadline_us, streak)
+                if observed_us < deadline_us:
+                    return make_decision(
+                        batch,
+                        observed_us,
+                        False,
+                        backoff_disposition,
+                        streak=streak,
+                        next_eligible_us=deadline_us,
+                        projection_applied=True,
+                    )
                 return make_decision(
                     batch,
                     observed_us,
-                    False,
-                    backoff_disposition,
+                    True,
+                    ready_disposition,
                     streak=streak,
                     next_eligible_us=deadline_us,
                     projection_applied=True,
                 )
-            return make_decision(
-                batch,
-                observed_us,
-                True,
-                ready_disposition,
-                streak=streak,
-                next_eligible_us=deadline_us,
-                projection_applied=True,
-            )
 
     def record_outcome(
         self: MarketBookRetryBackoffGate,

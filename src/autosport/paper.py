@@ -1335,6 +1335,37 @@ def _seal_paperbook_snapshot_decode_authority(method):
     revoke_causal_code = revoke_causal.__code__
     type_authority = _require_paperbook_type_authority
     type_authority_code = type_authority.__code__
+    snapshot_module_globals = globals()
+    snapshot_module_dependencies = {
+        "Decimal": Decimal,
+        "DecimalException": DecimalException,
+        "PaperTicket": PaperTicket,
+        "TicketLeg": TicketLeg,
+        "TicketStatus": TicketStatus,
+        "_MAX_PAPER_DECIMAL_TEXT_CHARS": _MAX_PAPER_DECIMAL_TEXT_CHARS,
+        "_SCHEMA_MISSING": _SCHEMA_MISSING,
+        "_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS": _SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS,
+        "parse_iso_timestamp": parse_iso_timestamp,
+    }
+    snapshot_module_dependency_codes = {
+        name: getattr(dependency, "__code__", None)
+        for name, dependency in snapshot_module_dependencies.items()
+    }
+
+    def require_snapshot_module_dependencies() -> None:
+        for name, dependency in snapshot_module_dependencies.items():
+            if snapshot_module_globals.get(name) is not dependency:
+                raise ValueError(
+                    f"PaperBook snapshot module dependency changed: {name}"
+                )
+            expected_code = snapshot_module_dependency_codes[name]
+            if (
+                expected_code is not None
+                and getattr(dependency, "__code__", None) is not expected_code
+            ):
+                raise ValueError(
+                    f"PaperBook snapshot module dependency authority changed: {name}"
+                )
 
     def require_type(target: object) -> None:
         if type_authority.__code__ is not type_authority_code:
@@ -1364,7 +1395,9 @@ def _seal_paperbook_snapshot_decode_authority(method):
             raise ValueError("PaperBook opening revoke authority changed")
         if revoke_causal.__code__ is not revoke_causal_code:
             raise ValueError("PaperBook causal-history revoke authority changed")
+        require_snapshot_module_dependencies()
         result = method(cls, *args, _snapshot_authority_revoke=revoke, **kwargs)
+        require_snapshot_module_dependencies()
         if method.__code__ is not method_code:
             raise ValueError("PaperBook snapshot decode callable authority changed")
         return result

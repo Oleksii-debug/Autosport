@@ -863,6 +863,27 @@ def _build_canonical_place_action_dispatch():
                 "Betfair client dependency dispatch changed"
             )
 
+    def dispatch(
+        client: BetfairSupervisedPlaceOrdersClient,
+        action: ExecutionAction,
+        *,
+        profile: BookmakerCapabilityProfile,
+        bound: BoundSupervisedExecutionPlan,
+        provider_order_ref: str,
+        execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None,
+    ) -> BetfairPlaceExecutionReport:
+        preflight(client)
+        return place_action(
+            client,
+            action,
+            profile=profile,
+            bound=bound,
+            provider_order_ref=provider_order_ref,
+            execution_workspace=execution_workspace,
+            _before_transport=_before_transport,
+        )
+
     return dispatch, preflight
 
 

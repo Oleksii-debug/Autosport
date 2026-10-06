@@ -783,8 +783,20 @@ class BetfairSettlementRevisionStore:
                 raise BetfairSettlementRevisionError("settlement revision lineage is not contiguous")
             if _time(revision.available_at, "available_at") <= _time(prior.available_at, "available_at"):
                 raise BetfairSettlementRevisionError("settlement revision time is not increasing")
-            if revision.content_sha256 == prior.content_sha256:
-                raise BetfairSettlementRevisionError("duplicate semantic settlement revision persisted")
+            if _time(revision.settled_date, "settled_date") < _time(
+                prior.settled_date,
+                "previous settled_date",
+            ):
+                raise BetfairSettlementRevisionError(
+                    "persisted settlement revision regressed provider settled_date"
+                )
+            if any(
+                item.content_sha256 == revision.content_sha256
+                for item in chain
+            ):
+                raise BetfairSettlementRevisionError(
+                    "persisted settlement revision regressed to superseded semantic content"
+                )
         elif revision.previous_revision_id is not None or revision.revision_number != 1:
             raise BetfairSettlementRevisionError("first settlement revision has invalid predecessor")
         chain.append(revision)

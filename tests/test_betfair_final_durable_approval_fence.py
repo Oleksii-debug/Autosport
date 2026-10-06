@@ -3391,3 +3391,71 @@ def test_execution_action_getattribute_rebinding_fails_closed_before_attempt(
             )
 
         assert transport.calls == []
+
+
+
+def test_final_send_approval_alias_rebinding_fails_closed(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        monkeypatch.setattr(
+            betfair_execution,
+            "_require_approval",
+            lambda *args, **kwargs: None,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="final-send functional authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-final-approval-alias-rebound",
+                profile=profile,
+                client=client,
+            )
+
+        assert transport.calls == []
+        assert (
+            ledger.attempt_state("attempt-final-approval-alias-rebound")
+            is AttemptState.RESERVED
+        )
+
+
+def test_final_send_durable_approval_code_swap_fails_closed(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        durable_guard = betfair_execution._require_durable_approval
+
+        def forged_guard(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(durable_guard, "__code__", forged_guard.__code__)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="durable approval authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-final-durable-approval-code-swap",
+                profile=profile,
+                client=client,
+            )
+
+        assert transport.calls == []
+        assert (
+            ledger.attempt_state("attempt-final-durable-approval-code-swap")
+            is AttemptState.RESERVED
+        )

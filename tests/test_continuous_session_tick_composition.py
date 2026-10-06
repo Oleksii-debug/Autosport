@@ -6574,6 +6574,7 @@ def test_tick_reports_post_drain_invalidation_backlog(
         status = coordinator.status()
 
         assert result.invalidation_backlog is True
+        assert result.full_refresh_required is (injection_mode == "full_refresh")
         if injection_mode == "dirty":
             assert buffer.pending_count == 1
             assert buffer.full_refresh_required is False

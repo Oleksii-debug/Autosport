@@ -5701,6 +5701,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 final_invalidation_snapshot = invalidation_backlog_snapshot()
                 if final_invalidation_snapshot is not None:
                     pending_full_refresh, pending_keys = final_invalidation_snapshot
+                    full_refresh = full_refresh or pending_full_refresh
                     backlog = bool(pending_full_refresh or pending_keys)
                 require_state_identity()
                 require_dependency_index_identity()

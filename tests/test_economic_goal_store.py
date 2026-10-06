@@ -983,6 +983,28 @@ def test_store_binding_ignores_class_descriptor_rebinding(monkeypatch, tmp_path)
     assert store.load() == _goal()
 
 
+def test_store_constructor_ignores_prebound_state_descriptors(monkeypatch, tmp_path) -> None:
+    class HostileDescriptor:
+        def __get__(self, instance, owner):
+            raise AssertionError("prebound store descriptor executed")
+
+        def __set__(self, instance, value):
+            raise AssertionError("prebound store descriptor setter executed")
+
+    monkeypatch.setattr(EconomicGoalStore, "workspace", HostileDescriptor(), raising=False)
+    monkeypatch.setattr(EconomicGoalStore, "path", HostileDescriptor(), raising=False)
+
+    store = EconomicGoalStore(tmp_path)
+    instance_state = object.__getattribute__(store, "__dict__")
+    canonical_workspace = tmp_path.resolve()
+    assert instance_state["workspace"] == canonical_workspace
+    assert instance_state["path"] == canonical_workspace / "economic_goal_contract.json"
+
+    store.initialize_owner(_goal())
+    assert store.load() == _goal()
+    assert (canonical_workspace / "economic_goal_contract.json").exists()
+
+
 def test_store_binding_validation_does_not_dispatch_path_equality(monkeypatch, tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
     store.initialize_owner(_goal())

@@ -848,6 +848,7 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
         _bindings=_STORE_BINDINGS_BY_ID,
         _weakref_ref=weakref.ref,
         _file_name=_CANONICAL_STORE_FILE_NAME,
+        _object_getattribute=_CANONICAL_OBJECT_GETATTRIBUTE,
         _error_type=EconomicGoalContractError,
     ) -> None:
         if type(self) is not __class__:
@@ -866,8 +867,9 @@ class EconomicGoalStore(metaclass=_EconomicGoalStoreMeta):
                 "EconomicGoalStore workspace cannot be canonically resolved"
             ) from exc
         path = _path_join(workspace_path, _file_name)
-        self.workspace = workspace_path
-        self.path = path
+        instance_state = _object_getattribute(self, "__dict__")
+        instance_state["workspace"] = workspace_path
+        instance_state["path"] = path
         store_id = id(self)
 
         def release_binding(store_ref) -> None:

@@ -36,19 +36,28 @@ def _declared_text(event: dict[str, Any], field: str) -> str | None:
 
 
 def _event_id(event: dict[str, Any]) -> str:
-    if "id" in event:
-        raw_event_id = event["id"]
-    elif "canonical_event_id" in event:
-        raw_event_id = event["canonical_event_id"]
-    else:
+    has_primary = "id" in event
+    has_canonical = "canonical_event_id" in event
+    if not has_primary and not has_canonical:
         raise provider.ProviderPayloadError("event is missing id")
-    if type(raw_event_id) is not str:
-        raise provider.ProviderPayloadError("event id must be a string")
-    return provider._provider_identity(  # noqa: SLF001 - product guard over owning adapter
-        raw_event_id,
-        field="event id",
-        allow_colon=False,
-    )
+
+    def validated(field_name: str) -> str:
+        raw = event[field_name]
+        if type(raw) is not str:
+            raise provider.ProviderPayloadError(f"event {field_name} must be a string")
+        return provider._provider_identity(  # noqa: SLF001 - product guard over owning adapter
+            raw,
+            field="event id",
+            allow_colon=False,
+        )
+
+    primary = validated("id") if has_primary else None
+    canonical = validated("canonical_event_id") if has_canonical else None
+    if primary is not None and canonical is not None and primary != canonical:
+        raise provider.ProviderPayloadError(
+            "event id conflicts with canonical_event_id"
+        )
+    return primary if primary is not None else canonical  # type: ignore[return-value]
 
 
 def _canonical_commence_time(value: str) -> str:

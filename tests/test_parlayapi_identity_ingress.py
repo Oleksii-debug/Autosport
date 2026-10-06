@@ -198,6 +198,31 @@ class ParlayApiIdentityIngressTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderPayloadError, "non-empty trimmed string"):
             self._read(event)
 
+    def test_matching_primary_and_canonical_event_ids_share_one_identity(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["canonical_event_id"] = event["id"]
+        quotes = self._read(event)
+        self.assertEqual(len(quotes), 1)
+        self.assertEqual(quotes[0].provider_event_id, "tt-100")
+
+    def test_conflicting_primary_and_canonical_event_ids_fail_closed(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["canonical_event_id"] = "tt-shadow"
+        with self.assertRaisesRegex(
+            ProviderPayloadError,
+            "event id conflicts with canonical_event_id",
+        ):
+            self._read(event)
+
+    def test_declared_canonical_event_id_requires_exact_string_even_with_primary_id(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["canonical_event_id"] = _ExplosiveString("tt-100")
+        with self.assertRaisesRegex(
+            ProviderPayloadError,
+            "canonical_event_id must be a string",
+        ):
+            self._read(event)
+
     def test_missing_event_id_uses_existing_canonical_id_fallback(self):
         event = copy.deepcopy(_BASE_EVENT)
         del event["id"]

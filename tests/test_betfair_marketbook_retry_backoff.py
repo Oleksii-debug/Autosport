@@ -338,3 +338,45 @@ def test_policy_version_is_explicit_and_stable():
     assert MARKETBOOK_RETRY_BACKOFF_POLICY_VERSION == (
         "betfair.list-market-book.retry-backoff.v1"
     )
+
+
+def test_snapshot_mutation_cannot_rewrite_live_backoff_state():
+    plan = _plan()
+    batch = plan.batches[0]
+    gate = MarketBookRetryBackoffGate(plan)
+    snapshot = gate.record_outcome(
+        batch.batch_id,
+        observed_at=NOW,
+        outcome=MarketBookAttemptOutcome.PROVIDER_FAILURE,
+        provider_error_code="SERVICE_BUSY",
+    )
+    exposed = snapshot.batches[0]
+    object.__setattr__(exposed, "terminal_failure", True)
+    object.__setattr__(exposed, "next_eligible_at_utc_us", None)
+
+    live = gate.snapshot().batches[0]
+    assert live is not exposed
+    assert live.terminal_failure is False
+    assert live.next_eligible_at_utc_us is not None
+
+
+def test_constructor_detaches_caller_owned_restart_state():
+    plan = _plan()
+    batch = plan.batches[0]
+    source_gate = MarketBookRetryBackoffGate(plan)
+    state = source_gate.record_outcome(
+        batch.batch_id,
+        observed_at=NOW,
+        outcome=MarketBookAttemptOutcome.PROVIDER_FAILURE,
+        provider_error_code="TIMEOUT_ERROR",
+    )
+    imported = state.batches[0]
+    restored_gate = MarketBookRetryBackoffGate(plan, state=state)
+
+    object.__setattr__(imported, "automatic_retry_exhausted", True)
+    object.__setattr__(imported, "next_eligible_at_utc_us", None)
+
+    live = restored_gate.snapshot().batches[0]
+    assert live is not imported
+    assert live.automatic_retry_exhausted is False
+    assert live.next_eligible_at_utc_us is not None

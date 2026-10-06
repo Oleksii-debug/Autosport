@@ -1543,18 +1543,12 @@ class _ContinuousSessionState:
             )
             return after != before
 
-        def finalize(_updated: dict[str, Any]) -> None:
-            # Projection writes advance the canonical generation, so publish
-            # the same bounded generation fence used by state/success commits.
-            # This prevents an older process from returning a stale failure
-            # publication after projection truth has superseded its cache.
-            self._write_error_checkpoint(None)
-
-        self._update(
-            mutate,
-            advance_generation=True,
-            finalize_under_lock=finalize,
-        )
+        # Source projection is durable progress, but it is not a successful
+        # session generation and must not supersede an already-active
+        # operational failure.  The checkpoint identity token still changes on
+        # publication, so stale processes are fenced without erasing the
+        # same-generation failure overlay.
+        self._update(mutate)
 
     def record_success(
         self,

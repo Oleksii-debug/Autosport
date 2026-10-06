@@ -3733,6 +3733,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             require_lifecycle_dispatch_authority()
         except Exception as exc:
             state_was_rebound = restore_state_identity()
+            dependency_index_was_rebound = restore_dependency_index_identity()
+            if dependency_index_was_rebound:
+                try:
+                    exc.add_note(
+                        "continuous-session dependency index authority was rebound "
+                        "during collector observation and was restored"
+                    )
+                except BaseException:
+                    pass
             if state_was_rebound:
                 try:
                     exc.add_note(

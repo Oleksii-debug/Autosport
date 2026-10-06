@@ -9,6 +9,7 @@ from types import FunctionType, MappingProxyType
 from .domain import MarketEvent, PaperTicket, TicketLeg
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
+from .economic_session import ProductEconomicSession, ProductEconomicSessionStore
 from .monotonic_workspace_authority import (
     AuthorityRecovery,
     MonotonicWorkspaceAuthority,
@@ -27,7 +28,12 @@ from .risk_day_window import (
     ProductDayRiskWindowStore,
     RiskDayWindowMismatchError,
 )
-from .risk_turnover_evidence import PaperDayTurnoverEvidence, PaperDayTurnoverResolver
+from .risk_turnover_evidence import (
+    PaperDayTurnoverEvidence,
+    PaperDayTurnoverResolver,
+    PaperSessionTurnoverEvidence,
+    PaperSessionTurnoverResolver,
+)
 from .run_registry import RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
 from .workspace_lock import WorkspaceEconomicLock
@@ -97,6 +103,18 @@ _PRODUCT_DAY_STORE_STATE_WITNESSES = _capture_instance_state_class_witnesses(
 _ECONOMIC_GOAL_STORE_STATE_WITNESSES = _capture_instance_state_class_witnesses(
     EconomicGoalStore,
     ("workspace", "path"),
+)
+_ECONOMIC_SESSION_STORE_STATE_WITNESSES = _capture_instance_state_class_witnesses(
+    ProductEconomicSessionStore,
+    (
+        "workspace",
+        "state_path",
+        "paperbook_path",
+        "goal_store",
+        "_clock",
+        "_product_clock",
+        "_authority",
+    ),
 )
 _RUN_REGISTRY_STATE_WITNESSES = _capture_instance_state_class_witnesses(
     RunRegistry,
@@ -514,6 +532,36 @@ if type(_TURNOVER_RESOLVE_FUNCTION) is not FunctionType or _TURNOVER_RESOLVE_COD
     _TURNOVER_RESOLVE_BINDING_WITNESS,
 ) = _capture_sealed_wrapper_authority(_TURNOVER_RESOLVE_FUNCTION)
 
+_SESSION_TURNOVER_RESOLVE_DESCRIPTOR = PaperSessionTurnoverResolver.__dict__["resolve"]
+if type(_SESSION_TURNOVER_RESOLVE_DESCRIPTOR) is not classmethod:
+    raise RuntimeError("canonical session turnover resolver descriptor is unavailable")
+_SESSION_TURNOVER_RESOLVE_FUNCTION = _SESSION_TURNOVER_RESOLVE_DESCRIPTOR.__func__
+_SESSION_TURNOVER_RESOLVE_CODE = getattr(
+    _SESSION_TURNOVER_RESOLVE_FUNCTION,
+    "__code__",
+    None,
+)
+if (
+    type(_SESSION_TURNOVER_RESOLVE_FUNCTION) is not FunctionType
+    or _SESSION_TURNOVER_RESOLVE_CODE is None
+):
+    raise RuntimeError("canonical session turnover resolver executable is unavailable")
+(
+    _SESSION_TURNOVER_RESOLVE_CLOSURE_WITNESS,
+    _SESSION_TURNOVER_RESOLVE_BINDING_WITNESS,
+) = _capture_sealed_wrapper_authority(_SESSION_TURNOVER_RESOLVE_FUNCTION)
+
+_ECONOMIC_SESSION_CURRENT = ProductEconomicSessionStore.current
+_ECONOMIC_SESSION_REQUIRE_CURRENT_UNDER_LOCK = (
+    ProductEconomicSessionStore.require_current_under_lock
+)
+_ECONOMIC_SESSION_CURRENT_CODE = getattr(_ECONOMIC_SESSION_CURRENT, "__code__", None)
+_ECONOMIC_SESSION_REQUIRE_CURRENT_UNDER_LOCK_CODE = getattr(
+    _ECONOMIC_SESSION_REQUIRE_CURRENT_UNDER_LOCK,
+    "__code__",
+    None,
+)
+
 _RISK_DAY_STORE_METHOD_NAMES = (
     "__init__",
     "current",
@@ -595,6 +643,47 @@ def _require_product_day_turnover_dispatch() -> None:
         )
 
 
+def _require_product_session_turnover_dispatch() -> None:
+    """Fail closed if economic-session turnover authority drifts."""
+
+    _require_instance_state_class_witnesses(
+        ProductEconomicSessionStore,
+        _ECONOMIC_SESSION_STORE_STATE_WITNESSES,
+        error="economic session store state authority changed",
+    )
+    descriptor = PaperSessionTurnoverResolver.__dict__.get("resolve")
+    if (
+        descriptor is not _SESSION_TURNOVER_RESOLVE_DESCRIPTOR
+        or type(descriptor) is not classmethod
+        or descriptor.__func__ is not _SESSION_TURNOVER_RESOLVE_FUNCTION
+        or getattr(descriptor.__func__, "__code__", None)
+        is not _SESSION_TURNOVER_RESOLVE_CODE
+    ):
+        raise RuntimeError(
+            "product session turnover resolver executable authority changed"
+        )
+    _require_sealed_wrapper_authority(
+        _SESSION_TURNOVER_RESOLVE_FUNCTION,
+        expected_closure=_SESSION_TURNOVER_RESOLVE_CLOSURE_WITNESS,
+        expected_bindings=_SESSION_TURNOVER_RESOLVE_BINDING_WITNESS,
+        error="product session turnover resolver dependency authority changed",
+    )
+    if (
+        ProductEconomicSessionStore.current is not _ECONOMIC_SESSION_CURRENT
+        or getattr(ProductEconomicSessionStore.current, "__code__", None)
+        is not _ECONOMIC_SESSION_CURRENT_CODE
+        or ProductEconomicSessionStore.require_current_under_lock
+        is not _ECONOMIC_SESSION_REQUIRE_CURRENT_UNDER_LOCK
+        or getattr(
+            ProductEconomicSessionStore.require_current_under_lock,
+            "__code__",
+            None,
+        )
+        is not _ECONOMIC_SESSION_REQUIRE_CURRENT_UNDER_LOCK_CODE
+    ):
+        raise RuntimeError("economic session executable authority changed")
+
+
 def _canonical_workspace_root(workspace: str | Path) -> Path:
     """Resolve the economic workspace through the frozen canonical Path surface."""
 
@@ -654,6 +743,15 @@ class _PaperDayTurnoverSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class _PaperSessionTurnoverSnapshot:
+    """Pre-lock session-turnover evidence revalidated under the writer lock."""
+
+    book: PaperBook
+    evidence: PaperSessionTurnoverEvidence
+    session_evidence: ProductEconomicSession
+
+
+@dataclass(frozen=True, slots=True)
 class _ProductDayAdmissionAuthority:
     """Current product-day headroom plus durable product-day admission identity."""
 
@@ -678,9 +776,12 @@ _DAY_AUTHORITY_FIELD_DESCRIPTOR_WITNESSES = tuple(
     )
     for owner in (
         _PaperDayTurnoverSnapshot,
+        _PaperSessionTurnoverSnapshot,
         _ProductDayAdmissionAuthority,
         PaperDayTurnoverEvidence,
+        PaperSessionTurnoverEvidence,
         ProductDayRiskWindow,
+        ProductEconomicSession,
         AuthorityRecovery,
     )
 )
@@ -691,6 +792,13 @@ _DAY_AUTHORITY_EXECUTABLE_DESCRIPTOR_WITNESSES = (
         _PaperDayTurnoverSnapshot,
         _capture_executable_descriptor_witnesses(
             _PaperDayTurnoverSnapshot,
+            ("__init__",),
+        ),
+    ),
+    (
+        _PaperSessionTurnoverSnapshot,
+        _capture_executable_descriptor_witnesses(
+            _PaperSessionTurnoverSnapshot,
             ("__init__",),
         ),
     ),
@@ -706,6 +814,20 @@ _DAY_AUTHORITY_EXECUTABLE_DESCRIPTOR_WITNESSES = (
         _capture_executable_descriptor_witnesses(
             PaperDayTurnoverEvidence,
             ("__init__", "__post_init__"),
+        ),
+    ),
+    (
+        PaperSessionTurnoverEvidence,
+        _capture_executable_descriptor_witnesses(
+            PaperSessionTurnoverEvidence,
+            ("__init__", "__post_init__"),
+        ),
+    ),
+    (
+        ProductEconomicSession,
+        _capture_executable_descriptor_witnesses(
+            ProductEconomicSession,
+            ("__init__", "__post_init__", "__eq__"),
         ),
     ),
     (
@@ -944,6 +1066,194 @@ def _canonical_economic_goal_store(root: Path) -> EconomicGoalStore:
     ):
         raise RuntimeError("economic goal store path is not canonical")
     return store
+
+
+def _prepare_paper_session_turnover_snapshot(
+    *,
+    root: Path,
+    book_path: Path,
+    risk_policy: PaperRiskPolicy,
+) -> _PaperSessionTurnoverSnapshot | None:
+    """Resolve session-scoped PAPER turnover before acquiring admission lock."""
+
+    goal = risk_policy.economic_goal
+    if goal is None or not _ADMISSION_PATH_EXISTS(book_path):
+        return None
+    _require_day_authority_data_descriptors()
+    _require_product_session_turnover_dispatch()
+    try:
+        goal_store = _canonical_economic_goal_store(root)
+        if _ECONOMIC_GOAL_LOAD_FROZEN(goal_store) != goal:
+            return None
+        _require_paperbook_admission_authority()
+        snapshot_book = _PAPERBOOK_LOAD_FUNCTION(PaperBook, book_path)
+        session_store = ProductEconomicSessionStore(root)
+        session = _ECONOMIC_SESSION_CURRENT(session_store)
+        if not _canonical_day_authority_field(
+            session,
+            ProductEconomicSession,
+            "product_clock_authoritative",
+        ):
+            return None
+        evidence = PaperSessionTurnoverResolver.resolve(
+            book=snapshot_book,
+            goal_store=goal_store,
+            session_store=session_store,
+            session_evidence=session,
+        )
+        _require_product_session_turnover_dispatch()
+        _require_day_authority_data_descriptors()
+    except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError):
+        return None
+    return _PaperSessionTurnoverSnapshot(
+        book=snapshot_book,
+        evidence=evidence,
+        session_evidence=session,
+    )
+
+
+def _revalidated_product_session_turnover_room(
+    *,
+    snapshot: _PaperSessionTurnoverSnapshot | None,
+    root: Path,
+    book: PaperBook,
+    risk_policy: PaperRiskPolicy,
+    workspace_lock: WorkspaceEconomicLock,
+    product_action_ts: str,
+) -> Decimal | None:
+    """Return session residual room only after exact under-lock revalidation."""
+
+    if snapshot is None:
+        return None
+    goal = risk_policy.economic_goal
+    if goal is None:
+        return None
+    _require_day_authority_data_descriptors()
+    try:
+        _require_product_session_turnover_dispatch()
+        snapshot_book = _canonical_day_authority_field(
+            snapshot,
+            _PaperSessionTurnoverSnapshot,
+            "book",
+        )
+        evidence = _canonical_day_authority_field(
+            snapshot,
+            _PaperSessionTurnoverSnapshot,
+            "evidence",
+        )
+        session_evidence = _canonical_day_authority_field(
+            snapshot,
+            _PaperSessionTurnoverSnapshot,
+            "session_evidence",
+        )
+        if not _same_semantic_book_state(snapshot_book, book):
+            return None
+        goal_store = _canonical_economic_goal_store(root)
+        durable_goal = _ECONOMIC_GOAL_LOAD_FROZEN(goal_store)
+        if durable_goal != goal:
+            return None
+        provenance = provenance_for(goal)
+        session_store = ProductEconomicSessionStore(root)
+        current_session = _ECONOMIC_SESSION_REQUIRE_CURRENT_UNDER_LOCK(
+            session_store,
+            session_evidence,
+            workspace_lock=workspace_lock,
+        )
+        if (
+            _canonical_day_authority_field(
+                evidence,
+                PaperSessionTurnoverEvidence,
+                "goal_id",
+            )
+            != goal.goal_id
+            or _canonical_day_authority_field(
+                evidence,
+                PaperSessionTurnoverEvidence,
+                "goal_revision",
+            )
+            != goal.revision
+            or _canonical_day_authority_field(
+                evidence,
+                PaperSessionTurnoverEvidence,
+                "goal_contract_sha256",
+            )
+            != provenance.contract_sha256
+            or _canonical_day_authority_field(
+                evidence,
+                PaperSessionTurnoverEvidence,
+                "bankroll_id",
+            )
+            != goal.bankroll_id
+            or _canonical_day_authority_field(
+                evidence,
+                PaperSessionTurnoverEvidence,
+                "currency",
+            )
+            != goal.currency
+            or _canonical_day_authority_field(
+                evidence,
+                PaperSessionTurnoverEvidence,
+                "initial_bankroll",
+            )
+            != book.initial_bankroll
+            or _canonical_day_authority_field(
+                evidence,
+                PaperSessionTurnoverEvidence,
+                "session_id",
+            )
+            != _canonical_day_authority_field(
+                current_session,
+                ProductEconomicSession,
+                "session_id",
+            )
+            or _canonical_day_authority_field(
+                evidence,
+                PaperSessionTurnoverEvidence,
+                "session_state_sha256",
+            )
+            != _canonical_day_authority_field(
+                current_session,
+                ProductEconomicSession,
+                "state_sha256",
+            )
+            or _canonical_day_authority_field(
+                evidence,
+                PaperSessionTurnoverEvidence,
+                "session_authority_generation",
+            )
+            != _canonical_day_authority_field(
+                current_session,
+                ProductEconomicSession,
+                "authority_generation",
+            )
+            or _canonical_day_authority_field(
+                evidence,
+                PaperSessionTurnoverEvidence,
+                "breached",
+            )
+        ):
+            return None
+        action_time = _parse_utc_timestamp(product_action_ts)
+        session_start = _parse_utc_timestamp(
+            _canonical_day_authority_field(
+                current_session,
+                ProductEconomicSession,
+                "started_at",
+            )
+        )
+        if action_time is None or session_start is None or action_time < session_start:
+            return None
+        room = _canonical_day_authority_field(
+            evidence,
+            PaperSessionTurnoverEvidence,
+            "residual_headroom",
+        )
+        if type(room) is not Decimal or not room.is_finite() or room < 0:
+            return None
+        _require_product_session_turnover_dispatch()
+        return room
+    except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError):
+        return None
 
 
 def _prepare_paper_day_turnover_snapshot(
@@ -1845,6 +2155,11 @@ def admit_paper_ticket(
         book_path=book_path,
         risk_policy=risk_policy,
     )
+    session_turnover_snapshot = _prepare_paper_session_turnover_snapshot(
+        root=root,
+        book_path=book_path,
+        risk_policy=risk_policy,
+    )
 
     _require_workspace_lock_dispatch()
     _require_admission_recovery_gate_authority()
@@ -1924,6 +2239,17 @@ def admit_paper_ticket(
                     _ProductDayAdmissionAuthority,
                     "admission_ts",
                 )
+
+        session_turnover_room: Decimal | None = None
+        if goal is not None and day_authority is not None:
+            session_turnover_room = _revalidated_product_session_turnover_room(
+                snapshot=session_turnover_snapshot,
+                root=root,
+                book=working_book,
+                risk_policy=risk_policy,
+                workspace_lock=workspace_lock,
+                product_action_ts=effective_placed_at,
+            )
 
         _require_paperbook_admission_authority()
         if not _admission_risk_helper_authority_valid():
@@ -2014,7 +2340,11 @@ def admit_paper_ticket(
                     "economic goal turnover limit exceeded",
                 )
         elif turnover_override_candidate:
-            if turnover_room is not None and amount <= turnover_room:
+            if (
+                turnover_room is not None
+                and session_turnover_room is not None
+                and amount <= min(turnover_room, session_turnover_room)
+            ):
                 assert context is not None
                 decision = _resume_after_product_day_turnover(
                     risk_policy=risk_policy,
@@ -2171,6 +2501,29 @@ def admit_paper_ticket(
                         )
 
             effective_placed_at = fresh_admission_ts
+            final_session_turnover_room = _revalidated_product_session_turnover_room(
+                snapshot=session_turnover_snapshot,
+                root=root,
+                book=mutation_book,
+                risk_policy=risk_policy,
+                workspace_lock=workspace_lock,
+                product_action_ts=fresh_admission_ts,
+            )
+            if (
+                turnover_override_candidate
+                and (
+                    final_session_turnover_room is None
+                    or amount > final_session_turnover_room
+                )
+            ):
+                return PaperAdmissionResult(
+                    risk=RiskDecision(
+                        False,
+                        "economic goal session turnover limit exceeded",
+                    ),
+                    ticket=None,
+                    book=working_book,
+                )
             try:
                 day_admission_permit = (
                     _PAPERBOOK_PREPARE_PRODUCT_DAY_ADMISSION_FUNCTION(

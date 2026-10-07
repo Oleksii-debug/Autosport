@@ -3148,6 +3148,9 @@ class SQLiteMarketStore:
         if type(event) is not MarketEvent:
             raise TypeError("event must be an exact MarketEvent")
         expected_payload = _validate_incoming_event(event)
+        expected_event = MarketEvent.from_dict(
+            _load_history_payload(expected_payload)
+        )
         append_authority = self._market_append_authority()
         availability_authority = self._market_append_availability_authority()
 
@@ -3184,7 +3187,7 @@ class SQLiteMarketStore:
                             JOIN market_events AS m
                               ON m.dedupe_key = c.dedupe_key
                             WHERE c.dedupe_key=?""",
-                        (event.dedupe_key,),
+                        (expected_event.dedupe_key,),
                     ).fetchone()
                     if row is None or len(row) != len(_HISTORY_COLUMNS) + 1:
                         raise ValueError(

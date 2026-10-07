@@ -94,6 +94,10 @@ class ExecutionDisposition(StrEnum):
 def _text(name: str, value: object) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
         raise ModelComputeRouterError(f"{name} must be a non-empty canonical string")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ModelComputeRouterError(
+            f"{name} must not contain control characters"
+        )
     try:
         value.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:

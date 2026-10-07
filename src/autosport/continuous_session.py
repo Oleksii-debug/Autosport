@@ -572,6 +572,24 @@ class _ContinuousSessionState:
         for delta in deltas:
             if type(delta) is not CollectorDelta:
                 raise TypeError("deltas must contain exact CollectorDelta values")
+            if type(delta.schema_version) is not int or delta.schema_version != 1:
+                raise TypeError("collector delta schema_version must be exact version 1")
+            for field_name in (
+                "delta_id",
+                "source_id",
+                "stream_epoch",
+                "source_cursor",
+                "event_dedupe_key",
+                "event_id",
+                "source_payload_digest",
+                "canonical_event_digest",
+            ):
+                if type(getattr(delta, field_name)) is not str:
+                    raise TypeError(
+                        f"collector delta {field_name} must be exact identity text"
+                    )
+            if delta.revision_of is not None and type(delta.revision_of) is not str:
+                raise TypeError("collector delta revision_of must be exact identity text")
             delta.validate()
             if delta.source_id != self.source_id:
                 raise ContinuousSessionError(

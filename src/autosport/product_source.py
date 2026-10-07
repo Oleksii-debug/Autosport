@@ -30,6 +30,11 @@ from .monotonic_workspace_authority import (
 from .json_integrity import strict_json_loads
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .providers import CanonicalNormalizer, MarketProvider, ProviderBatch, ProviderQuote
+from .source_rights_manifest import (
+    SourceRightsManifestError,
+    authorize_source_use,
+    load_source_rights_manifest,
+)
 from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 
@@ -46,6 +51,15 @@ class ProductSourcePayloadError(ProductSourceError):
 
 
 Clock = Callable[[], str]
+_PARLAY_SOURCE_RIGHTS_SCOPE = "provider.market_data.read"
+
+
+def _source_rights_now_utc(
+    *,
+    _datetime_type=datetime,
+    _utc=timezone.utc,
+) -> datetime:
+    return _datetime_type.now(_utc)
 
 
 class ParlayApiProductSource:
@@ -1006,8 +1020,13 @@ def _capture_parlay_product_source_factory(
     provider_type=ParlayApiTableTennisProvider,
     source_type=ParlayApiProductSource,
     required_env=_required_env,
+    rights_loader=load_source_rights_manifest,
+    rights_authorizer=authorize_source_use,
+    rights_error=SourceRightsManifestError,
+    rights_now=_source_rights_now_utc,
+    required_rights_scope=_PARLAY_SOURCE_RIGHTS_SCOPE,
 ):
-    """Bind shipped source constructors once at import composition."""
+    """Bind shipped source constructors and source-rights authority once at import."""
 
     def create_parlay_product_source() -> ParlayApiProductSource:
         """Construct the supported read-only Parlay source from closed dependencies."""
@@ -1015,9 +1034,30 @@ def _capture_parlay_product_source_factory(
         provider = provider_type(
             api_key=required_env("AUTOSPORT_PARLAY_API_KEY")
         )
+        workspace = required_env("AUTOSPORT_PRODUCT_WORKSPACE")
+        rights_path = required_env("AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST")
+        try:
+            manifest = rights_loader(rights_path)
+            authorization = rights_authorizer(
+                manifest,
+                source_identity=provider.source_id,
+                required_scope=required_rights_scope,
+                at=rights_now(),
+            )
+        except (rights_error, OSError, TypeError, ValueError) as exc:
+            raise ProductSourceError(
+                "Parlay product source rights authorization failed"
+            ) from exc
+        if (
+            authorization.source_identity != provider.source_id
+            or authorization.required_scope != required_rights_scope
+        ):
+            raise ProductSourceError(
+                "Parlay product source rights authorization is inconsistent"
+            )
         return source_type(
             provider,
-            workspace=required_env("AUTOSPORT_PRODUCT_WORKSPACE"),
+            workspace=workspace,
             lawful_terms_ref=required_env("AUTOSPORT_PARLAY_LAWFUL_TERMS_REF"),
             retention_ref=required_env("AUTOSPORT_PARLAY_RETENTION_REF"),
         )

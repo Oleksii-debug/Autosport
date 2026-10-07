@@ -1059,6 +1059,11 @@ class ScientificRegistry:
                     matched_class = record_class
                     break
 
+        if matched_class is None:
+            raise ValueError(
+                "scientific record must use an exact canonical record type"
+            )
+
         record_type = record.record_type
         expected_class = _LOCAL_SCIENTIFIC_RECORD_TYPES.get(record_type)
         if expected_class is None:

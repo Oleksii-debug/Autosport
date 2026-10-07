@@ -38,6 +38,8 @@ def _canonical_digest(payload):
 
 
 class _InjectedScientificRecord:
+    """Test-only representation of intentionally forged durable registry state."""
+
     def __init__(self, record_type, record_id, available_at, payload):
         self._record_type = record_type
         self._record_id = record_id
@@ -58,6 +60,30 @@ class _InjectedScientificRecord:
 
     def to_payload(self):
         return dict(self._payload)
+
+
+def _persist_injected_scientific_fixture(registry, record):
+    """Seed forged historical state without weakening production append authority."""
+
+    state = registry._read()
+    envelope = {
+        "record_type": record.record_type,
+        "record_id": record.record_id,
+        "available_at": record.available_at,
+        "payload": record.to_payload(),
+    }
+    envelope["record_sha256"] = _canonical_digest(envelope)
+    state["records"].append(envelope)
+    registry.path.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    registry._read()
 
 
 def _decision_registry(tmp_path, *, threshold="0.5"):
@@ -275,7 +301,8 @@ def test_self_authored_drift_records_cannot_mint_champion_authority(tmp_path):
         "effective_sample_size": 999,
     }
     forged_observation_id = _canonical_digest(forged_observation_payload)
-    registry.append(
+    _persist_injected_scientific_fixture(
+        registry,
         _InjectedScientificRecord(
             "DriftObservation",
             forged_observation_id,
@@ -316,7 +343,8 @@ def test_self_authored_drift_records_cannot_mint_champion_authority(tmp_path):
         "financial_authority_change_authorized": False,
         "real_money_execution_authorized": False,
     }
-    registry.append(
+    _persist_injected_scientific_fixture(
+        registry,
         _InjectedScientificRecord(
             "DriftFinding",
             forged_finding_id,
@@ -387,7 +415,8 @@ def test_hash_consistent_forged_finding_state_is_rederived_and_rejected(tmp_path
         "evidence_available_at": list(current.value_available_at),
     }
     observation_id = _canonical_digest(observation_payload)
-    registry.append(
+    _persist_injected_scientific_fixture(
+        registry,
         _InjectedScientificRecord(
             "DriftObservation",
             observation_id,
@@ -444,7 +473,8 @@ def test_hash_consistent_forged_finding_state_is_rederived_and_rejected(tmp_path
         "financial_authority_change_authorized": False,
         "real_money_execution_authorized": False,
     }
-    registry.append(
+    _persist_injected_scientific_fixture(
+        registry,
         _InjectedScientificRecord(
             "DriftFinding",
             finding_id,

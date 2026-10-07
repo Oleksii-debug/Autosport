@@ -488,9 +488,15 @@ class MarketMirror:
         for event in replay_events:
             observed = cls._utc_timestamp(event.observed_ts)
             ingested = cls._utc_timestamp(event.ingest_ts)
-            if observed is None or ingested is None:
+            source = cls._utc_timestamp(event.source_ts or event.observed_ts)
+            if observed is None or ingested is None or source is None:
                 continue
-            if observed <= boundary and ingested <= boundary:
+            if (
+                observed <= boundary
+                and ingested <= boundary
+                and source <= boundary
+                and ingested >= observed
+            ):
                 mirror.apply(event)
         return mirror.active_view(
             as_of=boundary,

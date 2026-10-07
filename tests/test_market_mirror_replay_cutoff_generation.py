@@ -3867,6 +3867,64 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_replay_future_source_sequence_cannot_shadow_visible_prior_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                visible = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T18:59:58+00:00",
+                    ingest_ts="2026-09-16T18:59:58+00:00",
+                    source_ts="2026-09-16T18:59:58+00:00",
+                )
+                future_source = self.event(
+                    sequence=2,
+                    odds="9.99",
+                    observed_ts="2026-09-16T18:59:59+00:00",
+                    ingest_ts="2026-09-16T18:59:59+00:00",
+                    source_ts="2026-09-16T19:00:01+00:00",
+                )
+                self.assertTrue(store.append(visible))
+                self.assertTrue(store.append(future_source))
+
+                snapshot = self.replay(store)
+
+                self.assertEqual(len(snapshot.events), 1)
+                self.assertEqual(snapshot.events[0].sequence, 1)
+                self.assertEqual(snapshot.events[0].decimal_odds, Decimal("2.00"))
+            finally:
+                store.close()
+
+    def test_replay_inverted_local_clock_cannot_shadow_visible_prior_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                visible = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T18:59:57+00:00",
+                    ingest_ts="2026-09-16T18:59:57+00:00",
+                    source_ts="2026-09-16T18:59:57+00:00",
+                )
+                impossible = self.event(
+                    sequence=2,
+                    odds="9.99",
+                    observed_ts="2026-09-16T18:59:59+00:00",
+                    ingest_ts="2026-09-16T18:59:58+00:00",
+                    source_ts="2026-09-16T18:59:56+00:00",
+                )
+                self.assertTrue(store.append(visible))
+                self.assertTrue(store.append(impossible))
+
+                snapshot = self.replay(store)
+
+                self.assertEqual(len(snapshot.events), 1)
+                self.assertEqual(snapshot.events[0].sequence, 1)
+                self.assertEqual(snapshot.events[0].decimal_odds, Decimal("2.00"))
+            finally:
+                store.close()
+
     def test_live_active_view_excludes_late_local_availability(self) -> None:
         mirror = MarketMirror()
         late_ingest = self.event(

@@ -26,6 +26,7 @@ from autosport.continuous_session import (
     SessionPausedError,
     SettlementResolution,
     SessionState,
+    _ContinuousSessionState,
 )
 from autosport.decision_ledger import (
     ECONOMIC_DECISION_KIND,

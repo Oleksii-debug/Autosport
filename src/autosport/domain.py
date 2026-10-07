@@ -40,7 +40,7 @@ def _require_utf8_encodable(value: str, field_name: str) -> str:
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
-        raise ValueError(f"{field_name} must be UTF-8 encodable") from exc
+        raise ValueError(f"{field_name} must be valid UTF-8 text") from exc
     return value
 
 

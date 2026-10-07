@@ -188,8 +188,8 @@ class AgentContext:
         self.paper_execution = paper_execution
         self.paper_provider_accounts = canonical_accounts
         self.notes = [] if notes is None else notes
-        if market_mirror is not None and not isinstance(market_mirror, MarketMirror):
-            raise TypeError("market_mirror must be a MarketMirror")
+        if market_mirror is not None and type(market_mirror) is not MarketMirror:
+            raise TypeError("market_mirror must be an exact MarketMirror")
         self.market_mirror = market_mirror if market_mirror is not None else MarketMirror()
 
         if latest_quotes is not None:

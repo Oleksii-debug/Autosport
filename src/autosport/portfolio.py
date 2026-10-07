@@ -67,6 +67,17 @@ def _canonical_portfolio_quote_keys(value: object, label: str) -> set[str]:
     return set(canonical)
 
 
+def _canonical_portfolio_ticket_legs(ticket: PaperTicket) -> tuple[TicketLeg, ...]:
+    """Re-prove every leg before portfolio identity/economic dispatch."""
+
+    if type(ticket.legs) is not tuple or not ticket.legs:
+        raise ValueError("portfolio tickets must carry a canonical non-empty leg tuple")
+    return tuple(
+        PaperBook._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
+        for leg in ticket.legs
+    )
+
+
 def _analysis_ticket_fingerprint(
     ticket: PaperTicket,
 ) -> tuple[
@@ -80,12 +91,7 @@ def _analysis_ticket_fingerprint(
     """Return exactly the mutable ticket fields consumed by scenario analysis."""
 
     ticket = _require_portfolio_ticket_identity(ticket)
-    if type(ticket.legs) is not tuple or not ticket.legs:
-        raise ValueError("portfolio tickets must carry a canonical non-empty leg tuple")
-    canonical_legs = tuple(
-        PaperBook._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
-        for leg in ticket.legs
-    )
+    canonical_legs = _canonical_portfolio_ticket_legs(ticket)
     return (
         ticket.ticket_id,
         ticket.stake,
@@ -162,6 +168,7 @@ def _scenario_profit_in_context(
     total = Decimal("0")
     for ticket in tickets:
         ticket = _require_portfolio_ticket_identity(ticket)
+        canonical_legs = _canonical_portfolio_ticket_legs(ticket)
         if ticket.status is not TicketStatus.OPEN:
             continue
         stake = _require_finite_decimal(
@@ -169,13 +176,13 @@ def _scenario_profit_in_context(
             f"portfolio ticket {ticket.ticket_id} stake",
         )
         combined_odds = Decimal("1")
-        for leg in ticket.legs:
+        for leg in canonical_legs:
             odds = _require_finite_decimal(
                 leg.locked_odds,
                 f"portfolio ticket {ticket.ticket_id} locked_odds",
             )
             combined_odds *= odds
-        if all(leg.quote_key in winning_quote_keys for leg in ticket.legs):
+        if all(leg.quote_key in winning_quote_keys for leg in canonical_legs):
             scenario_value = stake * combined_odds - stake
         else:
             scenario_value = stake.copy_negate()
@@ -225,8 +232,9 @@ class PortfolioEngine:
         affected: list[str] = []
         for ticket in tickets:
             ticket = _require_portfolio_ticket_identity(ticket)
+            canonical_legs = _canonical_portfolio_ticket_legs(ticket)
             if ticket.status is TicketStatus.OPEN and any(
-                leg.quote_key == quote_key for leg in ticket.legs
+                leg.quote_key == quote_key for leg in canonical_legs
             ):
                 affected.append(ticket.ticket_id)
         return affected

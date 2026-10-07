@@ -362,7 +362,7 @@ def test_registry_rejects_protocol_only_external_record_forgery(
         tmp_path / "scientific-registry.json"
     )
 
-    with pytest.raises(ValueError, match="canonical record class"):
+    with pytest.raises(ValueError, match="exact canonical record type"):
         registry.append(_ForgedExternalRecord(record_type))  # type: ignore[arg-type]
 
     assert registry.get(record_type, "forged-record") is None

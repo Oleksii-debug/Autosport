@@ -581,7 +581,7 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
         hostile = _HostileText("")
         _HostileText.reset_calls()
 
-        with self.assertRaisesRegex(ValueError, r"action_id must be non-empty text"):
+        with self.assertRaisesRegex(ValueError, r"action_id must be exact canonical identity text"):
             replace(base, action_id=hostile)
 
         self.assertEqual(_HostileText.strip_calls, 0)
@@ -603,13 +603,13 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
                     "plan_id",
                     _HostileText("forged-plan-id"),
                     action.action_id,
-                    r"plan_id must be non-empty text",
+                    r"plan_id must be exact canonical identity text",
                 ),
                 (
                     "action_id",
                     plan.plan_id,
                     _HostileText("forged-action-id"),
-                    r"action_id must be non-empty text",
+                    r"action_id must be exact canonical identity text",
                 ),
             )
             for field, plan_id, action_id, expected_error in cases:

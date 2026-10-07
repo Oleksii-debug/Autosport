@@ -57,18 +57,36 @@ class _LatestQuotesView(Mapping[object, MarketEvent]):
         self._by_quote: dict[str, MarketEvent] = {}
         self._ambiguous_quotes: set[str] = set()
         for event in events:
-            provider_key = (event.source_id, event.quote_key)
+            if type(event) is not MarketEvent:
+                raise TypeError("latest_quotes event must be an exact MarketEvent")
+            source_id = _canonical_string_value(
+                event.source_id, "latest_quotes source_id"
+            )
+            quote_key = _canonical_string_value(
+                event.quote_key, "latest_quotes quote_key"
+            )
+            provider_key = (source_id, quote_key)
             self._by_source_quote[provider_key] = event
-            previous = self._by_quote.get(event.quote_key)
+            previous = self._by_quote.get(quote_key)
             if previous is None:
-                self._by_quote[event.quote_key] = event
-            elif previous.source_id != event.source_id:
-                self._ambiguous_quotes.add(event.quote_key)
+                self._by_quote[quote_key] = event
+            else:
+                previous_source_id = _canonical_string_value(
+                    previous.source_id, "latest_quotes previous source_id"
+                )
+                if previous_source_id != source_id:
+                    self._ambiguous_quotes.add(quote_key)
 
     def __getitem__(self, key: object) -> MarketEvent:
-        if isinstance(key, tuple) and len(key) == 2:
-            return self._by_source_quote[key]
-        if isinstance(key, str):
+        if type(key) is tuple and len(key) == 2:
+            source_id = _canonical_string_value(
+                key[0], "latest_quotes source_id"
+            )
+            quote_key = _canonical_string_value(
+                key[1], "latest_quotes quote_key"
+            )
+            return self._by_source_quote[(source_id, quote_key)]
+        if type(key) is str:
             if key in self._ambiguous_quotes:
                 raise ValueError(
                     "latest quote_key is ambiguous across providers; "

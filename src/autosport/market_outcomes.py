@@ -235,7 +235,7 @@ class MarketSettlementOutcomeAuthority:
             raise TypeError(
                 "MarketSettlementOutcomeAuthority must come from verified evidence"
             )
-        if not isinstance(self.identity, MarketOutcomeIdentity):
+        if type(self.identity) is not MarketOutcomeIdentity:
             raise TypeError("identity must be MarketOutcomeIdentity")
         if self.identity.market_type is not MarketType.WINNER:
             raise ValueError(

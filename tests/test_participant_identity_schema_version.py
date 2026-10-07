@@ -325,6 +325,8 @@ def test_alias_record_id_rejects_subclass_before_virtual_payload_dispatch() -> N
 
 
 def test_entity_lineage_record_id_rejects_subclass_before_virtual_payload_dispatch() -> None:
+    from autosport.participant_identity import EntityLineage, LineageRelation
+
     class HostileEntityLineage(EntityLineage):
         __slots__ = ()
 

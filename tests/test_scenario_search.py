@@ -87,6 +87,27 @@ class ScenarioSearchTests(unittest.TestCase):
                 ),
             )
 
+    def test_scenario_search_rejects_ticket_list_subclass_before_iteration(self):
+        class HostileTicketList(list):
+            def __iter__(self):
+                raise AssertionError(
+                    "scenario ticket list iterated before exact-list admission"
+                )
+
+            def __len__(self):
+                raise AssertionError(
+                    "scenario ticket list length dispatched before exact-list admission"
+                )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "portfolio tickets must be an exact list",
+        ):
+            ScenarioSearchEngine().analyse(
+                HostileTicketList(),  # type: ignore[arg-type]
+                [],
+            )
+
     def test_scenario_search_revalidates_mutated_group_identity_at_use_boundary(self):
         book = PaperBook("100")
         a = TicketLeg("e1", "winner", "a", Decimal("2"))

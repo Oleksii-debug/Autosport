@@ -68,18 +68,23 @@ def test_research_packet_requires_explicit_availability_witness() -> None:
         )
 
 
-def test_research_packet_rejects_content_time_after_availability() -> None:
-    impossible = _item(
-        "2026-10-01T12:00:00Z",
-        available_at="2026-10-01T11:59:59Z",
-    )
-
-    with pytest.raises(ValueError, match="as_of_ts cannot be after available_at"):
-        ResearchPacket(
-            event_id="event-1",
-            generated_at="2026-10-01T12:00:01Z",
-            evidence=(impossible,),
+def test_evidence_item_rejects_content_time_after_availability() -> None:
+    with pytest.raises(ValueError, match="evidence as_of_ts cannot be after available_at"):
+        _item(
+            "2026-10-01T12:00:00Z",
+            available_at="2026-10-01T11:59:59Z",
         )
+
+
+def test_evidence_item_hash_revalidates_mutated_availability_chronology() -> None:
+    item = _item(
+        "2026-10-01T12:00:00Z",
+        available_at="2026-10-01T12:00:01Z",
+    )
+    object.__setattr__(item, "available_at", "2026-10-01T11:59:59Z")
+
+    with pytest.raises(ValueError, match="evidence as_of_ts cannot be after available_at"):
+        _ = item.canonical_hash
 
 
 def test_availability_witness_is_hash_bound_without_rewriting_legacy_hashes() -> None:

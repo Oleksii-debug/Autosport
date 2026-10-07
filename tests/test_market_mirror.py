@@ -658,6 +658,76 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
 
+    def test_apply_revalidates_post_construction_identity_before_hashing(self) -> None:
+        hash_calls: list[str] = []
+
+        class HostileIdentity(str):
+            def __hash__(self) -> int:
+                hash_calls.append("hash")
+                raise AssertionError("mutated identity reached hash dispatch")
+
+            def __eq__(self, other: object) -> bool:
+                raise AssertionError("mutated identity reached equality dispatch")
+
+        event = self.event(sequence=90)
+        object.__setattr__(event, "source_id", HostileIdentity(event.source_id))
+
+        mirror = MarketMirror()
+        with self.assertRaises(ValueError):
+            mirror.apply(event)
+        self.assertEqual(hash_calls, [])
+        self.assertEqual(len(mirror), 0)
+
+    def test_get_rejects_identity_subclasses_before_lookup_dispatch(self) -> None:
+        dispatch_calls: list[str] = []
+
+        class HostileIdentity(str):
+            def strip(self, *args: object, **kwargs: object) -> str:
+                dispatch_calls.append("strip")
+                raise AssertionError("identity strip dispatched before exact-type admission")
+
+            def encode(self, *args: object, **kwargs: object) -> bytes:
+                dispatch_calls.append("encode")
+                raise AssertionError("identity encode dispatched before exact-type admission")
+
+            def __format__(self, spec: str) -> str:
+                dispatch_calls.append("format")
+                raise AssertionError("identity formatting dispatched before exact-type admission")
+
+            def __hash__(self) -> int:
+                dispatch_calls.append("hash")
+                raise AssertionError("identity hash dispatched before exact-type admission")
+
+            def __eq__(self, other: object) -> bool:
+                dispatch_calls.append("eq")
+                raise AssertionError("identity equality dispatched before exact-type admission")
+
+        canonical = {
+            "source_id": "provider-a",
+            "event_id": "event-1",
+            "market_id": "market-1",
+            "selection_id": "selection-1",
+        }
+        mirror = MarketMirror()
+        for field_name in canonical:
+            values = dict(canonical)
+            values[field_name] = HostileIdentity(values[field_name])
+            with self.subTest(field_name=field_name):
+                with self.assertRaises(ValueError):
+                    mirror.get(**values)
+                self.assertEqual(dispatch_calls, [])
+
+    def test_persist_and_apply_rejects_store_subclass_before_append_dispatch(self) -> None:
+        class HostileStore(SQLiteMarketStore):
+            def append(self, event: MarketEvent) -> bool:
+                raise AssertionError("store subclass append dispatch must not execute")
+
+        hostile = object.__new__(HostileStore)
+        mirror = MarketMirror()
+        with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+            mirror.persist_and_apply(hostile, self.event(sequence=93))
+        self.assertEqual(len(mirror), 0)
+
     def test_apply_rejects_market_event_subclass_before_live_dispatch(self) -> None:
         class HostileMarketEvent(MarketEvent):
             def __getattribute__(self, name: str):

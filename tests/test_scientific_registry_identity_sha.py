@@ -8,9 +8,11 @@ import autosport.scientific_registry as registry_module
 from autosport.scientific_registry import (
     DatasetSnapshot,
     ModelVersion,
+    ResearchProtocol,
     ScientificRegistry,
     StrategyVersion,
 )
+from autosport.strategy_experiment import ScientificProtocolBinding
 
 
 SHA_A = "a" * 64
@@ -107,6 +109,84 @@ def test_valid_version_sha_payloads_remain_byte_spelling_stable() -> None:
     assert strategy.to_payload()["source_sha256"] == SHA_A
     assert strategy.to_payload()["environment_sha256"] == SHA_B
     assert strategy.to_payload()["config_sha256"] == SHA_C
+
+
+def _protocol_binding(**overrides: object) -> ScientificProtocolBinding:
+    values: dict[str, object] = {
+        "research_protocol_id": "protocol-v1",
+        "research_question_id": "question-v1",
+        "research_question_sha256": SHA_A,
+        "hypothesis_id": "hypothesis-v1",
+        "hypothesis_sha256": SHA_B,
+        "inclusion_criteria": "fixture inclusion",
+        "exclusion_criteria": "fixture exclusion",
+        "lawful_source_requirements": "fixture lawful source",
+        "causal_cutoff": T0,
+        "evaluation_design": "fixture evaluation",
+        "feature_set_version": "features-v1",
+        "uncertainty_method": "fixture uncertainty",
+        "multiple_comparison_control": "fixture multiplicity",
+        "robustness_checks": ("restart",),
+        "random_seed_policy": "fixed",
+        "stopping_rule": "fixed",
+        "promotion_rule": "fixed",
+        "expected_artifacts": ("fixture",),
+        "code_config_sha256": SHA_C,
+        "frozen_at_utc": T0,
+    }
+    values.update(overrides)
+    return ScientificProtocolBinding(**values)  # type: ignore[arg-type]
+
+
+def test_registry_restart_accepts_positive_integer_protocol_version(tmp_path) -> None:
+    path = tmp_path / "scientific-registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    protocol = ResearchProtocol(
+        binding=_protocol_binding(protocol_version=1),
+        source_sha256=SHA_A,
+        environment_sha256=SHA_B,
+        dataset_manifest_sha256=SHA_C,
+        available_at_utc=T0,
+    )
+
+    registry.append(protocol)
+
+    restarted = ScientificRegistry(path)
+    loaded = restarted.get("ResearchProtocol", "protocol-v1")
+    assert loaded is not None
+    assert loaded.payload["binding"]["protocol_version"] == 1
+
+
+def test_registry_restart_rejects_boolean_nested_protocol_version(tmp_path) -> None:
+    path = tmp_path / "scientific-registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    protocol = ResearchProtocol(
+        binding=_protocol_binding(protocol_version=1),
+        source_sha256=SHA_A,
+        environment_sha256=SHA_B,
+        dataset_manifest_sha256=SHA_C,
+        available_at_utc=T0,
+    )
+    registry.append(protocol)
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    entry["payload"]["binding"]["protocol_version"] = True
+    entry["record_sha256"] = registry_module._digest(
+        {
+            "record_type": entry["record_type"],
+            "record_id": entry["record_id"],
+            "available_at": entry["available_at"],
+            "payload": entry["payload"],
+        }
+    )
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="canonical string"):
+        ScientificRegistry(path)
 
 
 def _dataset(cls=DatasetSnapshot, **overrides: object) -> DatasetSnapshot:

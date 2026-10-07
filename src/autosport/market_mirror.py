@@ -133,6 +133,9 @@ class MarketMirror:
         """
         if type(event) is not MarketEvent:
             raise TypeError("event must be an exact MarketEvent")
+        # Frozen dataclasses can still be tampered with through object.__setattr__.
+        # Reconstruct the canonical value before any identity reaches tuple hashing.
+        event = self._snapshot_event(event)
 
         key = self._key(event)
         with self._lock:

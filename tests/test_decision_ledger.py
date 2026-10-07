@@ -370,9 +370,10 @@ class DecisionLedgerTests(unittest.TestCase):
                         JsonlDecisionLedger(path).append_economic(record, goal)
                     self.assertFalse(path.exists())
 
-    def test_material_action_id_requires_economic_record(self):
+    def test_general_material_action_id_is_idempotence_not_economic_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
             record = DecisionRecord(
                 "run-1",
                 "agent",
@@ -382,12 +383,18 @@ class DecisionLedgerTests(unittest.TestCase):
                 "ctx",
                 decision_id="general-material-action",
             )
+
+            ledger.append(record)
+
+            self.assertEqual(ledger.verified_records(), (record,))
             with self.assertRaisesRegex(
                 DecisionLedgerIntegrityError,
                 "attached to a non-economic decision",
             ):
-                JsonlDecisionLedger(path).append(record)
-            self.assertFalse(path.exists())
+                ledger.verified_economic_decision_for_material_action(
+                    "paper-action-1",
+                    self._economic_goal(),
+                )
 
     def test_verified_material_action_lookup_rejects_noncanonical_query(self):
         with tempfile.TemporaryDirectory() as tmp:

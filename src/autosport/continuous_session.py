@@ -577,6 +577,8 @@ class _ContinuousSessionState:
             for field_name in (
                 "delta_id",
                 "source_id",
+                "lawful_terms_ref",
+                "retention_ref",
                 "stream_epoch",
                 "source_cursor",
                 "event_dedupe_key",
@@ -588,8 +590,27 @@ class _ContinuousSessionState:
                     raise TypeError(
                         f"collector delta {field_name} must be exact identity text"
                     )
-            if delta.revision_of is not None and type(delta.revision_of) is not str:
-                raise TypeError("collector delta revision_of must be exact identity text")
+            for field_name in ("cursor_position", "revision_number"):
+                if type(getattr(delta, field_name)) is not int:
+                    raise TypeError(
+                        f"collector delta {field_name} must be an exact integer"
+                    )
+            for field_name in ("revision_of", "gap_from_cursor", "gap_to_cursor"):
+                value = getattr(delta, field_name)
+                if value is not None and type(value) is not str:
+                    raise TypeError(
+                        f"collector delta {field_name} must be exact identity text or None"
+                    )
+            if type(delta.quality_flags) is not tuple or any(
+                type(flag) is not str for flag in delta.quality_flags
+            ):
+                raise TypeError(
+                    "collector delta quality_flags must be an exact tuple of exact strings"
+                )
+            if type(delta.gap_state) is not GapState:
+                raise TypeError("collector delta gap_state must be exact GapState")
+            if type(delta.sync_state) is not SyncState:
+                raise TypeError("collector delta sync_state must be exact SyncState")
             delta.validate()
             if delta.source_id != self.source_id:
                 raise ContinuousSessionError(

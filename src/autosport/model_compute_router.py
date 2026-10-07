@@ -153,6 +153,51 @@ def _sha256(name: str, value: object) -> str:
     return text
 
 
+def _snapshot_exact_json_carrier(value: object, *, context: str) -> object:
+    """Detach a JSON payload without invoking caller-defined container/scalar hooks."""
+
+    if value is None or type(value) in {str, int, float, bool}:
+        return value
+    if type(value) is list:
+        return [
+            _snapshot_exact_json_carrier(
+                list.__getitem__(value, index),
+                context=f"{context}[{index}]",
+            )
+            for index in range(list.__len__(value))
+        ]
+    if type(value) is dict:
+        keys = tuple(dict.keys(value))
+        if any(type(key) is not str for key in keys):
+            raise ModelComputeRouterError(
+                f"{context} object keys must be exact strings"
+            )
+        return {
+            key: _snapshot_exact_json_carrier(
+                dict.__getitem__(value, key),
+                context=f"{context}.{key}",
+            )
+            for key in keys
+        }
+    raise ModelComputeRouterError(
+        f"{context} must use exact JSON carrier types"
+    )
+
+
+def _exact_payload_object(
+    raw: object,
+    *,
+    context: str,
+) -> dict[str, Any]:
+    if type(raw) is not dict:
+        raise ModelComputeRouterError(
+            f"{context} must be an exact JSON object"
+        )
+    snapshot = _snapshot_exact_json_carrier(raw, context=context)
+    assert type(snapshot) is dict
+    return snapshot
+
+
 def _canonical_digest(payload: object) -> str:
     encoded = json.dumps(
         payload,
@@ -225,10 +270,10 @@ class ComputeCandidate:
         _sha256("config_sha256", self.config_sha256)
         if type(self.capabilities) is not tuple or not self.capabilities:
             raise ModelComputeRouterError("capabilities must be a non-empty tuple")
-        if len(set(self.capabilities)) != len(self.capabilities):
-            raise ModelComputeRouterError("capabilities must be unique")
         for capability in self.capabilities:
             _text("capability", capability)
+        if len(set(self.capabilities)) != len(self.capabilities):
+            raise ModelComputeRouterError("capabilities must be unique")
         _nonnegative("estimated_cost", self.estimated_cost)
         _nonnegative("estimated_latency_seconds", self.estimated_latency_seconds)
 
@@ -246,6 +291,7 @@ class ComputeCandidate:
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, Any]) -> "ComputeCandidate":
+        raw = _exact_payload_object(raw, context="compute candidate payload")
         try:
             return cls(
                 candidate_id=raw["candidate_id"],
@@ -339,6 +385,7 @@ class ComputeRouteRequest:
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, Any]) -> "ComputeRouteRequest":
+        raw = _exact_payload_object(raw, context="route request payload")
         try:
             return cls(
                 request_id=raw["request_id"],
@@ -407,6 +454,7 @@ class ComputeRoutingPolicy:
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, Any]) -> "ComputeRoutingPolicy":
+        raw = _exact_payload_object(raw, context="routing policy payload")
         try:
             return cls(
                 policy_id=raw["policy_id"],
@@ -613,6 +661,7 @@ class ValueOfComputationEvidence:
     def from_payload(
         cls, raw: Mapping[str, Any]
     ) -> "ValueOfComputationEvidence":
+        raw = _exact_payload_object(raw, context="VOC evidence payload")
         try:
             return cls(
                 evidence_id=raw["evidence_id"],
@@ -809,6 +858,7 @@ class ComputeRouteDecision:
     def from_payload(
         cls, raw: Mapping[str, Any]
     ) -> "ComputeRouteDecision":
+        raw = _exact_payload_object(raw, context="route decision payload")
         try:
             return cls(
                 decision_id=raw["decision_id"],
@@ -996,6 +1046,7 @@ class ComputeExecutionEvidence:
     def from_payload(
         cls, raw: Mapping[str, Any]
     ) -> "ComputeExecutionEvidence":
+        raw = _exact_payload_object(raw, context="execution evidence payload")
         try:
             return cls(
                 execution_id=raw["execution_id"],

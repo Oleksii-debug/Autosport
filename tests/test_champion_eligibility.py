@@ -18,6 +18,7 @@ from autosport.drift_control import (
     DriftState,
     DriftWindow,
 )
+from autosport.integrity import atomic_write_json
 from autosport.research_supervisor import ResearchSupervisor
 from autosport.scientific_registry import DatasetSnapshot, ScientificRegistry
 
@@ -74,15 +75,7 @@ def _persist_injected_scientific_fixture(registry, record):
     }
     envelope["record_sha256"] = _canonical_digest(envelope)
     state["records"].append(envelope)
-    registry.path.write_text(
-        json.dumps(
-            state,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
-    )
+    atomic_write_json(registry.path, state)
     registry._read()
 
 

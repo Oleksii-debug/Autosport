@@ -7,7 +7,7 @@ from enum import Enum
 from threading import RLock
 
 from .domain import MarketEvent, _quote_identity
-from .storage import SQLiteMarketStore
+from .storage import SQLiteMarketStore, _timezone_aware_instant
 
 
 class MirrorUpdate(str, Enum):
@@ -81,10 +81,8 @@ class MarketMirror:
     def _utc_timestamp(value: str) -> datetime | None:
         """Parse one provider/observation timestamp, failing closed on bad input."""
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except (AttributeError, ValueError):
-            return None
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            parsed = _timezone_aware_instant(value, "timestamp")
+        except ValueError:
             return None
         return parsed.astimezone(timezone.utc)
 
@@ -119,6 +117,33 @@ class MarketMirror:
         if max_age < timedelta(0):
             raise ValueError("max_age must be non-negative")
         return as_of.astimezone(timezone.utc), max_age
+
+    @classmethod
+    def _decision_visible_event(
+        cls,
+        event: MarketEvent,
+        *,
+        boundary: datetime,
+        max_age: timedelta,
+    ) -> bool:
+        """Require provider freshness and local causal availability at one cutoff."""
+
+        if event.status not in cls._DECISION_ELIGIBLE_STATUSES:
+            return False
+        source_time = cls._utc_timestamp(event.source_ts or event.observed_ts)
+        observed_time = cls._utc_timestamp(event.observed_ts)
+        ingest_time = cls._utc_timestamp(event.ingest_ts)
+        if (
+            source_time is None
+            or observed_time is None
+            or ingest_time is None
+            or source_time > boundary
+            or observed_time > boundary
+            or ingest_time > boundary
+        ):
+            return False
+        age = boundary - source_time
+        return timedelta(0) <= age <= max_age
 
     def apply(self, event: MarketEvent) -> MirrorApplyResult:
         """Apply one event iff it advances source-local sequence state.
@@ -195,8 +220,41 @@ class MarketMirror:
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be a MarketEvent")
 
-        store.append(event)
-        return self.apply(event)
+        prior = self.event_for_quote_key(event.source_id, event.quote_key)
+        accepted = store.append_batch_accepted((event,))
+        if accepted:
+            if len(accepted) != 1:
+                raise RuntimeError("single market append returned invalid accepted cardinality")
+            # Apply the exact canonical value snapshot that storage admitted, not the
+            # caller-owned object. Nested MarketEvent metadata is mutable even though
+            # the dataclass is frozen; this closes SQLite-COMMIT -> mirror-apply TOCTOU.
+            return self.apply(accepted[0])
+
+        # If this mirror already reached this sequence (or a later one), applying a
+        # storage duplicate cannot advance live state: same-sequence retries remain
+        # idempotent and lower sequences remain stale. Avoid an O(history) trusted
+        # reread on the ordinary duplicate-poll path.
+        if prior is not None and prior.sequence >= event.sequence:
+            return self.apply(event)
+
+        # Storage intentionally treats a retry of one source-local sequence as the
+        # same provider observation even when local receipt clocks changed. On a
+        # fresh/incomplete mirror, applying the caller's retry object would expose
+        # local timestamps that are not the durable canonical history. Re-read the
+        # independently trusted persisted event before mutating live state.
+        canonical = next(
+            (
+                persisted
+                for persisted in store.events(event.event_id)
+                if persisted.dedupe_key == event.dedupe_key
+            ),
+            None,
+        )
+        if canonical is None:
+            raise RuntimeError(
+                "duplicate market event disappeared from canonical history"
+            )
+        return self.apply(canonical)
 
     def view(
         self,
@@ -267,17 +325,16 @@ class MarketMirror:
             market_ids=market_ids,
             selection_ids=selection_ids,
         )
-        eligible: list[MarketEvent] = []
-        for event in captured.events:
-            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
-                continue
-            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
-            if timestamp is None:
-                continue
-            age = boundary - timestamp
-            if timedelta(0) <= age <= age_limit:
-                eligible.append(event)
-        return MirrorSnapshot(revision=captured.revision, events=tuple(eligible))
+        eligible = tuple(
+            event
+            for event in captured.events
+            if self._decision_visible_event(
+                event,
+                boundary=boundary,
+                max_age=age_limit,
+            )
+        )
+        return MirrorSnapshot(revision=captured.revision, events=eligible)
 
     def event_for_quote_key(
         self,
@@ -334,17 +391,16 @@ class MarketMirror:
                 if key in self._latest
             )
 
-        eligible: list[MarketEvent] = []
-        for event in events:
-            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
-                continue
-            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
-            if timestamp is None:
-                continue
-            age = boundary - timestamp
-            if timedelta(0) <= age <= age_limit:
-                eligible.append(event)
-        return MirrorSnapshot(revision=revision, events=tuple(eligible))
+        eligible = tuple(
+            event
+            for event in events
+            if self._decision_visible_event(
+                event,
+                boundary=boundary,
+                max_age=age_limit,
+            )
+        )
+        return MirrorSnapshot(revision=revision, events=eligible)
 
     def snapshot(self) -> tuple[MarketEvent, ...]:
         """Return a deterministic, ownership-isolated snapshot by source and quote."""
@@ -401,18 +457,34 @@ class MarketMirror:
     ) -> MirrorSnapshot:
         """Reconstruct exactly the decision-visible mirror state at as_of.
 
-        Replay is read-only over canonical append-only history. Events whose local
-        observation or ingestion/receipt instant is after as_of are never applied,
-        even when their provider timestamp is older, so later-received evidence cannot
-        leak into an earlier decision. Malformed causal clocks fail closed. The
-        reconstructed mirror then applies the same canonical status/freshness/selectors
-        contract as a live active_view.
+        Replay never mutates canonical market history/current projection. The first
+        read of an exact normalized as_of durably issues a causal cutoff by freezing
+        the store's product-owned append generation; later appends therefore cannot
+        rewrite that already-issued cutoff,
+        even when they carry backdated local clocks. Events whose local observation or
+        ingestion/receipt instant is after as_of are still excluded. Malformed causal
+        clocks fail closed. The reconstructed mirror then applies the same canonical
+        status/freshness/selectors contract as a live active_view.
         """
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
+
+        # Validate and materialize every request selector before issuing the durable
+        # forward-observed cutoff. A malformed selector must not permanently freeze
+        # an otherwise valid decision instant, and one-shot iterables must not be
+        # consumed once for validation and then silently disappear during filtering.
+        selected_sources = cls._selector(source_ids, name="source_ids")
+        selected_sports = cls._selector(sports, name="sports")
+        selected_events = cls._selector(event_ids, name="event_ids")
+        selected_markets = cls._selector(market_ids, name="market_ids")
+        selected_selections = cls._selector(selection_ids, name="selection_ids")
+
         mirror = cls()
-        for event in store.events():
+        replay_events = store.replay_events_at_frozen_cutoff(
+            as_of=boundary.isoformat()
+        )
+        for event in replay_events:
             observed = cls._utc_timestamp(event.observed_ts)
             ingested = cls._utc_timestamp(event.ingest_ts)
             if observed is None or ingested is None:
@@ -422,11 +494,11 @@ class MarketMirror:
         return mirror.active_view(
             as_of=boundary,
             max_age=age_limit,
-            source_ids=source_ids,
-            sports=sports,
-            event_ids=event_ids,
-            market_ids=market_ids,
-            selection_ids=selection_ids,
+            source_ids=selected_sources,
+            sports=selected_sports,
+            event_ids=selected_events,
+            market_ids=selected_markets,
+            selection_ids=selected_selections,
         )
 
     @classmethod

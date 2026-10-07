@@ -458,6 +458,35 @@ class PairedVOCEvaluation:
                 raise VOCEvaluationError(
                     "paired VOC evaluation payload keys must be exact strings"
                 )
+
+        # The serialized schema is part of the Section-2 identity authority.
+        # Reject coercive wire aliases before Decimal/Enum construction can
+        # normalize a different runtime type into the same canonical payload.
+        for field in (
+            "baseline_utility",
+            "challenger_utility",
+            "compute_cost_penalty",
+            "latency_opportunity_cost_penalty",
+            "measured_compute_cost",
+            "support_fraction",
+            "incremental_value_interval_low",
+            "incremental_value_interval_high",
+            "provenance",
+        ):
+            if type(raw.get(field)) is not str:
+                raise VOCEvaluationError(
+                    f"paired VOC evaluation payload field {field} must be an exact string"
+                )
+        for field in ("baseline_abstained", "challenger_abstained"):
+            if type(raw.get(field)) is not bool:
+                raise VOCEvaluationError(
+                    f"paired VOC evaluation payload field {field} must be an exact bool"
+                )
+        for field in ("paired_sample_count", "effective_sample_size"):
+            if type(raw.get(field)) is not int:
+                raise VOCEvaluationError(
+                    f"paired VOC evaluation payload field {field} must be an exact int"
+                )
         try:
             expected_sha256 = raw["evaluation_sha256"]
             value = cls(

@@ -161,9 +161,28 @@ def _paperbook_causal_history_snapshot(book: object) -> tuple[object, ...]:
     settlement_times = getattr(book, "_settlement_times", None)
     if type(lifecycle) is not list or type(settlement_times) is not dict:
         raise ValueError("PaperBook causal history state is not canonical")
+
+    for entry in lifecycle:
+        if type(entry) is not tuple or len(entry) != 4:
+            raise ValueError("PaperBook lifecycle entry must be an exact four-item tuple")
+        action, ticket_id, winners, voids = entry
+        if type(action) is not str or type(ticket_id) is not str:
+            raise ValueError("PaperBook lifecycle action/ticket identities must be exact strings")
+        if (
+            type(winners) is not tuple
+            or type(voids) is not tuple
+            or any(type(value) is not str for value in winners)
+            or any(type(value) is not str for value in voids)
+        ):
+            raise ValueError("PaperBook lifecycle quote identities must be exact string tuples")
+
+    settlement_items = tuple(settlement_times.items())
+    if any(type(ticket_id) is not str for ticket_id, _ in settlement_items):
+        raise ValueError("PaperBook settlement history ticket identity keys must be exact strings")
+
     return (
         tuple(lifecycle),
-        tuple(sorted(settlement_times.items())),
+        tuple(sorted(settlement_items)),
     )
 
 

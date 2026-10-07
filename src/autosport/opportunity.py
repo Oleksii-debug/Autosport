@@ -963,11 +963,21 @@ class Opportunity:
     def conflict_key(self) -> str:
         """Stable identity for one evidence-defined opportunity before decision state."""
 
-        return _canonical_json_hash(self._decision_independent_payload())
+        if type(self) is not Opportunity:
+            raise OpportunityContractError(
+                "opportunity identity requires an exact Opportunity"
+            )
+        return _canonical_json_hash(
+            Opportunity._decision_independent_payload(self)
+        )
 
     @property
     def opportunity_id(self) -> str:
-        return _canonical_json_hash(self._identity_payload())
+        if type(self) is not Opportunity:
+            raise OpportunityContractError(
+                "opportunity identity requires an exact Opportunity"
+            )
+        return _canonical_json_hash(Opportunity._identity_payload(self))
 
     def _identity_payload(self) -> dict[str, Any]:
         return {
@@ -1084,6 +1094,10 @@ class OpportunitySet:
 
     @property
     def opportunity_set_id(self) -> str:
+        if type(self) is not OpportunitySet:
+            raise OpportunityContractError(
+                "opportunity set identity requires an exact OpportunitySet"
+            )
         return _canonical_json_hash(
             {
                 "opportunity_ids": [
@@ -1269,7 +1283,11 @@ class PortfolioPlan:
 
     @property
     def plan_id(self) -> str:
-        return _canonical_json_hash(self._identity_payload())
+        if type(self) is not PortfolioPlan:
+            raise OpportunityContractError(
+                "portfolio plan identity requires an exact PortfolioPlan"
+            )
+        return _canonical_json_hash(PortfolioPlan._identity_payload(self))
 
     def _identity_payload(self) -> dict[str, Any]:
         return {

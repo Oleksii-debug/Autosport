@@ -316,7 +316,11 @@ class SealedDecisionEnvelope:
 
     @property
     def envelope_sha256(self) -> str:
-        return _digest(self.canonical_payload())
+        if type(self) is not SealedDecisionEnvelope:
+            raise DecisionEnvelopeError(
+                "sealed decision envelope must be an exact SealedDecisionEnvelope"
+            )
+        return _digest(SealedDecisionEnvelope.canonical_payload(self))
 
 
 @dataclass(frozen=True, slots=True)

@@ -334,3 +334,36 @@ def test_quote_identity_rejects_non_nul_control_characters(value: str) -> None:
             ingest_ts=_TS,
             market_event_hash=_HASH,
         )
+
+
+def test_direct_identity_properties_reject_record_subclasses_before_virtual_dispatch() -> None:
+    quote = _quote()
+    hostile_opportunity = _OpportunitySubclass(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.WAIT,
+        quotes=(quote,),
+    )
+    with pytest.raises(OpportunityContractError, match="exact Opportunity"):
+        _ = hostile_opportunity.conflict_key
+    with pytest.raises(OpportunityContractError, match="exact Opportunity"):
+        _ = hostile_opportunity.opportunity_id
+
+    exact_opportunity = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.WAIT,
+        quotes=(quote,),
+    )
+    hostile_set = _OpportunitySetSubclass((exact_opportunity,))
+    with pytest.raises(OpportunityContractError, match="exact OpportunitySet"):
+        _ = hostile_set.opportunity_set_id
+
+    class HostilePortfolioPlan(PortfolioPlan):
+        __slots__ = ()
+
+        def _identity_payload(self) -> dict[str, object]:
+            raise AssertionError("PortfolioPlan subclass identity payload must not execute")
+
+    exact_set = OpportunitySet((exact_opportunity,))
+    hostile_plan = HostilePortfolioPlan(opportunity_set=exact_set)
+    with pytest.raises(OpportunityContractError, match="exact PortfolioPlan"):
+        _ = hostile_plan.plan_id

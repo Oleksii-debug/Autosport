@@ -300,3 +300,48 @@ def test_alias_identity_rejects_non_nul_control_aliases(
     kwargs[field_name] = value
     with pytest.raises(ParticipantIdentityError, match="canonical string"):
         AliasRecord(**kwargs)  # type: ignore[arg-type]
+
+
+def test_alias_record_id_rejects_subclass_before_virtual_payload_dispatch() -> None:
+    class HostileAliasRecord(AliasRecord):
+        __slots__ = ()
+
+        def payload(self) -> dict[str, str | None]:
+            raise AssertionError("AliasRecord subclass payload must not execute")
+
+    record = HostileAliasRecord(
+        source_id="provider-a",
+        alias="team-a",
+        entity_id="team:a",
+        valid_from="2026-01-01T00:00:00+00:00",
+        valid_until=None,
+        available_at="2026-01-01T00:00:00+00:00",
+        evidence_sha256="a" * 64,
+        recorded_at="2026-01-01T00:00:00+00:00",
+    )
+
+    with pytest.raises(ParticipantIdentityError, match="exact AliasRecord"):
+        _ = record.record_id
+
+
+def test_entity_lineage_record_id_rejects_subclass_before_virtual_payload_dispatch() -> None:
+    from autosport.participant_identity import EntityLineage, LineageRelation
+
+    class HostileEntityLineage(EntityLineage):
+        __slots__ = ()
+
+        def payload(self) -> dict[str, str | None]:
+            raise AssertionError("EntityLineage subclass payload must not execute")
+
+    record = HostileEntityLineage(
+        predecessor_entity_id="team:a",
+        successor_entity_id="team:b",
+        relation=LineageRelation.SUPERSEDES,
+        effective_from="2026-01-01T00:00:00+00:00",
+        available_at="2026-01-01T00:00:00+00:00",
+        recorded_at="2026-01-01T00:00:00+00:00",
+        evidence_sha256="b" * 64,
+    )
+
+    with pytest.raises(ParticipantIdentityError, match="exact EntityLineage"):
+        _ = record.record_id

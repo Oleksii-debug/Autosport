@@ -298,3 +298,11 @@ def test_delimiter_bearing_dedupe_components_cannot_alias_boundaries() -> None:
     assert left.dedupe_key.startswith("component-boundary-v1-")
     assert right.dedupe_key.startswith("component-boundary-v1-")
 
+
+
+@pytest.mark.parametrize("field_name", ("observed_ts", "ingest_ts", "source_ts"))
+def test_market_event_rejects_nonzero_submicrosecond_timestamp_precision(
+    field_name: str,
+) -> None:
+    with pytest.raises(ValueError, match="precision finer than microseconds"):
+        _event(**{field_name: "2026-10-07T00:00:00.1234561+00:00"})

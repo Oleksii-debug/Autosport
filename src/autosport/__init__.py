@@ -209,3 +209,8 @@ from . import _outcome_availability_registry_serialization as _outcome_availabil
 # Seal the two-phase availability clock against mutable function defaults, module
 # dispatch rebinding and direct mutation of cloned UTC-clock/begin globals.
 from . import _outcome_availability_clock_dispatch_guard as _outcome_availability_clock_dispatch_guard  # noqa: F401,E402
+
+
+# Positive Historical Data provenance uses the closure-hidden canonical urllib
+# dispatch snapshot; synthetic transports remain explicitly non-authoritative.
+from . import _betfair_historical_entitlement_io_snapshot_guard as _betfair_historical_entitlement_io_snapshot_guard  # noqa: F401,E402

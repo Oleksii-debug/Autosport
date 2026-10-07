@@ -1004,7 +1004,15 @@ class Opportunity:
             "forecasts",
             "evidence_refs",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        if type(raw) is not dict:
+            raise OpportunityContractError(
+                "opportunity must contain canonical fields"
+            )
+        raw_keys = tuple(raw.keys())
+        if (
+            any(type(key) is not str for key in raw_keys)
+            or set(raw_keys) != expected
+        ):
             raise OpportunityContractError(
                 "opportunity must contain canonical fields"
             )

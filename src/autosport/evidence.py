@@ -70,6 +70,18 @@ def _validate_evidence_identity_fields(
             )
 
 
+def _validated_evidence_payload(value: object) -> Mapping[str, Any]:
+    payload = freeze_canonical_json_object(
+        value,
+        field_name="strategy/research evidence payload",
+    )
+    if contains_forbidden_future_key(payload):
+        raise ValueError(
+            "strategy/research evidence must not contain future-result fields"
+        )
+    return payload
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceItem:
     evidence_id: str
@@ -87,11 +99,7 @@ class EvidenceItem:
             kind=self.kind,
             source_hash=self.source_hash,
         )
-        payload = freeze_canonical_json_object(
-            self.payload, field_name="strategy/research evidence payload"
-        )
-        if contains_forbidden_future_key(payload):
-            raise ValueError("strategy/research evidence must not contain future-result fields")
+        payload = _validated_evidence_payload(self.payload)
         object.__setattr__(self, "payload", payload)
 
     @property
@@ -103,12 +111,13 @@ class EvidenceItem:
             kind=self.kind,
             source_hash=self.source_hash,
         )
+        payload = _validated_evidence_payload(self.payload)
         raw = {
             "evidence_id": self.evidence_id,
             "as_of_ts": self.as_of_ts,
             "source": self.source,
             "kind": self.kind,
-            "payload": _json_payload(self.payload),
+            "payload": _json_payload(payload),
             "source_hash": self.source_hash,
         }
         canonical = json.dumps(
@@ -143,6 +152,7 @@ class ResearchPacket:
                 kind=item.kind,
                 source_hash=item.source_hash,
             )
+            _validated_evidence_payload(item.payload)
             if item.evidence_id in seen_evidence_ids:
                 raise ValueError("research packet contains duplicate evidence identity")
             seen_evidence_ids.add(item.evidence_id)

@@ -141,6 +141,31 @@ class EvidenceIdentitySchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source.*canonical string"):
             _ = item.canonical_hash
 
+    def test_canonical_hash_rejects_post_construction_future_payload_tamper(self):
+        item = self._item()
+        object.__setattr__(item, "payload", {"winner": "selection-a"})
+
+        with self.assertRaisesRegex(ValueError, "future-result fields"):
+            _ = item.canonical_hash
+
+    def test_canonical_hash_rejects_post_construction_noncanonical_payload(self):
+        item = self._item()
+        object.__setattr__(item, "payload", {"odds": float("nan")})
+
+        with self.assertRaisesRegex(ValueError, "finite JSON numbers"):
+            _ = item.canonical_hash
+
+    def test_research_packet_revalidates_nested_payload_after_tamper(self):
+        item = self._item()
+        object.__setattr__(item, "payload", {"settled_outcome": "won"})
+
+        with self.assertRaisesRegex(ValueError, "future-result fields"):
+            ResearchPacket(
+                event_id="event-1",
+                generated_at="2026-10-07T00:01:00+00:00",
+                evidence=(item,),
+            )
+
     def test_research_packet_rejects_duplicate_evidence_identity(self):
         first = self._item(evidence_id="same-evidence")
         second = EvidenceItem(

@@ -204,7 +204,11 @@ class FeatureArtifactProvenance:
             raise evidence.PointInTimeEvidenceError(
                 "feature artifact provenance fields mismatch"
             )
-        if payload["kind"] != _PROVENANCE_KIND or payload["schema_version"] != 1:
+        if (
+            type(payload["schema_version"]) is not int
+            or payload["kind"] != _PROVENANCE_KIND
+            or payload["schema_version"] != _SCHEMA_VERSION
+        ):
             raise evidence.PointInTimeEvidenceError(
                 "feature artifact provenance schema mismatch"
             )

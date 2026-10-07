@@ -54,7 +54,7 @@ def test_market_event_direct_constructor_rejects_string_subclass_before_dispatch
     "field_name",
     ("event_id", "market_id", "selection_id", "source_id"),
 )
-@pytest.mark.parametrize("value", ("", " padded", "padded ", "\ud800"))
+@pytest.mark.parametrize("value", ("", " padded", "padded ", "\x00inside", "line\nbreak", "del\x7finside", "\ud800"))
 def test_market_event_direct_constructor_rejects_noncanonical_identity(
     field_name: str,
     value: str,
@@ -87,7 +87,7 @@ def test_ticket_leg_direct_constructor_rejects_string_subclass_before_dispatch(
 
 
 @pytest.mark.parametrize("field_name", ("event_id", "market_id", "selection_id"))
-@pytest.mark.parametrize("value", ("", " padded", "padded ", "\ud800"))
+@pytest.mark.parametrize("value", ("", " padded", "padded ", "\x00inside", "line\nbreak", "del\x7finside", "\ud800"))
 def test_ticket_leg_direct_constructor_rejects_noncanonical_identity(
     field_name: str,
     value: str,

@@ -89,7 +89,7 @@ class ResearchStrategyRiskOfRuinIngressTests(unittest.TestCase):
                             "probability": "0.60",
                         },
                         {
-                            "quote_key": "abstract-complement:event-1-winner",
+                            "quote_key": "abstract-complement|event-1-winner|synthetic",
                             "probability": "0.40",
                         },
                     ],

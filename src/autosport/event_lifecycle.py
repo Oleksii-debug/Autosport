@@ -933,24 +933,27 @@ class ContinuousEventLifecycle:
                     event_id=record.event_id,
                 )
             )
-            # Schema-v1 used the provider-scoped event identity as the dependency
-            # input key.  After the v2 sport-scoped migration, retire that legacy
-            # routing key before evaluating/registering the new identity so a
-            # restart cannot leave both aliases active in the live dependency index.
-            if retire_input is not None and legacy_input_id != input_id:
-                retire_input(legacy_input_id)
             assessment = self.assess_evidence(
                 identity,
                 store,
                 as_of=as_of,
                 required_history=required_history,
             )
+            # Schema-v1 used the provider-scoped event identity as the dependency
+            # input key. Retire that alias only when the v2 identity can replace it
+            # now, or when causally visible completion retires the event entirely.
+            # WAIT_EVIDENCE may describe a future completion not visible at as_of;
+            # retiring the legacy key there would leak future catalog knowledge.
             if assessment.status is EvidenceEligibility.COMPLETED:
                 if retire_input is not None:
+                    if legacy_input_id != input_id:
+                        retire_input(legacy_input_id)
                     retire_input(input_id)
                 continue
             if not assessment.eligible:
                 continue
+            if retire_input is not None and legacy_input_id != input_id:
+                retire_input(legacy_input_id)
             record = self.get(identity)
             assert record is not None
             input_id = f"catalog:{record.identity}"

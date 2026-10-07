@@ -25,6 +25,8 @@ def payload() -> dict[str, object]:
             "historical.internal_research",
             "historical.read",
         ],
+        "privacy_classification": "NON_PERSONAL_DATA",
+        "evidence_class": "HUMAN_APPROVED_SOURCE_RIGHTS",
         "effective_at": "2026-09-01T00:00:00Z",
         "expires_at": "2026-12-01T00:00:00Z",
         "human_approved": True,
@@ -61,6 +63,8 @@ def test_caller_cannot_mint_positive_source_rights_authorization() -> None:
             required_scope="historical.read",
             checked_at=NOW,
             manifest_sha256="0" * 64,
+            privacy_classification="NON_PERSONAL_DATA",
+            evidence_class="HUMAN_APPROVED_SOURCE_RIGHTS",
             approved_by="release-owner",
             approval_reference="caller-authored-reference",
         )

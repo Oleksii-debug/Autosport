@@ -21,6 +21,12 @@ class _ExplosiveString(str):
         raise AssertionError("str subclass formatting must not execute")
 
 
+
+class _ExplosiveInt(int):
+    def __format__(self, spec: str) -> str:
+        raise AssertionError("int subclass formatting must not execute")
+
+
 def _event(**overrides: object) -> MarketEvent:
     payload: dict[str, object] = {
         "event_id": "event-1",
@@ -51,6 +57,14 @@ def test_market_event_direct_constructor_rejects_string_subclass_before_dispatch
 ) -> None:
     with pytest.raises(ValueError):
         _event(**{field_name: _ExplosiveString(value)})
+
+
+@pytest.mark.parametrize("sequence", (True, _ExplosiveInt(1)))
+def test_market_event_direct_constructor_rejects_noncanonical_sequence(
+    sequence: object,
+) -> None:
+    with pytest.raises(ValueError, match="sequence must be a non-boolean int"):
+        _event(sequence=sequence)
 
 
 @pytest.mark.parametrize(
@@ -124,6 +138,15 @@ def test_market_event_dedupe_key_rejects_post_construction_identity_subclass_bef
     object.__setattr__(event, field_name, _ExplosiveString(value))
 
     with pytest.raises(ValueError):
+        _ = event.dedupe_key
+
+
+
+def test_market_event_dedupe_key_rejects_post_construction_sequence_subclass_before_dispatch() -> None:
+    event = _event()
+    object.__setattr__(event, "sequence", _ExplosiveInt(1))
+
+    with pytest.raises(ValueError, match="sequence must be a non-boolean int"):
         _ = event.dedupe_key
 
 

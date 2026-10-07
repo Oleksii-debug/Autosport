@@ -474,3 +474,36 @@ def test_opportunity_ingress_rejects_hostile_key_before_hash_dispatch() -> None:
 
     with pytest.raises(OpportunityContractError, match="canonical fields"):
         Opportunity.from_dict(hostile)
+
+
+def test_sibling_dto_ingress_rejects_hostile_keys_before_hash_dispatch() -> None:
+    dispatch_calls: list[str] = []
+
+    class HostileKey(str):
+        armed = False
+
+        def __hash__(self) -> int:
+            if self.armed:
+                dispatch_calls.append("hash")
+                raise AssertionError("hostile DTO key hashed before exact admission")
+            return str.__hash__(self)
+
+        def __eq__(self, other: object) -> bool:
+            if self.armed:
+                dispatch_calls.append("eq")
+                raise AssertionError("hostile DTO key compared before exact admission")
+            return str.__eq__(self, other)
+
+    cases = [
+        (EvidenceRef.from_dict, EvidenceRef("authority", "reference").to_dict(), "authority"),
+        (QuoteRef.from_dict, _quote().to_dict(), "event_id"),
+    ]
+    for parser, payload, field_name in cases:
+        hostile = dict(payload)
+        key = HostileKey(field_name)
+        value = hostile.pop(field_name)
+        hostile[key] = value
+        key.armed = True
+        with pytest.raises(OpportunityContractError, match="canonical fields"):
+            parser(hostile)
+        assert dispatch_calls == []

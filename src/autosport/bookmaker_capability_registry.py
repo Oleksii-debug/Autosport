@@ -89,9 +89,14 @@ def _registry_write_lock(registry_path: Path) -> Iterator[None]:
 
 
 def _text(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
         raise BookmakerCapabilityRegistryError(
-            f"{field} must be a non-empty trimmed string"
+            f"{field} must be a non-empty canonical string"
         )
     return value
 
@@ -178,9 +183,9 @@ class BookmakerCapabilityRegistry:
         self.path = Path(path)
 
     def register_profile(self, profile: BookmakerCapabilityProfile) -> bool:
-        if not isinstance(profile, BookmakerCapabilityProfile):
+        if type(profile) is not BookmakerCapabilityProfile:
             raise BookmakerCapabilityRegistryError(
-                "profile must be a BookmakerCapabilityProfile"
+                "profile must be an exact BookmakerCapabilityProfile"
             )
         with _registry_write_lock(self.path):
             document = self._load_document()
@@ -247,9 +252,9 @@ class BookmakerCapabilityRegistry:
         self,
         evidence: BookmakerGovernanceEvidence,
     ) -> bool:
-        if not isinstance(evidence, BookmakerGovernanceEvidence):
+        if type(evidence) is not BookmakerGovernanceEvidence:
             raise BookmakerCapabilityRegistryError(
-                "evidence must be BookmakerGovernanceEvidence"
+                "evidence must be exact BookmakerGovernanceEvidence"
             )
         with _registry_write_lock(self.path):
             document = self._load_document()

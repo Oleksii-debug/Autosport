@@ -915,11 +915,14 @@ class ContinuousEventLifecycle:
         """Register evidence-sufficient events through the existing live-loop seam."""
         if not callable(register_input):
             raise TypeError("register_input must be callable")
-        selected = (
-            {record.identity for record in self.records()}
-            if identities is None
-            else set(identities)
-        )
+        if identities is None:
+            selected = {record.identity for record in self.records()}
+        else:
+            canonical_identities = [
+                _text(identity, f"identities[{index}]")
+                for index, identity in enumerate(identities)
+            ]
+            selected = set(canonical_identities)
         registered: list[str] = []
         for identity in sorted(selected):
             record = self.get(identity)

@@ -1244,6 +1244,7 @@ class SQLiteMarketStore:
         # shadows cannot redirect causal validation away from canonical main history.
         _validate_canonical_table(self.connection, "market_events")
         _validate_canonical_table(self.connection, "market_event_commit_order")
+        _validate_canonical_table(self.connection, "market_append_commit_times")
         _validate_canonical_table(
             self.connection, "market_append_availability"
         )
@@ -1304,6 +1305,7 @@ class SQLiteMarketStore:
             or positive_count != max_positive
         ):
             raise ValueError("positive market event append generations are not contiguous")
+        self._validated_append_commit_time_rows()
 
     def _next_append_generation(self) -> int:
         row = self.connection.execute(
@@ -1336,6 +1338,68 @@ class SQLiteMarketStore:
                 f"{_database_authority_key(database_path)}"
             ),
         )
+
+    def _validated_append_commit_time_rows(
+        self,
+    ) -> tuple[tuple[int, int, str, str], ...]:
+        """Return immutable product-assigned append transaction commit times.
+
+        Legacy v1 transitions legitimately have no row. Once v2 timing starts,
+        rows are contiguous by append transaction boundary and are sealed by the
+        existing append authority semantic binding.
+        """
+
+        _validate_canonical_table(self.connection, "market_append_commit_times")
+        positive_head = self._positive_append_generation_head()
+        raw_rows = self.connection.execute(
+            """SELECT start_append_generation,
+                      end_append_generation,
+                      append_tx_id,
+                      committed_at
+               FROM market_append_commit_times
+               ORDER BY end_append_generation"""
+        ).fetchall()
+        rows: list[tuple[int, int, str, str]] = []
+        previous_end: int | None = None
+        previous_committed_at: datetime | None = None
+        for raw_row in raw_rows:
+            if len(raw_row) != 4:
+                raise ValueError("market append commit-time row has invalid shape")
+            start, end, tx_id, stored_committed_at = raw_row
+            match = _APPEND_TX_RE.fullmatch(tx_id) if type(tx_id) is str else None
+            if (
+                type(start) is not int
+                or type(end) is not int
+                or start <= 0
+                or end < start
+                or end > positive_head
+                or match is None
+                or int(match.group("start")) != start
+                or int(match.group("end")) != end
+                or type(stored_committed_at) is not str
+            ):
+                raise ValueError("market append commit-time row is invalid")
+            canonical_committed_at = _canonical_product_time(stored_committed_at)
+            if canonical_committed_at != stored_committed_at:
+                raise ValueError("market append commit time is not canonical")
+            committed_instant = _timezone_aware_instant(
+                canonical_committed_at, "append committed_at"
+            )
+            if previous_end is not None and start != previous_end + 1:
+                raise MonotonicAuthorityRollbackError(
+                    "market append commit-time chronology is non-contiguous"
+                )
+            if (
+                previous_committed_at is not None
+                and committed_instant < previous_committed_at
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "market append commit-time product clock moved backwards"
+                )
+            rows.append((start, end, tx_id, canonical_committed_at))
+            previous_end = end
+            previous_committed_at = committed_instant
+        return tuple(rows)
 
     @staticmethod
     def _append_committed_boundaries(
@@ -1875,8 +1939,8 @@ class SQLiteMarketStore:
             expected_start = end + 1
         return committed_head, committed_state_sha256
 
-    @staticmethod
     def _require_canonical_append_authority_bindings(
+        self,
         history: tuple[AuthorityRecord, ...],
         entries: tuple[tuple[int, str, str], ...],
         *,
@@ -1906,6 +1970,9 @@ class SQLiteMarketStore:
                 "market append authority baseline semantic binding is invalid"
             )
 
+        timed_rows = self._validated_append_commit_time_rows()
+        timed_by_end = {row[1]: row for row in timed_rows}
+        used_timed_ends: set[int] = set()
         entry_index = 0
         previous_state_sha256 = baseline_state_sha256
         expected_start = 1
@@ -1942,10 +2009,26 @@ class SQLiteMarketStore:
                     payload_json=payload_json,
                 )
 
+            timed_row = timed_by_end.get(end)
+            committed_at: str | None = None
+            if timed_row is not None:
+                row_start, row_end, row_tx_id, row_committed_at = timed_row
+                if (
+                    row_start != start
+                    or row_end != end
+                    or row_tx_id != record.tx_id
+                ):
+                    raise MonotonicAuthorityRollbackError(
+                        "market append commit-time row does not match append authority"
+                    )
+                committed_at = row_committed_at
+                used_timed_ends.add(end)
+
             expected_binding_sha256 = _append_binding_sha256(
                 previous_state_sha256=previous_state_sha256,
                 intended_state_sha256=intended_state_sha256,
                 entries=transition_entries,
+                committed_at=committed_at,
             )
             if (
                 record.previous_committed_state_sha256 != previous_state_sha256
@@ -1964,9 +2047,17 @@ class SQLiteMarketStore:
             raise MonotonicAuthorityRollbackError(
                 "positive market append authority does not cover durable entries"
             )
+        covered_generation = entries[-1][0] if entries else 0
+        if any(
+            row[1] <= covered_generation and row[1] not in used_timed_ends
+            for row in timed_rows
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "market append commit-time row lacks matching committed authority"
+            )
 
-    @staticmethod
     def _require_canonical_pending_append_binding(
+        self,
         pending: AuthorityRecord,
         entries: tuple[tuple[int, str, str], ...],
         *,
@@ -2007,10 +2098,25 @@ class SQLiteMarketStore:
                 dedupe_key=dedupe_key,
                 payload_json=payload_json,
             )
+
+        committed_at: str | None = None
+        for row_start, row_end, row_tx_id, row_committed_at in (
+            self._validated_append_commit_time_rows()
+        ):
+            if row_end != end:
+                continue
+            if row_start != start or row_tx_id != pending.tx_id:
+                raise MonotonicAuthorityRollbackError(
+                    "market append commit-time row does not match pending authority"
+                )
+            committed_at = row_committed_at
+            break
+
         expected_binding_sha256 = _append_binding_sha256(
             previous_state_sha256=committed_state_sha256,
             intended_state_sha256=intended_state_sha256,
             entries=transition_entries,
+            committed_at=committed_at,
         )
         if (
             pending.intended_state_sha256 != intended_state_sha256

@@ -7,6 +7,8 @@ from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import autosport.continuous_session as continuous_session_module
+
 from autosport.causal_collector import (
     CollectorDelta,
     CollectorDeltaStore,
@@ -1145,3 +1147,11 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_continuous_session_rejects_nonzero_submicrosecond_causal_timestamp() -> None:
+    with unittest.TestCase().assertRaisesRegex(ValueError, "precision finer than microseconds"):
+        continuous_session_module._instant(
+            "2026-09-19T21:20:00.1234561Z",
+            "available_at",
+        )

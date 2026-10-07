@@ -19,6 +19,7 @@ from .event_lifecycle import (
     CatalogLifecycleError,
     ContinuousEventLifecycle,
     EventPhase,
+    canonical_event_identity_aliases,
 )
 from .domain import MarketEvent
 from .learning_environment import EvidenceTruth
@@ -1040,10 +1041,6 @@ class SportMemoryResultMaterializer:
         """Re-resolve product-owned outcome truth; caller DTO is assertion-only."""
 
         self._require_canonical_stores()
-        if asserted.event_identity != binding.event_identity:
-            raise SportMemoryResultMaterializationError(
-                "settlement event does not match frozen result binding"
-            )
         try:
             SettlementResolution.validate(asserted, as_of=as_of)
         except (TypeError, ValueError) as exc:
@@ -1051,28 +1048,39 @@ class SportMemoryResultMaterializer:
                 "settlement assertion is malformed or not causally available"
             ) from exc
         try:
-            record = ContinuousEventLifecycle.get(
-                self._lifecycle,
-                binding.event_identity,
+            matches = tuple(
+                record
+                for record in ContinuousEventLifecycle.records(self._lifecycle)
+                if record.source_id == binding.source_id
+                and record.sport == binding.sport_id
+                and binding.event_identity
+                in canonical_event_identity_aliases(record.identity)
             )
         except (CatalogLifecycleError, OSError, TypeError, ValueError) as exc:
             raise SportMemoryResultMaterializationError(
                 "canonical lifecycle could not resolve settlement authority"
             ) from exc
+        if len(matches) != 1:
+            raise SportMemoryResultMaterializationError(
+                "result binding lacks unique canonical lifecycle settlement evidence"
+            )
+        record = matches[0]
         if (
-            record is None
-            or record.phase is not EventPhase.COMPLETED
+            record.phase is not EventPhase.COMPLETED
             or record.settlement_ref is None
         ):
             raise SportMemoryResultMaterializationError(
                 "result binding lacks completed canonical lifecycle settlement evidence"
             )
-        if (
-            record.source_id != binding.source_id
-            or record.sport != binding.sport_id
-        ):
+        try:
+            record_aliases = canonical_event_identity_aliases(record.identity)
+        except ValueError as exc:
             raise SportMemoryResultMaterializationError(
-                "canonical lifecycle does not match frozen result binding"
+                "canonical lifecycle settlement identity is invalid"
+            ) from exc
+        if asserted.event_identity not in record_aliases:
+            raise SportMemoryResultMaterializationError(
+                "settlement event does not match frozen result binding"
             )
 
         try:
@@ -1099,7 +1107,7 @@ class SportMemoryResultMaterializer:
                 "product-owned settlement does not match canonical lifecycle evidence"
             )
         asserted_payload = (
-            asserted.event_identity,
+            record.identity,
             asserted.settlement_ref,
             asserted.quote_outcomes.copy(),
             asserted.evidence_id,
@@ -1216,7 +1224,15 @@ class SportMemoryResultMaterializer:
             raise SportMemoryResultMaterializationError(
                 "settlement evidence is not causally available at requested cutoff"
             )
-        if settlement.event_identity != binding.event_identity:
+        try:
+            settlement_aliases = canonical_event_identity_aliases(
+                settlement.event_identity
+            )
+        except ValueError as exc:
+            raise SportMemoryResultMaterializationError(
+                "settlement event identity is not canonical"
+            ) from exc
+        if binding.event_identity not in settlement_aliases:
             raise SportMemoryResultMaterializationError(
                 "settlement event does not match frozen result binding"
             )

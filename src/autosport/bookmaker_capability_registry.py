@@ -162,6 +162,11 @@ class BookmakerGovernanceEvidence:
         return sha256(encoded).hexdigest()
 
     def to_canonical_dict(self) -> dict[str, object]:
+        if type(self) is not BookmakerGovernanceEvidence:
+            raise BookmakerCapabilityRegistryError(
+                "evidence must be an exact BookmakerGovernanceEvidence"
+            )
+        BookmakerGovernanceEvidence.__post_init__(self)
         return {
             "account_id": self.account_id,
             "automation_permission": self.automation_permission.value,

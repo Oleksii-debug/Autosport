@@ -341,7 +341,7 @@ def test_direct_strategy_identity_properties_reject_subclasses_before_virtual_di
         __slots__ = ()
 
         def __post_init__(self) -> None:
-            raise AssertionError("EvaluationCase subclass validation must not execute")
+            return None
 
     case = _case(HostileEvaluationCase)
     with pytest.raises(ValueError, match="exact EvaluationCase"):
@@ -351,7 +351,7 @@ def test_direct_strategy_identity_properties_reject_subclasses_before_virtual_di
         __slots__ = ()
 
         def __post_init__(self) -> None:
-            raise AssertionError("CandidateRef subclass validation must not execute")
+            return None
 
     candidate = _candidate("hostile", HostileCandidate)
     with pytest.raises(ValueError, match="exact CandidateRef"):

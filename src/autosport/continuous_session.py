@@ -883,6 +883,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "outcome authority must return exact SettlementResolution or None"
                 )
+            # Validate the exact DTO before any identity/reference comparison.
+            # Construction is intentionally permissive enough for deserialization, so
+            # hostile scalar subclasses must fail closed before __eq__/__ne__ dispatch.
+            resolution.validate(as_of=as_of)
             if resolution.event_identity != record.identity:
                 raise ContinuousSessionError(
                     "settlement evidence event identity does not match lifecycle identity"
@@ -891,7 +895,6 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "settlement evidence reference does not match lifecycle evidence"
                 )
-            resolution.validate(as_of=as_of)
             resolutions.append(resolution)
         return tuple(resolutions)
 

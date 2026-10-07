@@ -114,6 +114,33 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
         ):
             PortfolioEngine().analyse([ticket])
 
+    def test_direct_portfolio_paths_reject_ticket_leg_subclass_before_dispatch(self) -> None:
+        class HostileLeg(TicketLeg):
+            @property
+            def quote_key(self) -> str:
+                raise AssertionError(
+                    "hostile ticket leg dispatched before exact-type admission"
+                )
+
+        book = PaperBook("100")
+        canonical_leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([canonical_leg], "10")
+        ticket.legs = (
+            HostileLeg("event", "winner", "alice", Decimal("2")),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "PaperBook ticket legs must be canonical TicketLeg values",
+        ):
+            PortfolioEngine.affected_tickets([ticket], canonical_leg.quote_key)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "PaperBook ticket legs must be canonical TicketLeg values",
+        ):
+            PortfolioEngine.scenario_profit([ticket], {canonical_leg.quote_key})
+
     def test_scenario_profit_rejects_noncanonical_winner_container(self) -> None:
         book = PaperBook("100")
         leg = TicketLeg("event", "winner", "alice", Decimal("2"))

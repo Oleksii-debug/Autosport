@@ -1,6 +1,14 @@
 import unittest
 
-from autosport.causal_collector import CollectorDelta, CollectorDeltaStore
+from autosport.causal_collector import (
+    CanonicalDesktopApplication,
+    CollectorDelta,
+    CollectorDeltaStore,
+    DesktopApplicationReceipt,
+    DesktopDeltaCheckpointStore,
+    RemoteCollectorAdapter,
+    StreamCheckpoint,
+)
 from autosport.continuous_session import _ContinuousSessionState
 
 
@@ -30,6 +38,13 @@ class _HostileInt(int):
     def __lt__(self, other):
         type(self).compare_calls += 1
         return super().__lt__(other)
+
+
+class _HostileReceipt(DesktopApplicationReceipt):
+    validate_calls = 0
+
+    def validate(self) -> None:
+        type(self).validate_calls += 1
 
 
 def _delta(**overrides):
@@ -85,6 +100,108 @@ class Section2SourceProjectionDeltaExactTypeTests(unittest.TestCase):
         ):
             store.stream_checkpoint("source-section2", _HostileText("epoch-section2"))
         self.assertEqual(_HostileText.format_calls, 0)
+
+    def test_collector_store_feed_rejects_hostile_after_delta_id_before_strip_dispatch(self) -> None:
+        _HostileText.strip_calls = 0
+        store = object.__new__(CollectorDeltaStore)
+        with self.assertRaisesRegex(
+            TypeError,
+            "after_delta_id must be exact string identity text or None",
+        ):
+            store.deltas_after_commit(
+                source_id="source-section2",
+                after_delta_id=_HostileText("delta-section2"),
+            )
+        self.assertEqual(_HostileText.strip_calls, 0)
+
+    def test_stream_checkpoint_rejects_hostile_identity_before_strip_dispatch(self) -> None:
+        _HostileText.strip_calls = 0
+        checkpoint = StreamCheckpoint(
+            source_id=_HostileText("source-section2"),
+            stream_epoch="epoch-section2",
+            last_cursor="cursor-section2",
+            last_position=1,
+            last_delta_id="delta-section2",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "source_id must be exact string identity text",
+        ):
+            checkpoint.validate()
+        self.assertEqual(_HostileText.strip_calls, 0)
+
+    def test_application_receipt_rejects_hostile_identity_before_strip_dispatch(self) -> None:
+        _HostileText.strip_calls = 0
+        receipt = DesktopApplicationReceipt(
+            delta_id=_HostileText("delta-section2"),
+            canonical_event_digest="0" * 64,
+            receipt_id="receipt-section2",
+            applied_at="2026-10-07T03:40:04+00:00",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "delta_id must be exact string identity text",
+        ):
+            receipt.validate()
+        self.assertEqual(_HostileText.strip_calls, 0)
+
+    def test_canonical_desktop_apply_rejects_delta_subclass_before_virtual_validation(self) -> None:
+        _HostileCollectorDelta.validate_calls = 0
+        app = object.__new__(CanonicalDesktopApplication)
+        hostile = object.__new__(_HostileCollectorDelta)
+        with self.assertRaisesRegex(TypeError, "delta must be exact CollectorDelta"):
+            app.apply(hostile, object())
+        self.assertEqual(_HostileCollectorDelta.validate_calls, 0)
+
+    def test_canonical_desktop_lookup_rejects_delta_subclass_before_state_dispatch(self) -> None:
+        app = object.__new__(CanonicalDesktopApplication)
+        hostile = object.__new__(_HostileCollectorDelta)
+        with self.assertRaisesRegex(TypeError, "delta must be exact CollectorDelta"):
+            app.lookup_receipt(hostile)
+
+    def test_checkpoint_store_has_ack_rejects_hostile_delta_id_before_strip_dispatch(self) -> None:
+        _HostileText.strip_calls = 0
+        store = object.__new__(DesktopDeltaCheckpointStore)
+        with self.assertRaisesRegex(
+            TypeError,
+            "delta_id must be exact string identity text",
+        ):
+            store.has_ack(_HostileText("delta-section2"))
+        self.assertEqual(_HostileText.strip_calls, 0)
+
+    def test_checkpoint_store_receipt_rejects_delta_subclass_before_read(self) -> None:
+        store = object.__new__(DesktopDeltaCheckpointStore)
+        hostile = object.__new__(_HostileCollectorDelta)
+        with self.assertRaisesRegex(TypeError, "delta must be exact CollectorDelta"):
+            store.application_receipt(hostile)
+
+    def test_checkpoint_store_ack_rejects_receipt_subclass_before_virtual_validation(self) -> None:
+        _HostileReceipt.validate_calls = 0
+        store = object.__new__(DesktopDeltaCheckpointStore)
+        receipt = _HostileReceipt(
+            delta_id="delta-section2",
+            canonical_event_digest="1" * 64,
+            receipt_id="receipt-section2",
+            applied_at="2026-10-07T03:40:04+00:00",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "application_receipt must be exact DesktopApplicationReceipt",
+        ):
+            store.ack(
+                _delta(),
+                application_receipt=receipt,
+                acknowledged_at="2026-10-07T03:40:05+00:00",
+            )
+        self.assertEqual(_HostileReceipt.validate_calls, 0)
+
+    def test_remote_adapter_rejects_delta_subclass_before_virtual_validation(self) -> None:
+        _HostileCollectorDelta.validate_calls = 0
+        adapter = RemoteCollectorAdapter(lambda _delta_value: True)
+        hostile = object.__new__(_HostileCollectorDelta)
+        with self.assertRaisesRegex(TypeError, "delta must be exact CollectorDelta"):
+            adapter.submit_committed_delta(hostile)
+        self.assertEqual(_HostileCollectorDelta.validate_calls, 0)
 
     def test_collector_store_rejects_delta_subclass_before_virtual_validation(self) -> None:
         _HostileCollectorDelta.validate_calls = 0

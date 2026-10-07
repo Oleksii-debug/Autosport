@@ -64,14 +64,16 @@ class ResearchDecisionAlreadyCommitted(RuntimeError):
         self.ticket_id = ticket_id
 
 
-def _validate_sha256(value: str, label: str) -> str:
-    if not isinstance(value, str) or len(value) != 64:
-        raise ValueError(f"{label} must be a 64-character SHA-256 hex string")
-    try:
-        int(value, 16)
-    except ValueError as exc:
-        raise ValueError(f"{label} must be hexadecimal") from exc
-    return value.lower()
+def _validate_sha256(value: object, label: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(
+            f"{label} must be a canonical lowercase SHA-256 hex string"
+        )
+    return value
 
 
 def _validate_canonical_string(
@@ -642,6 +644,9 @@ class DeterministicResearchCritic:
             if forecast is None:
                 reasons.append("missing ForecastRecord")
             else:
+                if type(forecast) is not ForecastRecord:
+                    raise ValueError("forecasts must contain exact ForecastRecord values")
+                ForecastRecord.to_dict(forecast)
                 if forecast.quote_key != leg.quote_key:
                     reasons.append("forecast quote_key mismatch")
                 if parse_iso_timestamp(forecast.generated_at) > decision_time:
@@ -653,9 +658,7 @@ class DeterministicResearchCritic:
                 if forecast.uncertainty > self.policy.max_forecast_uncertainty:
                     reasons.append("forecast uncertainty exceeds policy")
 
-                forecast_evidence_hashes = {
-                    str(value).lower() for value in forecast.evidence_hashes
-                }
+                forecast_evidence_hashes = set(forecast.evidence_hashes)
                 included = [
                     item
                     for item in available
@@ -695,8 +698,8 @@ class DeterministicResearchCritic:
                         elif latest.market_snapshot_hash is None:
                             reasons.append("latest evidence lacks market snapshot hash")
                         elif (
-                            forecast.market_snapshot_hash.lower()
-                            != latest.market_snapshot_hash.lower()
+                            forecast.market_snapshot_hash
+                            != latest.market_snapshot_hash
                         ):
                             reasons.append("market snapshot hash mismatch")
 

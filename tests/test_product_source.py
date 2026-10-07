@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -24,6 +25,10 @@ from autosport.product_source import (
     create_parlay_product_source,
 )
 from autosport.providers import ProviderBatch, ProviderQuote
+from autosport.source_rights_manifest import (
+    authorize_source_use,
+    load_source_rights_manifest,
+)
 
 
 _SOURCE_ID = "parlayapi:table_tennis"
@@ -190,6 +195,82 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 restored.resolve_event(next_deltas[0]).decimal_odds,
                 Decimal("1.90"),
             )
+
+    def test_pending_acquisition_remains_bound_to_exact_source_rights_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            authority_root = root / "authority"
+            rights_path = _write_source_rights_manifest(root)
+            manifest = load_source_rights_manifest(rights_path)
+            authorization = authorize_source_use(
+                manifest,
+                source_identity=_SOURCE_ID,
+                required_scope="provider.market_data.read",
+                at=datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc),
+            )
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-rights-1")]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                source_rights_authorization=authorization,
+                clock=lambda: "2026-10-07T12:00:01+00:00",
+            )
+            page = source.fetch_catalog_page(None)
+            self.assertEqual(page.cursor, "snapshot-rights-1")
+            durable = json.loads(source.state_path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(durable["pending"])
+            binding = durable["source_rights_binding"]
+            self.assertEqual(binding["manifest_sha256"], manifest.manifest_sha256)
+            self.assertEqual(binding["source_identity"], _SOURCE_ID)
+
+            later_authorization = authorize_source_use(
+                manifest,
+                source_identity=_SOURCE_ID,
+                required_scope="provider.market_data.read",
+                at=datetime(2026, 10, 7, 12, 5, tzinfo=timezone.utc),
+            )
+            restored = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                source_rights_authorization=later_authorization,
+                clock=lambda: "2026-10-07T12:05:01+00:00",
+            )
+            restored_state = json.loads(
+                restored.state_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(restored_state["source_rights_binding"], binding)
+            self.assertEqual(restored_state["pending"]["catalog_cursor"], page.cursor)
+
+            _write_source_rights_manifest(
+                root,
+                approval_reference="entitlement-record:replacement",
+            )
+            replacement_manifest = load_source_rights_manifest(rights_path)
+            replacement_authorization = authorize_source_use(
+                replacement_manifest,
+                source_identity=_SOURCE_ID,
+                required_scope="provider.market_data.read",
+                at=datetime(2026, 10, 7, 12, 10, tzinfo=timezone.utc),
+            )
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "durable source-rights binding does not match current authorization",
+            ):
+                ParlayApiProductSource(
+                    _Provider([]),
+                    workspace=workspace,
+                    authority_root=authority_root,
+                    lawful_terms_ref="terms:parlayapi:v1",
+                    retention_ref="retention:parlayapi:v1",
+                    source_rights_authorization=replacement_authorization,
+                    clock=lambda: "2026-10-07T12:10:01+00:00",
+                )
 
     def test_uncommitted_snapshot_is_replayed_instead_of_fetching_past_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

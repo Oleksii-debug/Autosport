@@ -169,6 +169,16 @@ class Section2SourceProjectionDeltaExactTypeTests(unittest.TestCase):
             store.has_ack(_HostileText("delta-section2"))
         self.assertEqual(_HostileText.strip_calls, 0)
 
+    def test_checkpoint_store_stream_rejects_hostile_epoch_before_format_dispatch(self) -> None:
+        _HostileText.format_calls = 0
+        store = object.__new__(DesktopDeltaCheckpointStore)
+        with self.assertRaisesRegex(
+            TypeError,
+            "stream_epoch must be exact string identity text",
+        ):
+            store.stream_checkpoint("source-section2", _HostileText("epoch-section2"))
+        self.assertEqual(_HostileText.format_calls, 0)
+
     def test_checkpoint_store_receipt_rejects_delta_subclass_before_read(self) -> None:
         store = object.__new__(DesktopDeltaCheckpointStore)
         hostile = object.__new__(_HostileCollectorDelta)

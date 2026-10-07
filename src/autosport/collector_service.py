@@ -564,8 +564,8 @@ class HeadlessCollectorService:
     def _append_admitted_delta(self, delta: CollectorDelta) -> bool:
         """Commit a validated provider delta and its epoch authority atomically."""
 
-        if not isinstance(delta, CollectorDelta):
-            raise TypeError("delta must be CollectorDelta")
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be canonical CollectorDelta")
         delta.validate()
         self._require_source_identity(
             expected_stream_epoch=delta.stream_epoch
@@ -732,8 +732,8 @@ class HeadlessCollectorService:
             self._require_source_identity(
                 expected_stream_epoch=cycle_stream_epoch
             )
-            if not isinstance(refreshed, tuple):
-                raise TypeError("lifecycle refresh must return a tuple")
+            if type(refreshed) is not tuple:
+                raise TypeError("lifecycle refresh must return an exact tuple")
             catalog_changes = tuple(refreshed)
             records = tuple(
                 item
@@ -753,8 +753,8 @@ class HeadlessCollectorService:
             self._require_source_identity(
                 expected_stream_epoch=cycle_stream_epoch
             )
-            if not isinstance(raw_deltas, tuple):
-                raise TypeError("source.fetch_deltas must return a tuple")
+            if type(raw_deltas) is not tuple:
+                raise TypeError("source.fetch_deltas must return an exact tuple")
             if len(raw_deltas) > self.config.max_items:
                 raise CollectorServiceError(
                     "source returned more deltas than the configured batch bound"
@@ -766,9 +766,9 @@ class HeadlessCollectorService:
                 for alias in canonical_event_identity_aliases(item.identity)
             }
             for delta in raw_deltas:
-                if not isinstance(delta, CollectorDelta):
+                if type(delta) is not CollectorDelta:
                     raise TypeError(
-                        "source.fetch_deltas must return CollectorDelta values"
+                        "source.fetch_deltas must return canonical CollectorDelta values"
                     )
                 delta.validate()
                 if delta.source_id != self.source_id:

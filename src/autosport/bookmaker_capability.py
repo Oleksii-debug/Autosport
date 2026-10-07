@@ -68,6 +68,25 @@ def _text(value: str, field: str) -> str:
     return value
 
 
+def _identity_text(value: object, field: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise BookmakerCapabilityError(
+            f"{field} must be exact canonical identity text"
+        )
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise BookmakerCapabilityError(
+            f"{field} must be exact canonical UTF-8 identity text"
+        ) from exc
+    return value
+
+
 def _timestamp(value: str, field: str) -> datetime:
     _text(value, field)
     try:
@@ -139,9 +158,9 @@ class BookmakerCapabilityProfile:
     source_payload_sha256: str
 
     def __post_init__(self) -> None:
-        _text(self.venue_id, "venue_id")
-        _text(self.account_id, "account_id")
-        _text(self.adapter_id, "adapter_id")
+        _identity_text(self.venue_id, "venue_id")
+        _identity_text(self.account_id, "account_id")
+        _identity_text(self.adapter_id, "adapter_id")
         _text(self.adapter_version, "adapter_version")
         if (
             not isinstance(self.profile_version, int)
@@ -236,10 +255,10 @@ class BookmakerBalanceObservation:
     exposure_limit: Decimal | None = None
 
     def __post_init__(self) -> None:
-        _text(self.venue_id, "venue_id")
-        _text(self.account_id, "account_id")
-        _text(self.adapter_id, "adapter_id")
-        _text(self.observation_id, "observation_id")
+        _identity_text(self.venue_id, "venue_id")
+        _identity_text(self.account_id, "account_id")
+        _identity_text(self.adapter_id, "adapter_id")
+        _identity_text(self.observation_id, "observation_id")
         _currency(self.currency)
         _money(self.available_balance, "available_balance")
         _timestamp(self.observed_at, "observed_at")
@@ -303,11 +322,11 @@ class BookmakerPositionObservation:
     stake: InitVar[Decimal | None] = None
 
     def __post_init__(self, stake: Decimal | None) -> None:
-        _text(self.venue_id, "venue_id")
-        _text(self.account_id, "account_id")
-        _text(self.adapter_id, "adapter_id")
-        _text(self.observation_id, "observation_id")
-        _text(self.external_position_id, "external_position_id")
+        _identity_text(self.venue_id, "venue_id")
+        _identity_text(self.account_id, "account_id")
+        _identity_text(self.adapter_id, "adapter_id")
+        _identity_text(self.observation_id, "observation_id")
+        _identity_text(self.external_position_id, "external_position_id")
         if not isinstance(self.state, BookmakerPositionState):
             raise BookmakerCapabilityError(
                 "state must be a BookmakerPositionState value"
@@ -345,7 +364,7 @@ class BookmakerPositionObservation:
         if self.gross_return is not None:
             _money(self.gross_return, "gross_return")
         if self.external_receipt_id is not None:
-            _text(self.external_receipt_id, "external_receipt_id")
+            _identity_text(self.external_receipt_id, "external_receipt_id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,10 +379,13 @@ class BookmakerAccountSnapshot:
     settled_positions: tuple[BookmakerPositionObservation, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.profile, BookmakerCapabilityProfile):
+        if type(self.profile) is not BookmakerCapabilityProfile:
             raise BookmakerCapabilityError(
-                "profile must be a BookmakerCapabilityProfile"
+                "profile must be exact BookmakerCapabilityProfile"
             )
+        _identity_text(self.profile.venue_id, "profile.venue_id")
+        _identity_text(self.profile.account_id, "profile.account_id")
+        _identity_text(self.profile.adapter_id, "profile.adapter_id")
         snapshot_at = _timestamp(self.observed_at, "observed_at")
         self._validate_not_after_snapshot(
             self.profile.observed_at,
@@ -420,6 +442,11 @@ class BookmakerAccountSnapshot:
                 "balance must be present exactly when balance_read was observed"
             )
         if self.balance is not None:
+            if type(self.balance) is not BookmakerBalanceObservation:
+                raise BookmakerCapabilityError(
+                    "balance must be exact BookmakerBalanceObservation"
+                )
+            _identity_text(self.balance.observation_id, "balance.observation_id")
             self._validate_identity(
                 self.balance.venue_id,
                 self.balance.account_id,
@@ -450,9 +477,19 @@ class BookmakerAccountSnapshot:
         seen_observation_ids: set[str] = set()
         seen_external_position_ids: set[str] = set()
         for position in positions:
-            if not isinstance(position, BookmakerPositionObservation):
+            if type(position) is not BookmakerPositionObservation:
                 raise BookmakerCapabilityError(
-                    f"{field} must contain BookmakerPositionObservation values"
+                    f"{field} must contain exact BookmakerPositionObservation values"
+                )
+            _identity_text(position.observation_id, f"{field}.observation_id")
+            _identity_text(
+                position.external_position_id,
+                f"{field}.external_position_id",
+            )
+            if position.external_receipt_id is not None:
+                _identity_text(
+                    position.external_receipt_id,
+                    f"{field}.external_receipt_id",
                 )
             self._validate_identity(
                 position.venue_id,
@@ -501,11 +538,15 @@ class BookmakerAccountSnapshot:
         field: str,
     ) -> None:
         expected = (
-            self.profile.venue_id,
-            self.profile.account_id,
-            self.profile.adapter_id,
+            _identity_text(self.profile.venue_id, "profile.venue_id"),
+            _identity_text(self.profile.account_id, "profile.account_id"),
+            _identity_text(self.profile.adapter_id, "profile.adapter_id"),
         )
-        actual = (venue_id, account_id, adapter_id)
+        actual = (
+            _identity_text(venue_id, f"{field}.venue_id"),
+            _identity_text(account_id, f"{field}.account_id"),
+            _identity_text(adapter_id, f"{field}.adapter_id"),
+        )
         if actual != expected:
             raise BookmakerCapabilityError(
                 f"{field} identity does not match capability profile"

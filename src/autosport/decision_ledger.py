@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from typing import Any
 from .causal_integrity import contains_forbidden_future_key
 from .domain import utc_now_iso
 from .economic_goal import EconomicGoalContract
+from .integrity import durable_path_lock
 from .economic_goal_provenance import (
     EconomicGoalProvenance,
     EconomicGoalProvenanceError,
@@ -64,6 +66,49 @@ ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY = "economic_goal_provenance"
 RISK_POLICY_PROVENANCE_PAYLOAD_KEY = "risk_policy_provenance"
 MATERIAL_ACTION_ID_PAYLOAD_KEY = "material_action_id"
 
+_MAX_DECISION_LEDGER_BYTES = 64 * 1024 * 1024
+
+
+def _canonical_decision_text(value: object, field_name: str) -> str:
+    """Require one exact lossless top-level decision identity spelling."""
+
+    if (
+        type(value) is not str
+        or not value
+        or str.strip(value) != value
+        or "\x00" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{field_name} must be a non-empty canonical string")
+    try:
+        str.encode(value, "utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be valid UTF-8 text") from exc
+    return value
+
+
+def _require_canonical_decision_id(
+    value: object,
+    *,
+    location: str = "",
+) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise DecisionLedgerIntegrityError(
+            f"Decision Ledger decision_id is invalid{location}"
+        )
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise DecisionLedgerIntegrityError(
+            f"Decision Ledger decision_id is invalid{location}"
+        ) from exc
+    return value
+
 
 @dataclass(frozen=True, slots=True)
 class EconomicDecisionAuthority:
@@ -96,6 +141,17 @@ class DecisionRecord:
     decision_kind: str = GENERAL_DECISION_KIND
 
     def __post_init__(self) -> None:
+        for field_name in (
+            "replay_run_id",
+            "agent",
+            "observed_ts",
+            "action",
+            "context_hash",
+            "recorded_at",
+            "decision_kind",
+        ):
+            _canonical_decision_text(getattr(self, field_name), field_name)
+        _require_canonical_decision_id(self.decision_id)
         payload = _freeze_decision_payload(self.payload)
         if contains_forbidden_future_key(payload):
             raise ValueError("decision payload must not contain future-result fields")
@@ -312,8 +368,82 @@ class JsonlDecisionLedger:
     )
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+        # Canonicalize symlink aliases before deriving the durable lock domain.
+        # Hard-link aliases cannot be collapsed by pathname resolution, so every
+        # authoritative read/write additionally requires a single-link file identity.
+        self.path = Path(path).expanduser().resolve(strict=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _require_regular_single_link(path_stat: os.stat_result) -> None:
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path must be a regular non-symlink file"
+            )
+        if path_stat.st_nlink != 1:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path must not have hard-link aliases"
+            )
+
+    @classmethod
+    def _require_same_file_identity(
+        cls,
+        opened: os.stat_result,
+        path_stat: os.stat_result,
+    ) -> None:
+        cls._require_regular_single_link(opened)
+        cls._require_regular_single_link(path_stat)
+        if opened.st_dev != path_stat.st_dev or opened.st_ino != path_stat.st_ino:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path changed during durable access"
+            )
+
+    def _verified_read_under_lock(self) -> bytes:
+        try:
+            path_before = os.stat(self.path, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file is missing or unreadable"
+            ) from exc
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file is missing or unreadable"
+            ) from exc
+        self._require_regular_single_link(path_before)
+        if path_before.st_size > _MAX_DECISION_LEDGER_BYTES:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger exceeds durable resource limit"
+            )
+        try:
+            with self.path.open("rb") as handle:
+                opened = os.fstat(handle.fileno())
+                path_opened = os.stat(self.path, follow_symlinks=False)
+                self._require_same_file_identity(opened, path_opened)
+                if opened.st_size > _MAX_DECISION_LEDGER_BYTES:
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger exceeds durable resource limit"
+                    )
+                raw = handle.read()
+                opened_after = os.fstat(handle.fileno())
+                path_after = os.stat(self.path, follow_symlinks=False)
+                self._require_same_file_identity(opened_after, path_after)
+                if (
+                    opened.st_dev != opened_after.st_dev
+                    or opened.st_ino != opened_after.st_ino
+                    or opened.st_size != opened_after.st_size
+                    or opened.st_mtime_ns != opened_after.st_mtime_ns
+                    or opened.st_ctime_ns != opened_after.st_ctime_ns
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger changed during durable read"
+                    )
+                return raw
+        except DecisionLedgerIntegrityError:
+            raise
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file is missing or unreadable"
+            ) from exc
 
     @staticmethod
     def _require_utf8_text(value: str, *, path: str) -> None:
@@ -323,6 +453,25 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger JSON text at {path} is not valid UTF-8"
             ) from exc
+
+    @classmethod
+    def _require_material_action_id(
+        cls,
+        value: object,
+        *,
+        location: str = "",
+    ) -> str:
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise DecisionLedgerIntegrityError(
+                f"Decision Ledger material_action_id is invalid{location}"
+            )
+        cls._require_utf8_text(value, path="payload.material_action_id")
+        return value
 
     @classmethod
     def _validate_json_value(cls, value: object, *, path: str) -> None:
@@ -387,18 +536,32 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record schema is invalid{location}"
             )
+        # Exact-fence top-level identity text before the generic JSON walk so a
+        # hostile str subclass cannot execute virtual encode/strip/hash behavior first.
+        for field_name in cls._STRING_FIELDS:
+            value = record.get(field_name)
+            if field_name == "decision_id":
+                _require_canonical_decision_id(value, location=location)
+                continue
+            try:
+                _canonical_decision_text(value, field_name)
+            except ValueError as exc:
+                raise DecisionLedgerIntegrityError(
+                    f"Decision Ledger record field {field_name!r} is invalid{location}"
+                ) from exc
+        if "decision_kind" in record:
+            try:
+                _canonical_decision_text(record["decision_kind"], "decision_kind")
+            except ValueError as exc:
+                raise DecisionLedgerIntegrityError(
+                    f"Decision Ledger decision_kind is invalid{location}"
+                ) from exc
         try:
             cls._validate_json_value(record, path="record")
         except RecursionError as exc:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record nesting is too deep{location}"
             ) from exc
-        for field_name in cls._STRING_FIELDS:
-            value = record.get(field_name)
-            if not isinstance(value, str) or not value.strip():
-                raise DecisionLedgerIntegrityError(
-                    f"Decision Ledger record field {field_name!r} is invalid{location}"
-                )
         if "decision_kind" in record and record["decision_kind"] != ECONOMIC_DECISION_KIND:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger decision_kind is invalid{location}"
@@ -412,6 +575,17 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger payload contains future-result fields{location}"
             )
+        material_action_id = payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+        if material_action_id is not None:
+            cls._require_material_action_id(
+                material_action_id,
+                location=location,
+            )
+            if record.get("decision_kind") != ECONOMIC_DECISION_KIND:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger material_action_id is attached to a "
+                    f"non-economic decision{location}"
+                )
         if (
             "decision_kind" in record
             and ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY not in payload
@@ -448,10 +622,78 @@ class JsonlDecisionLedger:
             sort_keys=True,
             allow_nan=False,
         )
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(envelope + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        encoded = (envelope + "\n").encode("utf-8")
+
+        # The complete read -> collision proof -> append transaction is one
+        # cooperating-writer critical section.  durable_path_lock alone is
+        # pathname-scoped, so the ledger file itself is also required to be a
+        # single-link regular file: two hard-link aliases must never acquire
+        # different sidecar locks and race the same material_action_id.
+        with durable_path_lock(self.path):
+            handle = None
+            try:
+                try:
+                    handle = self.path.open("x+b")
+                    existing = b""
+                except FileExistsError:
+                    path_before = os.stat(self.path, follow_symlinks=False)
+                    self._require_regular_single_link(path_before)
+                    handle = self.path.open("r+b")
+                    opened = os.fstat(handle.fileno())
+                    path_opened = os.stat(self.path, follow_symlinks=False)
+                    self._require_same_file_identity(opened, path_opened)
+                    handle.seek(0)
+                    existing = handle.read()
+                    opened_after_read = os.fstat(handle.fileno())
+                    path_after_read = os.stat(self.path, follow_symlinks=False)
+                    self._require_same_file_identity(
+                        opened_after_read,
+                        path_after_read,
+                    )
+                    if (
+                        opened_after_read.st_size > _MAX_DECISION_LEDGER_BYTES
+                        or opened.st_dev != opened_after_read.st_dev
+                        or opened.st_ino != opened_after_read.st_ino
+                        or opened.st_size != opened_after_read.st_size
+                        or opened.st_mtime_ns != opened_after_read.st_mtime_ns
+                        or opened.st_ctime_ns != opened_after_read.st_ctime_ns
+                    ):
+                        raise DecisionLedgerIntegrityError(
+                            "Decision Ledger changed during pre-append verification"
+                        )
+
+                assert handle is not None
+                opened_for_write = os.fstat(handle.fileno())
+                path_for_write = os.stat(self.path, follow_symlinks=False)
+                self._require_same_file_identity(opened_for_write, path_for_write)
+                if len(existing) + len(encoded) > _MAX_DECISION_LEDGER_BYTES:
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger append exceeds durable resource limit"
+                    )
+                self._verify_bytes(
+                    existing,
+                    reserved_decision_id=payload["decision_id"],
+                    reserved_material_action_id=payload["payload"].get(
+                        MATERIAL_ACTION_ID_PAYLOAD_KEY
+                    ),
+                )
+                handle.seek(0, os.SEEK_END)
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+                written = os.fstat(handle.fileno())
+                path_written = os.stat(self.path, follow_symlinks=False)
+                self._require_same_file_identity(written, path_written)
+            except DecisionLedgerIntegrityError:
+                raise
+            except OSError as exc:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger durable append failed"
+                ) from exc
+            finally:
+                if handle is not None:
+                    handle.close()
         return digest
 
     def append(self, record: DecisionRecord) -> str:
@@ -493,7 +735,13 @@ class JsonlDecisionLedger:
         )
 
     @classmethod
-    def _verify_bytes(cls, raw: bytes) -> int:
+    def _verify_bytes(
+        cls,
+        raw: bytes,
+        *,
+        reserved_decision_id: str | None = None,
+        reserved_material_action_id: str | None = None,
+    ) -> int:
         if not raw:
             return 0
         if not raw.endswith(b"\n"):
@@ -515,6 +763,7 @@ class JsonlDecisionLedger:
             )
 
         seen_decision_ids: set[str] = set()
+        seen_material_action_ids: set[str] = set()
         line_count = 0
         for line_number, line in enumerate(lines[:-1], start=1):
             if not line:
@@ -563,23 +812,51 @@ class JsonlDecisionLedger:
                     f"Decision Ledger SHA-256 mismatch at line {line_number}"
                 )
 
-            decision_id = str(record["decision_id"])
+            decision_id = _require_canonical_decision_id(
+                record["decision_id"],
+                location=f" at line {line_number}",
+            )
             if decision_id in seen_decision_ids:
                 raise DecisionLedgerIntegrityError(
                     f"Decision Ledger contains duplicate decision_id at line {line_number}"
                 )
             seen_decision_ids.add(decision_id)
+            material_action_id = record["payload"].get(
+                MATERIAL_ACTION_ID_PAYLOAD_KEY
+            )
+            if material_action_id is not None:
+                material_action_id = cls._require_material_action_id(
+                    material_action_id,
+                    location=f" at line {line_number}",
+                )
+                if material_action_id in seen_material_action_ids:
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger contains duplicate material_action_id "
+                        f"at line {line_number}"
+                    )
+                seen_material_action_ids.add(material_action_id)
             line_count += 1
 
+        if (
+            reserved_decision_id is not None
+            and reserved_decision_id in seen_decision_ids
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger already contains decision_id"
+            )
+        if reserved_material_action_id is not None:
+            reserved_material_action_id = cls._require_material_action_id(
+                reserved_material_action_id
+            )
+            if reserved_material_action_id in seen_material_action_ids:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger already contains material_action_id"
+                )
         return line_count
 
     def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
-        try:
-            raw = self.path.read_bytes()
-        except OSError as exc:
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger file is missing or unreadable"
-            ) from exc
+        with durable_path_lock(self.path):
+            raw = self._verified_read_under_lock()
         record_count = self._verify_bytes(raw)
         return VerifiedDecisionLedgerSnapshot(
             payload=raw,
@@ -605,8 +882,10 @@ class JsonlDecisionLedger:
         *,
         risk_policy: PaperRiskPolicy | None = None,
     ) -> DecisionRecord:
-        if not isinstance(decision_id, str) or not decision_id.strip():
-            raise ValueError("decision_id must be a non-empty string")
+        try:
+            decision_id = _require_canonical_decision_id(decision_id)
+        except DecisionLedgerIntegrityError as exc:
+            raise ValueError("decision_id must be exact canonical text") from exc
         for record in self.verified_records():
             if record.decision_id == decision_id:
                 verify_economic_goal_binding(record, contract, risk_policy)
@@ -630,17 +909,20 @@ class JsonlDecisionLedger:
         boundary before creating another material position.
         """
 
-        if not isinstance(material_action_id, str) or not material_action_id.strip():
-            raise ValueError("material_action_id must be a non-empty string")
+        try:
+            material_action_id = self._require_material_action_id(
+                material_action_id
+            )
+        except DecisionLedgerIntegrityError as exc:
+            raise ValueError(
+                "material_action_id must be exact canonical text"
+            ) from exc
         matched: list[DecisionRecord] = []
         for record in self.verified_records():
             value = record.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
             if value is None:
                 continue
-            if not isinstance(value, str) or not value.strip():
-                raise DecisionLedgerIntegrityError(
-                    "Decision Ledger material_action_id is invalid"
-                )
+            self._require_material_action_id(value)
             if value != material_action_id:
                 continue
             if record.decision_kind != ECONOMIC_DECISION_KIND:

@@ -54,6 +54,33 @@ class EvidenceIdentitySchemaTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "canonical string"):
                     EvidenceItem(**kwargs)
 
+    def test_source_hash_requires_lowercase_sha256(self):
+        for source_hash in ("A" * 64, "a" * 63, "not-a-hash"):
+            with self.subTest(source_hash=source_hash):
+                kwargs = {
+                    "evidence_id": "evidence-hash",
+                    "as_of_ts": "2026-10-07T00:00:00+00:00",
+                    "source": "provider:test",
+                    "kind": "research",
+                    "payload": {},
+                    "source_hash": source_hash,
+                }
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "source_hash must be a canonical lowercase SHA-256",
+                ):
+                    EvidenceItem(**kwargs)
+
+    def test_source_hash_is_revalidated_before_canonical_hash(self):
+        item = self._item()
+        object.__setattr__(item, "source_hash", "A" * 64)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "source_hash must be a canonical lowercase SHA-256",
+        ):
+            _ = item.canonical_hash
+
     def test_evidence_timestamp_requires_explicit_timezone(self):
         for timestamp in (
             "2026-10-07T00:00:00",

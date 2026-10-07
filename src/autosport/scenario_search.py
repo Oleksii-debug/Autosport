@@ -86,6 +86,10 @@ class ScenarioSearchReport:
 
 class PortfolioDependencyIndex:
     def __init__(self, tickets: list[PaperTicket]) -> None:
+        if type(tickets) is not list:
+            raise ValueError(
+                "portfolio dependency tickets must be an exact list"
+            )
         self.quote_to_tickets: dict[str, set[str]] = {}
         self.ticket_by_id: dict[str, PaperTicket] = {}
         for ticket in tickets:
@@ -125,12 +129,19 @@ class PortfolioDependencyIndex:
                 self.quote_to_tickets.setdefault(quote_key, set()).add(ticket_id)
 
     def affected_by(self, quote_keys: set[str]) -> set[str]:
-        affected: set[str] = set()
-        for key in quote_keys:
-            canonical_key = _canonical_string_value(
-                key,
-                "portfolio dependency quote_key",
+        if type(quote_keys) is not set:
+            raise ValueError(
+                "portfolio dependency quote_keys must be an exact set"
             )
+        canonical_keys = [
+            _canonical_string_value(
+                key,
+                f"portfolio dependency quote_key[{index}]",
+            )
+            for index, key in enumerate(quote_keys)
+        ]
+        affected: set[str] = set()
+        for canonical_key in canonical_keys:
             affected.update(self.quote_to_tickets.get(canonical_key, set()))
         return affected
 
@@ -216,12 +227,14 @@ class ScenarioSearchEngine:
                 "authoritative outcome analysis requires market authorities"
             )
         if any(
-            not isinstance(authority, MarketSettlementOutcomeAuthority)
+            type(authority) is not MarketSettlementOutcomeAuthority
             for authority in authorities
         ):
             raise ValueError(
                 "authoritative outcome analysis requires canonical market authorities"
             )
+        for authority in authorities:
+            MarketSettlementOutcomeAuthority.__post_init__(authority)
 
         ordered = tuple(
             sorted(
@@ -417,6 +430,8 @@ class ScenarioSearchEngine:
         )
 
     def _validate_and_map(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> dict[str, int]:
+        if type(groups) is not list:
+            raise ValueError("scenario groups must be an exact list")
         if not groups:
             raise ValueError("scenario groups required")
         mapping: dict[str, int] = {}

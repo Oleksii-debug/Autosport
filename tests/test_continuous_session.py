@@ -37,7 +37,13 @@ from autosport.decision_ledger import (
 from autosport.domain import MarketEvent, MarketType, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
-from autosport.event_lifecycle import CatalogEvent, CatalogPage, ContinuousEventLifecycle, EventPhase
+from autosport.event_lifecycle import (
+    CatalogEvent,
+    CatalogPage,
+    ContinuousEventLifecycle,
+    EventPhase,
+    canonical_event_identity,
+)
 from autosport.market_bus import MarketEventBus
 from autosport.market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
@@ -294,8 +300,9 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 store.append(_market_event(event_id="provider-a:event-1"))
                 result = coordinator.tick()
                 self.assertEqual(result.cycle_index, 1)
-                self.assertEqual(result.registered_input_ids, ("catalog:provider-a:event-1",))
-                self.assertEqual(dependencies.input_ids, ("catalog:provider-a:event-1",))
+                input_id = f"catalog:{canonical_event_identity('provider-a', 'table_tennis', 'event-1')}"
+                self.assertEqual(result.registered_input_ids, (input_id,))
+                self.assertEqual(dependencies.input_ids, (input_id,))
                 self.assertEqual(coordinator.status().cycles_completed, 1)
 
                 restarted, restarted_store, *_ = _build_coordinator(
@@ -333,8 +340,10 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     store.append(_market_event(event_id=f"provider-a:{event_id}"))
 
                 first = coordinator.tick()
-                self.assertIn("catalog:provider-a:event-1", first.registered_input_ids)
-                self.assertIn("catalog:provider-a:event-2", first.registered_input_ids)
+                event_1_input = f"catalog:{canonical_event_identity('provider-a', 'table_tennis', 'event-1')}"
+                event_2_input = f"catalog:{canonical_event_identity('provider-a', 'table_tennis', 'event-2')}"
+                self.assertIn(event_1_input, first.registered_input_ids)
+                self.assertIn(event_2_input, first.registered_input_ids)
                 self.assertEqual(lifecycle.get("provider-a:event-2").phase, EventPhase.LIVE)
 
                 source.page = CatalogPage(
@@ -349,7 +358,8 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     ),
                 )
                 second = coordinator.tick()
-                self.assertIn("catalog:provider-a:event-3", second.registered_input_ids)
+                event_3_input = f"catalog:{canonical_event_identity('provider-a', 'table_tennis', 'event-3')}"
+                self.assertIn(event_3_input, second.registered_input_ids)
                 records = lifecycle.records()
                 self.assertEqual(len(records), 3)
                 self.assertEqual(len({item.identity for item in records}), 3)

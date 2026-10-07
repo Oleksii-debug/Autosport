@@ -8,6 +8,7 @@ from autosport.model_compute_router import (
     ComputeRoutingPolicy,
     ComputeTier,
     DataClassification,
+    ModelComputeRouterError,
     VOCEvidenceProvenance,
     ValueOfComputationEvidence,
     route_compute,

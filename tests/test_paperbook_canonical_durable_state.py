@@ -69,14 +69,16 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
         self.path.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_open_ticket_rejects_noncanonical_leg_identity_before_bankroll_mutation(self) -> None:
-        invalid_legs = (
-            TicketLeg("", "winner", "alice", Decimal("2")),
-            TicketLeg(" event-1", "winner", "alice", Decimal("2")),
-            TicketLeg("event-1", "winner ", "alice", Decimal("2")),
-            TicketLeg("event-1", "winner", " alice", Decimal("2")),
+        cases = (
+            ("event_id", ""),
+            ("event_id", " event-1"),
+            ("market_id", "winner "),
+            ("selection_id", " alice"),
         )
-        for leg in invalid_legs:
-            with self.subTest(leg=leg):
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+                object.__setattr__(leg, field, value)
                 book = PaperBook("100")
                 with self.assertRaises(ValueError):
                     book.open_ticket([leg], "10")

@@ -122,6 +122,7 @@ def _snapshot_open_tickets_for_analysis(
     the source identities and those fields before publishing the detached cut.
     """
 
+    tickets = _canonical_portfolio_ticket_list(tickets)
     source_tickets = tuple(tickets)
     captured: list[tuple[object, ...]] = []
     snapshots: list[PaperTicket] = []

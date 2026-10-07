@@ -101,6 +101,18 @@ def test_ticket_identity_rejects_quote_key_str_subclass_before_virtual_method() 
         leg.ticket_identity()
 
 
+
+
+class _TrapList(list):
+    def __iter__(self):
+        raise AssertionError("list subclass iteration must not execute")
+
+
+def test_search_rejects_leg_list_subclass_before_iteration() -> None:
+    with pytest.raises(ValueError, match="candidate legs must be an exact list"):
+        BeamParlayCandidateSearch().search(_TrapList([_leg()]), minimum_legs=1)  # type: ignore[arg-type]
+
+
 def test_search_rejects_quote_key_str_subclass_before_virtual_method() -> None:
     leg = _leg()
     object.__setattr__(leg, "quote_key", _TrapStr(leg.quote_key))

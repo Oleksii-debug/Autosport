@@ -87,6 +87,52 @@ class ScenarioSearchTests(unittest.TestCase):
                 ),
             )
 
+    def test_scenario_search_rejects_ticket_list_subclass_before_iteration(self):
+        class HostileTicketList(list):
+            def __iter__(self):
+                raise AssertionError(
+                    "scenario ticket list iterated before exact-list admission"
+                )
+
+            def __len__(self):
+                raise AssertionError(
+                    "scenario ticket list length dispatched before exact-list admission"
+                )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "portfolio tickets must be an exact list",
+        ):
+            ScenarioSearchEngine().analyse(
+                HostileTicketList(),  # type: ignore[arg-type]
+                [],
+            )
+
+    def test_scenario_search_rejects_group_list_subclass_before_truthiness_or_iteration(self):
+        class HostileGroupList(list):
+            def __iter__(self):
+                raise AssertionError(
+                    "scenario group list iterated before exact-list admission"
+                )
+
+            def __bool__(self):
+                raise AssertionError(
+                    "scenario group list truthiness dispatched before exact-list admission"
+                )
+
+        book = PaperBook("100")
+        leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        ticket = book.open_ticket([leg], "1")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "scenario groups must be an exact list",
+        ):
+            ScenarioSearchEngine().analyse(
+                [ticket],
+                HostileGroupList(),  # type: ignore[arg-type]
+            )
+
     def test_scenario_search_revalidates_mutated_group_identity_at_use_boundary(self):
         book = PaperBook("100")
         a = TicketLeg("e1", "winner", "a", Decimal("2"))
@@ -120,6 +166,33 @@ class ScenarioSearchTests(unittest.TestCase):
         tb = book.open_ticket([b], "1")
         index = PortfolioDependencyIndex([ta, tb])
         self.assertEqual(index.affected_by({a.quote_key}), {ta.ticket_id})
+
+    def test_dependency_index_rejects_ticket_list_subclass_before_iteration(self):
+        class HostileTicketList(list):
+            def __iter__(self):
+                raise AssertionError(
+                    "dependency ticket list iterated before exact-list admission"
+                )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "portfolio dependency tickets must be an exact list",
+        ):
+            PortfolioDependencyIndex(HostileTicketList())  # type: ignore[arg-type]
+
+    def test_dependency_index_rejects_quote_set_subclass_before_iteration(self):
+        class HostileQuoteSet(set):
+            def __iter__(self):
+                raise AssertionError(
+                    "dependency quote set iterated before exact-set admission"
+                )
+
+        index = PortfolioDependencyIndex([])
+        with self.assertRaisesRegex(
+            ValueError,
+            "portfolio dependency quote_keys must be an exact set",
+        ):
+            index.affected_by(HostileQuoteSet({"e1|winner|a"}))  # type: ignore[arg-type]
 
     def test_dependency_index_rejects_hostile_ticket_id_before_hash_dispatch(self):
         book = PaperBook("100")

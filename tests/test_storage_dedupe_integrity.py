@@ -129,7 +129,8 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
             store.close()
 
     def test_noncanonical_incoming_event_fails_before_persistence(self):
-        invalid = replace(self._event(event_id="7"), event_id=7)  # type: ignore[arg-type]
+        invalid = self._event(event_id="7")
+        object.__setattr__(invalid, "event_id", 7)
         self._assert_invalid_event_not_persisted(invalid)
 
     def test_tuple_metadata_fails_before_json_type_drift_can_persist(self):
@@ -157,10 +158,8 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
 
     def test_noncanonical_event_rolls_back_earlier_batch_insert(self):
         valid = self._event(event_id="e2", sequence=2)
-        invalid = replace(
-            self._event(event_id="7", sequence=3),
-            event_id=7,  # type: ignore[arg-type]
-        )
+        invalid = self._event(event_id="7", sequence=3)
+        object.__setattr__(invalid, "event_id", 7)
 
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteMarketStore(Path(tmp) / "market.db")

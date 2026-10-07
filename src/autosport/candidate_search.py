@@ -254,6 +254,8 @@ class BeamParlayCandidateSearch:
 
     @staticmethod
     def _validate_input_legs(legs: list[CandidateLeg]) -> None:
+        if type(legs) is not list:
+            raise ValueError("candidate legs must be an exact list")
         seen_quote_keys: set[str] = set()
         for index, leg in enumerate(legs):
             if type(leg) is not CandidateLeg:

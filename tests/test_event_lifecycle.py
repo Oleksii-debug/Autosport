@@ -616,6 +616,32 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_register_eligible_rejects_identity_subclass_before_hash_dispatch(self) -> None:
+        class HostileIdentity(str):
+            def __hash__(self):
+                raise AssertionError(
+                    "lifecycle identity hashed before canonical admission"
+                )
+
+            def strip(self, *args, **kwargs):
+                raise AssertionError(
+                    "lifecycle identity subclass string dispatch must not execute"
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = ContinuousEventLifecycle(Path(directory) / "catalog.json")
+            with self.assertRaisesRegex(
+                ValueError,
+                r"identities\[0\] must be a non-empty trimmed canonical string",
+            ):
+                lifecycle.register_eligible(
+                    None,  # type: ignore[arg-type]
+                    as_of=self.START.isoformat(),
+                    required_history=timedelta(0),
+                    register_input=lambda *_args, **_kwargs: None,
+                    identities=[HostileIdentity("event-1")],
+                )
+
     def test_register_eligible_retires_schema_v1_dependency_while_v2_waits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

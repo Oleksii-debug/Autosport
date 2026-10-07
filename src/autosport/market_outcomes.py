@@ -61,6 +61,14 @@ def _canonical_text(name: str, value: object) -> str:
     return value
 
 
+def _canonical_provider_selection_id(name: str, value: object) -> str:
+    if type(value) is int:
+        return str(value)
+    if type(value) is str:
+        return _canonical_text(name, value)
+    raise ValueError(f"{name} must be a canonical string or integer")
+
+
 def _canonical_timestamp(name: str, value: object) -> tuple[str, datetime]:
     raw = _canonical_text(name, value)
     try:
@@ -117,6 +125,7 @@ class MarketOutcomeIdentity:
 
     @property
     def identity_key(self) -> tuple[str, str, str, str, str]:
+        MarketOutcomeIdentity.__post_init__(self)
         return (
             self.sport,
             self.event_id,
@@ -128,6 +137,7 @@ class MarketOutcomeIdentity:
     @property
     def market_key(self) -> tuple[str, str, str, str]:
         """Provider-independent key only when canonical market IDs already align."""
+        MarketOutcomeIdentity.__post_init__(self)
         return (
             self.sport,
             self.event_id,
@@ -136,6 +146,7 @@ class MarketOutcomeIdentity:
         )
 
     def quote_key(self, selection_id: str) -> str:
+        MarketOutcomeIdentity.__post_init__(self)
         selection = _canonical_text("market outcome selection_id", selection_id)
         return _quote_identity(
             self.event_id,
@@ -145,6 +156,7 @@ class MarketOutcomeIdentity:
         )
 
     def to_dict(self) -> dict[str, object]:
+        MarketOutcomeIdentity.__post_init__(self)
         return {
             "sport": self.sport,
             "event_id": self.event_id,
@@ -155,16 +167,25 @@ class MarketOutcomeIdentity:
 
     @classmethod
     def from_dict(cls, raw: object) -> "MarketOutcomeIdentity":
+        if cls is not MarketOutcomeIdentity:
+            raise TypeError("market outcome identity readback requires canonical type")
         expected = {"sport", "event_id", "market_id", "source_id", "market_type"}
-        if type(raw) is not dict or set(raw) != expected:
+        if type(raw) is not dict:
+            raise ValueError("serialized market outcome identity must contain canonical fields")
+        raw_keys = tuple(raw.keys())
+        if any(type(key) is not str for key in raw_keys) or set(raw_keys) != expected:
             raise ValueError("serialized market outcome identity must contain canonical fields")
         try:
-            return cls(
+            market_type = _canonical_text(
+                "serialized market outcome market_type",
+                raw["market_type"],
+            )
+            return MarketOutcomeIdentity(
                 sport=raw["sport"],
                 event_id=raw["event_id"],
                 market_id=raw["market_id"],
                 source_id=raw["source_id"],
-                market_type=MarketType(raw["market_type"]),
+                market_type=MarketType(market_type),
             )
         except (TypeError, ValueError) as exc:
             raise ValueError("serialized market outcome identity is invalid") from exc
@@ -200,6 +221,7 @@ class MarketTerminalState:
             raise ValueError("terminal settlements must use canonical selection order")
 
     def to_dict(self) -> dict[str, object]:
+        MarketTerminalState.__post_init__(self)
         return {
             "state_id": self.state_id,
             "settlements": [
@@ -235,8 +257,9 @@ class MarketSettlementOutcomeAuthority:
             raise TypeError(
                 "MarketSettlementOutcomeAuthority must come from verified evidence"
             )
-        if not isinstance(self.identity, MarketOutcomeIdentity):
+        if type(self.identity) is not MarketOutcomeIdentity:
             raise TypeError("identity must be MarketOutcomeIdentity")
+        MarketOutcomeIdentity.__post_init__(self.identity)
         if self.identity.market_type is not MarketType.WINNER:
             raise ValueError(
                 "authoritative terminal outcome semantics currently support winner markets only"
@@ -278,6 +301,7 @@ class MarketSettlementOutcomeAuthority:
 
     @property
     def quote_keys(self) -> tuple[str, ...]:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         return tuple(
             self.identity.quote_key(selection_id)
             for selection_id in self.selection_ids
@@ -285,6 +309,7 @@ class MarketSettlementOutcomeAuthority:
 
     @property
     def terminal_state_count(self) -> int:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         if (
             self.settlement_semantics
             is SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
@@ -299,6 +324,7 @@ class MarketSettlementOutcomeAuthority:
 
     @property
     def terminal_space_exact(self) -> bool:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         return (
             self.settlement_semantics
             is not SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
@@ -306,6 +332,7 @@ class MarketSettlementOutcomeAuthority:
 
     @property
     def terminal_states(self) -> tuple[MarketTerminalState, ...]:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         if (
             self.settlement_semantics
             is SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
@@ -362,6 +389,7 @@ class MarketSettlementOutcomeAuthority:
         return tuple(states)
 
     def assert_available_as_of(self, decision_as_of: datetime) -> None:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         if not isinstance(decision_as_of, datetime):
             raise TypeError("decision_as_of must be a datetime")
         if (
@@ -381,8 +409,10 @@ class MarketSettlementOutcomeAuthority:
             )
 
     def _state_is_derived(self, state: MarketTerminalState) -> bool:
-        if not isinstance(state, MarketTerminalState):
+        MarketSettlementOutcomeAuthority.__post_init__(self)
+        if type(state) is not MarketTerminalState:
             return False
+        MarketTerminalState.__post_init__(state)
         actual_ids = tuple(
             selection_id for selection_id, _ in state.settlements
         )
@@ -429,8 +459,10 @@ class MarketSettlementOutcomeAuthority:
     def settlement_by_quote(
         self, state: MarketTerminalState
     ) -> dict[str, str]:
-        if not isinstance(state, MarketTerminalState):
+        MarketSettlementOutcomeAuthority.__post_init__(self)
+        if type(state) is not MarketTerminalState:
             raise TypeError("state must be MarketTerminalState")
+        MarketTerminalState.__post_init__(state)
         if not self._state_is_derived(state):
             raise ValueError(
                 "terminal state is not derived from this outcome authority"
@@ -441,6 +473,7 @@ class MarketSettlementOutcomeAuthority:
         }
 
     def _identity_payload(self) -> dict[str, object]:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         return {
             "schema": "autosport.market_settlement_outcome_authority",
             "schema_version": 1,
@@ -482,11 +515,12 @@ class MarketSettlementOutcomeAuthority:
         supply that independently derived authority here; durable data then proves
         identity/equality only.
         """
-        if not isinstance(verified_authority, cls):
+        if type(verified_authority) is not MarketSettlementOutcomeAuthority:
             raise ValueError(
                 "durable market outcome authority readback requires separately "
                 "verified source authority"
             )
+        MarketSettlementOutcomeAuthority.__post_init__(verified_authority)
         canonical = verified_authority.to_dict()
         expected = set(canonical)
         if type(raw) is not dict or set(raw) != expected:
@@ -531,16 +565,18 @@ class MarketOutcomeAuthorityAssessment:
     refusal_reason: str | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.identity, MarketOutcomeIdentity):
+        if type(self.identity) is not MarketOutcomeIdentity:
             raise TypeError("assessment identity must be MarketOutcomeIdentity")
-        if not isinstance(self.status, OutcomeAuthorityStatus):
+        MarketOutcomeIdentity.__post_init__(self.identity)
+        if type(self.status) is not OutcomeAuthorityStatus:
             raise ValueError("assessment status must be OutcomeAuthorityStatus")
         if self.status is OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE:
             if (
-                not isinstance(self.authority, MarketSettlementOutcomeAuthority)
+                type(self.authority) is not MarketSettlementOutcomeAuthority
                 or self.refusal_reason is not None
             ):
                 raise ValueError("proven assessment requires authority and no refusal")
+            MarketSettlementOutcomeAuthority.__post_init__(self.authority)
             if self.authority.identity != self.identity:
                 raise ValueError("assessment authority identity mismatch")
         else:
@@ -564,9 +600,10 @@ def assess_market_outcome_authority(
 ) -> MarketOutcomeAuthorityAssessment:
     """Refuse raw caller assertions; exhaustive authority needs verified source evidence."""
 
-    if not isinstance(identity, MarketOutcomeIdentity):
+    if type(identity) is not MarketOutcomeIdentity:
         raise TypeError("identity must be MarketOutcomeIdentity")
-    if not isinstance(roster_basis, OutcomeRosterBasis):
+    MarketOutcomeIdentity.__post_init__(identity)
+    if type(roster_basis) is not OutcomeRosterBasis:
         raise ValueError("roster_basis must be OutcomeRosterBasis")
     if roster_basis is OutcomeRosterBasis.OBSERVED_ROWS_ONLY:
         reason = "observed_rows_do_not_prove_exhaustive_selection_roster"
@@ -676,9 +713,9 @@ def assess_betfair_historical_market_definition_authority(
                 f"marketDefinition.runners[{index}] requires id"
             )
         selection_ids.append(
-            _canonical_text(
+            _canonical_provider_selection_id(
                 f"marketDefinition.runners[{index}].id",
-                str(runner["id"]),
+                runner["id"],
             )
         )
     if len(selection_ids) != len(set(selection_ids)):

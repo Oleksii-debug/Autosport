@@ -216,7 +216,12 @@ class ReadOnlyCollectorDeltaFeed:
     def __init__(self, store: CollectorDeltaStore, *, source_id: str) -> None:
         if not isinstance(store, CollectorDeltaStore):
             raise TypeError("store must be CollectorDeltaStore")
-        if (\n            type(source_id) is not str\n            or not source_id\n            or source_id != source_id.strip()\n            or any(ord(char) < 32 or ord(char) == 127 for char in source_id)\n        ):
+        if (
+            type(source_id) is not str
+            or not source_id
+            or source_id != source_id.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in source_id)
+        ):
             raise ValueError("source_id must be a non-empty string")
         self.store = store
         self.source_id = source_id
@@ -487,7 +492,12 @@ class HeadlessCollectorService:
             raise TypeError("lifecycle must be ContinuousEventLifecycle")
         source_id = getattr(source, "source_id", None)
         stream_epoch = getattr(source, "stream_epoch", None)
-        if (\n            type(source_id) is not str\n            or not source_id\n            or source_id != source_id.strip()\n            or any(ord(char) < 32 or ord(char) == 127 for char in source_id)\n        ):
+        if (
+            type(source_id) is not str
+            or not source_id
+            or source_id != source_id.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in source_id)
+        ):
             raise ValueError("source.source_id must be a non-empty canonical string")
         if (\n            type(stream_epoch) is not str\n            or not stream_epoch\n            or stream_epoch != stream_epoch.strip()\n            or any(ord(char) < 32 or ord(char) == 127 for char in stream_epoch)\n        ):
             raise ValueError("source.stream_epoch must be a non-empty canonical string")
@@ -540,7 +550,12 @@ class HeadlessCollectorService:
             )
         source_id = getattr(source, "source_id", None)
         stream_epoch = getattr(source, "stream_epoch", None)
-        if (\n            type(source_id) is not str\n            or not source_id\n            or source_id != source_id.strip()\n            or any(ord(char) < 32 or ord(char) == 127 for char in source_id)\n        ):
+        if (
+            type(source_id) is not str
+            or not source_id
+            or source_id != source_id.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in source_id)
+        ):
             raise CollectorServiceError(
                 "source.source_id must remain a non-empty canonical string"
             )

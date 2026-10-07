@@ -33,11 +33,68 @@ _SCHEMA_MISSING = object()
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 
 
-def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
-    """Return the immutable opening facts that authorized PAPER economics."""
+def _ticket_leg_opening_commitment(leg: object) -> tuple[object, ...]:
+    """Snapshot one admitted leg without retaining caller-owned object identity."""
+
+    if type(leg) is not TicketLeg:
+        raise ValueError("PaperBook opening authority requires exact TicketLeg values")
+    if (
+        type(leg.event_id) is not str
+        or type(leg.market_id) is not str
+        or type(leg.selection_id) is not str
+        or type(leg.locked_odds) is not Decimal
+        or (leg.sport is not None and type(leg.sport) is not str)
+        or (leg.exchange_side is not None and type(leg.exchange_side) is not str)
+    ):
+        raise ValueError(
+            "PaperBook opening authority leg identity must use exact scalar types"
+        )
+    return (
+        leg.event_id,
+        leg.market_id,
+        leg.selection_id,
+        leg.locked_odds,
+        leg.sport,
+        leg.exchange_side,
+    )
+
+
+def _ticket_opening_commitment(ticket: object) -> tuple[object, ...]:
+    """Return detached immutable opening facts that authorized PAPER economics."""
+
+    if type(ticket) is not PaperTicket:
+        raise ValueError("PaperBook opening authority requires exact PaperTicket values")
+    if type(ticket.legs) is not tuple:
+        raise ValueError("PaperBook opening authority ticket legs must be an exact tuple")
+    if (
+        type(ticket.stake) is not Decimal
+        or type(ticket.placed_at) is not str
+        or type(ticket.strategy_reason) is not str
+        or type(ticket.provider_source_ids) is not tuple
+        or type(ticket.provider_accounts) is not tuple
+        or (ticket.bankroll_id is not None and type(ticket.bankroll_id) is not str)
+        or (ticket.currency is not None and type(ticket.currency) is not str)
+    ):
+        raise ValueError(
+            "PaperBook opening authority ticket identity must use exact scalar/container types"
+        )
+    if any(type(source_id) is not str for source_id in ticket.provider_source_ids):
+        raise ValueError(
+            "PaperBook opening authority provider_source_ids must contain exact strings"
+        )
+    for binding in ticket.provider_accounts:
+        if (
+            type(binding) is not tuple
+            or len(binding) != 2
+            or type(binding[0]) is not str
+            or type(binding[1]) is not str
+        ):
+            raise ValueError(
+                "PaperBook opening authority provider_accounts must contain exact string pairs"
+            )
     return (
         ticket.stake,
-        ticket.legs,
+        tuple(_ticket_leg_opening_commitment(leg) for leg in ticket.legs),
         ticket.placed_at,
         ticket.strategy_reason,
         ticket.provider_source_ids,

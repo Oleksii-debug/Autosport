@@ -554,6 +554,7 @@ class ContinuousEventLifecycle:
             type(raw) is not dict
             or set(raw) != {"schema", "schema_version", "sources", "events"}
             or raw["schema"] != self._SCHEMA
+            or type(raw["schema_version"]) is not int
             or raw["schema_version"] != self._VERSION
             or type(raw["sources"]) is not dict
             or type(raw["events"]) is not dict

@@ -96,6 +96,30 @@ class AgentCompositionIdentityTests(unittest.TestCase):
         self.assertEqual(len(first), 64)
         self.assertNotEqual(first, reversed_hash)
 
+    def test_agent_composition_rejects_identity_subclass_before_dispatch(self):
+        dispatch_calls = []
+
+        class HostileAgentName(str):
+            def strip(self, *args, **kwargs):
+                dispatch_calls.append("strip")
+                raise AssertionError(
+                    "hostile agent identity stripped before exact-type admission"
+                )
+
+            def __hash__(self):
+                dispatch_calls.append("hash")
+                raise AssertionError(
+                    "hostile agent identity hashed before exact-type admission"
+                )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "agent names must be non-empty canonical strings",
+        ):
+            agent_composition_sha256((HostileAgentName("market-mirror"),))
+
+        self.assertEqual(dispatch_calls, [])
+
     def test_latest_quotes_rejects_identity_subclasses_before_hash_dispatch(self):
         dispatch_calls = []
 

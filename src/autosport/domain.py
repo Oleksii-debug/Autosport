@@ -452,14 +452,52 @@ class MarketEvent:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        # Serialization is a canonical identity use-boundary. Re-prove every
+        # identity-bearing component before publishing it so post-construction
+        # mutation cannot leak a noncanonical alias into durable/downstream state.
+        canonical_event_id = _canonical_string_value(self.event_id, "event_id")
+        canonical_market_id = _canonical_string_value(self.market_id, "market_id")
+        canonical_selection_id = _canonical_string_value(
+            self.selection_id, "selection_id"
+        )
+        canonical_source_id = _canonical_string_value(self.source_id, "source_id")
+        canonical_sequence = _canonical_sequence_value(self.sequence)
+        canonical_sport = (
+            None if self.sport is None else _canonical_sport_value(self.sport)
+        )
+        canonical_competition_id = (
+            None
+            if self.competition_id is None
+            else _canonical_semantic_identity(self.competition_id, "competition_id")
+        )
+        canonical_market_semantics_id = (
+            None
+            if self.market_semantics_id is None
+            else _canonical_semantic_identity(
+                self.market_semantics_id, "market_semantics_id"
+            )
+        )
+        canonical_provider_source_class = (
+            None
+            if self.provider_source_class is None
+            else _canonical_semantic_identity(
+                self.provider_source_class, "provider_source_class"
+            )
+        )
+        canonical_exchange_side = (
+            None
+            if self.exchange_side is None
+            else _canonical_exchange_side(self.exchange_side)
+        )
+
         payload = {
-            "event_id": self.event_id,
-            "market_id": self.market_id,
-            "selection_id": self.selection_id,
+            "event_id": canonical_event_id,
+            "market_id": canonical_market_id,
+            "selection_id": canonical_selection_id,
             "decimal_odds": str(self.decimal_odds),
             "observed_ts": self.observed_ts,
-            "source_id": self.source_id,
-            "sequence": self.sequence,
+            "source_id": canonical_source_id,
+            "sequence": canonical_sequence,
             "market_type": self.market_type.value,
             "status": self.status,
             "source_ts": self.source_ts,
@@ -467,16 +505,16 @@ class MarketEvent:
             "score_state": self.score_state,
             "metadata": _serialized_metadata({"metadata": self.metadata}),
         }
-        if self.sport is not None:
-            payload["sport"] = self.sport
-        if self.competition_id is not None:
-            payload["competition_id"] = self.competition_id
-        if self.market_semantics_id is not None:
-            payload["market_semantics_id"] = self.market_semantics_id
-        if self.provider_source_class is not None:
-            payload["provider_source_class"] = self.provider_source_class
-        if self.exchange_side is not None:
-            payload["exchange_side"] = self.exchange_side
+        if canonical_sport is not None:
+            payload["sport"] = canonical_sport
+        if canonical_competition_id is not None:
+            payload["competition_id"] = canonical_competition_id
+        if canonical_market_semantics_id is not None:
+            payload["market_semantics_id"] = canonical_market_semantics_id
+        if canonical_provider_source_class is not None:
+            payload["provider_source_class"] = canonical_provider_source_class
+        if canonical_exchange_side is not None:
+            payload["exchange_side"] = canonical_exchange_side
         return payload
 
 

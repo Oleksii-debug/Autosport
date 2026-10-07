@@ -167,3 +167,45 @@ def test_valid_delimiter_bearing_domain_identity_is_not_normalized_or_rewritten(
     assert event.market_id == "market|spread"
     assert event.selection_id == "player|a"
     assert event.quote_key == leg.quote_key
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("source_id", "provider-1"),
+        ("event_id", "event-1"),
+        ("market_id", "market-1"),
+        ("selection_id", "selection-1"),
+        ("sport", "football"),
+        ("competition_id", "league:one"),
+        ("market_semantics_id", "market:semantics"),
+        ("provider_source_class", "provider:class"),
+        ("exchange_side", "back"),
+    ),
+)
+def test_market_event_to_dict_rejects_post_construction_identity_subclass_before_dispatch(
+    field_name: str,
+    value: str,
+) -> None:
+    event = _event(
+        sport="football",
+        competition_id="league:one",
+        market_semantics_id="market:semantics",
+        provider_source_class="provider:class",
+        exchange_side="back",
+    )
+    object.__setattr__(event, field_name, _ExplosiveString(value))
+
+    with pytest.raises(ValueError):
+        event.to_dict()
+
+
+@pytest.mark.parametrize("sequence", (True, _ExplosiveInt(1)))
+def test_market_event_to_dict_rejects_post_construction_noncanonical_sequence(
+    sequence: object,
+) -> None:
+    event = _event()
+    object.__setattr__(event, "sequence", sequence)
+
+    with pytest.raises(ValueError, match="sequence must be a non-boolean int"):
+        event.to_dict()
+

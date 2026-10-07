@@ -50,6 +50,11 @@ def _install_runtime(
         "build_autonomous_product_runtime",
         lambda **_kwargs: runtime,
     )
+    monkeypatch.setattr(
+        entrypoint,
+        "tick_autonomous_product_runtime",
+        lambda candidate: candidate.tick(),
+    )
     monkeypatch.setattr(entrypoint, "_print_record", lambda *_args, **_kwargs: None)
 
 

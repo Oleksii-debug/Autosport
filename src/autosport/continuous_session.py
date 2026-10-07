@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import builtins as _builtins
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
+from types import FunctionType, MethodType
 from typing import Any, Callable, Protocol
 
 from .causal_collector import (
@@ -42,16 +45,450 @@ class SessionStoppedError(ContinuousSessionError):
     """Raised when work is attempted while the session is durably STOPPED."""
 
 
+def _build_settlement_callback_authority():
+    """Build one shared fail-closed witness for settlement callback dispatch."""
+
+    missing_callback_value = object()
+    canonical_object_getattribute = object.__getattribute__
+    exact_type = type
+    exact_type_getattribute = type.__getattribute__
+    exact_len = len
+    exact_any = any
+    exact_zip = zip
+    exact_tuple = tuple
+    exact_callable = callable
+    exact_dict_type = dict
+    exact_dict_get = exact_dict_type.get
+    canonical_builtins = _builtins.__dict__
+    canonical_builtin_bindings = (
+        ("type", exact_type),
+        ("len", exact_len),
+        ("any", exact_any),
+        ("zip", exact_zip),
+        ("tuple", exact_tuple),
+        ("callable", exact_callable),
+        ("dict", exact_dict_type),
+    )
+
+    def require_canonical_builtins(*, label: str) -> None:
+        for name, expected in canonical_builtin_bindings:
+            if (
+                exact_dict_get(canonical_builtins, name, missing_callback_value)
+                is not expected
+            ):
+                raise ContinuousSessionError(
+                    f"settlement {label} builtin authority changed during tick"
+                )
+
+    def capture_python_surface(function: FunctionType) -> tuple[object, ...]:
+        closure = function.__closure__
+        closure_cells = () if closure is None else closure
+        try:
+            closure_values = exact_tuple(cell.cell_contents for cell in closure_cells)
+        except ValueError as exc:
+            raise ContinuousSessionError(
+                "settlement callback executable closure is unavailable"
+            ) from exc
+        kwdefaults = function.__kwdefaults__
+        kwdefault_items = () if kwdefaults is None else exact_tuple(kwdefaults.items())
+        return (
+            function,
+            function.__code__,
+            function.__globals__,
+            function.__defaults__,
+            kwdefaults,
+            kwdefault_items,
+            closure,
+            exact_tuple(closure_cells),
+            closure_values,
+        )
+
+    def capture_python_global_graph(
+        function: FunctionType,
+    ) -> tuple[tuple[object, ...], ...]:
+        """Capture the same-module executable globals reachable from one callback."""
+
+        root_globals = function.__globals__
+        pending = [function]
+        seen: set[FunctionType] = set()
+        graph: list[tuple[object, ...]] = []
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            current_builtins = current.__builtins__
+            if exact_type(current_builtins) is not dict:
+                raise ContinuousSessionError(
+                    "settlement callback builtin namespace is unavailable"
+                )
+            bindings: list[
+                tuple[str, object, tuple[object, ...] | None, object]
+            ] = []
+            for global_name in current.__code__.co_names:
+                value = current.__globals__.get(
+                    global_name,
+                    missing_callback_value,
+                )
+                value_surface = (
+                    capture_python_surface(value)
+                    if exact_type(value) is FunctionType
+                    else None
+                )
+                builtin_value = (
+                    exact_dict_get(
+                        current_builtins,
+                        global_name,
+                        missing_callback_value,
+                    )
+                    if value is missing_callback_value
+                    else missing_callback_value
+                )
+                bindings.append(
+                    (
+                        global_name,
+                        value,
+                        value_surface,
+                        builtin_value,
+                    )
+                )
+                if (
+                    value is not missing_callback_value
+                    and exact_type(value) is FunctionType
+                    and value.__globals__ is root_globals
+                    and value not in seen
+                ):
+                    pending.append(value)
+            graph.append(
+                (
+                    capture_python_surface(current),
+                    current_builtins,
+                    exact_tuple(bindings),
+                )
+            )
+        return exact_tuple(graph)
+
+    def capture_python_callable(function: FunctionType) -> tuple[object, ...]:
+        return (
+            *capture_python_surface(function),
+            capture_python_global_graph(function),
+        )
+
+    def stable_callback_lookup(owner: object, name: str) -> object | None:
+        try:
+            return canonical_object_getattribute(owner, name)
+        except AttributeError:
+            return None
+
+    def capture_callback(
+        owner: object,
+        name: str,
+        *,
+        optional: bool = False,
+    ) -> tuple[object | None, tuple[object, ...] | None]:
+        callback = stable_callback_lookup(owner, name)
+        if callback is None:
+            if optional:
+                return None, None
+            raise ContinuousSessionError(
+                f"settlement {name} dispatch must remain callable"
+            )
+        if not exact_callable(callback):
+            raise ContinuousSessionError(
+                f"settlement {name} dispatch must remain callable"
+            )
+        if exact_type(callback) is MethodType and exact_type(callback.__func__) is FunctionType:
+            return callback, (
+                "method",
+                callback.__self__,
+                *capture_python_callable(callback.__func__),
+            )
+        if exact_type(callback) is FunctionType:
+            return callback, ("function", *capture_python_callable(callback))
+        callback_type = exact_type(callback)
+        call_target = exact_type_getattribute(callback_type, "__call__")
+        call_witness = (
+            capture_python_callable(call_target)
+            if exact_type(call_target) is FunctionType
+            else None
+        )
+        return callback, (
+            "opaque",
+            callback,
+            callback_type,
+            call_target,
+            call_witness,
+        )
+
+    def require_python_surface(
+        witness: tuple[object, ...],
+        *,
+        label: str,
+    ) -> None:
+        (
+            function,
+            expected_code,
+            expected_globals,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_kwdefault_items,
+            expected_closure,
+            expected_closure_cells,
+            expected_closure_values,
+        ) = witness
+        if (
+            exact_type(function) is not FunctionType
+            or function.__code__ is not expected_code
+            or function.__globals__ is not expected_globals
+            or function.__defaults__ is not expected_defaults
+            or function.__kwdefaults__ is not expected_kwdefaults
+            or function.__closure__ is not expected_closure
+        ):
+            raise ContinuousSessionError(
+                f"settlement {label} executable changed during tick"
+            )
+        if expected_kwdefaults is not None:
+            if (
+                exact_len(expected_kwdefaults) != exact_len(expected_kwdefault_items)
+                or exact_any(
+                    expected_kwdefaults.get(key, missing_callback_value) is not value
+                    for key, value in expected_kwdefault_items
+                )
+            ):
+                raise ContinuousSessionError(
+                    f"settlement {label} executable changed during tick"
+                )
+        current_closure = function.__closure__
+        current_cells = () if current_closure is None else current_closure
+        if (
+            exact_len(current_cells) != exact_len(expected_closure_cells)
+            or exact_any(
+                current is not expected
+                for current, expected in exact_zip(
+                    current_cells,
+                    expected_closure_cells,
+                )
+            )
+        ):
+            raise ContinuousSessionError(
+                f"settlement {label} executable changed during tick"
+            )
+        try:
+            current_values = exact_tuple(cell.cell_contents for cell in current_cells)
+        except ValueError as exc:
+            raise ContinuousSessionError(
+                f"settlement {label} executable changed during tick"
+            ) from exc
+        if (
+            exact_len(current_values) != exact_len(expected_closure_values)
+            or exact_any(
+                current is not expected
+                for current, expected in exact_zip(
+                    current_values,
+                    expected_closure_values,
+                )
+            )
+        ):
+            raise ContinuousSessionError(
+                f"settlement {label} executable changed during tick"
+            )
+
+    def require_python_global_graph(
+        graph: tuple[tuple[object, ...], ...],
+        *,
+        label: str,
+    ) -> None:
+        for function_witness, expected_builtins, bindings in graph:
+            require_python_surface(function_witness, label=label)
+            function = function_witness[0]
+            if (
+                exact_type(function) is not FunctionType
+                or function.__builtins__ is not expected_builtins
+                or exact_type(expected_builtins) is not dict
+            ):
+                raise ContinuousSessionError(
+                    f"settlement {label} builtin namespace changed during tick"
+                )
+            expected_globals = function_witness[2]
+            for (
+                global_name,
+                expected,
+                nested_surface,
+                expected_builtin,
+            ) in bindings:
+                if expected is missing_callback_value:
+                    if global_name in expected_globals:
+                        raise ContinuousSessionError(
+                            f"settlement {label} global binding changed during tick"
+                        )
+                    if (
+                        exact_dict_get(
+                            expected_builtins,
+                            global_name,
+                            missing_callback_value,
+                        )
+                        is not expected_builtin
+                    ):
+                        raise ContinuousSessionError(
+                            f"settlement {label} builtin binding changed during tick"
+                        )
+                    continue
+                if (
+                    global_name not in expected_globals
+                    or expected_globals[global_name] is not expected
+                ):
+                    raise ContinuousSessionError(
+                        f"settlement {label} global binding changed during tick"
+                    )
+                if nested_surface is not None:
+                    require_python_surface(
+                        nested_surface,
+                        label=f"{label} global {global_name}",
+                    )
+
+    def require_python_callable(
+        witness: tuple[object, ...],
+        *,
+        label: str,
+    ) -> None:
+        if exact_len(witness) != 10:
+            raise ContinuousSessionError(
+                f"settlement {label} dispatch witness is unavailable"
+            )
+        surface = witness[:9]
+        global_graph = witness[9]
+        require_python_surface(surface, label=label)
+        require_python_global_graph(global_graph, label=label)
+
+    def require_callback(
+        owner: object,
+        name: str,
+        callback: object | None,
+        witness: tuple[object, ...] | None,
+        *,
+        label: str,
+        optional: bool = False,
+        relookup: bool = True,
+    ) -> None:
+        require_canonical_builtins(label=label)
+        current = stable_callback_lookup(owner, name) if relookup else callback
+        if callback is None:
+            if not optional or current is not None:
+                raise ContinuousSessionError(
+                    f"settlement {label} dispatch changed during tick"
+                )
+            return
+        if witness is None:
+            raise ContinuousSessionError(
+                f"settlement {label} dispatch witness is unavailable"
+            )
+        kind = witness[0]
+        if kind == "method":
+            expected_self = witness[1]
+            function_witness = witness[2:]
+            expected_function = function_witness[0]
+            if (
+                exact_type(current) is not MethodType
+                or current.__self__ is not expected_self
+                or current.__func__ is not expected_function
+            ):
+                raise ContinuousSessionError(
+                    f"settlement {label} dispatch changed during tick"
+                )
+            require_python_callable(function_witness, label=label)
+            return
+        if kind == "function":
+            function_witness = witness[1:]
+            expected_function = function_witness[0]
+            if current is not expected_function:
+                raise ContinuousSessionError(
+                    f"settlement {label} dispatch changed during tick"
+                )
+            require_python_callable(function_witness, label=label)
+            return
+        if kind != "opaque" or current is not witness[1] or exact_type(current) is not witness[2]:
+            raise ContinuousSessionError(
+                f"settlement {label} dispatch changed during tick"
+            )
+        expected_type = witness[2]
+        expected_call_target = witness[3]
+        call_witness = witness[4]
+        if exact_type_getattribute(expected_type, "__call__") is not expected_call_target:
+            raise ContinuousSessionError(
+                f"settlement {label} invocation slot changed during tick"
+            )
+        if call_witness is not None:
+            require_python_callable(call_witness, label=f"{label} invocation")
+
+
+    return capture_callback, require_callback
+
+
+(
+    _CANONICAL_CAPTURE_SETTLEMENT_CALLBACK,
+    _CANONICAL_REQUIRE_SETTLEMENT_CALLBACK,
+) = _build_settlement_callback_authority()
+del _build_settlement_callback_authority
+
+
 def _bind_canonical_settlement_engine(method):
-    """Inject the import-time exact SettlementEngine through a closure-owned seam."""
+    """Bind the exact engine and workspace lock used by the sealed consumer."""
 
     canonical_engine_type = SettlementEngine
+    canonical_lock_type = WorkspaceEconomicLock
+    canonical_snapshot = _canonical_settlement_handoff_snapshot
 
     def guarded(self, *args, **kwargs):
         if "_settlement_engine_type" in kwargs:
             raise TypeError("settlement engine origin is internal product authority")
+        if "_economic_lock_type" in kwargs or "_snapshot_fn" in kwargs:
+            raise TypeError("settlement economic origin is internal product authority")
         kwargs["_settlement_engine_type"] = canonical_engine_type
+        kwargs["_economic_lock_type"] = canonical_lock_type
+        kwargs["_snapshot_fn"] = canonical_snapshot
         return method(self, *args, **kwargs)
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
+def _bind_canonical_settlement_snapshot(method):
+    """Bind settlement snapshot and callback lookup to import-time authorities."""
+
+    canonical_snapshot = _canonical_settlement_handoff_snapshot
+    canonical_snapshot_code = canonical_snapshot.__code__
+    canonical_object_getattribute = object.__getattribute__
+    canonical_capture_callback = _CANONICAL_CAPTURE_SETTLEMENT_CALLBACK
+    canonical_require_callback = _CANONICAL_REQUIRE_SETTLEMENT_CALLBACK
+
+    def guarded(self, *args, **kwargs):
+        if (
+            "_snapshot_fn" in kwargs
+            or "_object_getattribute" in kwargs
+            or "_capture_callback_fn" in kwargs
+            or "_require_callback_fn" in kwargs
+        ):
+            raise TypeError("settlement internal dispatch origin is product authority")
+        if canonical_snapshot.__code__ is not canonical_snapshot_code:
+            raise ContinuousSessionError("settlement snapshot executable changed")
+        exposed_snapshot = getattr(
+            self,
+            "_settlement_handoff_snapshot",
+            canonical_snapshot,
+        )
+        if exposed_snapshot is not canonical_snapshot:
+            raise ContinuousSessionError("settlement snapshot dispatch changed")
+        kwargs["_snapshot_fn"] = canonical_snapshot
+        kwargs["_object_getattribute"] = canonical_object_getattribute
+        kwargs["_capture_callback_fn"] = canonical_capture_callback
+        kwargs["_require_callback_fn"] = canonical_require_callback
+        result = method(self, *args, **kwargs)
+        if canonical_snapshot.__code__ is not canonical_snapshot_code:
+            raise ContinuousSessionError("settlement snapshot executable changed")
+        return result
 
     guarded.__name__ = method.__name__
     guarded.__qualname__ = method.__qualname__
@@ -169,12 +606,28 @@ class SettlementResolution:
         available = _instant(self.available_at, "available_at")
         if available > cutoff:
             raise ValueError("settlement evidence is not causally available at session cutoff")
-        if type(self.quote_outcomes) is not dict or not self.quote_outcomes:
+        if type(self.quote_outcomes) not in {dict, _ValidatedQuoteOutcomes} or not self.quote_outcomes:
             raise ValueError("quote_outcomes must be a non-empty exact dict")
         for quote_key, outcome in self.quote_outcomes.items():
             _text(quote_key, "quote_outcomes quote_key")
             if type(outcome) is not str or outcome not in {"win", "loss", "void"}:
                 raise ValueError("quote_outcomes contains unsupported outcome")
+
+        quote_outcomes_sha256 = _settlement_quote_outcomes_sha256(self.quote_outcomes)
+        if type(self.quote_outcomes) is _ValidatedQuoteOutcomes:
+            if self.quote_outcomes.validated_sha256 != quote_outcomes_sha256:
+                raise ValueError(
+                    "settlement resolution quote_outcomes changed after validation"
+                )
+        else:
+            object.__setattr__(
+                self,
+                "quote_outcomes",
+                _ValidatedQuoteOutcomes(
+                    self.quote_outcomes,
+                    validated_sha256=quote_outcomes_sha256,
+                ),
+            )
 
 
 class SettlementOutcomeAuthority(Protocol):
@@ -241,7 +694,7 @@ class ContinuousSessionStatus:
     last_success_at: str | None
     last_error_code: str | None
     last_full_refresh_at: str | None
-    settlement_evidence: tuple[dict[str, str], ...]
+    settlement_evidence: tuple[dict[str, str | None], ...]
     source_provider_unavailable: bool = False
     source_last_success_at: str | None = None
     source_last_error_code: str | None = None
@@ -280,9 +733,101 @@ def _sha256(value: object, field: str) -> str:
     return value
 
 
+class _ValidatedQuoteOutcomes(dict[str, str]):
+    """Mutable compatibility view carrying the exact content sealed at validation."""
+
+    __slots__ = ("_validated_sha256",)
+
+    def __init__(
+        self,
+        values: Any = (),
+        *,
+        validated_sha256: str | None = None,
+    ) -> None:
+        super().__init__(values)
+        self._validated_sha256 = (
+            _settlement_quote_outcomes_sha256(self)
+            if validated_sha256 is None
+            else _sha256(validated_sha256, "validated_sha256")
+        )
+
+    @property
+    def validated_sha256(self) -> str:
+        return self._validated_sha256
+
+
+def _settlement_quote_outcomes_sha256(outcomes: dict[str, str]) -> str:
+    if type(outcomes) not in {dict, _ValidatedQuoteOutcomes} or not outcomes:
+        raise ValueError("quote_outcomes must be a non-empty exact dict")
+    canonical: list[list[str]] = []
+    for quote_key in sorted(outcomes):
+        _text(quote_key, "quote_outcomes quote_key")
+        outcome = outcomes[quote_key]
+        if type(outcome) is not str or outcome not in {"win", "loss", "void"}:
+            raise ValueError("quote_outcomes contains unsupported outcome")
+        canonical.append([quote_key, outcome])
+    payload = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_settlement_handoff_snapshot(
+    resolutions: tuple[SettlementResolution, ...],
+    *,
+    as_of: str | None = None,
+) -> tuple[SettlementResolution, ...]:
+    """Detach one exact validated settlement snapshot from caller-owned state."""
+
+    detached: list[SettlementResolution] = []
+    for resolution in resolutions:
+        if type(resolution) is not SettlementResolution:
+            raise TypeError(
+                "resolutions must contain exact SettlementResolution values"
+            )
+        validation_cutoff = resolution.available_at if as_of is None else as_of
+        resolution.validate(as_of=validation_cutoff)
+        outcomes = resolution.quote_outcomes
+        if type(outcomes) is not _ValidatedQuoteOutcomes:
+            raise ContinuousSessionError(
+                "validated settlement outcomes lost canonical seal"
+            )
+        validated_sha256 = outcomes.validated_sha256
+        copied_outcomes = dict(outcomes)
+        if (
+            _settlement_quote_outcomes_sha256(copied_outcomes)
+            != validated_sha256
+        ):
+            raise ContinuousSessionError(
+                "settlement outcomes changed while creating canonical snapshot"
+            )
+        snapshot = SettlementResolution(
+            event_identity=resolution.event_identity,
+            settlement_ref=resolution.settlement_ref,
+            quote_outcomes=copied_outcomes,
+            evidence_id=resolution.evidence_id,
+            evidence_sha256=resolution.evidence_sha256,
+            available_at=resolution.available_at,
+        )
+        snapshot.validate(as_of=validation_cutoff)
+        snapshot_outcomes = snapshot.quote_outcomes
+        if (
+            type(snapshot_outcomes) is not _ValidatedQuoteOutcomes
+            or snapshot_outcomes.validated_sha256 != validated_sha256
+        ):
+            raise ContinuousSessionError(
+                "canonical settlement snapshot digest mismatch"
+            )
+        detached.append(snapshot)
+    return tuple(detached)
+
+
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
-    _VERSION = 2
+    _LEGACY_VERSION = 2
+    _VERSION = 3
     _FIELDS = {
         "schema",
         "schema_version",
@@ -360,31 +905,66 @@ class _ContinuousSessionState:
             )
             self._read()
 
-    @staticmethod
-    def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:
+    @classmethod
+    def _validate_settlement_evidence(
+        cls,
+        raw: object,
+        *,
+        schema_version: int,
+    ) -> tuple[dict[str, str | None], ...]:
         if type(raw) is not list:
             raise ContinuousSessionError("settlement_evidence must be a list")
-        values: list[dict[str, str]] = []
+        values: list[dict[str, str | None]] = []
+        seen_evidence_ids: set[str] = set()
+        legacy_fields = {
+            "event_identity",
+            "settlement_ref",
+            "evidence_id",
+            "evidence_sha256",
+            "available_at",
+        }
+        current_fields = legacy_fields | {"quote_outcomes_sha256"}
+        if schema_version == cls._LEGACY_VERSION:
+            expected_fields = legacy_fields
+        elif schema_version == cls._VERSION:
+            expected_fields = current_fields
+        else:
+            raise ContinuousSessionError(
+                "unsupported continuous session settlement evidence schema"
+            )
+
         for item in raw:
             if type(item) is not dict:
                 raise ContinuousSessionError(
                     "settlement_evidence entries must be objects"
                 )
-            if set(item) != {
-                "event_identity",
-                "settlement_ref",
-                "evidence_id",
-                "evidence_sha256",
-                "available_at",
-            }:
+            if set(item) != expected_fields:
                 raise ContinuousSessionError(
                     "settlement_evidence entry fields mismatch"
                 )
             _text(item["event_identity"], "settlement_evidence event_identity")
             _text(item["settlement_ref"], "settlement_evidence settlement_ref")
-            _text(item["evidence_id"], "settlement_evidence evidence_id")
+            evidence_id = _text(
+                item["evidence_id"],
+                "settlement_evidence evidence_id",
+            )
+            if evidence_id in seen_evidence_ids:
+                raise ContinuousSessionError(
+                    "settlement_evidence evidence_id values must be unique"
+                )
+            seen_evidence_ids.add(evidence_id)
             _sha256(item["evidence_sha256"], "settlement_evidence evidence_sha256")
             _instant(item["available_at"], "settlement_evidence available_at")
+            quote_outcomes_sha256 = (
+                None
+                if schema_version == cls._LEGACY_VERSION
+                else item["quote_outcomes_sha256"]
+            )
+            if quote_outcomes_sha256 is not None:
+                _sha256(
+                    quote_outcomes_sha256,
+                    "settlement_evidence quote_outcomes_sha256",
+                )
             values.append(
                 {
                     "event_identity": item["event_identity"],
@@ -392,6 +972,7 @@ class _ContinuousSessionState:
                     "evidence_id": item["evidence_id"],
                     "evidence_sha256": item["evidence_sha256"],
                     "available_at": item["available_at"],
+                    "quote_outcomes_sha256": quote_outcomes_sha256,
                 }
             )
         return tuple(values)
@@ -407,7 +988,7 @@ class _ContinuousSessionState:
             type(raw) is not dict
             or set(raw) != self._FIELDS
             or raw["schema"] != self._SCHEMA
-            or raw["schema_version"] != self._VERSION
+            or raw["schema_version"] not in {self._LEGACY_VERSION, self._VERSION}
             or raw["source_id"] != self.source_id
         ):
             raise ContinuousSessionError("continuous session state schema/identity mismatch")
@@ -425,7 +1006,11 @@ class _ContinuousSessionState:
                 _instant(raw[name], name)
         if raw["last_error_code"] is not None:
             _text(raw["last_error_code"], "last_error_code")
-        evidence = self._validate_settlement_evidence(raw["settlement_evidence"])
+        schema_version = raw["schema_version"]
+        evidence = self._validate_settlement_evidence(
+            raw["settlement_evidence"],
+            schema_version=schema_version,
+        )
         gap_state = raw["source_gap_state"]
         sync_state = raw["source_sync_state"]
         if (gap_state is None) != (sync_state is None):
@@ -475,6 +1060,7 @@ class _ContinuousSessionState:
                 "unresolved source gaps require DETECTED/GAP_DETECTED projection"
             )
         raw["state"] = state.value
+        raw["schema_version"] = self._VERSION
         raw["settlement_evidence"] = [dict(item) for item in evidence]
         return raw
 
@@ -523,9 +1109,14 @@ class _ContinuousSessionState:
         self._update(mutate)
 
     @staticmethod
+    def _quote_outcomes_sha256(evidence: SettlementResolution) -> str:
+        evidence.validate(as_of=evidence.available_at)
+        return _settlement_quote_outcomes_sha256(evidence.quote_outcomes)
+
+    @staticmethod
     def _normalized_settlement_evidence(
         evidence: SettlementResolution,
-    ) -> dict[str, str]:
+    ) -> dict[str, str | None]:
         return {
             "event_identity": evidence.event_identity,
             "settlement_ref": evidence.settlement_ref,
@@ -535,6 +1126,9 @@ class _ContinuousSessionState:
                 evidence.available_at,
                 "available_at",
             ).isoformat(),
+            "quote_outcomes_sha256": _ContinuousSessionState._quote_outcomes_sha256(
+                evidence
+            ),
         }
 
     def validate_settlement_evidence(
@@ -550,10 +1144,16 @@ class _ContinuousSessionState:
         for evidence in settlement_evidence:
             normalized = self._normalized_settlement_evidence(evidence)
             existing = known.get(evidence.evidence_id)
-            if existing is not None and existing != normalized:
-                raise ContinuousSessionError(
-                    "settlement evidence id conflicts with durable evidence"
-                )
+            if existing is not None:
+                if existing["quote_outcomes_sha256"] is None:
+                    raise ContinuousSessionError(
+                        "legacy settlement evidence cannot be safely rebound without "
+                        "an outcome fingerprint"
+                    )
+                if existing != normalized:
+                    raise ContinuousSessionError(
+                        "settlement evidence id conflicts with durable evidence"
+                    )
             known[evidence.evidence_id] = normalized
 
     def record_source_projection(
@@ -629,6 +1229,11 @@ class _ContinuousSessionState:
                 existing = known.get(evidence.evidence_id)
                 normalized = self._normalized_settlement_evidence(evidence)
                 if existing is not None:
+                    if existing["quote_outcomes_sha256"] is None:
+                        raise ContinuousSessionError(
+                            "legacy settlement evidence cannot be safely rebound without "
+                            "an outcome fingerprint"
+                        )
                     if existing != normalized:
                         raise ContinuousSessionError(
                             "settlement evidence id conflicts with durable evidence"
@@ -860,23 +1465,102 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         )
         return self._state.snapshot()
 
+    @_bind_canonical_settlement_snapshot
     def _settlement_resolutions(
         self,
         *,
         as_of: str,
+        _snapshot_fn: Callable[..., tuple[SettlementResolution, ...]],
+        _object_getattribute: Callable[[object, str], object],
+        _capture_callback_fn: Callable[..., tuple[object | None, tuple[object, ...] | None]],
+        _require_callback_fn: Callable[..., None],
+        _captured_outcome_authority: object | None = None,
+        _captured_outcome_resolve: object | None = None,
+        _captured_outcome_resolve_witness: tuple[object, ...] | None = None,
     ) -> tuple[SettlementResolution, ...]:
-        if self.outcome_authority is None:
+        del _object_getattribute
+        outcome_authority = self.outcome_authority
+        if outcome_authority is None:
+            if (
+                _captured_outcome_authority is not None
+                or _captured_outcome_resolve is not None
+                or _captured_outcome_resolve_witness is not None
+            ):
+                raise ContinuousSessionError(
+                    "settlement outcome authority changed during tick"
+                )
             return ()
+        if (
+            _captured_outcome_authority is None
+            and _captured_outcome_resolve is None
+            and _captured_outcome_resolve_witness is None
+        ):
+            resolve, resolve_witness = _capture_callback_fn(
+                outcome_authority,
+                "resolve",
+            )
+        else:
+            if _captured_outcome_authority is not outcome_authority:
+                raise ContinuousSessionError(
+                    "settlement outcome authority changed during tick"
+                )
+            resolve = _captured_outcome_resolve
+            resolve_witness = _captured_outcome_resolve_witness
+        if resolve is None or resolve_witness is None:
+            raise ContinuousSessionError(
+                "settlement outcome authority resolve dispatch must remain callable"
+            )
+
+        # Lifecycle record enumeration is callback-capable product work. Materialize
+        # it completely, then revalidate the exact callback witness before any outcome
+        # dispatch so lifecycle code cannot retarget settlement authority in between
+        # tick's preflight and the actual resolve call.
+        records = [record for record in self.lifecycle.records()]
+        _require_callback_fn(
+            outcome_authority,
+            "resolve",
+            resolve,
+            resolve_witness,
+            label="outcome authority resolve",
+            relookup=False,
+        )
+
         resolutions: list[SettlementResolution] = []
-        for record in self.lifecycle.records():
+        for record in records:
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
                 continue
-            resolution = self.outcome_authority.resolve(record, as_of=as_of)
+            if self.outcome_authority is not outcome_authority:
+                raise ContinuousSessionError(
+                    "settlement outcome authority changed during resolution"
+                )
+            _require_callback_fn(
+                outcome_authority,
+                "resolve",
+                resolve,
+                resolve_witness,
+                label="outcome authority resolve",
+            )
+            resolution = resolve(record, as_of=as_of)
+            # The callback is allowed to compute a resolution, not to retarget the
+            # interpreter primitives used by canonical settlement validation,
+            # snapshotting, PaperBook materialization, or the callback witness itself.
+            # Revalidate before any post-callback product dispatch can consume them.
+            _require_callback_fn(
+                outcome_authority,
+                "resolve",
+                resolve,
+                resolve_witness,
+                label="outcome authority resolve",
+            )
+            if self.outcome_authority is not outcome_authority:
+                raise ContinuousSessionError(
+                    "settlement outcome authority changed during resolution"
+                )
             if resolution is None:
                 continue
-            if not isinstance(resolution, SettlementResolution):
+            if type(resolution) is not SettlementResolution:
                 raise ContinuousSessionError(
-                    "outcome authority must return SettlementResolution or None"
+                    "outcome authority must return exact SettlementResolution or None"
                 )
             if resolution.event_identity != record.identity:
                 raise ContinuousSessionError(
@@ -887,13 +1571,29 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "settlement evidence reference does not match lifecycle evidence"
                 )
             resolution.validate(as_of=as_of)
-            resolutions.append(resolution)
+            (snapshot,) = _snapshot_fn(
+                (resolution,),
+                as_of=as_of,
+            )
+            # The detached object, not the authority-owned object, is the final
+            # lifecycle-bound truth crossing into session economics.
+            if snapshot.event_identity != record.identity:
+                raise ContinuousSessionError(
+                    "settlement snapshot event identity does not match lifecycle identity"
+                )
+            if snapshot.settlement_ref != record.settlement_ref:
+                raise ContinuousSessionError(
+                    "settlement snapshot reference does not match lifecycle evidence"
+                )
+            resolutions.append(snapshot)
         return tuple(resolutions)
 
     def _load_book(self) -> PaperBook:
         if self.paper_book_path.exists():
             return PaperBook.load(self.paper_book_path)
         return PaperBook(self.initial_bankroll)
+
+    _settlement_handoff_snapshot = staticmethod(_canonical_settlement_handoff_snapshot)
 
     @_seal_settlement_consumer_entry
     @_bind_canonical_settlement_engine
@@ -902,25 +1602,30 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         *,
         resolutions: tuple[SettlementResolution, ...],
         _settlement_engine_type: type[SettlementEngine],
+        _economic_lock_type: type[WorkspaceEconomicLock],
+        _snapshot_fn: Callable[..., tuple[SettlementResolution, ...]],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if not resolutions:
             return (), ()
         if SettlementEngine is not _settlement_engine_type:
-            raise ContinuousSessionError(
-                "settlement engine constructor origin changed"
-            )
+            raise ContinuousSessionError("settlement engine constructor origin changed")
+        if WorkspaceEconomicLock is not _economic_lock_type:
+            raise ContinuousSessionError("settlement economic lock origin changed")
+        execution_resolutions = _snapshot_fn(resolutions)
         unique: dict[str, SettlementResolution] = {}
-        for resolution in resolutions:
+        for resolution in execution_resolutions:
             unique.setdefault(resolution.evidence_id, resolution)
 
-        with WorkspaceEconomicLock(self.workspace):
+        lock = _economic_lock_type(self.workspace)
+        if type(lock) is not _economic_lock_type:
+            raise ContinuousSessionError("settlement economic lock constructor origin changed")
+        with lock:
             book = self._load_book()
             engine = _settlement_engine_type()
             if type(engine) is not _settlement_engine_type:
-                raise ContinuousSessionError(
-                    "settlement engine constructor returned non-canonical type"
-                )
+                raise ContinuousSessionError("settlement engine constructor returned non-canonical type")
             for resolution in unique.values():
+                self._require_settlement_causal_for_open_tickets(book, resolution)
                 allowed = self._open_quote_keys_for_book(book, resolution.event_identity)
                 scoped = {
                     quote_key: outcome
@@ -934,6 +1639,39 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 book.save(self.paper_book_path)
 
         return settled, tuple(unique)
+
+    @staticmethod
+    def _require_settlement_causal_for_open_tickets(
+        book: PaperBook,
+        resolution: SettlementResolution,
+    ) -> None:
+        available_at = _instant(
+            resolution.available_at,
+            "settlement available_at",
+        )
+        event_parts = {resolution.event_identity}
+        if ":" in resolution.event_identity:
+            event_parts.add(resolution.event_identity.split(":", 1)[1])
+        resolution_quote_keys = set(resolution.quote_outcomes)
+
+        for ticket in book.tickets.values():
+            if ticket.status.value != "open":
+                continue
+            matches_resolution = any(
+                leg.event_id in event_parts
+                and leg.quote_key in resolution_quote_keys
+                for leg in ticket.legs
+            )
+            if not matches_resolution:
+                continue
+            placed_at = _instant(
+                ticket.placed_at,
+                f"ticket {ticket.ticket_id} placed_at",
+            )
+            if available_at < placed_at:
+                raise ContinuousSessionError(
+                    "settlement evidence predates matching open ticket placement"
+                )
 
     @staticmethod
     def _open_quote_keys_for_book(
@@ -951,13 +1689,90 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if leg.event_id in parts
         }
 
-    def tick(self) -> ContinuousTickResult:
+    @_bind_canonical_settlement_snapshot
+    def tick(
+        self,
+        *,
+        _snapshot_fn: Callable[..., tuple[SettlementResolution, ...]],
+        _object_getattribute: Callable[[object, str], object],
+        _capture_callback_fn: Callable[..., tuple[object | None, tuple[object, ...] | None]],
+        _require_callback_fn: Callable[..., None],
+    ) -> ContinuousTickResult:
         self._require_running()
+
+        # One tick must use one configured outcome authority and learning handoff.
+        # Callback-capable collector/lifecycle/outcome work may not retarget either
+        # collaborator before settlement truth reaches learning or PAPER economics.
+        outcome_authority = self.outcome_authority
+        learning_handoff = self.settlement_learning_handoff
+
+        del _object_getattribute
+        capture_callback = _capture_callback_fn
+        require_callback = _require_callback_fn
+
+        outcome_resolve = None
+        outcome_resolve_witness = None
+        if outcome_authority is not None:
+            outcome_resolve, outcome_resolve_witness = capture_callback(
+                outcome_authority,
+                "resolve",
+            )
+
+        learning_prepare = None
+        learning_prepare_witness = None
+        learning_reconcile = None
+        learning_reconcile_witness = None
+        if learning_handoff is not None:
+            learning_prepare, learning_prepare_witness = capture_callback(
+                learning_handoff,
+                "prepare_settlement",
+                optional=True,
+            )
+            learning_reconcile, learning_reconcile_witness = capture_callback(
+                learning_handoff,
+                "reconcile_after_settlement",
+            )
+
+        def require_learning_handoff() -> None:
+            if self.outcome_authority is not outcome_authority:
+                raise ContinuousSessionError(
+                    "settlement outcome authority changed during tick"
+                )
+            if outcome_authority is not None:
+                require_callback(
+                    outcome_authority,
+                    "resolve",
+                    outcome_resolve,
+                    outcome_resolve_witness,
+                    label="outcome authority resolve",
+                )
+            if self.settlement_learning_handoff is not learning_handoff:
+                raise ContinuousSessionError(
+                    "settlement learning handoff changed during tick"
+                )
+            if learning_handoff is not None:
+                require_callback(
+                    learning_handoff,
+                    "prepare_settlement",
+                    learning_prepare,
+                    learning_prepare_witness,
+                    label="learning prepare",
+                    optional=True,
+                )
+                require_callback(
+                    learning_handoff,
+                    "reconcile_after_settlement",
+                    learning_reconcile,
+                    learning_reconcile_witness,
+                    label="learning reconcile",
+                )
+
         now = self.clock()
         _instant(now, "now")
         try:
             cycle = self.collector.run_cycle()
             source_snapshot = self._refresh_source_state_projection()
+            require_learning_handoff()
             if cycle.provider_unavailable:
                 self._state.record_failure(code="ProviderUnavailableError")
                 snapshot = self._state.snapshot()
@@ -1031,36 +1846,53 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 register_input=register,
                 retire_input=retire,
             )
-            # The lifecycle is canonical about eligibility; the index is canonical
-            # about dependency routing. Keep both outputs for auditability.
             for input_id in registered:
                 if input_id not in newly_registered:
                     newly_registered.append(input_id)
 
-            resolutions = self._settlement_resolutions(as_of=now)
+            require_learning_handoff()
+            authority_resolutions = self._settlement_resolutions(
+                as_of=now,
+                _captured_outcome_authority=outcome_authority,
+                _captured_outcome_resolve=outcome_resolve,
+                _captured_outcome_resolve_witness=outcome_resolve_witness,
+            )
+            require_learning_handoff()
+            resolutions = _snapshot_fn(
+                authority_resolutions,
+                as_of=now,
+            )
             self._state.validate_settlement_evidence(
                 settlement_evidence=resolutions
             )
-            if self.settlement_learning_handoff is not None:
-                prepare = getattr(
-                    self.settlement_learning_handoff,
-                    "prepare_settlement",
-                    None,
+            handoff_resolutions: tuple[SettlementResolution, ...] | None = None
+            if learning_handoff is not None:
+                handoff_resolutions = _snapshot_fn(
+                    resolutions,
+                    as_of=now,
                 )
-                if prepare is not None:
-                    prepare(
+                if learning_prepare is not None:
+                    learning_prepare(
                         paper_book_path=self.paper_book_path,
-                        resolutions=resolutions,
+                        resolutions=handoff_resolutions,
                         at=now,
                     )
+                    require_learning_handoff()
+                    for resolution in handoff_resolutions:
+                        resolution.validate(as_of=resolution.available_at)
+            require_learning_handoff()
             settled, evidence_ids = self._settle(resolutions=resolutions)
-            if self.settlement_learning_handoff is not None:
-                self.settlement_learning_handoff.reconcile_after_settlement(
+            require_learning_handoff()
+            if learning_handoff is not None:
+                assert handoff_resolutions is not None
+                assert learning_reconcile is not None
+                learning_reconcile(
                     paper_book_path=self.paper_book_path,
-                    resolutions=resolutions,
+                    resolutions=handoff_resolutions,
                     settled_ticket_ids=settled,
                     at=now,
                 )
+                require_learning_handoff()
 
             cycle_index = self._state.snapshot().cycles_completed + 1
             self._state.record_success(
@@ -1090,8 +1922,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             self._state.record_failure(code=type(exc).__name__)
             raise
 
-# Seal the consumer entry after class creation. The metaclass data descriptor also
-# makes direct type.__setattr__/type.__delattr__ respect the same class-level fence.
+
 _ContinuousSessionCoordinatorMeta._settle = _build_settlement_consumer_class_guard(
     "_settle"
 )

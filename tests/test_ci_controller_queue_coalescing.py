@@ -2253,7 +2253,15 @@ def test_rebound_selector_cannot_starve_canonical_pr_group(monkeypatch) -> None:
             _run(51, "7" * 40, (501,)),
             _run(60, "9" * 40, (601,)),
         ),
-        {501: [qualification]},
+        {
+            501: [qualification],
+            601: [
+                PullRequestQualification(
+                    head_sha="9" * 40,
+                    integration_capable=True,
+                )
+            ],
+        },
     )
 
     # A mutable module-global selector must neither widen nor silently starve this
@@ -2283,7 +2291,15 @@ def test_rebound_selector_cannot_replace_canonical_group_with_another_pr(monkeyp
             _run(50, "8" * 40, (501,)),
             _run(60, "9" * 40, (601,)),
         ),
-        {501: [qualification]},
+        {
+            501: [qualification],
+            601: [
+                PullRequestQualification(
+                    head_sha="9" * 40,
+                    integration_capable=True,
+                )
+            ],
+        },
     )
 
     monkeypatch.setattr(
@@ -3656,7 +3672,7 @@ def test_sweep_decision_helpers_are_captured_before_active_run_callback_rebind(
     forged_calls: list[str] = []
 
     class FixtureApi:
-        _WorkflowScopedGitHubApi__workflow_name = "CI"
+        _workflow_name = "CI"
 
         def active_runs(self) -> tuple[WorkflowRun, ...]:
             monkeypatch.setattr(
@@ -4497,7 +4513,17 @@ def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
         raise AssertionError(url)
 
     request_impl = scoped_controller.GitHubApi._request
-    monkeypatch.setitem(request_impl.__globals__, "urlopen", fake_urlopen)
+    canonical_urlopen = request_impl.__globals__["urlopen"]
+
+    class FakeOpener:
+        def open(self, request, data=None, timeout=None):
+            assert data is None
+            return fake_urlopen(request, timeout=timeout)
+
+    # Keep the production urlopen function identity/code intact. The controller
+    # deliberately seals that symbol; the regression harness simulates transport
+    # underneath urllib's stable opener seam instead.
+    monkeypatch.setitem(canonical_urlopen.__globals__, "_opener", FakeOpener())
 
     assert scoped_controller.main(_scoped_main_args()) == 0
 

@@ -264,6 +264,7 @@ class ParticipantIdentityRegistry:
     def add_entity(self, entity: EntityIdentity) -> None:
         if type(entity) is not EntityIdentity:
             raise TypeError("entity must be EntityIdentity")
+        entity.__post_init__()
         existing = self._entities.get(entity.entity_id)
         if existing is not None:
             if existing != entity:
@@ -277,6 +278,7 @@ class ParticipantIdentityRegistry:
     def add_alias(self, alias: AliasRecord) -> None:
         if type(alias) is not AliasRecord:
             raise TypeError("alias must be AliasRecord")
+        alias.__post_init__()
         if alias.entity_id not in self._entities:
             raise ParticipantIdentityError("alias references unknown entity")
         if alias in self._aliases:
@@ -341,6 +343,7 @@ class ParticipantIdentityRegistry:
     def add_roster_membership(self, membership: RosterMembership) -> None:
         if type(membership) is not RosterMembership:
             raise TypeError("membership must be RosterMembership")
+        membership.__post_init__()
         if membership.entity_id not in self._entities:
             raise ParticipantIdentityError("roster membership references unknown entity")
         entity = self._entities[membership.entity_id]
@@ -359,6 +362,7 @@ class ParticipantIdentityRegistry:
         """Append correction provenance without changing prior resolutions."""
         if type(lineage) is not EntityLineage:
             raise TypeError("lineage must be EntityLineage")
+        lineage.__post_init__()
         if lineage.predecessor_entity_id not in self._entities or lineage.successor_entity_id not in self._entities:
             raise ParticipantIdentityError("lineage references unknown entity")
         predecessor = self._entities[lineage.predecessor_entity_id]

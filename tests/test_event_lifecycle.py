@@ -880,6 +880,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                     ingest_ts=(self.START + timedelta(seconds=1)).isoformat(),
                     sport="table_tennis",
                 )
+                self._product_now = self.START + timedelta(seconds=3)
                 self.assertTrue(store.append(impossible))
 
                 assessment = self._assess_evidence(

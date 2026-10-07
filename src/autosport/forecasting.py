@@ -165,6 +165,13 @@ class ForecastRecord:
             "strategy_version",
         ):
             _canonical_identity_text(getattr(self, field_name), field_name=field_name)
+        training_cutoff = parse_iso_timestamp(self.model_training_cutoff_ts)
+        input_cutoff = parse_iso_timestamp(self.input_cutoff_ts)
+        generated = parse_iso_timestamp(self.generated_at)
+        if training_cutoff > input_cutoff:
+            raise ValueError("model training cutoff cannot be after forecast input cutoff")
+        if input_cutoff > generated:
+            raise ValueError("input cutoff cannot be after forecast generation")
         if type(self.evidence_hashes) is not tuple:
             raise ValueError(
                 "evidence_hashes must remain an exact tuple of SHA-256 digests"

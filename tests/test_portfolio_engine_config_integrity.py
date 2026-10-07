@@ -141,6 +141,33 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
         ):
             PortfolioEngine.scenario_profit([ticket], {canonical_leg.quote_key})
 
+    def test_portfolio_entrypoints_reject_ticket_list_subclass_before_iteration(self) -> None:
+        class HostileTickets(list):
+            def __iter__(self):
+                raise AssertionError(
+                    "hostile ticket container iterated before exact-list admission"
+                )
+
+        book = PaperBook("100")
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+        hostile = HostileTickets([ticket])
+
+        with self.assertRaisesRegex(ValueError, "portfolio tickets must be an exact list"):
+            PortfolioEngine.affected_tickets(hostile, leg.quote_key)
+
+        with self.assertRaisesRegex(ValueError, "portfolio tickets must be an exact list"):
+            PortfolioEngine.scenario_profit(hostile, {leg.quote_key})
+
+        with self.assertRaisesRegex(ValueError, "portfolio tickets must be an exact list"):
+            PortfolioEngine.scenario_profit_settlements(
+                hostile,
+                {leg.quote_key: "win"},
+            )
+
+        with self.assertRaisesRegex(ValueError, "portfolio tickets must be an exact list"):
+            PortfolioEngine().analyse(hostile)
+
     def test_scenario_profit_rejects_noncanonical_winner_container(self) -> None:
         book = PaperBook("100")
         leg = TicketLeg("event", "winner", "alice", Decimal("2"))

@@ -334,3 +334,18 @@ def test_decision_envelope_identity_rejects_control_aliases(value: str) -> None:
 def test_sealed_decision_identity_rejects_control_aliases(value: str) -> None:
     with pytest.raises(DecisionEnvelopeError, match="control characters"):
         envelope(decision_id=value)
+
+
+def test_sealed_envelope_hash_rejects_subclass_before_virtual_payload_dispatch():
+    class HostileEnvelope(SealedDecisionEnvelope):
+        def canonical_payload(self):
+            raise AssertionError("SealedDecisionEnvelope subclass payload must not execute")
+
+    sealed = envelope()
+    hostile = HostileEnvelope(**{
+        field: getattr(sealed, field)
+        for field in SealedDecisionEnvelope.__dataclass_fields__
+    })
+
+    with pytest.raises(DecisionEnvelopeError, match="exact SealedDecisionEnvelope"):
+        _ = hostile.envelope_sha256

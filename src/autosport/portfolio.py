@@ -15,7 +15,7 @@ from decimal import (
     localcontext,
 )
 
-from .domain import PaperTicket, TicketLeg, TicketStatus
+from .domain import PaperTicket, TicketLeg, TicketStatus, _canonical_string_value
 from .paper import PaperBook
 
 
@@ -278,7 +278,29 @@ class PortfolioEngine:
             raise _portfolio_arithmetic_error(exc) from exc
 
     def analyse(self, tickets: list[PaperTicket], exclusive_groups: list[set[str]] | None = None) -> PortfolioReport:
-        groups = [set(group) for group in (exclusive_groups or [])]
+        if exclusive_groups is None:
+            raw_groups: list[set[str]] = []
+        else:
+            if type(exclusive_groups) is not list:
+                raise ValueError("exclusive_groups must be an exact list")
+            raw_groups = exclusive_groups
+
+        groups: list[set[str]] = []
+        for index, raw_group in enumerate(raw_groups):
+            if type(raw_group) is not set:
+                raise ValueError(
+                    "exclusive_groups entries must be exact sets of quote keys"
+                )
+            canonical_group: list[str] = []
+            for quote_key in raw_group:
+                canonical_group.append(
+                    _canonical_string_value(
+                        quote_key,
+                        f"exclusive_groups[{index}] quote_key",
+                    )
+                )
+            groups.append(set(canonical_group))
+
         seen: set[str] = set()
         for group in groups:
             if not group:

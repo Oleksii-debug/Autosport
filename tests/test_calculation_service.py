@@ -527,19 +527,13 @@ class CalculationServiceTests(unittest.TestCase):
                 return super().__getattribute__(name)
 
         canonical = self._event()
-        hostile = HostileMarketEvent(
-            event_id=canonical.event_id,
-            market_id=canonical.market_id,
-            selection_id=canonical.selection_id,
-            decimal_odds=canonical.decimal_odds,
-            observed_ts=canonical.observed_ts,
-            source_id=canonical.source_id,
-            sequence=canonical.sequence,
-            market_type=canonical.market_type,
-            source_ts=canonical.source_ts,
-            ingest_ts=canonical.ingest_ts,
-            metadata={},
-        )
+        hostile = object.__new__(HostileMarketEvent)
+        for field_name in canonical.__dataclass_fields__:
+            object.__setattr__(
+                hostile,
+                field_name,
+                object.__getattribute__(canonical, field_name),
+            )
 
         with self.assertRaisesRegex(ValueError, "event must be an exact MarketEvent"):
             self.service.implied_probability_for_event(

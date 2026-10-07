@@ -63,6 +63,28 @@ from autosport.risk import PaperRiskPolicy
 from autosport.storage import SQLiteMarketStore
 
 
+class _HostileTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("hostile tuple iteration must not run")
+
+    def __len__(self):
+        raise AssertionError("hostile tuple length must not run")
+
+
+class _HostileSettlementResolution(SettlementResolution):
+    def __getattribute__(self, name):
+        if name in {
+            "available_at",
+            "event_identity",
+            "settlement_ref",
+            "quote_outcomes",
+            "evidence_id",
+            "evidence_sha256",
+        }:
+            raise AssertionError("hostile settlement attribute dispatch must not run")
+        return super().__getattribute__(name)
+
+
 class ContinuousSessionSchemaVersionTests(unittest.TestCase):
     def test_restart_rejects_boolean_schema_version_without_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -93,6 +115,50 @@ class ContinuousSessionSchemaVersionTests(unittest.TestCase):
                 )
 
             self.assertEqual(path.read_bytes(), forged)
+
+    def test_settlement_state_rejects_hostile_container_before_iteration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = _ContinuousSessionState(
+                Path(directory) / "continuous-session.json",
+                session_id="session-section2",
+                source_id="provider-a",
+                clock=lambda: "2026-10-07T04:00:00+00:00",
+            )
+            hostile = _HostileTuple()
+            with self.assertRaisesRegex(TypeError, "exact tuple"):
+                state.validate_settlement_evidence(settlement_evidence=hostile)
+            with self.assertRaisesRegex(TypeError, "exact tuple"):
+                state.record_success(
+                    at="2026-10-07T04:00:01+00:00",
+                    full_refresh=False,
+                    settlement_evidence=hostile,
+                )
+
+    def test_source_projection_rejects_hostile_container_before_iteration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = _ContinuousSessionState(
+                Path(directory) / "continuous-session.json",
+                session_id="session-section2",
+                source_id="provider-a",
+                clock=lambda: "2026-10-07T04:00:00+00:00",
+            )
+            with self.assertRaisesRegex(TypeError, "deltas must be an exact tuple"):
+                state.record_source_projection(
+                    deltas=_HostileTuple(),
+                    backlog=False,
+                )
+
+    def test_settlement_normalizer_rejects_subclass_before_attribute_dispatch(self) -> None:
+        hostile = _HostileSettlementResolution(
+            event_identity="provider-a:event-1",
+            settlement_ref="provider-result:1",
+            quote_outcomes={"provider-a:event-1:winner:home": "win"},
+            evidence_id="outcome-hostile",
+            evidence_sha256="0" * 64,
+            available_at="2026-10-07T04:00:00+00:00",
+        )
+        with self.assertRaisesRegex(TypeError, "exact SettlementResolution"):
+            _ContinuousSessionState._normalized_settlement_evidence(hostile)
 
 
 class _Clock:

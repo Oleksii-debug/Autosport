@@ -324,3 +324,64 @@ def test_experiment_cell_case_identity_rejects_control_aliases(value: str) -> No
             candidate_id="champion",
             evidence=_run_evidence(),
         )
+
+
+def test_direct_strategy_identity_properties_reject_subclasses_before_virtual_dispatch() -> None:
+    class HostileScientificProtocol(ScientificProtocolBinding):
+        __slots__ = ()
+
+        def canonical_dict(self) -> dict[str, object]:
+            raise AssertionError("ScientificProtocolBinding subclass payload must not execute")
+
+    scientific = _scientific(HostileScientificProtocol)
+    with pytest.raises(ValueError, match="exact ScientificProtocolBinding"):
+        _ = scientific.binding_sha256
+
+    class HostileEvaluationCase(EvaluationCase):
+        __slots__ = ()
+
+        def __post_init__(self) -> None:
+            return None
+
+    case = _case(HostileEvaluationCase)
+    with pytest.raises(ValueError, match="exact EvaluationCase"):
+        _ = case.identity
+
+    class HostileCandidate(CandidateRef):
+        __slots__ = ()
+
+        def __post_init__(self) -> None:
+            return None
+
+    candidate = _candidate("hostile", HostileCandidate)
+    with pytest.raises(ValueError, match="exact CandidateRef"):
+        _ = candidate.runtime_identity_sha256
+
+    class HostileProtocol(ChampionChallengerProtocol):
+        __slots__ = ()
+
+        def promotion_plan_dict(self) -> dict[str, object]:
+            raise AssertionError("ChampionChallengerProtocol promotion payload must not execute")
+
+        def canonical_dict(self) -> dict[str, object]:
+            raise AssertionError("ChampionChallengerProtocol canonical payload must not execute")
+
+    exact = _protocol()
+    hostile = HostileProtocol(
+        experiment_id=exact.experiment_id,
+        research_question_id=exact.research_question_id,
+        hypothesis_id=exact.hypothesis_id,
+        scientific_protocol=exact.scientific_protocol,
+        champion=exact.champion,
+        challengers=exact.challengers,
+        cases=exact.cases,
+        primary_metric=exact.primary_metric,
+        minimum_total_improvement=exact.minimum_total_improvement,
+        primary_higher_is_better=exact.primary_higher_is_better,
+        guardrails=exact.guardrails,
+        protocol_schema_version=exact.protocol_schema_version,
+    )
+    with pytest.raises(ValueError, match="exact ChampionChallengerProtocol"):
+        _ = hostile.promotion_plan_sha256
+    with pytest.raises(ValueError, match="exact ChampionChallengerProtocol"):
+        _ = hostile.protocol_sha256

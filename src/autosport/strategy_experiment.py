@@ -268,8 +268,12 @@ class ScientificProtocolBinding:
 
     @property
     def binding_sha256(self) -> str:
+        if type(self) is not ScientificProtocolBinding:
+            raise ValueError(
+                "scientific protocol binding identity requires an exact ScientificProtocolBinding"
+            )
         canonical = json.dumps(
-            self.canonical_dict(),
+            ScientificProtocolBinding.canonical_dict(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -315,7 +319,9 @@ class EvaluationCase:
 
     @property
     def identity(self) -> tuple[Any, ...]:
-        self.__post_init__()
+        if type(self) is not EvaluationCase:
+            raise ValueError("evaluation case identity requires an exact EvaluationCase")
+        EvaluationCase.__post_init__(self)
         return (
             self.dataset_name,
             self.sport,
@@ -373,7 +379,9 @@ class CandidateRef:
 
     @property
     def runtime_identity_sha256(self) -> str:
-        self.__post_init__()
+        if type(self) is not CandidateRef:
+            raise ValueError("candidate runtime identity requires an exact CandidateRef")
+        CandidateRef.__post_init__(self)
         return _runtime_identity_sha256(
             self.canonical_strategy_id,
             self.agent_composition_sha256,
@@ -540,8 +548,12 @@ class ChampionChallengerProtocol:
 
     @property
     def promotion_plan_sha256(self) -> str:
+        if type(self) is not ChampionChallengerProtocol:
+            raise ValueError(
+                "promotion plan identity requires an exact ChampionChallengerProtocol"
+            )
         canonical = json.dumps(
-            self.promotion_plan_dict(),
+            ChampionChallengerProtocol.promotion_plan_dict(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -580,8 +592,12 @@ class ChampionChallengerProtocol:
 
     @property
     def protocol_sha256(self) -> str:
+        if type(self) is not ChampionChallengerProtocol:
+            raise ValueError(
+                "protocol identity requires an exact ChampionChallengerProtocol"
+            )
         canonical = json.dumps(
-            self.canonical_dict(),
+            ChampionChallengerProtocol.canonical_dict(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

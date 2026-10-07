@@ -671,6 +671,8 @@ class PromotionEvidence:
     created_at: str
 
     def __post_init__(self) -> None:
+        if type(self) is not PromotionEvidence:
+            raise ValueError("promotion evidence must be an exact PromotionEvidence")
         for name in (
             "promotion_evidence_id", "experiment_id", "research_protocol_id",
             "research_question_id", "hypothesis_id", "candidate_strategy_version_id",
@@ -706,7 +708,7 @@ class PromotionEvidence:
             raise ValueError("effect interval low must not exceed high")
         if practical < low or practical > high:
             raise ValueError("practical improvement must lie inside effect interval")
-        expected_id = _digest(self.to_payload(include_id=False))
+        expected_id = _digest(PromotionEvidence.to_payload(self, include_id=False))
         if self.promotion_evidence_id != expected_id:
             raise ValueError("promotion_evidence_id does not match canonical evidence identity")
 

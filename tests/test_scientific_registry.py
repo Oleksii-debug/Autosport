@@ -1032,3 +1032,29 @@ def test_promotion_rejects_preconsumed_confirmation_holdout(tmp_path):
     )
     with pytest.raises(PromotionEvidenceError, match="unconsumed confirmation holdout"):
         registry.record_promotion(decision)
+
+
+def test_promotion_evidence_constructor_rejects_subclass_before_payload_dispatch():
+    exact = _promotion_evidence(
+        experiment_id="experiment-identity-subclass",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=SHA_D,
+        evidence_id="promotion-identity-subclass",
+    )
+
+    class HostilePromotionEvidence(PromotionEvidence):
+        __slots__ = ()
+
+        def to_payload(self, *, include_id: bool = True):
+            raise AssertionError("PromotionEvidence subclass payload must not execute")
+
+    fields = {
+        field: getattr(exact, field)
+        for field in PromotionEvidence.__dataclass_fields__
+    }
+    with pytest.raises(ValueError, match="exact PromotionEvidence"):
+        HostilePromotionEvidence(**fields)

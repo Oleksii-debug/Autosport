@@ -121,6 +121,34 @@ class ScenarioSearchTests(unittest.TestCase):
         index = PortfolioDependencyIndex([ta, tb])
         self.assertEqual(index.affected_by({a.quote_key}), {ta.ticket_id})
 
+    def test_dependency_index_rejects_hostile_ticket_id_before_hash_dispatch(self):
+        book = PaperBook("100")
+        leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        ticket = book.open_ticket([leg], "1")
+        ticket.ticket_id = _ExplosiveQuoteKey(ticket.ticket_id)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "portfolio dependency ticket_id must be a non-empty trimmed string",
+        ):
+            PortfolioDependencyIndex([ticket])
+
+    def test_dependency_index_revalidates_mutated_leg_identity_before_publish(self):
+        book = PaperBook("100")
+        leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        ticket = book.open_ticket([leg], "1")
+        object.__setattr__(
+            leg,
+            "event_id",
+            _ExplosiveQuoteKey("e1"),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "event_id must be a non-empty trimmed string",
+        ):
+            PortfolioDependencyIndex([ticket])
+
     def test_beam_candidate_search_bounds_combinatorics(self):
         legs = [CandidateLeg(f"e{i}|winner|a", f"e{i}", Decimal("2.0"), Decimal("0.55")) for i in range(20)]
         results = BeamParlayCandidateSearch(beam_width=20, max_legs=5, result_limit=15).search(legs)

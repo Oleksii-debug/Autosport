@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -50,6 +51,77 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
             revisions=revisions,
         )
 
+    @staticmethod
+    def _instant(value: str) -> datetime:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(
+            timezone.utc
+        )
+
+    @staticmethod
+    def _iso(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z")
+
+    def _remember_product_acceptance(
+        self,
+        registry: RunRegistry,
+        logical_time: str,
+    ) -> str:
+        state = json.loads(registry.path.read_text(encoding="utf-8"))
+        binding = next(
+            item
+            for item in state["outcome_lineage_trust"]
+            if item["source_identity"] == self.source_identity
+            and item["record_id"] == self.record_id
+        )
+        actual = max(
+            revision["first_available_at"]
+            for revision in binding["revisions"]
+            if revision.get("first_available_at") is not None
+        )
+        anchors = getattr(self, "_logical_product_times", None)
+        if anchors is None:
+            anchors = {}
+            self._logical_product_times = anchors
+        anchors[logical_time] = actual
+        return actual
+
+    def _product_cutoff(self, logical_time: str) -> str:
+        anchors = getattr(self, "_logical_product_times", {})
+        if logical_time not in {
+            self.t0,
+            self.t1,
+            self.t_mid,
+            self.t2,
+            self.t3,
+        } or not anchors:
+            return logical_time
+        if logical_time in anchors:
+            return anchors[logical_time]
+
+        target = self._instant(logical_time)
+        ordered = sorted(
+            (self._instant(logical), self._instant(actual))
+            for logical, actual in anchors.items()
+        )
+        if target < ordered[0][0]:
+            return self._iso(ordered[0][1] - (ordered[0][0] - target))
+        if target > ordered[-1][0]:
+            return self._iso(ordered[-1][1] + (target - ordered[-1][0]))
+
+        for (left_logical, left_actual), (right_logical, right_actual) in zip(
+            ordered,
+            ordered[1:],
+        ):
+            if left_logical < target < right_logical:
+                logical_span = (right_logical - left_logical).total_seconds()
+                fraction = (target - left_logical).total_seconds() / logical_span
+                return self._iso(
+                    left_actual + (right_actual - left_actual) * fraction
+                )
+        raise AssertionError("logical product cutoff could not be mapped")
+
     def _accept(
         self,
         registry: RunRegistry,
@@ -59,16 +131,16 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
         market: str,
         results: str,
         accepted_at: str,
-    ) -> None:
-        with patch("autosport.run_registry._utc_now", return_value=accepted_at):
-            key = registry.begin(
-                self._sha(market),
-                self._sha(results),
-                "baseline-v1",
-                run_id,
-                outcome_lineage=binding,
-            )
+    ) -> str:
+        key = registry.begin(
+            self._sha(market),
+            self._sha(results),
+            "baseline-v1",
+            run_id,
+            outcome_lineage=binding,
+        )
         registry.complete(key)
+        return self._remember_product_acceptance(registry, accepted_at)
 
     def _resolve(
         self,
@@ -78,7 +150,7 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
         return registry.outcome_revision_as_of(
             source_identity=self.source_identity,
             record_id=self.record_id,
-            cutoff=cutoff,
+            cutoff=self._product_cutoff(cutoff),
         )
 
     def test_extension_resolves_only_revisions_product_available_by_cutoff(self) -> None:
@@ -136,7 +208,7 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
             revisions = state["outcome_lineage_trust"][0]["revisions"]
             self.assertEqual(
                 {item["first_available_at"] for item in revisions},
-                {"2026-01-01T11:00:00.000000Z"},
+                {self._product_cutoff(self.t2)},
             )
 
     def test_exact_reimport_preserves_earliest_product_availability(self) -> None:
@@ -165,7 +237,7 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
             self.assertIsNotNone(resolved)
             self.assertEqual(
                 resolved.first_available_at,
-                "2026-01-01T10:00:00.000000Z",
+                self._product_cutoff(self.t1),
             )
 
     def test_caller_cannot_backdate_product_availability(self) -> None:
@@ -187,10 +259,10 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
             self.assertIsNone(self._resolve(registry, self.t1))
             self.assertEqual(
                 self._resolve(registry, self.t2).first_available_at,
-                "2026-01-01T11:00:00.000000Z",
+                self._product_cutoff(self.t2),
             )
 
-    def test_product_acceptance_rejects_nonzero_submicrosecond_precision(self) -> None:
+    def test_product_clock_rebinding_is_rejected_before_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
             before = registry.path.read_bytes()
@@ -200,13 +272,13 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     OutcomeLineageTrustError,
-                    "precision finer than microseconds",
+                    "product UTC clock authority was rebound",
                 ):
                     registry.begin(
-                        self._sha("market-submicrosecond"),
-                        self._sha("results-submicrosecond"),
+                        self._sha("market-clock-rebind"),
+                        self._sha("results-clock-rebind"),
                         "baseline-v1",
-                        "submicrosecond-acceptance",
+                        "clock-rebind",
                         outcome_lineage=self._binding("r1"),
                     )
             self.assertEqual(registry.path.read_bytes(), before)
@@ -317,7 +389,7 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
             trust_revision = state["outcome_lineage_trust"][0]["revisions"][0]
             self.assertEqual(
                 trust_revision.pop("first_available_at"),
-                "2026-01-01T10:00:00.000000Z",
+                self._product_cutoff(self.t1),
             )
             registry.path.write_text(
                 json.dumps(state, sort_keys=True),
@@ -378,7 +450,7 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
                     revision["first_available_at"]
                     for revision in migrated["outcome_lineage_trust"][0]["revisions"]
                 },
-                {"2026-01-01T11:00:00.000000Z"},
+                {self._product_cutoff(self.t2)},
             )
 
     def test_begin_rejects_outcome_lineage_subclass_before_virtual_attribute_dispatch(self) -> None:
@@ -473,7 +545,7 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
             with patch("autosport.run_registry._utc_now", return_value=self.t1):
                 with self.assertRaisesRegex(
                     OutcomeLineageTrustError,
-                    "predates already trusted",
+                    "product UTC clock authority was rebound",
                 ):
                     registry.begin(
                         self._sha("market-extension"),

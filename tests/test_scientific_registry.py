@@ -44,6 +44,14 @@ def _question() -> ResearchQuestion:
     return ResearchQuestion("question-1", "Does candidate improve holdout ROI?", SHA_A, T0)
 
 
+class _HostileTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("hostile scientific identity tuple iteration must not run")
+
+    def __len__(self):
+        raise AssertionError("hostile scientific identity tuple length must not run")
+
+
 def _hypothesis() -> Hypothesis:
     return Hypothesis(
         "hypothesis-1",
@@ -55,6 +63,20 @@ def _hypothesis() -> Hypothesis:
         ("max_drawdown",),
         T0,
     )
+
+
+def test_hypothesis_rejects_tuple_subclass_before_identity_iteration():
+    with pytest.raises(ValueError, match="exact tuple"):
+        Hypothesis(
+            "hypothesis-hostile",
+            "question-1",
+            "Candidate improves the frozen primary metric.",
+            "holdout ROI > champion ROI",
+            "holdout ROI <= champion ROI or any guardrail regresses",
+            "roi",
+            _HostileTuple(("max_drawdown",)),
+            T0,
+        )
 
 
 def _payload_sha(record) -> str:

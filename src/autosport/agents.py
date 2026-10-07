@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Iterable, Protocol
 
 from .decision_ledger import DecisionRecord, JsonlDecisionLedger
-from .domain import MarketEvent, TicketLeg
+from .domain import MarketEvent, TicketLeg, _canonical_string_value
 from .market_mirror import MarketMirror
 from .paper import PaperBook
 

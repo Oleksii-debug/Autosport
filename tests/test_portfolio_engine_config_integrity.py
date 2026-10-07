@@ -168,6 +168,38 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "portfolio tickets must be an exact list"):
             PortfolioEngine().analyse(hostile)
 
+    def test_portfolio_decimal_subclasses_fail_before_virtual_dispatch(self) -> None:
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError(
+                    "hostile Decimal.is_finite dispatched before exact-type admission"
+                )
+
+            def __le__(self, other):
+                raise AssertionError(
+                    "hostile Decimal comparison dispatched before exact-type admission"
+                )
+
+        book = PaperBook("100")
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+        ticket.stake = HostileDecimal("10")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "portfolio ticket .* stake must be a finite Decimal",
+        ):
+            PortfolioEngine.scenario_profit([ticket], {leg.quote_key})
+
+        ticket.stake = Decimal("10")
+        object.__setattr__(leg, "locked_odds", HostileDecimal("2"))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "PaperBook snapshot contains non-finite locked_odds",
+        ):
+            PortfolioEngine.scenario_profit([ticket], {leg.quote_key})
+
     def test_scenario_profit_rejects_noncanonical_winner_container(self) -> None:
         book = PaperBook("100")
         leg = TicketLeg("event", "winner", "alice", Decimal("2"))

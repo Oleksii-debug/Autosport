@@ -72,7 +72,7 @@ _LINEAGE_TRUST_FIELD = "outcome_lineage_trust"
 
 def _is_canonical_sha256(value: object) -> bool:
     return (
-        isinstance(value, str)
+        type(value) is str
         and len(value) == 64
         and all(character in _HEX_DIGITS for character in value)
     )
@@ -85,8 +85,8 @@ def _require_canonical_sha256(name: str, value: object) -> str:
 
 
 def _require_nonempty_string(name: str, value: object) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{name} must be a non-empty string")
+    if type(value) is not str or not value:
+        raise ValueError(f"{name} must be an exact non-empty string")
     return value
 
 

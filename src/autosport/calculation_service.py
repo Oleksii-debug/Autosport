@@ -225,8 +225,8 @@ def _snapshot_quote_at_cutoff(
     *,
     cutoff_value: datetime,
 ) -> MarketQuoteEvidence:
-    if not isinstance(event, MarketEvent):
-        raise ValueError("event must be a MarketEvent")
+    if type(event) is not MarketEvent:
+        raise ValueError("event must be an exact MarketEvent")
     if not isinstance(event.market_type, MarketType):
         raise ValueError("market event market_type must be a MarketType")
     if type(event.decimal_odds) is not Decimal:

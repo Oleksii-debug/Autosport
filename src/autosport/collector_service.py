@@ -487,10 +487,10 @@ class HeadlessCollectorService:
             raise TypeError("lifecycle must be ContinuousEventLifecycle")
         source_id = getattr(source, "source_id", None)
         stream_epoch = getattr(source, "stream_epoch", None)
-        if not isinstance(source_id, str) or not source_id.strip():
-            raise ValueError("source.source_id must be a non-empty string")
-        if not isinstance(stream_epoch, str) or not stream_epoch.strip():
-            raise ValueError("source.stream_epoch must be a non-empty string")
+        if type(source_id) is not str or not source_id or source_id != source_id.strip():
+            raise ValueError("source.source_id must be a non-empty canonical string")
+        if type(stream_epoch) is not str or not stream_epoch or stream_epoch != stream_epoch.strip():
+            raise ValueError("source.stream_epoch must be a non-empty canonical string")
         if not callable(getattr(source, "fetch_catalog_page", None)):
             raise TypeError("source.fetch_catalog_page must be callable")
         if not callable(getattr(source, "fetch_deltas", None)):
@@ -540,13 +540,17 @@ class HeadlessCollectorService:
             )
         source_id = getattr(source, "source_id", None)
         stream_epoch = getattr(source, "stream_epoch", None)
+        if type(source_id) is not str or not source_id or source_id != source_id.strip():
+            raise CollectorServiceError(
+                "source.source_id must remain a non-empty canonical string"
+            )
         if source_id != self._source_id:
             raise CollectorServiceError(
                 "source.source_id changed after collector service construction"
             )
-        if not isinstance(stream_epoch, str) or not stream_epoch.strip():
+        if type(stream_epoch) is not str or not stream_epoch or stream_epoch != stream_epoch.strip():
             raise CollectorServiceError(
-                "source.stream_epoch must remain a non-empty string"
+                "source.stream_epoch must remain a non-empty canonical string"
             )
         if (
             expected_stream_epoch is not None
@@ -560,8 +564,8 @@ class HeadlessCollectorService:
     def _append_admitted_delta(self, delta: CollectorDelta) -> bool:
         """Commit a validated provider delta and its epoch authority atomically."""
 
-        if not isinstance(delta, CollectorDelta):
-            raise TypeError("delta must be CollectorDelta")
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be canonical CollectorDelta")
         delta.validate()
         self._require_source_identity(
             expected_stream_epoch=delta.stream_epoch
@@ -728,8 +732,8 @@ class HeadlessCollectorService:
             self._require_source_identity(
                 expected_stream_epoch=cycle_stream_epoch
             )
-            if not isinstance(refreshed, tuple):
-                raise TypeError("lifecycle refresh must return a tuple")
+            if type(refreshed) is not tuple:
+                raise TypeError("lifecycle refresh must return an exact tuple")
             catalog_changes = tuple(refreshed)
             records = tuple(
                 item
@@ -749,8 +753,8 @@ class HeadlessCollectorService:
             self._require_source_identity(
                 expected_stream_epoch=cycle_stream_epoch
             )
-            if not isinstance(raw_deltas, tuple):
-                raise TypeError("source.fetch_deltas must return a tuple")
+            if type(raw_deltas) is not tuple:
+                raise TypeError("source.fetch_deltas must return an exact tuple")
             if len(raw_deltas) > self.config.max_items:
                 raise CollectorServiceError(
                     "source returned more deltas than the configured batch bound"
@@ -762,9 +766,9 @@ class HeadlessCollectorService:
                 for alias in canonical_event_identity_aliases(item.identity)
             }
             for delta in raw_deltas:
-                if not isinstance(delta, CollectorDelta):
+                if type(delta) is not CollectorDelta:
                     raise TypeError(
-                        "source.fetch_deltas must return CollectorDelta values"
+                        "source.fetch_deltas must return canonical CollectorDelta values"
                     )
                 delta.validate()
                 if delta.source_id != self.source_id:

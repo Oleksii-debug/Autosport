@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import autosport.scientific_registry as registry_module
 from autosport.scientific_registry import (
     DatasetSnapshot,
     ModelVersion,
@@ -199,3 +200,14 @@ def test_registry_rejects_protocol_only_external_record_forgery(
         registry.append(_ForgedExternalRecord(record_type))  # type: ignore[arg-type]
 
     assert registry.get(record_type, "forged-record") is None
+
+
+
+def test_declared_registry_types_have_one_canonical_write_class() -> None:
+    canonical = {
+        **registry_module._LOCAL_SCIENTIFIC_RECORD_TYPES,
+        **registry_module._external_scientific_record_types(),
+    }
+
+    assert set(canonical) == set(registry_module._RECORD_TYPES)
+    assert len(set(canonical.values())) == len(canonical)

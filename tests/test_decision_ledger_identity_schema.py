@@ -116,10 +116,10 @@ def test_constructor_rejects_mapping_subclass_before_virtual_iteration() -> None
 
 
 def test_constructor_accepts_already_frozen_canonical_payload() -> None:
-    original = _record()
+    original = _record(payload={"x": 1, "items": ["a", "b"]})
     cloned = _record(payload=original.payload)
 
-    assert cloned.to_dict()["payload"] == {"x": 1}
+    assert cloned.to_dict()["payload"] == {"x": 1, "items": ["a", "b"]}
 
 
 def test_append_rejects_tampered_payload_mapping_before_virtual_dispatch(

@@ -1009,8 +1009,12 @@ class Opportunity:
                 "opportunity must contain canonical fields"
             )
         try:
-            strategy_class = StrategyClass(raw["strategy_class"])
-            decision = OpportunityDecision(raw["decision"])
+            strategy_class = StrategyClass(
+                _canonical_text(raw["strategy_class"], "strategy_class")
+            )
+            decision = OpportunityDecision(
+                _canonical_text(raw["decision"], "decision")
+            )
         except (TypeError, ValueError) as exc:
             raise OpportunityContractError(
                 "opportunity enum value is unsupported"

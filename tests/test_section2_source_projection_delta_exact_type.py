@@ -13,10 +13,15 @@ class _HostileCollectorDelta(CollectorDelta):
 
 class _HostileText(str):
     strip_calls = 0
+    format_calls = 0
 
     def strip(self, *args, **kwargs):
         type(self).strip_calls += 1
         return super().strip(*args, **kwargs)
+
+    def __format__(self, format_spec):
+        type(self).format_calls += 1
+        return super().__format__(format_spec)
 
 
 class _HostileInt(int):
@@ -51,6 +56,36 @@ def _delta(**overrides):
 
 
 class Section2SourceProjectionDeltaExactTypeTests(unittest.TestCase):
+    def test_collector_store_get_rejects_hostile_delta_id_before_strip_dispatch(self) -> None:
+        _HostileText.strip_calls = 0
+        store = object.__new__(CollectorDeltaStore)
+        with self.assertRaisesRegex(
+            TypeError,
+            "delta_id must be exact string identity text",
+        ):
+            store.get(_HostileText("delta-section2"))
+        self.assertEqual(_HostileText.strip_calls, 0)
+
+    def test_collector_store_feed_rejects_hostile_source_id_before_strip_dispatch(self) -> None:
+        _HostileText.strip_calls = 0
+        store = object.__new__(CollectorDeltaStore)
+        with self.assertRaisesRegex(
+            TypeError,
+            "source_id must be exact string identity text",
+        ):
+            store.deltas_after_commit(source_id=_HostileText("source-section2"))
+        self.assertEqual(_HostileText.strip_calls, 0)
+
+    def test_collector_store_checkpoint_rejects_hostile_stream_identity_before_format_dispatch(self) -> None:
+        _HostileText.format_calls = 0
+        store = object.__new__(CollectorDeltaStore)
+        with self.assertRaisesRegex(
+            TypeError,
+            "stream_epoch must be exact string identity text",
+        ):
+            store.stream_checkpoint("source-section2", _HostileText("epoch-section2"))
+        self.assertEqual(_HostileText.format_calls, 0)
+
     def test_collector_store_rejects_delta_subclass_before_virtual_validation(self) -> None:
         _HostileCollectorDelta.validate_calls = 0
         hostile = object.__new__(_HostileCollectorDelta)

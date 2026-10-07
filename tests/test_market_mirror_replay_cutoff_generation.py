@@ -35,12 +35,18 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             },
         )
         self._authority_env.start()
+        self._clock_lock = threading.Lock()
+        self._product_now = self.CUTOFF - timedelta(seconds=1)
         self._product_clock = patch.object(
             storage_module,
             "_market_product_utc_now",
-            return_value=(self.CUTOFF - timedelta(seconds=1)).isoformat(),
+            side_effect=self._read_product_clock,
         )
         self._product_clock.start()
+
+    def _read_product_clock(self) -> str:
+        with self._clock_lock:
+            return self._product_now.isoformat()
 
     def tearDown(self) -> None:
         self._product_clock.stop()
@@ -69,18 +75,29 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             ingest_ts=ingest_ts or observed_ts,
         )
 
-    @classmethod
     def replay(
-        cls,
+        self,
         store: SQLiteMarketStore,
         *,
         as_of: datetime | None = None,
     ):
-        return MarketMirror.replay_view_from_store(
-            store,
-            as_of=as_of or cls.CUTOFF,
-            max_age=timedelta(minutes=2),
-        )
+        resolved_as_of = as_of or self.CUTOFF
+        with self._clock_lock:
+            if self._product_now < resolved_as_of:
+                self._product_now = resolved_as_of
+        try:
+            return MarketMirror.replay_view_from_store(
+                store,
+                as_of=resolved_as_of,
+                max_age=timedelta(minutes=2),
+            )
+        finally:
+            # Make an append after a replay strictly later than that decision cut.
+            with self._clock_lock:
+                if self._product_now <= resolved_as_of:
+                    self._product_now = resolved_as_of + timedelta(
+                        microseconds=1
+                    )
 
     @staticmethod
     def semantic_events(snapshot) -> tuple[dict[str, object], ...]:
@@ -131,13 +148,25 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         canonical_as_of = storage_module._canonical_replay_cutoff(as_of.isoformat())
         cutoff_id = storage_module._replay_cutoff_id(canonical_as_of)
         issued_at = storage_module._canonical_product_time(
-            storage_module._market_product_utc_now()
+            canonical_as_of
+        )
+        availability_rows = store._validated_append_availability_rows(
+            store._market_append_authority()
+        )
+        matching_availability = next(
+            (
+                row[3]
+                for row in availability_rows
+                if row[0] == max_generation
+            ),
+            availability_rows[0][3],
         )
         corpus_sha256 = store._frozen_replay_corpus_sha256(max_generation)
         binding_sha256 = storage_module._replay_cutoff_binding_sha256(
             cutoff_id=cutoff_id,
             canonical_as_of=canonical_as_of,
             max_append_generation=max_generation,
+            append_available_at=matching_availability,
             issued_at=issued_at,
             corpus_sha256=corpus_sha256,
         )
@@ -1157,7 +1186,65 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_first_historical_cutoff_fails_closed_without_product_time_proof(self) -> None:
+    def test_first_historical_cutoff_excludes_late_backdated_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+
+                # The second event is appended after decision cutoff D but lies about
+                # caller-carried observed/ingest/source clocks by backdating them.
+                # Product availability, not those fields, decides historical membership.
+                with self._clock_lock:
+                    self._product_now = self.CUTOFF + timedelta(
+                        microseconds=1
+                    )
+                late_backdated = self.event(
+                    sequence=2,
+                    odds="9.99",
+                    observed_ts="2026-09-16T18:59:59+00:00",
+                    ingest_ts="2026-09-16T18:59:59+00:00",
+                    source_ts="2026-09-16T18:59:59+00:00",
+                )
+                self.assertTrue(store.append(late_backdated))
+
+                first_resolution = self.replay(store, as_of=self.CUTOFF)
+                self.assertEqual(
+                    self.semantic_events(first_resolution),
+                    (first.to_dict(),),
+                )
+                cutoff = store.connection.execute(
+                    """SELECT max_append_generation
+                       FROM market_replay_cutoffs"""
+                ).fetchone()
+                self.assertEqual(cutoff, (1,))
+                availability = store.connection.execute(
+                    """SELECT max_append_generation, available_at
+                       FROM market_append_availability
+                       ORDER BY max_append_generation"""
+                ).fetchall()
+                self.assertEqual([row[0] for row in availability], [0, 1, 2])
+                self.assertLessEqual(
+                    storage_module._timezone_aware_instant(
+                        availability[1][1], "generation-1 available_at"
+                    ),
+                    self.CUTOFF,
+                )
+                self.assertGreater(
+                    storage_module._timezone_aware_instant(
+                        availability[2][1], "generation-2 available_at"
+                    ),
+                    self.CUTOFF,
+                )
+            finally:
+                store.close()
+
+    def test_first_future_cutoff_fails_before_authority_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
@@ -1168,28 +1255,21 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                         observed_ts="2026-09-16T19:00:00+00:00",
                     )
                 )
-                store.append(
-                    self.event(
-                        sequence=2,
-                        odds="9.99",
-                        observed_ts="2026-09-16T18:59:59+00:00",
-                        ingest_ts="2026-09-16T18:59:59+00:00",
-                    )
-                )
-
+                future_cutoff = self.CUTOFF + timedelta(seconds=5)
                 with patch.object(
                     storage_module,
                     "_market_product_utc_now",
-                    return_value=(
-                        self.CUTOFF + timedelta(microseconds=1)
-                    ).isoformat(),
+                    return_value=self.CUTOFF.isoformat(),
                 ):
                     with self.assertRaisesRegex(
                         ValueError,
-                        "first-time historical replay cutoff lacks durable product-time availability proof",
+                        "future replay cutoff cannot be issued before its decision time",
                     ):
-                        self.replay(store)
-
+                        MarketMirror.replay_view_from_store(
+                            store,
+                            as_of=future_cutoff,
+                            max_age=timedelta(minutes=2),
+                        )
                 self.assertEqual(
                     store.connection.execute(
                         "SELECT COUNT(*) FROM market_replay_cutoffs"
@@ -1222,7 +1302,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(row)
                 assert row is not None
-                self.assertLessEqual(
+                self.assertGreaterEqual(
                     storage_module._timezone_aware_instant(
                         row[1], "issued_at"
                     ),
@@ -3857,14 +3937,27 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 )
                 cutoff_id = storage_module._replay_cutoff_id(canonical_as_of)
                 corpus_sha256 = store._frozen_replay_corpus_sha256(1)
+                append_available_at = store.connection.execute(
+                    """SELECT available_at
+                       FROM market_append_availability
+                       WHERE max_append_generation=0"""
+                ).fetchone()[0]
                 binding_sha256 = storage_module._replay_cutoff_binding_sha256(
                     cutoff_id=cutoff_id,
                     canonical_as_of=canonical_as_of,
                     max_append_generation=1,
-                    issued_at=canonical_as_of,
+                    append_available_at=append_available_at,
+                    issued_at=storage_module._canonical_product_time(
+                        canonical_as_of
+                    ),
                     corpus_sha256=corpus_sha256,
                 )
-                rows = ((cutoff_id, canonical_as_of, 1),)
+                rows = ((
+                    cutoff_id,
+                    canonical_as_of,
+                    1,
+                    storage_module._canonical_product_time(canonical_as_of),
+                ),)
                 intended_state_sha256 = storage_module._replay_cutoff_state_sha256(
                     rows,
                     sealed_corpus_sha256=corpus_sha256,

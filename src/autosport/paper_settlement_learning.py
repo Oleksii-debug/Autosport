@@ -90,20 +90,19 @@ class PaperSettlementLearningWitness:
         _text(self.ticket_id, "ticket_id")
         _sha(self.binding_id, "binding_id")
         _sha(self.settlement_bundle_sha256, "settlement_bundle_sha256")
-        if not isinstance(self.observation, Observation):
-            raise TypeError("observation must be Observation")
-        if not isinstance(self.action, Action):
-            raise TypeError("action must be Action")
-        if not isinstance(self.outcome, Outcome):
-            raise TypeError("outcome must be Outcome")
-        if not isinstance(self.reward, RewardEvidence):
-            raise TypeError("reward must be RewardEvidence")
-        if not isinstance(self.transition, Transition):
-            raise TypeError("transition must be Transition")
-        if not isinstance(self.baseline_checkpoint, EnvironmentCheckpoint):
-            raise TypeError("baseline_checkpoint must be EnvironmentCheckpoint")
-        if not isinstance(self.next_checkpoint, EnvironmentCheckpoint):
-            raise TypeError("next_checkpoint must be EnvironmentCheckpoint")
+        typed_evidence = (
+            ("observation", self.observation, Observation),
+            ("action", self.action, Action),
+            ("outcome", self.outcome, Outcome),
+            ("reward", self.reward, RewardEvidence),
+            ("transition", self.transition, Transition),
+            ("baseline_checkpoint", self.baseline_checkpoint, EnvironmentCheckpoint),
+            ("next_checkpoint", self.next_checkpoint, EnvironmentCheckpoint),
+        )
+        for field_name, value, expected_type in typed_evidence:
+            if type(value) is not expected_type:
+                raise TypeError(f"{field_name} must use the exact canonical record type")
+            expected_type.__post_init__(value)
         if (
             self.observation.environment_id != self.action.environment_id
             or self.action.environment_id != self.outcome.environment_id

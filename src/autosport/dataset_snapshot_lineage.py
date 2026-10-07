@@ -370,6 +370,8 @@ class DatasetSnapshotLineageAuthority:
             "proof_sha256",
         }
         schema_version = raw.get("schema_version")
+        if type(schema_version) is not int:
+            raise ValueError("dataset snapshot lineage proof schema mismatch")
         if raw.get("kind") != _PROOF_KIND:
             raise ValueError("dataset snapshot lineage proof schema mismatch")
         if schema_version == 1:
@@ -418,7 +420,10 @@ class DatasetSnapshotLineageAuthority:
             raise ValueError("dataset snapshot lineage authority must be valid UTF-8 JSON") from exc
         if type(state) is not dict or set(state) != {"schema_version", "records"}:
             raise ValueError("dataset snapshot lineage authority fields mismatch")
-        if state.get("schema_version") != self.SCHEMA_VERSION:
+        if (
+            type(state.get("schema_version")) is not int
+            or state.get("schema_version") != self.SCHEMA_VERSION
+        ):
             raise ValueError("dataset snapshot lineage authority schema_version mismatch")
         raw_records = state.get("records")
         if type(raw_records) is not list:

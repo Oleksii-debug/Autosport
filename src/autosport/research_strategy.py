@@ -225,12 +225,13 @@ class ResearchStrategyPlan:
     def __post_init__(self) -> None:
         if not self.instructions:
             raise ValueError("research strategy plan must contain at least one decision")
-        if len(self.source_sha256) != 64:
-            raise ValueError("research strategy plan source_sha256 must be SHA-256")
-        try:
-            int(self.source_sha256, 16)
-        except ValueError as exc:
-            raise ValueError("research strategy plan source_sha256 must be hexadecimal") from exc
+        source_sha256 = _exact_plan_text(self.source_sha256, field="source_sha256")
+        if len(source_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in source_sha256
+        ):
+            raise ValueError(
+                "research strategy plan source_sha256 must be canonical lowercase SHA-256"
+            )
         ids = [item.decision_id for item in self.instructions]
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate research decision_id")
@@ -279,7 +280,7 @@ class ResearchStrategyPlan:
         if source_sha256 is None:
             canonical = _canonical_plan_json(raw)
             source_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return cls(instructions, source_sha256.lower())
+        return cls(instructions, source_sha256)
 
     def preflight(self, events: Iterable[MarketEvent]) -> None:
         """Bind every planned decision to the same causal replay state before economic mutation."""

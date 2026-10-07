@@ -82,7 +82,16 @@ def test_future_market_guard_decodes_encoded_quote_identity() -> None:
         "selection|ghost",
         None,
     )
-    group = ScenarioGroup("future-market", (ScenarioOutcome(fabricated),))
+    fabricated_peer = _quote_identity(
+        "event|2026",
+        "market|future",
+        "selection|peer",
+        None,
+    )
+    group = ScenarioGroup(
+        "future-market",
+        (ScenarioOutcome(fabricated), ScenarioOutcome(fabricated_peer)),
+    )
     decision_time = parse_iso_timestamp(_DECISION_TS)
     with pytest.raises(ValueError, match="market identity first appears after decision"):
         _validate_scenario_future_identity(
@@ -109,7 +118,16 @@ def test_future_market_guard_keeps_sport_in_event_market_identity() -> None:
         "ghost",
         "tennis",
     )
-    group = ScenarioGroup("sport-qualified-future-market", (ScenarioOutcome(fabricated),))
+    fabricated_peer = _quote_identity(
+        "shared-event",
+        "shared-market",
+        "peer",
+        "tennis",
+    )
+    group = ScenarioGroup(
+        "sport-qualified-future-market",
+        (ScenarioOutcome(fabricated), ScenarioOutcome(fabricated_peer)),
+    )
     decision_time = parse_iso_timestamp(_DECISION_TS)
     earlier = parse_iso_timestamp("2026-10-06T23:59:00+00:00")
     future = parse_iso_timestamp("2026-10-07T00:01:00+00:00")
@@ -153,15 +171,30 @@ def test_scenario_space_does_not_merge_same_local_market_across_sports() -> None
         ingest_ts=_DECISION_TS,
         sport="soccer",
     )
+    tennis_peer = MarketEvent(
+        event_id="shared-event",
+        market_id="shared-market",
+        selection_id="tennis-peer",
+        decimal_odds=Decimal("2"),
+        observed_ts=_DECISION_TS,
+        source_id="provider-1",
+        sequence=3,
+        ingest_ts=_DECISION_TS,
+        sport="tennis",
+    )
     group = ScenarioGroup(
         "tennis-only",
-        (ScenarioOutcome(tennis.quote_key),),
+        (
+            ScenarioOutcome(tennis.quote_key),
+            ScenarioOutcome(tennis_peer.quote_key),
+        ),
     )
 
     _validate_scenario_space_binding(
         (group,),
         {
             tennis.quote_key: tennis,
+            tennis_peer.quote_key: tennis_peer,
             soccer.quote_key: soccer,
         },
         parse_iso_timestamp(_DECISION_TS),

@@ -1425,8 +1425,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
     ) -> bool:
         """Atomically admit one canonical delta and its active-epoch authority."""
 
-        if not isinstance(delta, CollectorDelta):
-            raise TypeError("delta must be CollectorDelta")
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
         delta.validate()
         _instant(activated_at, "activated_at")
         connection = self._connect()

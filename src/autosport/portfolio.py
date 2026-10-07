@@ -279,14 +279,15 @@ class PortfolioEngine:
         snapshot = settlement_by_quote.copy()
         allowed = frozenset({"win", "loss", "void"})
         for quote_key, result in snapshot.items():
-            if (
-                type(quote_key) is not str
-                or not quote_key
-                or quote_key != quote_key.strip()
-            ):
+            try:
+                _canonical_string_value(
+                    quote_key,
+                    "settlement_by_quote quote_key",
+                )
+            except ValueError as exc:
                 raise ValueError(
                     "settlement_by_quote keys must be non-empty canonical strings"
-                )
+                ) from exc
             if type(result) is not str or result not in allowed:
                 raise ValueError(
                     "settlement_by_quote values must be win, loss, or void"

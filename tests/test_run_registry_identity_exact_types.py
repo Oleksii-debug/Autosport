@@ -109,7 +109,7 @@ class RunRegistryIdentityExactTypeTests(unittest.TestCase):
                         "run_id": "run-1",
                     }
                     kwargs[field] = malformed
-                    with self.assertRaisesRegex(ValueError, "exact canonical"):
+                    with self.assertRaisesRegex(ValueError, "canonical spelling"):
                         registry.begin(**kwargs)
                     self.assertEqual(path.read_bytes(), baseline)
 

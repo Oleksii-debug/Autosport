@@ -1127,3 +1127,11 @@ def test_canonical_event_identity_rejects_control_aliases(field: str, value: str
 def test_canonical_event_identity_rejects_non_utf8_identity_text() -> None:
     with pytest.raises(ValueError, match="UTF-8"):
         canonical_event_identity(source_id="provider-a", sport="table_tennis", event_id="event-\ud800")
+
+
+def test_event_lifecycle_rejects_nonzero_submicrosecond_causal_timestamp() -> None:
+    with pytest.raises(ValueError, match="precision finer than microseconds"):
+        event_lifecycle_module._instant(
+            "2026-09-19T07:00:00.1234561Z",
+            "discovered_at",
+        )

@@ -376,9 +376,9 @@ class MarketMirror:
             sport,
             exchange_side,
         )
-        with self._lock:
-            event = self._latest.get((source_id, quote_key))
-            return None if event is None else self._snapshot_event(event)
+        # Reuse the exact source/quote lookup boundary instead of allowing caller-
+        # controlled str subclasses to reach tuple hashing in _latest directly.
+        return self.event_for_quote_key(source_id, quote_key)
 
     def active_snapshot(
         self,

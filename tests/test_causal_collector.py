@@ -143,6 +143,26 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(checkpoint.last_position, 1)
             self.assertEqual(checkpoint.last_cursor, "1")
 
+    def test_store_reopen_rejects_boolean_schema_version_without_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            CollectorDeltaStore(path)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["schema_version"] = True
+            path.write_text(
+                json.dumps(raw, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            forged = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "unsupported causal collector store schema",
+            ):
+                CollectorDeltaStore(path)
+
+            self.assertEqual(path.read_bytes(), forged)
+
     def test_source_and_normalized_digests_preserve_distinct_evidence(self):
         payload = event_payload()
         source_payload = json.dumps(payload, ensure_ascii=False, indent=2)

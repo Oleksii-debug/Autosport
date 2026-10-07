@@ -180,6 +180,66 @@ def test_batch_cursor_rejects_subclass_control_and_non_utf8_text() -> None:
         ProviderBatch("provider-a", (_quote(),), cursor="\ud800")
 
 
+
+def test_normalizer_rejects_metadata_dict_subclass_before_items_dispatch() -> None:
+    dispatch_calls: list[str] = []
+
+    class HostileMetadata(dict):
+        def items(self):
+            dispatch_calls.append("items")
+            raise AssertionError("metadata mapping dispatch must not execute")
+
+    quote = _quote()
+    object.__setattr__(quote, "metadata", HostileMetadata({"origin": "fixture"}))
+
+    with pytest.raises(TypeError, match="metadata must be an exact dict"):
+        CanonicalNormalizer().normalize("provider-a", quote)
+
+    assert dispatch_calls == []
+
+
+def test_normalizer_rejects_nested_json_container_subclass_before_iteration() -> None:
+    dispatch_calls: list[str] = []
+
+    class HostileList(list):
+        def __iter__(self):
+            dispatch_calls.append("iter")
+            raise AssertionError("nested JSON list dispatch must not execute")
+
+    quote = _quote()
+    object.__setattr__(quote, "metadata", {"nested": HostileList(["value"])})
+
+    with pytest.raises(TypeError, match="non-canonical JSON value type HostileList"):
+        CanonicalNormalizer().normalize("provider-a", quote)
+
+    assert dispatch_calls == []
+
+
+def test_normalizer_rejects_json_key_subclass_before_hash_dispatch() -> None:
+    dispatch_calls: list[str] = []
+
+    class HostileKey(str):
+        armed = False
+
+        def __hash__(self) -> int:
+            if self.armed:
+                dispatch_calls.append("hash")
+                raise AssertionError("JSON key hash dispatch must not execute")
+            return str.__hash__(self)
+
+    key = HostileKey("origin")
+    metadata = {key: "fixture"}
+    key.armed = True
+
+    quote = _quote()
+    object.__setattr__(quote, "metadata", metadata)
+
+    with pytest.raises(TypeError, match="non-string JSON object key"):
+        CanonicalNormalizer().normalize("provider-a", quote)
+
+    assert dispatch_calls == []
+
+
 def test_valid_provider_identity_remains_byte_stable() -> None:
     quote = _quote()
     batch = ProviderBatch("provider-a", (quote,), cursor="1")

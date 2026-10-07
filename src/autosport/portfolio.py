@@ -46,6 +46,15 @@ def _portfolio_arithmetic_error(exc: DecimalException) -> ValueError:
     )
 
 
+def _require_portfolio_ticket_identity(ticket: object) -> PaperTicket:
+    """Re-prove the canonical ticket identity before any portfolio use boundary."""
+
+    if type(ticket) is not PaperTicket:
+        raise ValueError("portfolio tickets must be canonical PaperTicket values")
+    _canonical_string_value(ticket.ticket_id, "portfolio ticket_id")
+    return ticket
+
+
 def _analysis_ticket_fingerprint(
     ticket: PaperTicket,
 ) -> tuple[
@@ -58,6 +67,7 @@ def _analysis_ticket_fingerprint(
 ]:
     """Return exactly the mutable ticket fields consumed by scenario analysis."""
 
+    ticket = _require_portfolio_ticket_identity(ticket)
     return (
         ticket.ticket_id,
         ticket.stake,
@@ -133,6 +143,7 @@ def _scenario_profit_in_context(
 
     total = Decimal("0")
     for ticket in tickets:
+        ticket = _require_portfolio_ticket_identity(ticket)
         if ticket.status is not TicketStatus.OPEN:
             continue
         stake = _require_finite_decimal(
@@ -192,7 +203,14 @@ class PortfolioEngine:
 
     @staticmethod
     def affected_tickets(tickets: list[PaperTicket], quote_key: str) -> list[str]:
-        return [ticket.ticket_id for ticket in tickets if ticket.status is TicketStatus.OPEN and any(leg.quote_key == quote_key for leg in ticket.legs)]
+        affected: list[str] = []
+        for ticket in tickets:
+            ticket = _require_portfolio_ticket_identity(ticket)
+            if ticket.status is TicketStatus.OPEN and any(
+                leg.quote_key == quote_key for leg in ticket.legs
+            ):
+                affected.append(ticket.ticket_id)
+        return affected
 
     @staticmethod
     def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:

@@ -3842,6 +3842,47 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_projection_repair_decodes_only_authoritative_tip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                events = tuple(
+                    self.event(
+                        sequence=sequence,
+                        odds=f"2.{sequence:02d}",
+                        observed_ts=(
+                            "2026-09-16T18:59:"
+                            f"{min(sequence, 59):02d}+00:00"
+                        ),
+                    )
+                    for sequence in range(1, 17)
+                )
+                for event in events:
+                    self.assertTrue(store.append(event))
+
+                original_decoder = storage_module._event_from_history_row
+                decoded_rows = 0
+
+                def counted_decoder(row):
+                    nonlocal decoded_rows
+                    decoded_rows += 1
+                    return original_decoder(row)
+
+                with patch.object(
+                    storage_module,
+                    "_event_from_history_row",
+                    side_effect=counted_decoder,
+                ):
+                    repaired = store._repair_current_projection_for_key(
+                        source_id=events[-1].source_id,
+                        quote_key=events[-1].quote_key,
+                    )
+
+                self.assertEqual(repaired.dedupe_key, events[-1].dedupe_key)
+                self.assertEqual(decoded_rows, 1)
+            finally:
+                store.close()
+
     def test_new_append_repairs_forged_current_projection_from_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

@@ -2821,38 +2821,55 @@ class SQLiteMarketStore:
         source_id: str,
         quote_key: str,
     ) -> MarketEvent:
-        """Re-derive one repairable current row from canonical history only."""
+        """Re-derive one repairable current row from the canonical history tip.
 
-        rows = self.connection.execute(
+        Stream semantics are admitted before history publication. Therefore a healthy
+        stream does not need an O(history) rescan every time a duplicate arrives.
+        Resolve the authoritative provider-local tip directly, then either prove the
+        derived projection already matches it or repair only that projection row.
+        """
+
+        row = self.connection.execute(
             f"""SELECT {_HISTORY_COLUMNS_SQL}
                 FROM market_events
+                WHERE source_id=? AND quote_key=?
+                ORDER BY sequence DESC, dedupe_key DESC
+                LIMIT 1""",
+            (source_id, quote_key),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                "cannot project current quote without canonical market history"
+            )
+
+        event = _event_from_history_row(row)
+        payload = _canonical_payload(event)
+        current_row = self.connection.execute(
+            f"""SELECT {_CURRENT_COLUMNS_SQL}
+                FROM current_quotes
                 WHERE source_id=? AND quote_key=?""",
             (source_id, quote_key),
-        ).fetchall()
-        if not rows:
-            raise RuntimeError(
-                "cannot project current quote without canonical market history"
-            )
+        ).fetchone()
 
-        expected_semantics: tuple[str, str | None] | None = None
-        event: MarketEvent | None = None
-        for row in rows:
-            candidate = _event_from_history_row(row)
-            if expected_semantics is None:
-                expected_semantics = _stream_semantic_identity(candidate)
+        if current_row is not None:
+            try:
+                current_event = _event_from_current_row(current_row)
+            except ValueError:
+                # current_quotes is derived and repairable. Malformed projection
+                # bytes cannot override the already-proven append-only history.
+                current_event = None
             else:
-                _assert_stream_semantic_identity(expected_semantics, candidate)
-            if (
-                event is None
-                or _projection_order_key(candidate) > _projection_order_key(event)
-            ):
-                event = candidate
+                if _stream_semantic_identity(current_event) != _stream_semantic_identity(
+                    event
+                ):
+                    # A syntactically valid projection that claims different market
+                    # rules is a semantic tamper, not a benign stale cache row.
+                    raise ValueError(
+                        "current market quote projection conflicts with authoritative history"
+                    )
+                if current_row[-1] == payload:
+                    return event
 
-        if event is None:
-            raise RuntimeError(
-                "cannot project current quote without canonical market history"
-            )
-        payload = _canonical_payload(event)
         self.connection.execute(
             """INSERT INTO current_quotes
                (source_id,quote_key,observed_ts,sequence,payload_json)
@@ -2923,6 +2940,25 @@ class SQLiteMarketStore:
                 quote_key=event.quote_key,
             )
             return False
+
+        # The just-inserted row is not yet durable. Prove its market-rule semantics
+        # against one previously admitted stream witness before issuing chronology.
+        # Startup validation plus this inductive boundary makes a full stream rescan
+        # unnecessary on every append while still failing closed on semantic rebind.
+        semantic_witness_row = self.connection.execute(
+            f"""SELECT {_HISTORY_COLUMNS_SQL}
+                FROM market_events
+                WHERE source_id=? AND quote_key=? AND dedupe_key<>?
+                ORDER BY sequence DESC, dedupe_key DESC
+                LIMIT 1""",
+            (event.source_id, event.quote_key, event.dedupe_key),
+        ).fetchone()
+        if semantic_witness_row is not None:
+            semantic_witness = _event_from_history_row(semantic_witness_row)
+            _assert_stream_semantic_identity(
+                _stream_semantic_identity(semantic_witness),
+                event,
+            )
 
         self.connection.execute(
             """INSERT INTO market_event_commit_order

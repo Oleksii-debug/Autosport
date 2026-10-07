@@ -715,7 +715,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         bundle_id = "voc-bundle-derived"
         experiment_id = "voc-experiment-derived"
         bundle_sha = SHA_B
-        self.registry.append(
+        _persist_raw_scientific_fixture(
+            self.registry,
             RawScientificRecord(
                 record_type="EvaluationBundle",
                 record_id=bundle_id,
@@ -734,7 +735,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                 },
             )
         )
-        self.registry.append(
+        _persist_raw_scientific_fixture(
+            self.registry,
             RawScientificRecord(
                 record_type="Experiment",
                 record_id=experiment_id,
@@ -745,7 +747,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                 },
             )
         )
-        self.registry.append(
+        _persist_raw_scientific_fixture(
+            self.registry,
             RawScientificRecord(
                 record_type="PromotionEvidence",
                 record_id="voc-promotion-evidence-derived",
@@ -1044,7 +1047,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             register_cohort=False,
         )
         self.registry.append(first)
-        self.registry.append(
+        _persist_raw_scientific_fixture(
+            self.registry,
             RawScientificRecord(
                 record_type="PairedVOCEvaluation",
                 record_id=second.evaluation_id,

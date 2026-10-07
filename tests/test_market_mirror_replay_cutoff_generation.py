@@ -2681,6 +2681,82 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_append_chronology_keeps_source_receive_ingest_commit_and_availability_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                source_time = self.CUTOFF - timedelta(seconds=4)
+                observed_time = self.CUTOFF - timedelta(seconds=3)
+                ingest_time = self.CUTOFF - timedelta(seconds=2)
+                commit_time = self.CUTOFF - timedelta(seconds=1)
+                availability_time = self.CUTOFF
+                event = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    source_ts=source_time.isoformat(),
+                    observed_ts=observed_time.isoformat(),
+                    ingest_ts=ingest_time.isoformat(),
+                )
+
+                with patch.object(
+                    storage_module,
+                    "_market_product_utc_now",
+                    side_effect=(
+                        commit_time.isoformat(),
+                        availability_time.isoformat(),
+                    ),
+                ):
+                    self.assertTrue(store.append(event))
+
+                [stored] = store.events()
+                committed_at = store.connection.execute(
+                    """SELECT committed_at
+                       FROM market_append_commit_times
+                       WHERE end_append_generation=1"""
+                ).fetchone()[0]
+                available_at = store.connection.execute(
+                    """SELECT available_at
+                       FROM market_append_availability
+                       WHERE max_append_generation=1"""
+                ).fetchone()[0]
+
+                self.assertEqual(stored.source_ts, source_time.isoformat())
+                self.assertEqual(stored.observed_ts, observed_time.isoformat())
+                self.assertEqual(stored.ingest_ts, ingest_time.isoformat())
+                self.assertEqual(
+                    committed_at,
+                    storage_module._canonical_product_time(
+                        commit_time.isoformat()
+                    ),
+                )
+                self.assertEqual(
+                    available_at,
+                    storage_module._canonical_product_time(
+                        availability_time.isoformat()
+                    ),
+                )
+                chronology = (
+                    storage_module._timezone_aware_instant(
+                        stored.source_ts, "source_ts"
+                    ),
+                    storage_module._timezone_aware_instant(
+                        stored.observed_ts, "observed_ts"
+                    ),
+                    storage_module._timezone_aware_instant(
+                        stored.ingest_ts, "ingest_ts"
+                    ),
+                    storage_module._timezone_aware_instant(
+                        committed_at, "append committed_at"
+                    ),
+                    storage_module._timezone_aware_instant(
+                        available_at, "append available_at"
+                    ),
+                )
+                self.assertEqual(tuple(sorted(chronology)), chronology)
+                self.assertEqual(len(set(chronology)), len(chronology))
+            finally:
+                store.close()
+
     def test_append_rejects_product_commit_clock_rollback_without_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

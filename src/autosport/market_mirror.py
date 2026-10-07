@@ -97,16 +97,19 @@ class MarketMirror:
         """Normalize a focused-view selector without treating one ID as characters."""
         if values is None:
             return None
-        if isinstance(values, str):
-            selected = frozenset({values})
+        if type(values) is str:
+            candidates = (values,)
         else:
             try:
-                selected = frozenset(values)
+                candidates = tuple(values)
             except TypeError as exc:
                 raise TypeError(f"{name} must be a string or iterable of strings") from exc
-        if any(not isinstance(value, str) or not value for value in selected):
+        # Identity selectors are a trust boundary. Validate exact built-in text
+        # before constructing the hash-based set so a str subclass cannot dispatch
+        # caller-controlled __hash__/__eq__ before fail-closed admission.
+        if any(type(value) is not str or not value for value in candidates):
             raise ValueError(f"{name} entries must be non-empty strings")
-        return selected
+        return frozenset(candidates)
 
     @staticmethod
     def _decision_boundary(*, as_of: datetime, max_age: timedelta) -> tuple[datetime, timedelta]:

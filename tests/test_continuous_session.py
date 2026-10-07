@@ -26,6 +26,7 @@ from autosport.continuous_session import (
     SessionPausedError,
     SettlementResolution,
     SessionState,
+    _ContinuousSessionState,
 )
 from autosport.decision_ledger import (
     ECONOMIC_DECISION_KIND,
@@ -54,6 +55,38 @@ from autosport.paper_settlement_learning import PaperSettlementLearningBridge
 from autosport.providers import ProviderUnavailableError
 from autosport.risk import PaperRiskPolicy
 from autosport.storage import SQLiteMarketStore
+
+
+class ContinuousSessionSchemaVersionTests(unittest.TestCase):
+    def test_restart_rejects_boolean_schema_version_without_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "continuous-session.json"
+            _ContinuousSessionState(
+                path,
+                session_id="session-section2",
+                source_id="provider-a",
+                clock=lambda: "2026-10-07T04:00:00+00:00",
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["schema_version"] = True
+            path.write_text(
+                json.dumps(raw, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            forged = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "schema/identity mismatch",
+            ):
+                _ContinuousSessionState(
+                    path,
+                    session_id="session-section2",
+                    source_id="provider-a",
+                    clock=lambda: "2026-10-07T04:00:01+00:00",
+                )
+
+            self.assertEqual(path.read_bytes(), forged)
 
 
 class _Clock:

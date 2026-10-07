@@ -4,9 +4,15 @@ from decimal import Decimal
 import pytest
 
 from autosport.candidate_search import CandidateLeg, ParlayCandidate
+from autosport.domain import MarketEvent
 from autosport.forecasting import ForecastRecord
 from autosport.research_pipeline import ResearchEvidence
-from autosport.research_strategy import ResearchReplayInstruction, ResearchStrategyPlan
+from autosport.research_strategy import (
+    ResearchReplayInstruction,
+    ResearchStrategyPlan,
+    market_event_evidence_hash,
+    research_market_snapshot_hash,
+)
 from autosport.scenario_search import ScenarioGroup, ScenarioOutcome
 
 T0 = "2026-10-06T23:00:00+00:00"
@@ -103,3 +109,86 @@ def test_plan_requires_exact_tuple_and_revalidates_instruction() -> None:
     object.__setattr__(instruction, "trigger_quote_key", _TrapStr(QUOTE))
     with pytest.raises(ValueError, match="trigger_quote_key"):
         ResearchStrategyPlan((instruction,), "b" * 64)
+
+
+def _market_event() -> MarketEvent:
+    return MarketEvent(
+        event_id="event-1",
+        market_id="market-1",
+        selection_id="selection-1",
+        decimal_odds=Decimal("2"),
+        observed_ts=T1,
+        source_id="provider-1",
+        sequence=1,
+        ingest_ts=T1,
+    )
+
+
+def test_market_evidence_hash_rejects_event_subclass_before_member_dispatch() -> None:
+    base = _market_event()
+
+    class HostileEvent(MarketEvent):
+        armed = False
+
+        def __getattribute__(self, name: str):
+            if name == "event_id" and type(self).armed:
+                raise AssertionError("MarketEvent identity dispatched before exact admission")
+            return super().__getattribute__(name)
+
+    hostile = HostileEvent(
+        event_id=base.event_id,
+        market_id=base.market_id,
+        selection_id=base.selection_id,
+        decimal_odds=base.decimal_odds,
+        observed_ts=base.observed_ts,
+        source_id=base.source_id,
+        sequence=base.sequence,
+        market_type=base.market_type,
+        status=base.status,
+        source_ts=base.source_ts,
+        ingest_ts=base.ingest_ts,
+        score_state=base.score_state,
+        metadata=base.metadata,
+    )
+    HostileEvent.armed = True
+    with pytest.raises(TypeError, match="exact MarketEvent"):
+        market_event_evidence_hash(hostile)
+
+
+def test_market_evidence_hash_revalidates_post_construction_identity() -> None:
+    event = _market_event()
+    object.__setattr__(event, "selection_id", _TrapStr("selection-1"))
+    with pytest.raises(ValueError, match="selection_id"):
+        market_event_evidence_hash(event)
+
+
+def test_snapshot_hash_rejects_mapping_subclass_before_get_dispatch() -> None:
+    event = _market_event()
+
+    class HostileQuotes(dict):
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("mapping get dispatched before exact admission")
+
+    with pytest.raises(TypeError, match="exact dict"):
+        research_market_snapshot_hash(
+            HostileQuotes({event.quote_key: event}),
+            [event.quote_key],
+        )
+
+
+def test_snapshot_hash_validates_quote_key_before_hash_dispatch() -> None:
+    event = _market_event()
+    with pytest.raises(ValueError, match="snapshot quote_key"):
+        research_market_snapshot_hash(
+            {event.quote_key: event},
+            [_TrapStr(event.quote_key)],
+        )
+
+
+def test_snapshot_hash_rejects_mapping_key_identity_mismatch() -> None:
+    event = _market_event()
+    with pytest.raises(ValueError, match="mapping key does not match"):
+        research_market_snapshot_hash(
+            {"event-1|market-1|different-selection": event},
+            ["event-1|market-1|different-selection"],
+        )

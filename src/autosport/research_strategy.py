@@ -169,20 +169,27 @@ def _canonical_plan_json(raw: Any) -> str:
 def _stable_event_projection(event: MarketEvent) -> dict[str, Any]:
     """Stable causal quote projection used to bind offline research evidence to replay state."""
 
+    if type(event) is not MarketEvent:
+        raise TypeError("research evidence requires exact MarketEvent")
+    # Reuse the canonical durable serialization boundary before reading fields for
+    # an evidence digest. This catches post-construction identity/schema drift and
+    # detaches metadata from caller-owned containers.
+    canonical = MarketEvent.from_dict(MarketEvent.to_dict(event))
+    payload = MarketEvent.to_dict(canonical)
     projection: dict[str, Any] = {
-        "event_id": event.event_id,
-        "market_id": event.market_id,
-        "selection_id": event.selection_id,
-        "decimal_odds": str(event.decimal_odds),
-        "observed_ts": event.observed_ts,
-        "source_id": event.source_id,
-        "sport": event.sport,
-        "sequence": event.sequence,
-        "market_type": event.market_type.value,
-        "status": event.status,
-        "source_ts": event.source_ts,
-        "score_state": event.score_state,
-        "metadata": event.metadata,
+        "event_id": payload["event_id"],
+        "market_id": payload["market_id"],
+        "selection_id": payload["selection_id"],
+        "decimal_odds": payload["decimal_odds"],
+        "observed_ts": payload["observed_ts"],
+        "source_id": payload["source_id"],
+        "sport": payload.get("sport"),
+        "sequence": payload["sequence"],
+        "market_type": payload["market_type"],
+        "status": payload["status"],
+        "source_ts": payload["source_ts"],
+        "score_state": payload["score_state"],
+        "metadata": payload["metadata"],
     }
     # Preserve the exact legacy/None research projection while making concrete
     # canonical market/provenance semantics identity-bearing.
@@ -192,7 +199,7 @@ def _stable_event_projection(event: MarketEvent) -> dict[str, Any]:
         "provider_source_class",
         "exchange_side",
     ):
-        value = getattr(event, field_name)
+        value = payload.get(field_name)
         if value is not None:
             projection[field_name] = value
     return projection
@@ -212,13 +219,29 @@ def research_market_snapshot_hash(
     latest_quotes: dict[str, MarketEvent],
     quote_keys: Iterable[str],
 ) -> str:
-    keys = tuple(sorted(set(quote_keys)))
+    if type(latest_quotes) is not dict:
+        raise TypeError("research latest_quotes must be an exact dict")
+    mapping_keys = tuple(dict.keys(latest_quotes))
+    for key in mapping_keys:
+        _exact_plan_text(key, field="latest quote mapping key")
+
+    requested = tuple(quote_keys)
+    canonical_requested = tuple(
+        _exact_plan_text(key, field="snapshot quote_key")
+        for key in requested
+    )
+    keys = tuple(sorted(set(canonical_requested)))
     projection: dict[str, dict[str, Any]] = {}
     for key in keys:
-        event = latest_quotes.get(key)
+        event = dict.get(latest_quotes, key)
         if event is None:
             raise ValueError(f"research snapshot missing replay quote: {key}")
-        projection[key] = _stable_event_projection(event)
+        event_projection = _stable_event_projection(event)
+        if event.quote_key != key:
+            raise ValueError(
+                "research snapshot mapping key does not match canonical MarketEvent quote_key"
+            )
+        projection[key] = event_projection
     canonical = json.dumps(
         projection,
         ensure_ascii=False,

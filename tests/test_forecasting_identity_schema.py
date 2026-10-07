@@ -322,6 +322,9 @@ def test_walk_forward_rejects_window_subclass_before_attribute_dispatch() -> Non
     class HostileWindow(TemporalEvaluationWindow):
         __slots__ = ()
 
+        def __post_init__(self) -> None:
+            return None
+
         def __getattribute__(self, name: str):
             if name == "evaluation_start_ts":
                 raise AssertionError("window subclass attribute dispatch must not execute")
@@ -336,6 +339,7 @@ def test_walk_forward_rejects_window_subclass_before_attribute_dispatch() -> Non
 
     with pytest.raises(ValueError, match="exact TemporalEvaluationWindow"):
         evaluate_walk_forward((), (), (window,))
+
 
 def test_forecast_use_boundary_revalidates_evidence_reference_identities() -> None:
     digest = "a" * 64

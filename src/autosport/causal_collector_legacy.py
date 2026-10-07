@@ -587,6 +587,8 @@ class CollectorDeltaStore(_JsonAtomicStore):
         return {"schema_version": 1, "deltas": [], "streams": {}}
 
     def get(self, delta_id: str) -> CollectorDelta | None:
+        if type(delta_id) is not str:
+            raise TypeError("delta_id must be exact string identity text")
         _text(delta_id, "delta_id")
         for raw in self._read()["deltas"]:
             if raw.get("delta_id") == delta_id:
@@ -713,6 +715,8 @@ class CollectorDeltaStore(_JsonAtomicStore):
         source position; append order ensures a desktop that already consumed newer
         source positions still receives that correction instead of silently skipping it.
         """
+        if type(source_id) is not str:
+            raise TypeError("source_id must be exact string identity text")
         _text(source_id, "source_id")
         if (
             isinstance(max_items, bool)
@@ -727,6 +731,8 @@ class CollectorDeltaStore(_JsonAtomicStore):
         ]
         start = 0
         if after_delta_id is not None:
+            if type(after_delta_id) is not str:
+                raise TypeError("after_delta_id must be exact string identity text or None")
             _text(after_delta_id, "after_delta_id")
             for index, item in enumerate(items):
                 if item.delta_id == after_delta_id:
@@ -739,6 +745,12 @@ class CollectorDeltaStore(_JsonAtomicStore):
         return tuple(items[start : start + max_items])
 
     def stream_checkpoint(self, source_id: str, stream_epoch: str) -> StreamCheckpoint | None:
+        if type(source_id) is not str:
+            raise TypeError("source_id must be exact string identity text")
+        if type(stream_epoch) is not str:
+            raise TypeError("stream_epoch must be exact string identity text")
+        _text(source_id, "source_id")
+        _text(stream_epoch, "stream_epoch")
         raw = self._read()["streams"].get(f"{source_id}|{stream_epoch}")
         return None if raw is None else StreamCheckpoint(**raw)
 

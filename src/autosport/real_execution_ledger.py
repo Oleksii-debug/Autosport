@@ -86,6 +86,21 @@ def _text(value: str, name: str) -> str:
     return value
 
 
+def _identity_text(value: object, name: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{name} must be exact canonical identity text")
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be exact canonical UTF-8 identity text") from exc
+    return value
+
+
 def _sha256_text(value: str, name: str) -> str:
     _text(value, name)
     if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
@@ -233,10 +248,10 @@ class ExecutionAction:
             "event_id",
             "market_id",
             "selection_id",
-            "side",
             "quote_id",
         ):
-            _text(getattr(self, name), name)
+            _identity_text(getattr(self, name), name)
+        _text(self.side, "side")
         observed = _timestamp(self.quote_observed_at, "quote_observed_at")
         expires = _timestamp(self.expires_at, "expires_at")
         if expires <= observed:
@@ -287,7 +302,7 @@ class ExecutionPlan:
             "decision_id",
             "approval_id",
         ):
-            _text(getattr(self, name), name)
+            _identity_text(getattr(self, name), name)
         _timestamp(self.created_at, "created_at")
         if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
             raise ValueError("unsupported execution plan schema")
@@ -341,13 +356,16 @@ class ExternalAcknowledgement:
     reconciliation_evidence_id: str | None = None
 
     def __post_init__(self) -> None:
-        _text(self.attempt_id, "attempt_id")
-        _text(self.external_receipt_id, "external_receipt_id")
+        _identity_text(self.attempt_id, "attempt_id")
+        _identity_text(self.external_receipt_id, "external_receipt_id")
         _timestamp(self.acknowledged_at, "acknowledged_at")
         if not isinstance(self.status, AcknowledgementStatus):
             raise ValueError("status must be AcknowledgementStatus")
         if self.reconciliation_evidence_id is not None:
-            _text(self.reconciliation_evidence_id, "reconciliation_evidence_id")
+            _identity_text(
+                self.reconciliation_evidence_id,
+                "reconciliation_evidence_id",
+            )
         if self.status in {
             AcknowledgementStatus.ACCEPTED,
             AcknowledgementStatus.PARTIAL,
@@ -402,13 +420,9 @@ class ExternalEffectReconciliation:
     source: str
 
     def __post_init__(self) -> None:
-        for name in (
-            "attempt_id",
-            "evidence_id",
-            "external_receipt_id",
-            "source",
-        ):
-            _text(getattr(self, name), name)
+        for name in ("attempt_id", "evidence_id", "external_receipt_id"):
+            _identity_text(getattr(self, name), name)
+        _text(self.source, "source")
         _timestamp(self.observed_at, "observed_at")
 
     def to_dict(self) -> dict[str, Any]:
@@ -430,8 +444,9 @@ class ReconciliationSnapshot:
     source: str
 
     def __post_init__(self) -> None:
-        for name in ("attempt_id", "evidence_id", "source"):
-            _text(getattr(self, name), name)
+        for name in ("attempt_id", "evidence_id"):
+            _identity_text(getattr(self, name), name)
+        _text(self.source, "source")
         _timestamp(self.observed_at, "observed_at")
         if type(self.external_effect_found) is not bool:
             raise ValueError("external_effect_found must be bool")
@@ -602,7 +617,12 @@ class RealExecutionLedger:
             )
         if type(event["schema_version"]) is not int or event["schema_version"] != SCHEMA_VERSION:
             raise ExecutionLedgerIntegrityError(f"unsupported event schema{where}")
-        for name in ("event_id", "event_type", "recorded_at", "plan_id"):
+        for name in ("event_id", "plan_id"):
+            try:
+                _identity_text(event[name], name)
+            except ValueError as exc:
+                raise ExecutionLedgerIntegrityError(f"invalid {name}{where}") from exc
+        for name in ("event_type", "recorded_at"):
             if type(event[name]) is not str or not event[name].strip():
                 raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
         try:
@@ -615,10 +635,13 @@ class RealExecutionLedger:
             raise ExecutionLedgerIntegrityError(f"unknown event type{where}")
         for name in ("action_id", "attempt_id"):
             value = event[name]
-            if value is not None and (
-                type(value) is not str or not value.strip()
-            ):
-                raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
+            if value is not None:
+                try:
+                    _identity_text(value, name)
+                except ValueError as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        f"invalid {name}{where}"
+                    ) from exc
         if not isinstance(event["payload"], dict):
             raise ExecutionLedgerIntegrityError(f"invalid payload{where}")
         try:
@@ -737,7 +760,7 @@ class RealExecutionLedger:
     def _plan_event(
         events: list[dict[str, Any]], plan_id: str
     ) -> dict[str, Any] | None:
-        _text(plan_id, "plan_id")
+        _identity_text(plan_id, "plan_id")
         matches = [
             event
             for event in events
@@ -758,7 +781,7 @@ class RealExecutionLedger:
     def _attempt_events(
         events: list[dict[str, Any]], attempt_id: str
     ) -> list[dict[str, Any]]:
-        _text(attempt_id, "attempt_id")
+        _identity_text(attempt_id, "attempt_id")
         return [event for event in events if event["attempt_id"] == attempt_id]
 
     @classmethod
@@ -883,7 +906,7 @@ class RealExecutionLedger:
         plan_id: str,
         action_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        _text(action_id, "action_id")
+        _identity_text(action_id, "action_id")
         plan_event = cls._plan_event(events, plan_id)
         if plan_event is None:
             raise ExecutionStateError(f"plan {plan_id!r} is not reserved")
@@ -1601,7 +1624,7 @@ class RealExecutionLedger:
         approved_at: str,
         evidence_sha256: str,
     ) -> None:
-        _text(approval_id, "approval_id")
+        _identity_text(approval_id, "approval_id")
         _sha256_text(approval_fingerprint, "approval_fingerprint")
         _timestamp(approved_at, "approved_at")
         _sha256_text(evidence_sha256, "evidence_sha256")
@@ -1652,7 +1675,7 @@ class RealExecutionLedger:
         revoked_at: str,
         revocation_evidence_sha256: str,
     ) -> None:
-        _text(approval_id, "approval_id")
+        _identity_text(approval_id, "approval_id")
         _sha256_text(approval_fingerprint, "approval_fingerprint")
         _timestamp(revoked_at, "revoked_at")
         _sha256_text(revocation_evidence_sha256, "revocation_evidence_sha256")
@@ -1747,8 +1770,8 @@ class RealExecutionLedger:
         provider_id: str,
     ) -> str:
         """Durably bind a provider-safe <=32-char order reference before submission."""
-        _text(attempt_id, "attempt_id")
-        provider = _text(provider_id, "provider_id")
+        _identity_text(attempt_id, "attempt_id")
+        provider = _identity_text(provider_id, "provider_id")
 
         def operation() -> str:
             events = self._events()
@@ -1765,7 +1788,7 @@ class RealExecutionLedger:
                 raise ExecutionIdentityConflict(
                     "provider order reference authority mismatches action bookmaker"
                 )
-            account_id = _text(action["account_id"], "account_id")
+            account_id = _identity_text(action["account_id"], "account_id")
             binding_sha256 = _digest(
                 {
                     "schema": "autosport.provider_order_reference_binding",
@@ -1832,7 +1855,7 @@ class RealExecutionLedger:
         attempt_id: str,
         provider_id: str,
     ) -> str | None:
-        provider = _text(provider_id, "provider_id")
+        provider = _identity_text(provider_id, "provider_id")
         events = self._events()
         matches = [
             event["payload"]
@@ -1862,7 +1885,7 @@ class RealExecutionLedger:
         observed_at: str,
         source: str,
     ) -> None:
-        _text(attempt_id, "attempt_id")
+        _identity_text(attempt_id, "attempt_id")
         _sha256_text(evidence_id, "evidence_id")
         _timestamp(observed_at, "observed_at")
         _text(source, "source")
@@ -1978,7 +2001,7 @@ class RealExecutionLedger:
         attempt_id: str,
         reserved_at: str | None = None,
     ) -> ExecutionAttempt:
-        _text(attempt_id, "attempt_id")
+        _identity_text(attempt_id, "attempt_id")
         reserved_at = reserved_at or _now()
         _timestamp(reserved_at, "reserved_at")
 
@@ -2585,7 +2608,7 @@ class RealExecutionLedger:
         the canonical writer/admission authority.
         """
 
-        _text(plan_id, "plan_id")
+        _identity_text(plan_id, "plan_id")
         snapshot = self.verified_snapshot()
         # Parse the captured bytes, never a second filesystem read, so every
         # returned fact is mechanically tied to snapshot.sha256/event_count.

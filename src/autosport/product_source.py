@@ -1048,9 +1048,13 @@ def _capture_parlay_product_source_factory(
             raise ProductSourceError(
                 "Parlay product source rights authorization failed"
             ) from exc
+        lawful_terms_ref = required_env("AUTOSPORT_PARLAY_LAWFUL_TERMS_REF")
+        retention_ref = required_env("AUTOSPORT_PARLAY_RETENTION_REF")
         if (
             authorization.source_identity != provider.source_id
             or authorization.required_scope != required_rights_scope
+            or authorization.terms_reference != lawful_terms_ref
+            or authorization.retention_authority_reference != retention_ref
         ):
             raise ProductSourceError(
                 "Parlay product source rights authorization is inconsistent"
@@ -1058,8 +1062,8 @@ def _capture_parlay_product_source_factory(
         return source_type(
             provider,
             workspace=workspace,
-            lawful_terms_ref=required_env("AUTOSPORT_PARLAY_LAWFUL_TERMS_REF"),
-            retention_ref=required_env("AUTOSPORT_PARLAY_RETENTION_REF"),
+            lawful_terms_ref=lawful_terms_ref,
+            retention_ref=retention_ref,
         )
 
     return create_parlay_product_source

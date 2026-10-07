@@ -25,6 +25,8 @@ _REQUIRED_FIELDS = {
     "authorized_scopes",
     "privacy_classification",
     "evidence_class",
+    "terms_reference",
+    "retention_authority_reference",
     "effective_at",
     "expires_at",
     "human_approved",
@@ -54,6 +56,8 @@ class SourceRightsManifest:
     authorized_scopes: tuple[str, ...]
     privacy_classification: str
     evidence_class: str
+    terms_reference: str
+    retention_authority_reference: str
     effective_at: datetime
     expires_at: datetime
     approved_by: str
@@ -72,6 +76,8 @@ class SourceRightsAuthorization:
     manifest_sha256: str
     privacy_classification: str
     evidence_class: str
+    terms_reference: str
+    retention_authority_reference: str
     approved_by: str
     approval_reference: str
 
@@ -95,6 +101,8 @@ def _install_source_rights_authorization_seal(
         "manifest_sha256",
         "privacy_classification",
         "evidence_class",
+        "terms_reference",
+        "retention_authority_reference",
         "approved_by",
         "approval_reference",
     )
@@ -126,6 +134,8 @@ def _install_source_rights_authorization_seal(
         manifest_sha256: str,
         privacy_classification: str,
         evidence_class: str,
+        terms_reference: str,
+        retention_authority_reference: str,
         approved_by: str,
         approval_reference: str,
         _issuer: object | None = None,
@@ -153,6 +163,8 @@ def _install_source_rights_authorization_seal(
             manifest_sha256,
             privacy_classification,
             evidence_class,
+            terms_reference,
+            retention_authority_reference,
             approved_by,
             approval_reference,
         )
@@ -200,6 +212,8 @@ def _build_source_rights_authorization_issuer(
         manifest_sha256: str,
         privacy_classification: str,
         evidence_class: str,
+        terms_reference: str,
+        retention_authority_reference: str,
         approved_by: str,
         approval_reference: str,
     ) -> SourceRightsAuthorization:
@@ -210,6 +224,8 @@ def _build_source_rights_authorization_issuer(
             manifest_sha256=manifest_sha256,
             privacy_classification=privacy_classification,
             evidence_class=evidence_class,
+            terms_reference=terms_reference,
+            retention_authority_reference=retention_authority_reference,
             approved_by=approved_by,
             approval_reference=approval_reference,
             _issuer=_issuer_token,
@@ -450,7 +466,7 @@ def _validated_projection(
     _int_type=int,
     _sorted=sorted,
     _type=type,
-) -> tuple[str, tuple[str, ...], str, str, datetime, datetime, str, str, datetime]:
+) -> tuple[str, tuple[str, ...], str, str, str, str, datetime, datetime, str, str, datetime]:
     payload = _bounded_impl(payload)
     try:
         raw = _json_loads(
@@ -520,6 +536,14 @@ def _validated_projection(
         field_name="evidence_class",
         allowed=_evidence_classes,
     )
+    terms_reference = _canonical_text_impl(
+        raw["terms_reference"],
+        field_name="terms_reference",
+    )
+    retention_authority_reference = _canonical_text_impl(
+        raw["retention_authority_reference"],
+        field_name="retention_authority_reference",
+    )
     effective_at = _timestamp_impl(
         raw["effective_at"],
         field_name="effective_at",
@@ -555,6 +579,8 @@ def _validated_projection(
         authorized_scopes,
         privacy_classification,
         evidence_class,
+        terms_reference,
+        retention_authority_reference,
         effective_at,
         expires_at,
         approved_by,
@@ -602,6 +628,14 @@ def _validated_manifest_snapshot(
             manifest.evidence_class,
             field_name="manifest evidence_class",
             allowed=_evidence_classes,
+        ),
+        _canonical_text_impl(
+            manifest.terms_reference,
+            field_name="manifest terms_reference",
+        ),
+        _canonical_text_impl(
+            manifest.retention_authority_reference,
+            field_name="manifest retention_authority_reference",
         ),
         _runtime_timestamp_impl(
             manifest.effective_at,
@@ -659,6 +693,8 @@ def _build_source_rights_loader(
             authorized_scopes,
             privacy_classification,
             evidence_class,
+            terms_reference,
+            retention_authority_reference,
             effective_at,
             expires_at,
             approved_by,
@@ -673,6 +709,8 @@ def _build_source_rights_loader(
             authorized_scopes=authorized_scopes,
             privacy_classification=privacy_classification,
             evidence_class=evidence_class,
+            terms_reference=terms_reference,
+            retention_authority_reference=retention_authority_reference,
             effective_at=effective_at,
             expires_at=expires_at,
             approved_by=approved_by,
@@ -784,6 +822,8 @@ def _build_authorize_source_use(
             manifest_sha256=manifest.manifest_sha256,
             privacy_classification=manifest.privacy_classification,
             evidence_class=manifest.evidence_class,
+            terms_reference=manifest.terms_reference,
+            retention_authority_reference=manifest.retention_authority_reference,
             approved_by=manifest.approved_by,
             approval_reference=manifest.approval_reference,
         )

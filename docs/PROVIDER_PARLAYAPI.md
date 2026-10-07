@@ -30,6 +30,7 @@ For the shipped table-tennis source that manifest must authorize:
 - exact scope `provider.market_data.read`;
 - `privacy_classification=NON_PERSONAL_DATA`;
 - `evidence_class=HUMAN_APPROVED_SOURCE_RIGHTS`;
+- the exact `terms_reference` and `retention_authority_reference` that must match the runtime terms/retention assertions carried into collector evidence;
 - an active human-approved validity interval at construction time.
 
 `UNKNOWN` evidence/privacy, `PERSONAL_DATA_RESTRICTED`, missing/expired authority, source mismatch, scope mismatch, malformed JSON, or a replaced/tampered manifest fail closed before the enabled ProductSource is constructed. The manifest is an operational authorization/evidence gate, not a legal opinion and not real-money execution authority.

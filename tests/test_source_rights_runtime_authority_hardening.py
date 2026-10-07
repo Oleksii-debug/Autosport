@@ -27,6 +27,8 @@ def payload() -> dict[str, object]:
         ],
         "privacy_classification": "NON_PERSONAL_DATA",
         "evidence_class": "HUMAN_APPROVED_SOURCE_RIGHTS",
+            "terms_reference": "terms:parlayapi:v1",
+            "retention_authority_reference": "retention:parlayapi:v1",
         "effective_at": "2026-09-01T00:00:00Z",
         "expires_at": "2026-12-01T00:00:00Z",
         "human_approved": True,
@@ -65,6 +67,8 @@ def test_caller_cannot_mint_positive_source_rights_authorization() -> None:
             manifest_sha256="0" * 64,
             privacy_classification="NON_PERSONAL_DATA",
             evidence_class="HUMAN_APPROVED_SOURCE_RIGHTS",
+            terms_reference="terms:parlayapi:v1",
+            retention_authority_reference="retention:parlayapi:v1",
             approved_by="release-owner",
             approval_reference="caller-authored-reference",
         )

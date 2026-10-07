@@ -513,6 +513,48 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 ):
                     create_parlay_product_source()
 
+    def test_factory_rejects_terms_reference_not_bound_to_rights_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rights = _write_source_rights_manifest(root)
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": str(root / "workspace"),
+                    "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:other:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceError,
+                    "source rights authorization is inconsistent",
+                ):
+                    create_parlay_product_source()
+
+    def test_factory_rejects_retention_reference_not_bound_to_rights_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rights = _write_source_rights_manifest(root)
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": str(root / "workspace"),
+                    "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:other:v1",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceError,
+                    "source rights authorization is inconsistent",
+                ):
+                    create_parlay_product_source()
+
     def test_factory_constructor_dependencies_are_import_composed(self) -> None:
         class AttackerProvider:
             source_id = _SOURCE_ID

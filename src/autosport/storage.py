@@ -67,6 +67,12 @@ _EXPECTED_TABLE_XINFO = {
         (0, "dedupe_key", "TEXT", 0, None, 1, 0),
         (1, "append_generation", "INTEGER", 1, None, 0, 0),
     ),
+    "market_append_availability": (
+        (0, "max_append_generation", "INTEGER", 0, None, 1, 0),
+        (1, "append_authority_record_sha256", "TEXT", 1, None, 0, 0),
+        (2, "append_state_sha256", "TEXT", 1, None, 0, 0),
+        (3, "available_at", "TEXT", 1, None, 0, 0),
+    ),
     "market_replay_cutoffs": (
         (0, "cutoff_id", "TEXT", 0, None, 1, 0),
         (1, "as_of", "TEXT", 1, None, 0, 0),
@@ -84,6 +90,7 @@ _EXPECTED_PRIMARY_KEYS = {
     "market_events": ("dedupe_key",),
     "current_quotes": ("source_id", "quote_key"),
     "market_event_commit_order": ("dedupe_key",),
+    "market_append_availability": ("max_append_generation",),
     "market_replay_cutoffs": ("cutoff_id",),
 }
 _LEGACY_CURRENT_PRIMARY_KEYS = ("quote_key",)
@@ -114,6 +121,19 @@ _APPEND_BASELINE_TX_RE: Final = re.compile(r"^baseline-(?P<nonce>[0-9a-f]{32})$"
 _APPEND_TX_RE: Final = re.compile(
     r"^append-(?P<start>[1-9][0-9]*)-(?P<end>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{32})$"
 )
+_APPEND_AVAILABILITY_MACHINE_DOMAIN: Final = "data.market-event-product-availability.v1"
+_APPEND_AVAILABILITY_MACHINE_KEY_PREFIX: Final = (
+    "sqlite-market-store-product-availability:"
+)
+_APPEND_AVAILABILITY_STATE_SCHEMA: Final = (
+    "autosport.market-event-product-availability.state.v1"
+)
+_APPEND_AVAILABILITY_BINDING_SCHEMA: Final = (
+    "autosport.market-event-product-availability.binding.v1"
+)
+_APPEND_AVAILABILITY_TX_RE: Final = re.compile(
+    r"^availability-(?P<generation>0|[1-9][0-9]*)-(?P<nonce>[0-9a-f]{32})$"
+)
 _COMMIT_ORDER_IMMUTABILITY_TRIGGERS: Final = {
     "market_event_commit_order_no_delete": """CREATE TRIGGER market_event_commit_order_no_delete
 BEFORE DELETE ON market_event_commit_order
@@ -124,6 +144,18 @@ END""",
 BEFORE UPDATE ON market_event_commit_order
 BEGIN
     SELECT RAISE(ABORT, 'market event append-generation rows are immutable');
+END""",
+}
+_APPEND_AVAILABILITY_IMMUTABILITY_TRIGGERS: Final = {
+    "market_append_availability_no_delete": """CREATE TRIGGER market_append_availability_no_delete
+BEFORE DELETE ON market_append_availability
+BEGIN
+    SELECT RAISE(ABORT, 'market append availability rows are immutable');
+END""",
+    "market_append_availability_no_update": """CREATE TRIGGER market_append_availability_no_update
+BEFORE UPDATE ON market_append_availability
+BEGIN
+    SELECT RAISE(ABORT, 'market append availability rows are immutable');
 END""",
 }
 _REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS: Final = {
@@ -267,6 +299,65 @@ def _append_binding_sha256(
             "previous_state_sha256": previous_state_sha256,
             "intended_state_sha256": intended_state_sha256,
             "entries": [list(entry) for entry in entries],
+        }
+    )
+
+
+def _append_availability_state_sha256(
+    rows: tuple[tuple[int, str, str, str], ...],
+) -> str | None:
+    if not rows:
+        return None
+    return _canonical_sha256(
+        {
+            "schema": _APPEND_AVAILABILITY_STATE_SCHEMA,
+            "rows": [list(row) for row in rows],
+        }
+    )
+
+
+def _append_availability_binding_sha256(
+    *,
+    previous_state_sha256: str | None,
+    intended_state_sha256: str,
+    row: tuple[int, str, str, str],
+) -> str:
+    if len(row) != 4:
+        raise ValueError("market append availability row has invalid shape")
+    (
+        max_append_generation,
+        append_authority_record_sha256,
+        append_state_sha256,
+        available_at,
+    ) = row
+    if type(max_append_generation) is not int or max_append_generation < 0:
+        raise ValueError("market append availability generation is invalid")
+    for value, field_name in (
+        (append_authority_record_sha256, "append authority record"),
+        (append_state_sha256, "append state"),
+        (intended_state_sha256, "availability state"),
+    ):
+        if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"{field_name} SHA-256 is not canonical")
+    if previous_state_sha256 is not None and (
+        type(previous_state_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", previous_state_sha256) is None
+    ):
+        raise ValueError("previous availability state SHA-256 is not canonical")
+    canonical_available_at = _canonical_product_time(available_at)
+    if canonical_available_at != available_at:
+        raise ValueError("market append availability time is not canonical")
+    return _canonical_sha256(
+        {
+            "schema": _APPEND_AVAILABILITY_BINDING_SCHEMA,
+            "previous_state_sha256": previous_state_sha256,
+            "intended_state_sha256": intended_state_sha256,
+            "row": [
+                max_append_generation,
+                append_authority_record_sha256,
+                append_state_sha256,
+                canonical_available_at,
+            ],
         }
     )
 
@@ -675,6 +766,20 @@ def _validate_table_shape(
                 "market_event_commit_order schema is not canonical: "
                 "immutable append-generation triggers mismatch"
             )
+    elif table_name == "market_append_availability":
+        expected_triggers = tuple(
+            sorted(_APPEND_AVAILABILITY_IMMUTABILITY_TRIGGERS.items())
+        )
+        actual_triggers = tuple(
+            (name, sql)
+            for name, sql in triggers
+            if isinstance(name, str) and isinstance(sql, str)
+        )
+        if actual_triggers != expected_triggers:
+            raise ValueError(
+                "market_append_availability schema is not canonical: "
+                "immutable availability triggers mismatch"
+            )
     elif table_name == "market_replay_cutoffs":
         expected_triggers = tuple(sorted(_REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS.items()))
         actual_triggers = tuple(
@@ -862,6 +967,9 @@ class SQLiteMarketStore:
             # generation-zero PREPARE for abandoned crash state.
             with self._market_append_issuance_lock(append_authority):
                 self._ensure_market_append_baseline_authority()
+                self._ensure_market_append_availability_authority(
+                    append_authority
+                )
                 self._rebuild_current_quotes(
                     append_authority=append_authority,
                 )
@@ -983,16 +1091,33 @@ class SQLiteMarketStore:
             replay_cutoff_state = _schema_object(
                 self.connection, "market_replay_cutoffs"
             )
+            append_availability_state = _schema_object(
+                self.connection, "market_append_availability"
+            )
             if (commit_order_state is None) != (replay_cutoff_state is None):
                 raise ValueError(
                     "causal replay schema is incomplete: "
                     "commit order/cutoff tables disagree"
                 )
+            if commit_order_state is None and append_availability_state is not None:
+                raise ValueError(
+                    "causal replay schema is incomplete: "
+                    "append availability exists without append order"
+                )
             initialize_causal_replay = commit_order_state is None
+            initialize_append_availability = append_availability_state is None
             self.connection.execute(
                 """CREATE TABLE IF NOT EXISTS market_event_commit_order (
                     dedupe_key TEXT PRIMARY KEY,
                     append_generation INTEGER NOT NULL
+                )"""
+            )
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS market_append_availability (
+                    max_append_generation INTEGER PRIMARY KEY,
+                    append_authority_record_sha256 TEXT NOT NULL,
+                    append_state_sha256 TEXT NOT NULL,
+                    available_at TEXT NOT NULL
                 )"""
             )
             self.connection.execute(
@@ -1007,6 +1132,9 @@ class SQLiteMarketStore:
                 for trigger_sql in _COMMIT_ORDER_IMMUTABILITY_TRIGGERS.values():
                     self.connection.execute(trigger_sql)
                 for trigger_sql in _REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS.values():
+                    self.connection.execute(trigger_sql)
+            if initialize_append_availability:
+                for trigger_sql in _APPEND_AVAILABILITY_IMMUTABILITY_TRIGGERS.values():
                     self.connection.execute(trigger_sql)
             self.connection.execute(
                 """CREATE INDEX IF NOT EXISTS idx_market_event_commit_generation
@@ -1123,6 +1251,355 @@ class SQLiteMarketStore:
             domain=_APPEND_MACHINE_DOMAIN,
             key=f"{_APPEND_MACHINE_KEY_PREFIX}{_database_authority_key(database_path)}",
         )
+
+    def _market_append_availability_authority(self) -> MonotonicWorkspaceAuthority:
+        self._require_database_path_identity()
+        database_path = self.path
+        return MonotonicWorkspaceAuthority(
+            workspace=database_path.parent,
+            domain=_APPEND_AVAILABILITY_MACHINE_DOMAIN,
+            key=(
+                f"{_APPEND_AVAILABILITY_MACHINE_KEY_PREFIX}"
+                f"{_database_authority_key(database_path)}"
+            ),
+        )
+
+    @staticmethod
+    def _append_committed_boundaries(
+        append_authority: MonotonicWorkspaceAuthority,
+    ) -> tuple[tuple[int, str, str], ...]:
+        history = append_authority.read_history()
+        commits = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
+        )
+        if not commits:
+            raise MonotonicAuthorityRollbackError(
+                "market append authority lacks a committed generation-zero baseline"
+            )
+
+        boundaries: list[tuple[int, str, str]] = []
+        baseline = commits[0]
+        if (
+            _APPEND_BASELINE_TX_RE.fullmatch(baseline.tx_id) is None
+            or baseline.previous_committed_state_sha256 is not None
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "market append authority baseline history is invalid"
+            )
+        boundaries.append(
+            (0, baseline.record_sha256, baseline.intended_state_sha256)
+        )
+
+        expected_start = 1
+        previous_state_sha256 = baseline.intended_state_sha256
+        for record in commits[1:]:
+            match = _APPEND_TX_RE.fullmatch(record.tx_id)
+            if match is None:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history has invalid transaction identity"
+                )
+            start = int(match.group("start"))
+            end = int(match.group("end"))
+            if (
+                start != expected_start
+                or end < start
+                or record.previous_committed_state_sha256
+                != previous_state_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history is non-contiguous"
+                )
+            boundaries.append(
+                (
+                    end,
+                    record.record_sha256,
+                    record.intended_state_sha256,
+                )
+            )
+            expected_start = end + 1
+            previous_state_sha256 = record.intended_state_sha256
+        return tuple(boundaries)
+
+    def _validated_append_availability_rows(
+        self,
+        append_authority: MonotonicWorkspaceAuthority,
+    ) -> tuple[tuple[int, str, str, str], ...]:
+        _validate_canonical_table(
+            self.connection, "market_append_availability"
+        )
+        boundaries = self._append_committed_boundaries(append_authority)
+        raw_rows = self.connection.execute(
+            """SELECT max_append_generation,
+                      append_authority_record_sha256,
+                      append_state_sha256,
+                      available_at
+               FROM market_append_availability
+               ORDER BY max_append_generation"""
+        ).fetchall()
+        if len(raw_rows) > len(boundaries):
+            raise MonotonicAuthorityRollbackError(
+                "market append availability exceeds committed append authority"
+            )
+
+        rows: list[tuple[int, str, str, str]] = []
+        previous_available_at: datetime | None = None
+        for index, raw_row in enumerate(raw_rows):
+            if len(raw_row) != 4:
+                raise ValueError("market append availability row has invalid shape")
+            (
+                max_generation,
+                append_record_sha256,
+                append_state_sha256,
+                stored_available_at,
+            ) = raw_row
+            if (
+                type(max_generation) is not int
+                or max_generation < 0
+                or type(append_record_sha256) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", append_record_sha256) is None
+                or type(append_state_sha256) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", append_state_sha256) is None
+                or type(stored_available_at) is not str
+            ):
+                raise ValueError("market append availability row is invalid")
+            canonical_available_at = _canonical_product_time(
+                stored_available_at
+            )
+            if stored_available_at != canonical_available_at:
+                raise ValueError(
+                    "market append availability time is not canonical"
+                )
+            expected_generation, expected_record, expected_state = boundaries[index]
+            if (
+                max_generation != expected_generation
+                or append_record_sha256 != expected_record
+                or append_state_sha256 != expected_state
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "market append availability does not match append authority prefix"
+                )
+            available_instant = _timezone_aware_instant(
+                canonical_available_at, "append available_at"
+            )
+            if (
+                previous_available_at is not None
+                and available_instant < previous_available_at
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "market append availability product clock moved backwards"
+                )
+            previous_available_at = available_instant
+            rows.append(
+                (
+                    max_generation,
+                    append_record_sha256,
+                    append_state_sha256,
+                    canonical_available_at,
+                )
+            )
+        return tuple(rows)
+
+    @staticmethod
+    def _require_append_availability_authority_bindings(
+        availability_authority: MonotonicWorkspaceAuthority,
+        rows: tuple[tuple[int, str, str, str], ...],
+        *,
+        exact: bool,
+    ) -> None:
+        history = availability_authority.read_history()
+        commits = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
+        )
+        if len(commits) < len(rows) or (exact and len(commits) != len(rows)):
+            raise MonotonicAuthorityRollbackError(
+                "market append availability machine authority does not match durable rows"
+            )
+
+        previous_state_sha256: str | None = None
+        prefix: tuple[tuple[int, str, str, str], ...] = ()
+        for index, row in enumerate(rows):
+            commit = commits[index]
+            match = _APPEND_AVAILABILITY_TX_RE.fullmatch(commit.tx_id)
+            if match is None or int(match.group("generation")) != row[0]:
+                raise MonotonicAuthorityRollbackError(
+                    "market append availability transaction identity is invalid"
+                )
+            prefix = (*prefix, row)
+            intended_state_sha256 = _append_availability_state_sha256(prefix)
+            if intended_state_sha256 is None:
+                raise RuntimeError(
+                    "non-empty market append availability state has no digest"
+                )
+            expected_binding_sha256 = _append_availability_binding_sha256(
+                previous_state_sha256=previous_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                row=row,
+            )
+            if (
+                commit.previous_committed_state_sha256
+                != previous_state_sha256
+                or commit.intended_state_sha256 != intended_state_sha256
+                or commit.semantic_binding_sha256 != expected_binding_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "market append availability semantic binding is invalid"
+                )
+            previous_state_sha256 = intended_state_sha256
+
+    def _recover_append_availability_authority(
+        self,
+        availability_authority: MonotonicWorkspaceAuthority,
+        rows: tuple[tuple[int, str, str, str], ...],
+    ) -> None:
+        observed_state_sha256 = _append_availability_state_sha256(rows)
+        try:
+            availability_authority.recover(
+                observed_state_sha256=observed_state_sha256
+            )
+        except MonotonicAuthorityRecoveryRequiredError:
+            history = availability_authority.read_history()
+            if not history or history[-1].phase is not AuthorityPhase.PREPARE:
+                raise
+            pending = history[-1]
+            candidates: list[tuple[int, str, str, str]] = []
+            for index, row in enumerate(rows):
+                prior_rows = rows[:index] + rows[index + 1 :]
+                if (
+                    _append_availability_state_sha256(prior_rows)
+                    == pending.previous_committed_state_sha256
+                ):
+                    candidates.append(row)
+            if (
+                len(candidates) != 1
+                or pending.intended_state_sha256 != observed_state_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "market append availability PREPARE is not one canonical row addition"
+                )
+            row = candidates[0]
+            expected_binding_sha256 = _append_availability_binding_sha256(
+                previous_state_sha256=pending.previous_committed_state_sha256,
+                intended_state_sha256=pending.intended_state_sha256,
+                row=row,
+            )
+            match = _APPEND_AVAILABILITY_TX_RE.fullmatch(pending.tx_id)
+            if (
+                match is None
+                or int(match.group("generation")) != row[0]
+                or pending.semantic_binding_sha256
+                != expected_binding_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "market append availability PREPARE semantic binding is invalid"
+                )
+            availability_authority.recover(
+                observed_state_sha256=observed_state_sha256,
+                tx_id=pending.tx_id,
+                semantic_binding_sha256=pending.semantic_binding_sha256,
+            )
+        self._require_append_availability_authority_bindings(
+            availability_authority,
+            rows,
+            exact=True,
+        )
+
+    def _ensure_market_append_availability_authority(
+        self,
+        append_authority: MonotonicWorkspaceAuthority,
+    ) -> tuple[tuple[int, str, str, str], ...]:
+        """Seal conservative product availability for every committed append boundary.
+
+        Each timestamp is sampled only after the corresponding append-machine COMMIT
+        already exists. It is therefore an upper bound on when that complete append
+        state was product-available. Crash repair may move a missing witness later,
+        never earlier; caller event clocks are never used for this authority.
+        """
+
+        self._recover_positive_append_authority(append_authority)
+        availability_authority = self._market_append_availability_authority()
+        rows = self._validated_append_availability_rows(append_authority)
+        self._recover_append_availability_authority(
+            availability_authority, rows
+        )
+        boundaries = self._append_committed_boundaries(append_authority)
+
+        while len(rows) < len(boundaries):
+            (
+                max_generation,
+                append_record_sha256,
+                append_state_sha256,
+            ) = boundaries[len(rows)]
+            available_at = _canonical_product_time(_market_product_utc_now())
+            available_instant = _timezone_aware_instant(
+                available_at, "append available_at"
+            )
+            if rows and available_instant < _timezone_aware_instant(
+                rows[-1][3], "previous append available_at"
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "market append availability product clock moved backwards"
+                )
+            row = (
+                max_generation,
+                append_record_sha256,
+                append_state_sha256,
+                available_at,
+            )
+            observed_state_sha256 = _append_availability_state_sha256(rows)
+            intended_rows = (*rows, row)
+            intended_state_sha256 = _append_availability_state_sha256(
+                intended_rows
+            )
+            if intended_state_sha256 is None:
+                raise RuntimeError(
+                    "non-empty market append availability state has no digest"
+                )
+            binding_sha256 = _append_availability_binding_sha256(
+                previous_state_sha256=observed_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                row=row,
+            )
+            tx_id = f"availability-{max_generation}-{uuid.uuid4().hex}"
+
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._validate_causal_replay_state()
+                live_rows = self._validated_append_availability_rows(
+                    append_authority
+                )
+                if live_rows != rows:
+                    raise MonotonicAuthorityRollbackError(
+                        "market append availability changed during issuance"
+                    )
+                availability_authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed_state_sha256,
+                    intended_state_sha256=intended_state_sha256,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                self.connection.execute(
+                    """INSERT INTO market_append_availability
+                       (max_append_generation,
+                        append_authority_record_sha256,
+                        append_state_sha256,
+                        available_at)
+                       VALUES (?, ?, ?, ?)""",
+                    row,
+                )
+                self._commit_stable_database_path()
+            except BaseException:
+                self.connection.rollback()
+                raise
+
+            rows = self._validated_append_availability_rows(
+                append_authority
+            )
+            self._require_database_path_identity()
+            self._recover_append_availability_authority(
+                availability_authority, rows
+            )
+
+        return rows
 
     @staticmethod
     def _market_append_issuance_lock(
@@ -2123,6 +2600,9 @@ class SQLiteMarketStore:
 
                     if not accepted:
                         self._commit_stable_database_path()
+                        self._ensure_market_append_availability_authority(
+                            authority
+                        )
                         return accepted
 
                     qualified_columns = ",".join(
@@ -2208,6 +2688,9 @@ class SQLiteMarketStore:
                     observed_state_sha256=intended_state_sha256,
                     tx_id=tx_id,
                     semantic_binding_sha256=binding_sha256,
+                )
+                self._ensure_market_append_availability_authority(
+                    authority
                 )
                 return accepted
 

@@ -329,6 +329,41 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                 _verification_token=authority._verification_token,
             )
 
+    def test_authoritative_search_revalidates_mutated_exact_identity_before_sort(self):
+        authority = self._authority(("away", "home"))
+
+        class HostileSourceId(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError(
+                    "mutated source identity must be rejected before virtual strip dispatch"
+                )
+
+            def __lt__(self, other):
+                raise AssertionError(
+                    "mutated source identity must be rejected before sort dispatch"
+                )
+
+            def __hash__(self):
+                raise AssertionError(
+                    "mutated source identity must be rejected before hash dispatch"
+                )
+
+        object.__setattr__(
+            authority.identity,
+            "source_id",
+            HostileSourceId(authority.identity.source_id),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "market outcome source_id must be a non-empty canonical string",
+        ):
+            ScenarioSearchEngine().analyse_authoritative(
+                [],
+                [authority],
+                decision_as_of=self.DECISION_AS_OF,
+            )
+
     def test_authoritative_search_rejects_authority_subclass_before_identity_dispatch(self):
         authority = self._authority(("away", "home"))
 

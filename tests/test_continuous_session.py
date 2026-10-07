@@ -73,6 +73,14 @@ class _HostileTuple(tuple):
         raise AssertionError("hostile tuple length must not run")
 
 
+class _HostileRequiredHistory(timedelta):
+    def __lt__(self, _other):
+        raise AssertionError("hostile timedelta comparison must not run")
+
+    def total_seconds(self):
+        raise AssertionError("hostile timedelta conversion must not run")
+
+
 class _HostileSettlementResolution(SettlementResolution):
     def __getattribute__(self, name):
         if name in {
@@ -337,6 +345,7 @@ def _build_coordinator(
     *,
     outcome_authority=None,
     settlement_learning_handoff=None,
+    required_history: timedelta = timedelta(0),
 ):
     market_store = SQLiteMarketStore(root / "market.db")
     lifecycle = ContinuousEventLifecycle(root / "catalog.json")
@@ -378,11 +387,33 @@ def _build_coordinator(
         session_id="session-1",
         clock=clock,
         initial_bankroll="100",
+        required_history=required_history,
     )
     return coordinator, market_store, lifecycle, mirror, invalidations, dependencies
 
 
 class ContinuousSessionCoordinatorTests(unittest.TestCase):
+    def test_constructor_rejects_required_history_subclass_before_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            with self.assertRaisesRegex(TypeError, "exact timedelta"):
+                _build_coordinator(
+                    root,
+                    source,
+                    clock,
+                    required_history=_HostileRequiredHistory(seconds=1),
+                )
+
     def test_tick_registers_new_event_and_persists_checkpoint_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

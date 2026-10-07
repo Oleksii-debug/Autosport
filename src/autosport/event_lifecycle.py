@@ -825,9 +825,11 @@ class ContinuousEventLifecycle:
         as_of: str,
         required_history: timedelta,
     ) -> EventEvidenceAssessment:
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be SQLiteMarketStore")
-        if not isinstance(required_history, timedelta) or required_history < timedelta(0):
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
+        if type(required_history) is not timedelta:
+            raise TypeError("required_history must be an exact timedelta")
+        if required_history < timedelta(0):
             raise ValueError("required_history must be a non-negative timedelta")
         record = self.get(identity)
         if record is None:

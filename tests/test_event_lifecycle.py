@@ -1206,3 +1206,64 @@ def test_event_lifecycle_rejects_nonzero_submicrosecond_causal_timestamp() -> No
             "2026-09-19T07:00:00.1234561Z",
             "discovered_at",
         )
+
+
+class _HostileCausalHistory(timedelta):
+    def __lt__(self, _other):
+        raise AssertionError("hostile timedelta comparison must not run")
+
+    def total_seconds(self):
+        raise AssertionError("hostile timedelta conversion must not run")
+
+
+class _HostileReplayStore(SQLiteMarketStore):
+    def replay_events_at_frozen_cutoff(self, *, as_of: str):
+        raise AssertionError("hostile store replay dispatch must not run")
+
+
+def test_assess_evidence_rejects_required_history_subclass_before_dispatch(tmp_path: Path) -> None:
+    lifecycle = ContinuousEventLifecycle(tmp_path / "catalog.json")
+    store = SQLiteMarketStore(tmp_path / "market.db")
+    try:
+        with pytest.raises(TypeError, match="exact timedelta"):
+            lifecycle.assess_evidence(
+                "missing-event",
+                store,
+                as_of="2026-09-19T07:00:00+00:00",
+                required_history=_HostileCausalHistory(seconds=1),
+            )
+    finally:
+        store.close()
+
+
+def test_assess_evidence_rejects_store_subclass_before_replay_dispatch(tmp_path: Path) -> None:
+    lifecycle = ContinuousEventLifecycle(tmp_path / "catalog.json")
+    event = CatalogEvent(
+        source_id="provider-a",
+        sport="table_tennis",
+        event_id="event-1",
+        phase=EventPhase.LIVE,
+        available_at="2026-09-19T07:00:00+00:00",
+        scheduled_start_at="2026-09-19T07:10:00+00:00",
+    )
+    lifecycle.apply_page(
+        CatalogPage(
+            source_id="provider-a",
+            stream_epoch="epoch-1",
+            cursor="cursor-1",
+            position=1,
+            events=(event,),
+        ),
+        discovered_at="2026-09-19T07:00:00+00:00",
+    )
+    store = _HostileReplayStore(tmp_path / "hostile-market.db")
+    try:
+        with pytest.raises(TypeError, match="exact SQLiteMarketStore"):
+            lifecycle.assess_evidence(
+                event.identity,
+                store,
+                as_of="2026-09-19T07:00:01+00:00",
+                required_history=timedelta(0),
+            )
+    finally:
+        store.close()

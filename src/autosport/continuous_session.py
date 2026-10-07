@@ -799,10 +799,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self.outcome_authority = outcome_authority
         self.settlement_learning_handoff = settlement_learning_handoff
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
-        if isinstance(required_history, timedelta) and required_history.total_seconds() < 0:
+        if type(required_history) is not timedelta:
+            raise TypeError("required_history must be an exact timedelta")
+        if required_history < timedelta(0):
             raise ValueError("required_history cannot be negative")
-        if not isinstance(required_history, timedelta):
-            raise TypeError("required_history must be timedelta")
         self.required_history = required_history
         for name, value in (
             ("max_invalidation_batches_per_tick", max_invalidation_batches_per_tick),

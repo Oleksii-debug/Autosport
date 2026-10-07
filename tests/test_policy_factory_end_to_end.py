@@ -415,7 +415,7 @@ def _foundation(tmp_path, *, artifact_directory: str = "artifacts"):
     )
     bootstrap_state = registry._read()
     bootstrap_state["records"].append(registry._entry(bootstrap_decision))
-    registry_module.atomic_write_json(registry.path, bootstrap_state)
+    atomic_write_json(registry.path, bootstrap_state)
     ScientificRegistry(registry.path)
     return (
         registry,

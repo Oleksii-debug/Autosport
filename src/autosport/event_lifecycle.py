@@ -483,6 +483,8 @@ class ContinuousEventLifecycle:
         if type(raw) is not dict:
             raise CatalogLifecycleError("unsupported catalog lifecycle state")
         version = raw.get("schema_version")
+        if type(version) is not int:
+            raise CatalogLifecycleError("unsupported catalog lifecycle state")
         if version == self._VERSION:
             return
         if (

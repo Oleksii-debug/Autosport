@@ -13,6 +13,9 @@ from .causal_integrity import (
 )
 
 
+_SHA256_HEX = frozenset("0123456789abcdef")
+
+
 def _canonical_text(value: object, field_name: str) -> str:
     if (
         type(value) is not str
@@ -60,7 +63,11 @@ def _validate_evidence_identity_fields(
     _canonical_text(source, "source")
     _canonical_text(kind, "kind")
     if source_hash is not None:
-        _canonical_text(source_hash, "source_hash")
+        digest = _canonical_text(source_hash, "source_hash")
+        if len(digest) != 64 or any(character not in _SHA256_HEX for character in digest):
+            raise ValueError(
+                "source_hash must be a canonical lowercase SHA-256 digest"
+            )
 
 
 @dataclass(frozen=True, slots=True)

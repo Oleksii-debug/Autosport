@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -58,6 +59,12 @@ def _text(value: object, name: str) -> str:
 
 def _instant(value: object, name: str) -> datetime:
     raw = _text(value, name)
+    for match in re.finditer(r"[.,]([0-9]+)", raw):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(f"{name} precision finer than microseconds is unsupported")
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:

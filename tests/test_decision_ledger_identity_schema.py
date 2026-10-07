@@ -77,6 +77,44 @@ def test_constructor_rejects_noncanonical_top_level_identity_text(
         _record(**{field_name: value})
 
 
+def test_constructor_rejects_hostile_payload_key_before_hash_dispatch() -> None:
+    dispatch_calls: list[str] = []
+
+    class HostilePayloadKey(str):
+        armed = False
+
+        def __hash__(self) -> int:
+            if self.armed:
+                dispatch_calls.append("hash")
+                raise AssertionError("hostile payload key hashed before exact admission")
+            return str.__hash__(self)
+
+        def __eq__(self, other: object) -> bool:
+            if self.armed:
+                dispatch_calls.append("eq")
+                raise AssertionError("hostile payload key compared before exact admission")
+            return str.__eq__(self, other)
+
+    key = HostilePayloadKey("material_action_id")
+    payload: dict[object, object] = {}
+    payload[key] = "action-1"
+    key.armed = True
+
+    with pytest.raises(ValueError, match="mapping keys must use exact"):
+        _record(payload=payload)
+
+    assert dispatch_calls == []
+
+
+def test_constructor_rejects_mapping_subclass_before_virtual_iteration() -> None:
+    class HostileMapping(dict):
+        def items(self):
+            raise AssertionError("mapping subclass items must not execute")
+
+    with pytest.raises(ValueError, match="mappings must be exact dictionaries"):
+        _record(payload=HostileMapping({"material_action_id": "action-1"}))
+
+
 def test_append_revalidates_tampered_top_level_identity_before_virtual_dispatch(
     tmp_path: Path,
 ) -> None:

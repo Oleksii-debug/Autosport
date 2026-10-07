@@ -70,6 +70,35 @@ class RunRegistryIdentityExactTypeTests(unittest.TestCase):
 
         self.assertEqual(dispatch_calls, [])
 
+    def test_restart_entry_rejects_hostile_field_key_before_hash_dispatch(self) -> None:
+        dispatch_calls: list[str] = []
+
+        class HostileField(str):
+            armed = False
+
+            def __hash__(self) -> int:
+                if self.armed:
+                    dispatch_calls.append("hash")
+                    raise AssertionError("hostile run-entry field hashed before exact admission")
+                return str.__hash__(self)
+
+            def __eq__(self, other: object) -> bool:
+                if self.armed:
+                    dispatch_calls.append("eq")
+                    raise AssertionError("hostile run-entry field compared before exact admission")
+                return str.__eq__(self, other)
+
+        hostile = HostileField("status")
+        item: dict[object, object] = {hostile: "in_progress"}
+        hostile.armed = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            with self.assertRaisesRegex(ValueError, "entry keys must be exact strings"):
+                registry._validate_entry("key", item)
+
+        self.assertEqual(dispatch_calls, [])
+
     def test_restart_entry_rejects_mapping_subclass_before_mapping_dispatch(self) -> None:
         dispatch_calls: list[str] = []
 

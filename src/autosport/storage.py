@@ -197,6 +197,8 @@ def _validate_persistable_sequence(value: object) -> int:
 
 def _validate_incoming_event(event: MarketEvent) -> str:
     """Prove an event survives the exact durable JSON/SQLite representation without type drift."""
+    if type(event) is not MarketEvent:
+        raise TypeError("market event must be an exact MarketEvent")
     _validate_persistable_sequence(event.sequence)
     _observed_instant(event.observed_ts)
     _timezone_aware_instant(event.ingest_ts, "ingest_ts")

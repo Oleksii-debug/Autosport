@@ -16,6 +16,7 @@ from autosport.risk_day_window import (
     RiskDayWindowIntegrityError,
     RiskDayWindowMismatchError,
 )
+from autosport.workspace_lock import WorkspaceEconomicLock
 
 
 def _epoch_ns(value: str) -> int:
@@ -88,6 +89,79 @@ class ProductDayRiskWindowStoreTests(unittest.TestCase):
             authority_root=self.authority_root,
             _test_clock=self.clock,
         )
+
+    def test_workspace_lock_file_name_equal_subclass_rebind_fails_closed(self) -> None:
+        store = self._store()
+        original_file_name = WorkspaceEconomicLock.FILE_NAME
+
+        class EqualLockName(str):
+            pass
+
+        try:
+            WorkspaceEconomicLock.FILE_NAME = EqualLockName(original_file_name)
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "workspace economic lock authority changed",
+            ):
+                store.current()
+        finally:
+            WorkspaceEconomicLock.FILE_NAME = original_file_name
+
+        self.assertFalse(store.state_path.exists())
+
+    def test_workspace_lock_validator_dependency_rebind_fails_closed(self) -> None:
+        store = self._store()
+        validator_globals = WorkspaceEconomicLock._validate_open_handle_identity.__globals__
+        original_open = validator_globals["_open_read_only_descriptor"]
+
+        def hostile_open(_path) -> int:
+            raise AssertionError("mutated lock descriptor opener executed")
+
+        try:
+            validator_globals["_open_read_only_descriptor"] = hostile_open
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "workspace economic lock dependency authority changed",
+            ):
+                store.current()
+        finally:
+            validator_globals["_open_read_only_descriptor"] = original_open
+
+        self.assertFalse(store.state_path.exists())
+
+    def test_workspace_lock_acquire_rebind_fails_before_day_authority(self) -> None:
+        store = self._store()
+        original_acquire = WorkspaceEconomicLock.acquire
+
+        def hostile_acquire(_self) -> None:
+            raise AssertionError("mutated workspace lock acquire executed")
+
+        try:
+            WorkspaceEconomicLock.acquire = hostile_acquire
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "workspace economic lock executable authority changed",
+            ):
+                store.current()
+        finally:
+            WorkspaceEconomicLock.acquire = original_acquire
+
+        self.assertFalse(store.state_path.exists())
+
+    def test_current_under_lock_rejects_unheld_workspace_lock(self) -> None:
+        store = self._store()
+        unheld = WorkspaceEconomicLock(self.workspace)
+
+        with self.assertRaisesRegex(
+            RiskDayWindowIntegrityError,
+            "requires the canonical held workspace economic lock",
+        ):
+            ProductDayRiskWindowStore._current_under_lock(
+                store,
+                workspace_lock=unheld,
+            )
+
+        self.assertFalse(store.state_path.exists())
 
     def test_issues_complete_utc_day_without_headroom_authority(self) -> None:
         evidence = self._store().current()
@@ -333,6 +407,64 @@ class ProductClockBoundaryTests(unittest.TestCase):
             self.assertTrue(evidence.product_clock_authoritative)
             self.assertEqual(store.require_current(evidence), evidence)
 
+    def test_require_current_under_held_lock_reuses_existing_writer_lock(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            evidence = store.current()
+
+            with WorkspaceEconomicLock(store.workspace) as workspace_lock:
+                observed = store.require_current_under_lock(
+                    evidence,
+                    workspace_lock=workspace_lock,
+                )
+
+            self.assertEqual(observed, evidence)
+            self.assertTrue(observed.product_clock_authoritative)
+
+    def test_require_current_under_lock_rejects_unheld_lock_object(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            evidence = store.current()
+            workspace_lock = WorkspaceEconomicLock(store.workspace)
+
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "held workspace economic lock",
+            ):
+                store.require_current_under_lock(
+                    evidence,
+                    workspace_lock=workspace_lock,
+                )
+
+    def test_require_current_under_lock_rechecks_monotonic_state(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            evidence = store.current()
+            payload = json.loads(store.state_path.read_text(encoding="utf-8"))
+            payload["transition_id"] = "f" * 32
+
+            with WorkspaceEconomicLock(store.workspace) as workspace_lock:
+                atomic_write_json(store.state_path, payload)
+                with self.assertRaises(
+                    (RiskDayWindowIntegrityError, MonotonicAuthorityRollbackError)
+                ):
+                    store.require_current_under_lock(
+                        evidence,
+                        workspace_lock=workspace_lock,
+                    )
+
     def test_require_current_rejects_window_subclass_before_equality(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -358,11 +490,88 @@ class ProductClockBoundaryTests(unittest.TestCase):
 
             self.assertEqual(_HostileWindow.hook_calls, 0)
 
-    def test_runtime_product_clock_rebind_is_downgraded(self) -> None:
+    def test_require_current_bypasses_instance_current_shadow(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            evidence = store.current()
+            forged = ProductDayRiskWindow(
+                workspace_instance_id=evidence.workspace_instance_id,
+                day_key=evidence.day_key,
+                window_start=evidence.window_start,
+                window_end_exclusive=evidence.window_end_exclusive,
+                state_sha256="0" * 64,
+                authority_generation=evidence.authority_generation,
+                product_clock_authoritative=True,
+                timezone=evidence.timezone,
+            )
+            store.current = lambda: forged
+
+            with self.assertRaises(RiskDayWindowMismatchError):
+                ProductDayRiskWindowStore.require_current(store, forged)
+
+    def test_current_rejects_store_subclass_before_internal_dispatch(self) -> None:
+        class DerivedStore(ProductDayRiskWindowStore):
+            pass
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = DerivedStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "canonical exact store type",
+            ):
+                ProductDayRiskWindowStore.current(store)
+
+    def test_current_bypasses_instance_publish_day_shadow(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+
+            def hostile_publish(*args, **kwargs):
+                del args, kwargs
+                raise AssertionError("instance publish shadow executed")
+
+            store._publish_day = hostile_publish
+            evidence = ProductDayRiskWindowStore.current(store)
+
+            self.assertTrue(store.state_path.exists())
+            self.assertTrue(evidence.product_clock_authoritative)
+
+    def test_current_bypasses_instance_evidence_shadow(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+
+            def hostile_evidence(*args, **kwargs):
+                del args, kwargs
+                raise AssertionError("instance evidence shadow executed")
+
+            store._evidence = hostile_evidence
+            first = ProductDayRiskWindowStore.current(store)
+            second = ProductDayRiskWindowStore.current(store)
+
+            self.assertEqual(second, first)
+            self.assertTrue(first.product_clock_authoritative)
+
+    def test_runtime_product_clock_rebind_cannot_redirect_default_store(self) -> None:
         original = day_window._PRODUCT_TIME_NS
+        forged_day = "2000-01-01"
         try:
             day_window._PRODUCT_TIME_NS = lambda: _epoch_ns(
-                "2026-09-23T12:00:00Z"
+                forged_day + "T12:00:00Z"
             )
             with TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -372,14 +581,189 @@ class ProductClockBoundaryTests(unittest.TestCase):
                 )
                 evidence = store.current()
 
-                self.assertFalse(evidence.product_clock_authoritative)
-                with self.assertRaisesRegex(
-                    RiskDayWindowIntegrityError,
-                    "test/synthetic clock",
-                ):
-                    store.require_current(evidence)
+                self.assertNotEqual(evidence.day_key, forged_day)
+                self.assertNotEqual(store.product_clock_day_key(), forged_day)
+                self.assertTrue(evidence.product_clock_authoritative)
+                self.assertEqual(store.require_current(evidence), evidence)
         finally:
             day_window._PRODUCT_TIME_NS = original
+
+    def test_module_clock_helper_rebind_cannot_mint_product_day(self) -> None:
+        original = day_window._clock_utc_instant
+        forged_day = "2099-12-31"
+        try:
+            day_window._clock_utc_instant = lambda clock: datetime(
+                2099, 12, 31, 12, 0, tzinfo=timezone.utc
+            )
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                store = ProductDayRiskWindowStore(
+                    root / "workspace",
+                    authority_root=root / "machine-authority",
+                )
+                evidence = store.current()
+
+                self.assertNotEqual(evidence.day_key, forged_day)
+                self.assertTrue(evidence.product_clock_authoritative)
+                self.assertEqual(store.require_current(evidence), evidence)
+        finally:
+            day_window._clock_utc_instant = original
+
+    def test_product_clock_day_key_rejects_injected_clock(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+                _test_clock=lambda: _epoch_ns("2026-09-23T12:00:00Z"),
+            )
+
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "test/synthetic clock",
+            ):
+                store.product_clock_day_key()
+
+    def test_state_snapshot_digest_rejects_noncanonical_path(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            store.current()
+            store.state_path = store.state_path.with_name("alternate-day.json")
+
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "path is not canonical",
+            ):
+                store.state_snapshot_sha256()
+
+    def test_state_snapshot_digest_matches_current_evidence(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+
+            evidence = store.current()
+
+            self.assertEqual(store.product_clock_day_key(), evidence.day_key)
+            self.assertEqual(store.state_snapshot_sha256(), evidence.state_sha256)
+
+    def test_class_authority_entrypoints_reject_runtime_replacement(self) -> None:
+        for name in ("current", "product_clock_day_key", "state_snapshot_sha256", "require_current", "require_current_under_lock", "require_committed_window", "_current_under_lock", "_publish_day", "_evidence"):
+            with self.subTest(name=name):
+                original = ProductDayRiskWindowStore.__dict__[name]
+                with self.assertRaisesRegex(TypeError, "authority method is sealed"):
+                    setattr(
+                        ProductDayRiskWindowStore,
+                        name,
+                        lambda *args, **kwargs: None,
+                    )
+                self.assertIs(ProductDayRiskWindowStore.__dict__[name], original)
+
+    def test_class_authority_entrypoints_reject_runtime_deletion(self) -> None:
+        for name in ("current", "require_current", "require_committed_window", "_publish_day", "_evidence"):
+            with self.subTest(name=name):
+                original = ProductDayRiskWindowStore.__dict__[name]
+                with self.assertRaisesRegex(TypeError, "authority method is sealed"):
+                    delattr(ProductDayRiskWindowStore, name)
+                self.assertIs(ProductDayRiskWindowStore.__dict__[name], original)
+
+    def test_current_bypasses_monotonic_recover_instance_shadow(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+
+            def hostile_recover(*args, **kwargs):
+                del args, kwargs
+                raise AssertionError("instance recover shadow executed")
+
+            store._authority.recover = hostile_recover
+            evidence = store.current()
+
+            self.assertTrue(evidence.product_clock_authoritative)
+
+    def test_publish_bypasses_monotonic_prepare_and_commit_instance_shadows(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+
+            def hostile_transition(*args, **kwargs):
+                del args, kwargs
+                raise AssertionError("instance monotonic transition shadow executed")
+
+            store._authority.prepare = hostile_transition
+            store._authority.commit = hostile_transition
+            evidence = store.current()
+
+            self.assertTrue(evidence.product_clock_authoritative)
+            self.assertTrue(store.state_path.exists())
+
+
+    def test_committed_window_entrypoint_is_closure_sealed(self) -> None:
+        function = ProductDayRiskWindowStore.__dict__["require_committed_window"]
+        self.assertIsNotNone(function.__closure__)
+        freevars = set(function.__code__.co_freevars)
+        self.assertIn("function", freevars)
+        self.assertIn("frozen_globals", freevars)
+
+    def test_committed_historical_window_re_resolves_from_monotonic_history(self) -> None:
+        store = self._store()
+        first = store.current()
+        self.clock.set("2026-09-24T12:30:00Z")
+        store.current()
+
+        resolved = store.require_committed_window(
+            day_key=first.day_key,
+            window_start=first.window_start,
+            window_end_exclusive=first.window_end_exclusive,
+            state_sha256=first.state_sha256,
+            authority_generation=first.authority_generation,
+        )
+
+        self.assertEqual(resolved, first)
+
+    def test_historical_window_rejects_uncommitted_generation(self) -> None:
+        store = self._store()
+        first = store.current()
+
+        with self.assertRaisesRegex(
+            RiskDayWindowMismatchError,
+            "generation is not uniquely committed",
+        ):
+            store.require_committed_window(
+                day_key=first.day_key,
+                window_start=first.window_start,
+                window_end_exclusive=first.window_end_exclusive,
+                state_sha256=first.state_sha256,
+                authority_generation=first.authority_generation + 100,
+            )
+
+    def test_historical_window_rejects_day_forged_around_real_commit(self) -> None:
+        store = self._store()
+        first = store.current()
+
+        with self.assertRaisesRegex(
+            RiskDayWindowMismatchError,
+            "does not match committed authority",
+        ):
+            store.require_committed_window(
+                day_key="2026-09-22",
+                window_start="2026-09-22T00:00:00Z",
+                window_end_exclusive="2026-09-23T00:00:00Z",
+                state_sha256=first.state_sha256,
+                authority_generation=first.authority_generation,
+            )
 
 
 if __name__ == "__main__":

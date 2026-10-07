@@ -16,6 +16,7 @@ from decimal import (
     Underflow,
     localcontext,
 )
+from datetime import timezone
 from pathlib import Path
 from weakref import WeakKeyDictionary
 
@@ -26,11 +27,12 @@ from .forecasting import parse_iso_timestamp
 _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
-_PAPER_SNAPSHOT_SCHEMA_VERSION = 7
-_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
+_PAPER_SNAPSHOT_SCHEMA_VERSION = 8
+_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8})
 _SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
+_ProductDayAdmissionWitness = tuple[str, str, str, str, str, int]
 
 
 def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
@@ -146,11 +148,22 @@ def _make_ticket_opening_authority_registry():
 def _paperbook_causal_history_snapshot(book: object) -> tuple[object, ...]:
     lifecycle = getattr(book, "_lifecycle", None)
     settlement_times = getattr(book, "_settlement_times", None)
-    if type(lifecycle) is not list or type(settlement_times) is not dict:
+    product_day_admissions = getattr(book, "_product_day_admissions", None)
+    if (
+        type(lifecycle) is not list
+        or type(settlement_times) is not dict
+        or type(product_day_admissions) is not dict
+    ):
         raise ValueError("PaperBook causal history state is not canonical")
     return (
         tuple(lifecycle),
         tuple(sorted(settlement_times.items())),
+        tuple(
+            sorted(
+                (ticket_id, *witness)
+                for ticket_id, witness in product_day_admissions.items()
+            )
+        ),
     )
 
 
@@ -162,7 +175,7 @@ def _make_paperbook_causal_history_authority_registry():
 
     def register_book(book: object) -> None:
         with guard:
-            authorities[book] = ((), ())
+            authorities[book] = ((), (), ())
 
     def revoke(book: object) -> None:
         with guard:
@@ -206,10 +219,11 @@ def _make_paperbook_causal_history_authority_registry():
                 raise ValueError(
                     "PaperBook byte-loaded snapshot lacks product-issued causal history authority"
                 )
-            lifecycle, settlement_times = expected
+            lifecycle, settlement_times, product_day_admissions = expected
             authorities[book] = (
                 lifecycle + (("open", ticket_id, (), ()),),
                 settlement_times,
+                product_day_admissions,
             )
 
     def advance_settle(
@@ -225,7 +239,7 @@ def _make_paperbook_causal_history_authority_registry():
                 raise ValueError(
                     "PaperBook byte-loaded snapshot lacks product-issued causal history authority"
                 )
-            lifecycle, settlement_times = expected
+            lifecycle, settlement_times, product_day_admissions = expected
             settlement_mapping = dict(settlement_times)
             if ticket_id in settlement_mapping:
                 raise ValueError(
@@ -235,6 +249,40 @@ def _make_paperbook_causal_history_authority_registry():
             authorities[book] = (
                 lifecycle + (("settle", ticket_id, winners, voids),),
                 tuple(sorted(settlement_mapping.items())),
+                product_day_admissions,
+            )
+
+    def advance_product_day_admission(
+        book: object,
+        ticket_id: str,
+        witness: _ProductDayAdmissionWitness,
+    ) -> None:
+        with guard:
+            expected = authorities.get(book)
+            if expected is None:
+                raise ValueError(
+                    "PaperBook byte-loaded snapshot lacks product-issued causal history authority"
+                )
+            lifecycle, settlement_times, product_day_admissions = expected
+            admission_mapping = {
+                row[0]: tuple(row[1:])
+                for row in product_day_admissions
+            }
+            if ticket_id in admission_mapping:
+                raise ValueError(
+                    "PaperBook product-day admission authority cannot be rebound"
+                )
+            admission_mapping[ticket_id] = witness
+            authorities[book] = (
+                lifecycle,
+                settlement_times,
+                tuple(
+                    sorted(
+                        (current_ticket_id, *current_witness)
+                        for current_ticket_id, current_witness
+                        in admission_mapping.items()
+                    )
+                ),
             )
 
     return (
@@ -245,6 +293,7 @@ def _make_paperbook_causal_history_authority_registry():
         require_candidate,
         advance_open,
         advance_settle,
+        advance_product_day_admission,
     )
 
 
@@ -256,7 +305,64 @@ def _make_paperbook_causal_history_authority_registry():
     _require_snapshot_candidate_causal_history_authority,
     _advance_paperbook_causal_history_open,
     _advance_paperbook_causal_history_settle,
+    _advance_paperbook_product_day_admission,
 ) = _make_paperbook_causal_history_authority_registry()
+
+
+def _make_product_day_admission_permit_registry():
+    """Create one-shot pre-mutation permits for product-day chronology writes."""
+
+    permits = WeakKeyDictionary()
+    guard = threading.RLock()
+
+    def register_book(book: object) -> None:
+        with guard:
+            permits[book] = {}
+
+    def issue(
+        book: object,
+        witness: _ProductDayAdmissionWitness,
+    ) -> object:
+        if type(witness) is not tuple or len(witness) != 6:
+            raise ValueError("PaperBook product-day permit witness is not canonical")
+        token = object()
+        with guard:
+            current = permits.get(book)
+            if current is None:
+                raise RuntimeError("PaperBook product-day permit registry is unavailable")
+            current[token] = witness
+        return token
+
+    def consume(
+        book: object,
+        token: object,
+        *,
+        placed_at: str,
+    ) -> _ProductDayAdmissionWitness:
+        if type(token) is not object:
+            raise ValueError("PaperBook product-day admission permit is not canonical")
+        with guard:
+            current = permits.get(book)
+            if current is None:
+                raise RuntimeError("PaperBook product-day permit registry is unavailable")
+            if token not in current:
+                raise ValueError("PaperBook product-day admission permit is invalid or consumed")
+            witness = current[token]
+            if witness[0] != placed_at:
+                raise ValueError(
+                    "PaperBook product-day admission permit does not match ticket placed_at"
+                )
+            del current[token]
+        return witness
+
+    return register_book, issue, consume
+
+
+(
+    _register_product_day_admission_permit_book,
+    _issue_product_day_admission_permit,
+    _consume_product_day_admission_permit,
+) = _make_product_day_admission_permit_registry()
 
 
 def _paper_decimal_context() -> Context:
@@ -292,6 +398,7 @@ class PaperBook:
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
         _register_ticket_opening_authority_book(self)
         _register_paperbook_causal_history_authority_book(self)
+        _register_product_day_admission_permit_book(self)
         initial = Decimal(str(initial_bankroll))
         self._require_finite(initial, "initial_bankroll")
         if initial <= 0:
@@ -307,6 +414,13 @@ class PaperBook:
         # lifecycle tuple used by rollback/state hashes while making timestamp
         # mutation mechanically detectable.
         self._settlement_times: dict[str, str | None] = {}
+        # Positive bounded-day turnover may exclude historical stake only when
+        # admission chronology was issued by the canonical product-day path.
+        # Keep that durable witness inside PaperBook's existing causal authority
+        # instead of introducing a parallel turnover/admission ledger.
+        self._product_day_admissions: dict[
+            str, _ProductDayAdmissionWitness
+        ] = {}
 
     @property
     def committed_stake(self) -> Decimal:
@@ -390,6 +504,96 @@ class PaperBook:
         self._lifecycle.append(("open", ticket.ticket_id, (), ()))
         _advance_paperbook_causal_history_open(self, ticket.ticket_id)
         return ticket
+
+    def _prepare_product_day_admission(
+        self,
+        *,
+        admission_ts: str,
+        window_store: object,
+        window_evidence: object,
+        workspace_lock: object,
+    ) -> object:
+        """Resolve one canonical current-day chronology witness before mutation."""
+
+        # PaperBook loads during the early persistence-preload phase. Resolve the
+        # finalized day/lock authorities only when this transition executes.
+        from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
+        from .workspace_lock import WorkspaceEconomicLock
+
+        _require_ticket_opening_authority(self)
+        _require_paperbook_causal_history_authority(self)
+        self._validate_loaded_state(self)
+        if type(window_store) is not ProductDayRiskWindowStore:
+            raise ValueError("PaperBook product-day window store is not canonical")
+        if type(window_evidence) is not ProductDayRiskWindow:
+            raise ValueError("PaperBook product-day window evidence is not canonical")
+        if type(workspace_lock) is not WorkspaceEconomicLock:
+            raise ValueError("PaperBook product-day workspace lock is not canonical")
+
+        require_current_under_lock = ProductDayRiskWindowStore.__dict__.get(
+            "require_current_under_lock"
+        )
+        if not callable(require_current_under_lock):
+            raise ValueError("PaperBook product-day authority executable changed")
+        current_window = require_current_under_lock(
+            window_store,
+            window_evidence,
+            workspace_lock=workspace_lock,
+        )
+        if (
+            type(current_window) is not ProductDayRiskWindow
+            or not current_window.product_clock_authoritative
+        ):
+            raise ValueError("PaperBook product-day admission requires product clock authority")
+
+        witness = self._validate_product_day_admission_witness(
+            (
+                admission_ts,
+                current_window.day_key,
+                current_window.window_start,
+                current_window.window_end_exclusive,
+                current_window.state_sha256,
+                current_window.authority_generation,
+            ),
+            ticket_id="pending-product-day-admission",
+        )
+        return witness
+
+    def _record_product_day_admission(
+        self,
+        ticket_id: str,
+        *,
+        permit: object,
+    ) -> None:
+        """Consume one pre-mutation permit and bind ticket chronology exactly once."""
+
+        _require_ticket_opening_authority(self)
+        _require_paperbook_causal_history_authority(self)
+        self._validate_loaded_state(self)
+        ticket = self.tickets.get(ticket_id)
+        if ticket is None:
+            raise ValueError("PaperBook product-day admission references unknown ticket")
+        if ticket_id in self._product_day_admissions:
+            raise ValueError("PaperBook product-day admission authority cannot be rebound")
+        witness = _consume_product_day_admission_permit(
+            self,
+            permit,
+            placed_at=ticket.placed_at,
+        )
+        witness = self._validate_product_day_admission_witness(
+            witness,
+            ticket_id=ticket_id,
+        )
+        self._product_day_admissions[ticket_id] = witness
+        try:
+            _advance_paperbook_product_day_admission(
+                self,
+                ticket_id,
+                witness,
+            )
+        except Exception:
+            self._product_day_admissions.pop(ticket_id, None)
+            raise
 
     @staticmethod
     def _normalize_resolution_keys(values: object, label: str) -> set[str]:
@@ -567,6 +771,20 @@ class PaperBook:
                 for t in self.tickets.values()
             ],
             "lifecycle": self._lifecycle_to_json(),
+            "product_day_admissions": [
+                {
+                    "ticket_id": ticket_id,
+                    "admission_ts": witness[0],
+                    "day_key": witness[1],
+                    "window_start": witness[2],
+                    "window_end_exclusive": witness[3],
+                    "window_state_sha256": witness[4],
+                    "window_authority_generation": witness[5],
+                }
+                for ticket_id, witness in sorted(
+                    self._product_day_admissions.items()
+                )
+            ],
         }
 
         # The raw snapshot is detached from the mutable live object. Validate
@@ -741,6 +959,93 @@ class PaperBook:
         return settled_text
 
     @classmethod
+    def _validate_product_day_admission_witness(
+        cls,
+        value: object,
+        *,
+        ticket_id: str,
+    ) -> _ProductDayAdmissionWitness:
+        if type(value) is not tuple or len(value) != 6:
+            raise ValueError(
+                "PaperBook product-day admission witness must be a canonical tuple"
+            )
+        (
+            admission_ts,
+            day_key,
+            window_start,
+            window_end_exclusive,
+            window_state_sha256,
+            window_authority_generation,
+        ) = value
+        cls._require_canonical_text(ticket_id, "product-day admission ticket_id")
+        admission_ts = cls._validate_timestamp(
+            admission_ts,
+            "product-day admission_ts",
+        )
+        day_key = cls._require_canonical_text(day_key, "product-day day_key")
+        window_start = cls._validate_timestamp(
+            window_start,
+            "product-day window_start",
+        )
+        window_end_exclusive = cls._validate_timestamp(
+            window_end_exclusive,
+            "product-day window_end_exclusive",
+        )
+        if (
+            type(window_state_sha256) is not str
+            or len(window_state_sha256) != 64
+            or window_state_sha256 != window_state_sha256.lower()
+            or any(ch not in "0123456789abcdef" for ch in window_state_sha256)
+        ):
+            raise ValueError(
+                "PaperBook product-day window_state_sha256 must be canonical SHA-256"
+            )
+        if (
+            type(window_authority_generation) is not int
+            or window_authority_generation <= 0
+        ):
+            raise ValueError(
+                "PaperBook product-day window_authority_generation must be positive"
+            )
+
+        admission_instant = parse_iso_timestamp(admission_ts)
+        start = parse_iso_timestamp(window_start)
+        end = parse_iso_timestamp(window_end_exclusive)
+        start_utc = start.astimezone(timezone.utc)
+        end_utc = end.astimezone(timezone.utc)
+        admission_utc = admission_instant.astimezone(timezone.utc)
+        canonical_admission_ts = admission_utc.isoformat().replace("+00:00", "Z")
+        canonical_window_start = start_utc.isoformat().replace("+00:00", "Z")
+        canonical_window_end = end_utc.isoformat().replace("+00:00", "Z")
+        if (
+            admission_ts != canonical_admission_ts
+            or window_start != canonical_window_start
+            or window_end_exclusive != canonical_window_end
+            or start_utc.hour != 0
+            or start_utc.minute != 0
+            or start_utc.second != 0
+            or start_utc.microsecond != 0
+            or (end_utc - start_utc).total_seconds() != 86400
+            or end_utc.hour != 0
+            or end_utc.minute != 0
+            or end_utc.second != 0
+            or end_utc.microsecond != 0
+            or day_key != start_utc.date().isoformat()
+            or not (start_utc <= admission_utc < end_utc)
+        ):
+            raise ValueError(
+                "PaperBook product-day admission witness is not one canonical UTC day"
+            )
+        return (
+            admission_ts,
+            day_key,
+            window_start,
+            window_end_exclusive,
+            window_state_sha256,
+            window_authority_generation,
+        )
+
+    @classmethod
     def _validate_ticket_leg(cls, leg: object, *, ticket_id: str | None = None) -> TicketLeg:
         if type(leg) is not TicketLeg:
             raise ValueError("PaperBook ticket legs must be canonical TicketLeg values")
@@ -817,6 +1122,28 @@ class PaperBook:
             raise ValueError("PaperBook lifecycle must be a canonical list")
         if type(book._settlement_times) is not dict:
             raise ValueError("PaperBook settlement-time witness must be a canonical mapping")
+        if type(book._product_day_admissions) is not dict:
+            raise ValueError(
+                "PaperBook product-day admission witness must be a canonical mapping"
+            )
+        for ticket_id, witness in book._product_day_admissions.items():
+            ticket = book.tickets.get(ticket_id)
+            if ticket is None:
+                raise ValueError(
+                    "PaperBook product-day admission references unknown ticket_id"
+                )
+            canonical_witness = cls._validate_product_day_admission_witness(
+                witness,
+                ticket_id=ticket_id,
+            )
+            if canonical_witness != witness:
+                raise ValueError(
+                    "PaperBook product-day admission witness is not canonical"
+                )
+            if ticket.placed_at != witness[0]:
+                raise ValueError(
+                    "PaperBook product-day admission time conflicts with ticket placed_at"
+                )
 
         replay_balance = book.initial_bankroll
         opened: set[str] = set()
@@ -1026,6 +1353,55 @@ class PaperBook:
         return entries, settlement_times
 
     @classmethod
+    def _parse_product_day_admissions(
+        cls,
+        value: object,
+    ) -> dict[str, _ProductDayAdmissionWitness]:
+        if type(value) is not list:
+            raise ValueError(
+                "PaperBook snapshot product_day_admissions must be a list"
+            )
+        admissions: dict[str, _ProductDayAdmissionWitness] = {}
+        expected_fields = {
+            "ticket_id",
+            "admission_ts",
+            "day_key",
+            "window_start",
+            "window_end_exclusive",
+            "window_state_sha256",
+            "window_authority_generation",
+        }
+        for item in value:
+            if type(item) is not dict or set(item) != expected_fields:
+                raise ValueError(
+                    "PaperBook snapshot product-day admission has unexpected fields"
+                )
+            ticket_id = cls._require_canonical_text(
+                item["ticket_id"],
+                "snapshot product-day admission ticket_id",
+            )
+            if ticket_id in admissions:
+                raise ValueError(
+                    "PaperBook snapshot contains duplicate product-day admission ticket_id"
+                )
+            admissions[ticket_id] = cls._validate_product_day_admission_witness(
+                (
+                    item["admission_ts"],
+                    item["day_key"],
+                    item["window_start"],
+                    item["window_end_exclusive"],
+                    item["window_state_sha256"],
+                    item["window_authority_generation"],
+                ),
+                ticket_id=ticket_id,
+            )
+        if tuple(admissions) != tuple(sorted(admissions)):
+            raise ValueError(
+                "PaperBook snapshot product_day_admissions must be sorted by ticket_id"
+            )
+        return admissions
+
+    @classmethod
     def _parse_snapshot_decimal(cls, value: object, label: str) -> Decimal:
         if not isinstance(value, str) or not value or value.strip() != value:
             raise ValueError(
@@ -1170,7 +1546,7 @@ class PaperBook:
             if ticket_id in seen_ticket_ids:
                 raise ValueError("PaperBook snapshot contains duplicate ticket_id")
             seen_ticket_ids.add(ticket_id)
-            if schema_version in {3, 4, 5, 6, 7}:
+            if schema_version in {3, 4, 5, 6, 7, 8}:
                 provider_source_ids_raw = cls._required_snapshot_field(
                     item, "provider_source_ids", f"ticket {ticket_id}"
                 )
@@ -1186,7 +1562,7 @@ class PaperBook:
                         ),
                         ticket_id,
                     )
-                    if schema_version in {4, 5, 6, 7}
+                    if schema_version in {4, 5, 6, 7, 8}
                     else ()
                 )
                 bankroll_id = cls._required_snapshot_field(
@@ -1219,7 +1595,7 @@ class PaperBook:
                     cls._required_snapshot_field(
                         item, "settled_at", f"ticket {ticket_id}"
                     )
-                    if schema_version in {5, 6, 7}
+                    if schema_version in {5, 6, 7, 8}
                     else None
                 ),
                 status=cls._parse_snapshot_status(
@@ -1248,6 +1624,7 @@ class PaperBook:
                 for ticket_id in book.tickets
             ]
             book._settlement_times = {}
+            book._product_day_admissions = {}
         else:
             if "lifecycle" not in raw:
                 raise ValueError(
@@ -1257,6 +1634,16 @@ class PaperBook:
                 raw["lifecycle"],
                 schema_version,
             )
+            if schema_version >= 8:
+                book._product_day_admissions = cls._parse_product_day_admissions(
+                    cls._required_snapshot_field(
+                        raw,
+                        "product_day_admissions",
+                        "root",
+                    )
+                )
+            else:
+                book._product_day_admissions = {}
 
         cls._validate_loaded_state(book)
         # Decoding arbitrary bytes proves structure only. It must not mint the

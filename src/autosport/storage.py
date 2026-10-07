@@ -110,7 +110,7 @@ _REPLAY_CUTOFF_MACHINE_DOMAIN: Final = "data.market-replay-causal-cutoff.v1"
 _REPLAY_CUTOFF_MACHINE_KEY_PREFIX: Final = "sqlite-market-store-replay-cutoff:"
 _REPLAY_CUTOFF_STATE_SCHEMA: Final = "autosport.market-replay-cutoff.machine-state.v2"
 _REPLAY_CUTOFF_CORPUS_SCHEMA: Final = "autosport.market-replay-cutoff.corpus.v1"
-_REPLAY_CUTOFF_BINDING_SCHEMA: Final = "autosport.market-replay-cutoff.issuance-binding.v2"
+_REPLAY_CUTOFF_BINDING_SCHEMA: Final = "autosport.market-replay-cutoff.issuance-binding.v3"
 _APPEND_MACHINE_DOMAIN: Final = "data.market-event-positive-append.v1"
 _APPEND_MACHINE_KEY_PREFIX: Final = "sqlite-market-store-positive-append:"
 _APPEND_STATE_SCHEMA: Final = "autosport.market-event-positive-append.chain.v1"
@@ -387,15 +387,24 @@ def _replay_cutoff_binding_sha256(
     cutoff_id: str,
     canonical_as_of: str,
     max_append_generation: int,
+    append_available_at: str,
     issued_at: str,
     corpus_sha256: str,
 ) -> str:
+    canonical_available_at = _canonical_product_time(append_available_at)
     canonical_issued_at = _canonical_product_time(issued_at)
+    as_of_instant = _timezone_aware_instant(canonical_as_of, "as_of")
     if _timezone_aware_instant(
-        canonical_issued_at, "cutoff issued_at"
-    ) > _timezone_aware_instant(canonical_as_of, "as_of"):
+        canonical_available_at, "append available_at"
+    ) > as_of_instant:
         raise ValueError(
-            "replay cutoff product issuance cannot be later than its decision cutoff"
+            "replay cutoff includes append state unavailable at decision time"
+        )
+    if as_of_instant > _timezone_aware_instant(
+        canonical_issued_at, "cutoff issued_at"
+    ):
+        raise ValueError(
+            "future replay cutoff cannot be issued before its decision time"
         )
     return _canonical_sha256(
         {
@@ -403,6 +412,7 @@ def _replay_cutoff_binding_sha256(
             "cutoff_id": cutoff_id,
             "as_of": canonical_as_of,
             "max_append_generation": max_append_generation,
+            "append_available_at": canonical_available_at,
             "issued_at": canonical_issued_at,
             "corpus_sha256": corpus_sha256,
         }
@@ -1174,6 +1184,9 @@ class SQLiteMarketStore:
         # shadows cannot redirect causal validation away from canonical main history.
         _validate_canonical_table(self.connection, "market_events")
         _validate_canonical_table(self.connection, "market_event_commit_order")
+        _validate_canonical_table(
+            self.connection, "market_append_availability"
+        )
         _validate_canonical_table(self.connection, "market_replay_cutoffs")
 
         missing_commit = self.connection.execute(
@@ -1600,6 +1613,45 @@ class SQLiteMarketStore:
             )
 
         return rows
+
+    def _committed_append_available_at(
+        self,
+        append_authority: MonotonicWorkspaceAuthority,
+        availability_authority: MonotonicWorkspaceAuthority,
+        max_generation: int,
+    ) -> str:
+        """Return independently committed product availability for one append boundary.
+
+        This is a prefix proof: later availability PREPARE/COMMIT activity is irrelevant
+        to an already-issued cutoff, so an old cutoff stays readable during a newer
+        live append while its own boundary remains exactly proven.
+        """
+
+        self._require_committed_append_authority_through(
+            append_authority, max_generation
+        )
+        rows = self._validated_append_availability_rows(
+            append_authority
+        )
+        target_index = next(
+            (
+                index
+                for index, row in enumerate(rows)
+                if row[0] == max_generation
+            ),
+            None,
+        )
+        if target_index is None:
+            raise MonotonicAuthorityRollbackError(
+                "causal replay cutoff lacks durable append availability evidence"
+            )
+        prefix = rows[: target_index + 1]
+        self._require_append_availability_authority_bindings(
+            availability_authority,
+            prefix,
+            exact=False,
+        )
+        return prefix[-1][3]
 
     @staticmethod
     def _market_append_issuance_lock(
@@ -2185,9 +2237,9 @@ class SQLiteMarketStore:
                 or stored_issued_at != canonical_issued_at
                 or cutoff_id != _replay_cutoff_id(canonical_as_of)
                 or _timezone_aware_instant(
-                    canonical_issued_at, "cutoff issued_at"
+                    canonical_as_of, "as_of"
                 )
-                > _timezone_aware_instant(canonical_as_of, "as_of")
+                > _timezone_aware_instant(canonical_issued_at, "cutoff issued_at")
             ):
                 raise ValueError("causal replay cutoff authority is invalid")
             rows.append(
@@ -2276,6 +2328,8 @@ class SQLiteMarketStore:
         observed_state_sha256: str | None,
         *,
         cutoff_rows: tuple[tuple[str, str, int, str], ...],
+        append_authority: MonotonicWorkspaceAuthority,
+        availability_authority: MonotonicWorkspaceAuthority,
     ) -> None:
         try:
             authority.recover(observed_state_sha256=observed_state_sha256)
@@ -2309,11 +2363,17 @@ class SQLiteMarketStore:
             cutoff_id, canonical_as_of, max_generation, issued_at = candidates[0]
             tx_prefix = f"{cutoff_id[:32]}-"
             tx_suffix = pending.tx_id[len(tx_prefix) :] if pending.tx_id.startswith(tx_prefix) else ""
+            append_available_at = self._committed_append_available_at(
+                append_authority,
+                availability_authority,
+                max_generation,
+            )
             corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
             expected_binding_sha256 = _replay_cutoff_binding_sha256(
                 cutoff_id=cutoff_id,
                 canonical_as_of=canonical_as_of,
                 max_append_generation=max_generation,
+                append_available_at=append_available_at,
                 issued_at=issued_at,
                 corpus_sha256=corpus_sha256,
             )
@@ -2741,6 +2801,9 @@ class SQLiteMarketStore:
         cutoff_id = _replay_cutoff_id(canonical_as_of)
         authority = self._replay_cutoff_authority()
         append_authority = self._market_append_authority()
+        availability_authority = (
+            self._market_append_availability_authority()
+        )
 
         # Existing independently issued cutoffs never depend on later append-machine
         # progress, so keep them readable while another store is publishing a newer
@@ -2781,6 +2844,8 @@ class SQLiteMarketStore:
                     authority,
                     observed_state_sha256,
                     cutoff_rows=cutoff_rows,
+                    append_authority=append_authority,
+                    availability_authority=availability_authority,
                 )
 
                 current_row = next(
@@ -2803,6 +2868,14 @@ class SQLiteMarketStore:
                     )
 
                 if current_row is None:
+                    # Under the append sibling lock, finish any conservative
+                    # post-COMMIT availability witnesses before selecting a historical
+                    # boundary. Missing crash-era witnesses are recorded at recovery
+                    # time, never backdated from event/source clocks.
+                    self._ensure_market_append_availability_authority(
+                        append_authority
+                    )
+
                     # Serialize only cutoff issuance against canonical appends. The
                     # potentially large replay scan/decode happens after the SQLite
                     # write transaction commits. The outer resolver lock stays held
@@ -2822,6 +2895,8 @@ class SQLiteMarketStore:
                             authority,
                             observed_state_sha256,
                             cutoff_rows=cutoff_rows,
+                            append_authority=append_authority,
+                            availability_authority=availability_authority,
                         )
                         current_row = next(
                             (
@@ -2837,19 +2912,15 @@ class SQLiteMarketStore:
                             None,
                         )
                         if current_row is None:
-                            generation_row = self.connection.execute(
-                                """SELECT COALESCE(MAX(append_generation), 0)
-                                   FROM market_event_commit_order"""
-                            ).fetchone()
-                            if (
-                                generation_row is None
-                                or type(generation_row[0]) is not int
-                                or generation_row[0] < 0
-                            ):
-                                raise ValueError(
-                                    "cannot freeze causal replay append generation"
+                            availability_rows = (
+                                self._validated_append_availability_rows(
+                                    append_authority
                                 )
-                            max_generation = generation_row[0]
+                            )
+                            self._recover_append_availability_authority(
+                                availability_authority,
+                                availability_rows,
+                            )
                             issued_at = _canonical_product_time(
                                 _market_product_utc_now()
                             )
@@ -2872,12 +2943,36 @@ class SQLiteMarketStore:
                                 raise ValueError(
                                     "product UTC clock moved backwards across replay cutoff issuance"
                                 )
-                            if issued_instant > _timezone_aware_instant(
+                            as_of_instant = _timezone_aware_instant(
                                 canonical_as_of, "as_of"
-                            ):
+                            )
+                            if as_of_instant > issued_instant:
                                 raise ValueError(
-                                    "first-time historical replay cutoff lacks durable product-time availability proof"
+                                    "future replay cutoff cannot be issued before its decision time"
                                 )
+                            eligible_availability = tuple(
+                                row
+                                for row in availability_rows
+                                if _timezone_aware_instant(
+                                    row[3], "append available_at"
+                                )
+                                <= as_of_instant
+                            )
+                            if not eligible_availability:
+                                raise ValueError(
+                                    "historical replay cutoff predates durable product availability evidence"
+                                )
+                            (
+                                max_generation,
+                                _append_record_sha256,
+                                _append_state_sha256,
+                                append_available_at,
+                            ) = eligible_availability[-1]
+                            self._require_append_availability_authority_bindings(
+                                availability_authority,
+                                availability_rows,
+                                exact=True,
+                            )
                             current_row = (
                                 canonical_as_of,
                                 max_generation,
@@ -2890,6 +2985,7 @@ class SQLiteMarketStore:
                                 cutoff_id=cutoff_id,
                                 canonical_as_of=canonical_as_of,
                                 max_append_generation=max_generation,
+                                append_available_at=append_available_at,
                                 issued_at=issued_at,
                                 corpus_sha256=corpus_sha256,
                             )
@@ -2955,6 +3051,8 @@ class SQLiteMarketStore:
                         authority,
                         observed_state_sha256,
                         cutoff_rows=cutoff_rows,
+                        append_authority=append_authority,
+                        availability_authority=availability_authority,
                     )
 
                 # Re-read and independently prove the exact durable state after
@@ -2974,6 +3072,8 @@ class SQLiteMarketStore:
                         authority,
                         observed_state_sha256,
                         cutoff_rows=cutoff_rows,
+                        append_authority=append_authority,
+                        availability_authority=availability_authority,
                     )
                     current_row = next(
                         (
@@ -2994,8 +3094,9 @@ class SQLiteMarketStore:
                     stored_as_of, max_generation, issued_at = current_row
                     if stored_as_of != canonical_as_of:
                         raise ValueError("causal replay cutoff authority is invalid")
-                    self._require_committed_append_authority_through(
+                    append_available_at = self._committed_append_available_at(
                         append_authority,
+                        availability_authority,
                         max_generation,
                     )
                     corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
@@ -3003,6 +3104,7 @@ class SQLiteMarketStore:
                         cutoff_id=cutoff_id,
                         canonical_as_of=canonical_as_of,
                         max_append_generation=max_generation,
+                        append_available_at=append_available_at,
                         issued_at=issued_at,
                         corpus_sha256=corpus_sha256,
                     )

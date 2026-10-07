@@ -362,6 +362,19 @@ class BoundedMirrorInvalidationBuffer:
             self._dirty[key] = None
             return result
 
+    def force_full_refresh(self) -> None:
+        """Discard partial dirty-key knowledge and require one coherent mirror refresh.
+
+        Use this recovery fence only after downstream invalidation processing has
+        consumed work that can no longer be proven complete. The MarketMirror is
+        still canonical and current; the next drain therefore asks every registered
+        decision input to rebuild from that shared truth instead of trusting a
+        possibly incomplete incremental key set.
+        """
+        with self._lock:
+            self._dirty.clear()
+            self._full_refresh_required = True
+
     def drain(self, *, max_items: int = 250) -> MirrorInvalidationBatch:
         """Return at most ``max_items`` affected keys, or one full-refresh fence."""
         if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:

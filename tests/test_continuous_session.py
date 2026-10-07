@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -999,6 +1000,254 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+
+    def test_status_snapshots_invalidation_backlog_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                invalidations = coordinator.invalidation_buffer
+                invalidations._dirty[("provider-a", "quote-1")] = None
+
+                class InterleavingLock:
+                    def __init__(self) -> None:
+                        self.exits = 0
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, exc_type, exc, traceback) -> None:
+                        self.exits += 1
+                        if self.exits == 1:
+                            invalidations._dirty.clear()
+                            invalidations._full_refresh_required = True
+
+                invalidations._lock = InterleavingLock()
+                status = coordinator.status()
+
+                self.assertEqual(status.invalidation_pending_count, 1)
+                self.assertFalse(status.invalidation_full_refresh_required)
+                self.assertEqual(invalidations._dirty, {})
+                self.assertTrue(invalidations._full_refresh_required)
+            finally:
+                store.close()
+
+
+    def test_status_rejects_invalidation_pending_descriptor_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                with patch.object(
+                    BoundedMirrorInvalidationBuffer,
+                    "pending_count",
+                    new=property(lambda self: 0),
+                ):
+                    with self.assertRaisesRegex(
+                        ContinuousSessionError,
+                        "canonical invalidation status authority changed",
+                    ):
+                        coordinator.status()
+            finally:
+                store.close()
+
+
+    def test_status_rejects_invalidation_buffer_subclass_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                canonical = coordinator.invalidation_buffer
+
+                class ForgedInvalidationBuffer(BoundedMirrorInvalidationBuffer):
+                    @property
+                    def pending_count(self) -> int:
+                        return 0
+
+                    @property
+                    def full_refresh_required(self) -> bool:
+                        return False
+
+                coordinator.invalidation_buffer = ForgedInvalidationBuffer(
+                    canonical.mirror
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "canonical invalidation buffer subtype is not supported",
+                ):
+                    coordinator.status()
+            finally:
+                store.close()
+
+    def test_status_rejects_non_boolean_invalidation_full_refresh_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                invalidations = coordinator.invalidation_buffer
+                invalidations._full_refresh_required = 1
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "canonical invalidation buffer state is invalid",
+                ):
+                    coordinator.status()
+            finally:
+                store.close()
+
+    def test_status_rejects_malformed_canonical_invalidation_dirty_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                invalidations = coordinator.invalidation_buffer
+                invalidations._max_dirty_keys = 1
+                invalidations._dirty = {
+                    ("provider-a", "quote-a"): None,
+                    ("provider-a", "quote-b"): None,
+                }
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "canonical invalidation buffer state is invalid",
+                ):
+                    coordinator.status()
+            finally:
+                store.close()
+
+    def test_tick_preserves_primary_failure_when_checkpoint_persistence_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                primary = RuntimeError("primary failure")
+
+                def fail_cycle():
+                    raise primary
+
+                coordinator.collector.run_cycle = fail_cycle
+                original_record_failure = coordinator._state.record_failure
+
+                def fail_checkpoint(*, code: str) -> None:
+                    raise OSError("checkpoint persistence failure")
+
+                coordinator._state.record_failure = fail_checkpoint
+                try:
+                    coordinator.tick()
+                except RuntimeError as exc:
+                    self.assertIs(exc, primary)
+                    self.assertTrue(
+                        any(
+                            "operational failure checkpoint could not be persisted: OSError"
+                            in note
+                            for note in (exc.__notes__ or [])
+                        )
+                    )
+                else:
+                    raise AssertionError(
+                        "primary tick failure was not re-raised after checkpoint failure"
+                    )
+                finally:
+                    coordinator._state.record_failure = original_record_failure
+            finally:
+                store.close()
+
+
+    def test_tick_result_does_not_reread_session_after_success_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            page = CatalogPage(
+                source_id="provider-a",
+                stream_epoch="epoch-1",
+                cursor="cursor-1",
+                position=1,
+                events=(_event(phase=EventPhase.PRE_MATCH),),
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(page),
+                clock,
+            )
+            original_snapshot = coordinator._state.snapshot
+            initial_cycles = original_snapshot().cycles_completed
+
+            def guarded_snapshot():
+                if coordinator._state._cycles_completed > initial_cycles:
+                    raise AssertionError(
+                        "successful tick result reread a later session generation"
+                    )
+                return original_snapshot()
+
+            coordinator._state.snapshot = guarded_snapshot
+            try:
+                result = coordinator.tick()
+                self.assertEqual(result.cycle_index, initial_cycles + 1)
+                self.assertEqual(
+                    result.last_success_at,
+                    "2026-09-19T21:20:00+00:00",
+                )
+            finally:
+                coordinator._state.snapshot = original_snapshot
+                store.close()
 
 if __name__ == "__main__":
     unittest.main()

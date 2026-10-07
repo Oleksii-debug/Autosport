@@ -50,7 +50,7 @@ class ResearchFutureScenarioIdentityTests(unittest.TestCase):
             sequence=999,
         )
         plan = self._plan_with_extra_outcome(
-            f"{future.event_id}|{future.market_id}|synthetic-selection"
+            replace(future, selection_id="synthetic-selection").quote_key
         )
 
         with self.assertRaisesRegex(
@@ -98,7 +98,11 @@ class ResearchFutureScenarioIdentityTests(unittest.TestCase):
             sequence=1001,
         )
         plan = self._plan_with_extra_outcome(
-            f"{future.event_id}|synthetic-market|synthetic-selection"
+            replace(
+                future,
+                market_id="synthetic-market",
+                selection_id="synthetic-selection",
+            ).quote_key
         )
 
         with self.assertRaisesRegex(

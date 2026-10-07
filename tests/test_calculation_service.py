@@ -5,6 +5,8 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
+import autosport.calculation_service as calculation_service_module
+
 from autosport.calculation import CalculationEngine
 from autosport.calculation_service import CalculationService
 from autosport.domain import MarketEvent, MarketType

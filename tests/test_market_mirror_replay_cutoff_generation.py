@@ -4368,5 +4368,99 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 store.close()
 
 
+    def test_replay_rejects_datetime_subclass_before_causal_dispatch(self) -> None:
+        class HostileDateTime(datetime):
+            def utcoffset(self):
+                raise AssertionError("datetime subclass dispatch must not execute")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                hostile = HostileDateTime(
+                    2026,
+                    9,
+                    16,
+                    19,
+                    0,
+                    1,
+                    tzinfo=timezone.utc,
+                )
+                with self.assertRaisesRegex(TypeError, "exact datetime"):
+                    MarketMirror.replay_view_from_store(
+                        store,
+                        as_of=hostile,
+                        max_age=timedelta(minutes=2),
+                    )
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
+            finally:
+                store.close()
+
+    def test_replay_rejects_timedelta_subclass_before_causal_dispatch(self) -> None:
+        class HostileTimedelta(timedelta):
+            def __lt__(self, other):
+                raise AssertionError("timedelta subclass dispatch must not execute")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                with self.assertRaisesRegex(TypeError, "exact timedelta"):
+                    MarketMirror.replay_view_from_store(
+                        store,
+                        as_of=self.CUTOFF,
+                        max_age=HostileTimedelta(minutes=2),
+                    )
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
+            finally:
+                store.close()
+
+    def test_replay_rejects_store_subclass_before_authority_dispatch(self) -> None:
+        class HostileStore(SQLiteMarketStore):
+            def replay_events_at_frozen_cutoff(self, *, as_of: str):
+                raise AssertionError("store subclass authority must not execute")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = HostileStore(Path(directory) / "market.db")
+            try:
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    MarketMirror.replay_view_from_store(
+                        store,
+                        as_of=self.CUTOFF,
+                        max_age=timedelta(minutes=2),
+                    )
+            finally:
+                store.close()
+
+    def test_store_cutoff_rejects_str_subclass_before_replace_dispatch(self) -> None:
+        class HostileStr(str):
+            def replace(self, *args, **kwargs):
+                raise AssertionError("str subclass replace must not execute")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                with self.assertRaisesRegex(ValueError, "exact ISO-8601 string"):
+                    store.replay_events_at_frozen_cutoff(
+                        as_of=HostileStr(self.CUTOFF.isoformat())
+                    )
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

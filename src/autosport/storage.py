@@ -1051,7 +1051,9 @@ class SQLiteMarketStore:
             # issuance lock so a concurrent constructor cannot mistake a live
             # generation-zero PREPARE for abandoned crash state.
             with self._market_append_issuance_lock(append_authority):
-                self._ensure_market_append_baseline_authority()
+                self._ensure_market_append_baseline_authority(
+                    append_authority
+                )
                 self._ensure_market_append_availability_authority(
                     append_authority
                 )
@@ -1961,10 +1963,20 @@ class SQLiteMarketStore:
             self._validated_generation_zero_entries()
         )
 
-    def _ensure_market_append_baseline_authority(self) -> None:
-        """Seal baseline membership without claiming historical receipt chronology."""
+    def _ensure_market_append_baseline_authority(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+    ) -> None:
+        """Seal baseline membership without claiming historical receipt chronology.
 
-        authority = self._market_append_authority()
+        The caller must pass the already-created append authority.  Constructing a
+        second authority before the first one durably binds a pristine workspace can
+        allocate a competing immutable workspace identity and make the same store
+        fail its own restart/availability admission.
+        """
+
+        if type(authority) is not MonotonicWorkspaceAuthority:
+            raise TypeError("authority must be an exact MonotonicWorkspaceAuthority")
         observed_state_sha256 = self._generation_zero_baseline_state_sha256()
         history = authority.read_history()
 

@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from autosport.causal_collector_legacy import CollectorDeltaStore as LegacyCollectorDeltaStore
+from autosport.causal_collector_legacy import LegacyJsonCollectorDeltaStore as LegacyCollectorDeltaStore
 
 from autosport.causal_collector import (
     AckConflictError,

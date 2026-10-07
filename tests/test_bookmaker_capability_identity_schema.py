@@ -119,12 +119,14 @@ def _position(**overrides: object) -> BookmakerPositionObservation:
         (_balance, "account_id"),
         (_balance, "adapter_id"),
         (_balance, "observation_id"),
+        (_balance, "source_payload_sha256"),
         (_position, "venue_id"),
         (_position, "account_id"),
         (_position, "adapter_id"),
         (_position, "observation_id"),
         (_position, "external_position_id"),
         (_position, "external_receipt_id"),
+        (_position, "source_payload_sha256"),
     ),
 )
 def test_account_position_identifiers_reject_str_subclasses_before_dispatch(

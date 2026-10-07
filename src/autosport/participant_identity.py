@@ -249,6 +249,69 @@ class EntityLineage:
         }
 
 
+def _snapshot_entity_identity(value: EntityIdentity) -> EntityIdentity:
+    if type(value) is not EntityIdentity:
+        raise TypeError("entity must be EntityIdentity")
+    EntityIdentity.__post_init__(value)
+    return EntityIdentity(
+        entity_id=value.entity_id,
+        kind=value.kind,
+        source_reference=value.source_reference,
+        evidence_sha256=value.evidence_sha256,
+        first_known_at=value.first_known_at,
+        available_at=value.available_at,
+    )
+
+
+def _snapshot_alias_record(value: AliasRecord) -> AliasRecord:
+    if type(value) is not AliasRecord:
+        raise TypeError("alias must be AliasRecord")
+    AliasRecord.__post_init__(value)
+    return AliasRecord(
+        source_id=value.source_id,
+        alias=value.alias,
+        entity_id=value.entity_id,
+        valid_from=value.valid_from,
+        valid_until=value.valid_until,
+        available_at=value.available_at,
+        evidence_sha256=value.evidence_sha256,
+        recorded_at=value.recorded_at,
+        relation=value.relation,
+        supersedes_record_id=value.supersedes_record_id,
+    )
+
+
+def _snapshot_roster_membership(value: RosterMembership) -> RosterMembership:
+    if type(value) is not RosterMembership:
+        raise TypeError("membership must be RosterMembership")
+    RosterMembership.__post_init__(value)
+    return RosterMembership(
+        event_id=value.event_id,
+        source_id=value.source_id,
+        entity_id=value.entity_id,
+        member_from=value.member_from,
+        member_until=value.member_until,
+        available_at=value.available_at,
+        evidence_sha256=value.evidence_sha256,
+    )
+
+
+def _snapshot_entity_lineage(value: EntityLineage) -> EntityLineage:
+    if type(value) is not EntityLineage:
+        raise TypeError("lineage must be EntityLineage")
+    EntityLineage.__post_init__(value)
+    return EntityLineage(
+        predecessor_entity_id=value.predecessor_entity_id,
+        successor_entity_id=value.successor_entity_id,
+        relation=value.relation,
+        effective_from=value.effective_from,
+        available_at=value.available_at,
+        recorded_at=value.recorded_at,
+        evidence_sha256=value.evidence_sha256,
+        valid_until=value.valid_until,
+    )
+
+
 class ParticipantIdentityRegistry:
     """Append-only identity evidence with causal and restated views."""
 
@@ -271,9 +334,7 @@ class ParticipantIdentityRegistry:
         return registry
 
     def add_entity(self, entity: EntityIdentity) -> None:
-        if type(entity) is not EntityIdentity:
-            raise TypeError("entity must be EntityIdentity")
-        entity.__post_init__()
+        entity = _snapshot_entity_identity(entity)
         existing = self._entities.get(entity.entity_id)
         if existing is not None:
             if existing != entity:
@@ -285,9 +346,7 @@ class ParticipantIdentityRegistry:
         self._entities = candidate_entities
 
     def add_alias(self, alias: AliasRecord) -> None:
-        if type(alias) is not AliasRecord:
-            raise TypeError("alias must be AliasRecord")
-        alias.__post_init__()
+        alias = _snapshot_alias_record(alias)
         if alias.entity_id not in self._entities:
             raise ParticipantIdentityError("alias references unknown entity")
         if alias in self._aliases:
@@ -350,9 +409,7 @@ class ParticipantIdentityRegistry:
         self._aliases = candidate_aliases
 
     def add_roster_membership(self, membership: RosterMembership) -> None:
-        if type(membership) is not RosterMembership:
-            raise TypeError("membership must be RosterMembership")
-        membership.__post_init__()
+        membership = _snapshot_roster_membership(membership)
         if membership.entity_id not in self._entities:
             raise ParticipantIdentityError("roster membership references unknown entity")
         entity = self._entities[membership.entity_id]
@@ -369,9 +426,7 @@ class ParticipantIdentityRegistry:
 
     def add_lineage(self, lineage: EntityLineage) -> None:
         """Append correction provenance without changing prior resolutions."""
-        if type(lineage) is not EntityLineage:
-            raise TypeError("lineage must be EntityLineage")
-        lineage.__post_init__()
+        lineage = _snapshot_entity_lineage(lineage)
         if lineage.predecessor_entity_id not in self._entities or lineage.successor_entity_id not in self._entities:
             raise ParticipantIdentityError("lineage references unknown entity")
         predecessor = self._entities[lineage.predecessor_entity_id]
@@ -461,7 +516,7 @@ class ParticipantIdentityRegistry:
         _text("entity_id", entity_id)
         moment = _instant("as_of", as_of)
         return tuple(
-            record for record in self._lineages
+            _snapshot_entity_lineage(record) for record in self._lineages
             if entity_id in (record.predecessor_entity_id, record.successor_entity_id)
             and _contains(record.effective_from, record.valid_until, moment)
             and (
@@ -508,10 +563,10 @@ class ParticipantIdentityRegistry:
         tips = [record for record in matches if record.record_id not in superseded_ids]
         if not tips or len({record.entity_id for record in tips}) != 1:
             raise ParticipantIdentityError("alias cannot be resolved unambiguously at requested causal view")
-        return max(
+        return _snapshot_alias_record(max(
             tips,
             key=lambda record: (_instant("available_at", record.available_at), record.record_id),
-        )
+        ))
 
     def resolve_alias(self, source_id: str, alias: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> EntityIdentity:
         moment = _instant("as_of", as_of)
@@ -519,7 +574,7 @@ class ParticipantIdentityRegistry:
         entity = self._entities[record.entity_id]
         if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", entity.available_at) > moment:
             raise ParticipantIdentityError("entity was not known at requested causal view")
-        return entity
+        return _snapshot_entity_identity(entity)
 
     def roster_at(self, event_id: str, source_id: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> tuple[EntityIdentity, ...]:
         moment = _instant("as_of", as_of)
@@ -533,7 +588,10 @@ class ParticipantIdentityRegistry:
                     if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", entity.available_at) > moment:
                         raise ParticipantIdentityError("roster references entity not known at requested causal view")
                     result[entity.entity_id] = entity
-        return tuple(sorted(result.values(), key=lambda entity: entity.entity_id))
+        return tuple(
+            _snapshot_entity_identity(entity)
+            for entity in sorted(result.values(), key=lambda entity: entity.entity_id)
+        )
 
     def _persist_state(
         self,

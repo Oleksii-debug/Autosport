@@ -632,3 +632,11 @@ def test_holdout_ledger_rejects_boolean_schema_version_without_rewrite(tmp_path)
 
     assert path.read_bytes() == forged
 
+
+
+def test_point_in_time_parser_rejects_nonzero_submicrosecond_timestamp_precision() -> None:
+    with pytest.raises(PointInTimeEvidenceError, match="precision finer than microseconds"):
+        point_in_time_module._instant(
+            "2026-09-20T10:00:00.1234561Z",
+            "test causal timestamp",
+        )

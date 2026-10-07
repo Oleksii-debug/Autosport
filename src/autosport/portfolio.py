@@ -55,6 +55,18 @@ def _require_portfolio_ticket_identity(ticket: object) -> PaperTicket:
     return ticket
 
 
+def _canonical_portfolio_quote_keys(value: object, label: str) -> set[str]:
+    """Validate quote identities before any portfolio hash/membership dispatch."""
+
+    if type(value) is not set:
+        raise ValueError(f"{label} must be an exact set of quote keys")
+    canonical = [
+        _canonical_string_value(quote_key, f"{label}[{index}]")
+        for index, quote_key in enumerate(value)
+    ]
+    return set(canonical)
+
+
 def _analysis_ticket_fingerprint(
     ticket: PaperTicket,
 ) -> tuple[
@@ -68,10 +80,16 @@ def _analysis_ticket_fingerprint(
     """Return exactly the mutable ticket fields consumed by scenario analysis."""
 
     ticket = _require_portfolio_ticket_identity(ticket)
+    if type(ticket.legs) is not tuple or not ticket.legs:
+        raise ValueError("portfolio tickets must carry a canonical non-empty leg tuple")
+    canonical_legs = tuple(
+        PaperBook._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
+        for leg in ticket.legs
+    )
     return (
         ticket.ticket_id,
         ticket.stake,
-        ticket.legs,
+        canonical_legs,
         ticket.placed_at,
         ticket.status,
         ticket.provider_source_ids,
@@ -203,6 +221,7 @@ class PortfolioEngine:
 
     @staticmethod
     def affected_tickets(tickets: list[PaperTicket], quote_key: str) -> list[str]:
+        quote_key = _canonical_string_value(quote_key, "portfolio quote_key")
         affected: list[str] = []
         for ticket in tickets:
             ticket = _require_portfolio_ticket_identity(ticket)
@@ -214,9 +233,13 @@ class PortfolioEngine:
 
     @staticmethod
     def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:
+        canonical_winners = _canonical_portfolio_quote_keys(
+            winning_quote_keys,
+            "portfolio winning_quote_keys",
+        )
         try:
             with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
-                return _scenario_profit_in_context(tickets, winning_quote_keys)
+                return _scenario_profit_in_context(tickets, canonical_winners)
         except DecimalException as exc:
             raise _portfolio_arithmetic_error(exc) from exc
 

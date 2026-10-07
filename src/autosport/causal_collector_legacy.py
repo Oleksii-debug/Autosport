@@ -124,8 +124,41 @@ class CollectorDelta:
     gap_to_cursor: str | None = None
 
     def validate(self) -> None:
-        if self.schema_version != 1:
+        # Identity/version/correction fields are authority-bearing.  Fence their
+        # concrete scalar types before any virtual string/int/enum operation so
+        # hostile subclasses cannot execute while canonical identity is validated.
+        if type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError("unsupported collector delta schema_version")
+        for name in (
+            "delta_id",
+            "source_id",
+            "lawful_terms_ref",
+            "retention_ref",
+            "stream_epoch",
+            "source_cursor",
+            "event_dedupe_key",
+            "event_id",
+            "source_payload_digest",
+            "canonical_event_digest",
+        ):
+            if type(getattr(self, name)) is not str:
+                raise TypeError(f"{name} must be exact string identity text")
+        for name in ("cursor_position", "revision_number"):
+            if type(getattr(self, name)) is not int:
+                raise TypeError(f"{name} must be an exact integer")
+        for name in ("revision_of", "gap_from_cursor", "gap_to_cursor"):
+            value = getattr(self, name)
+            if value is not None and type(value) is not str:
+                raise TypeError(f"{name} must be exact string identity text or None")
+        if type(self.quality_flags) is not tuple or any(
+            type(flag) is not str for flag in self.quality_flags
+        ):
+            raise TypeError("quality_flags must be an exact tuple of exact strings")
+        if type(self.gap_state) is not GapState:
+            raise TypeError("gap_state must be exact GapState")
+        if type(self.sync_state) is not SyncState:
+            raise TypeError("sync_state must be exact SyncState")
+
         for name in (
             "delta_id", "source_id", "lawful_terms_ref", "retention_ref", "stream_epoch",
             "source_cursor", "event_dedupe_key", "event_id"

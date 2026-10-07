@@ -27,10 +27,6 @@ def _leg() -> CandidateLeg:
     )
 
 
-@pytest.mark.parametrize(
-    "field",
-    ("event_id", "market_id", "selection_id"),
-)
 def test_constructor_rejects_hostile_quote_key_before_hash_or_strip() -> None:
     class _HashTrapStr(str):
         def __hash__(self) -> int:

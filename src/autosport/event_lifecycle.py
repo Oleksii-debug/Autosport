@@ -247,9 +247,9 @@ class CatalogPage:
             raise ValueError("events must be a tuple")
         identities: set[str] = set()
         for event in self.events:
-            if not isinstance(event, CatalogEvent):
-                raise TypeError("events must contain CatalogEvent values")
-            event.validate()
+            if type(event) is not CatalogEvent:
+                raise TypeError("events must contain exact CatalogEvent values")
+            CatalogEvent.validate(event)
             if event.source_id != self.source_id:
                 raise ValueError("catalog page cannot mix source_id values")
             if event.identity in identities:
@@ -680,8 +680,10 @@ class ContinuousEventLifecycle:
         )
 
     def apply_page(self, page: CatalogPage, *, discovered_at: str) -> tuple[str, ...]:
+        if type(page) is not CatalogPage:
+            raise TypeError("page must be an exact CatalogPage")
         with durable_path_lock(self.path):
-            page.validate()
+            CatalogPage.validate(page)
             now = _instant(discovered_at, "discovered_at")
             for event in page.events:
                 if _instant(event.available_at, "available_at") > now:
@@ -755,8 +757,8 @@ class ContinuousEventLifecycle:
             raise TypeError("fetch_page must be callable")
         current = self.checkpoint(source_id)
         page = fetch_page(current)
-        if not isinstance(page, CatalogPage):
-            raise TypeError("fetch_page must return CatalogPage")
+        if type(page) is not CatalogPage:
+            raise TypeError("fetch_page must return an exact CatalogPage")
         if page.source_id != source_id:
             raise CatalogConflictError("catalog reader returned the wrong source_id")
         return self.apply_page(page, discovered_at=discovered_at)

@@ -194,6 +194,56 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 records["soccer"].identity,
             )
 
+    def test_catalog_page_rejects_catalog_event_subclass_before_dispatch(self) -> None:
+        class HostileCatalogEvent(CatalogEvent):
+            def validate(self) -> None:
+                raise AssertionError("CatalogEvent subclass dispatch must not execute")
+
+        canonical = self._catalog_event()
+        hostile = HostileCatalogEvent(
+            source_id=canonical.source_id,
+            sport=canonical.sport,
+            event_id=canonical.event_id,
+            phase=canonical.phase,
+            available_at=canonical.available_at,
+            scheduled_start_at=canonical.scheduled_start_at,
+            completion_ref=canonical.completion_ref,
+            settlement_ref=canonical.settlement_ref,
+        )
+        page = CatalogPage(
+            source_id="provider-a",
+            stream_epoch="epoch-1",
+            cursor="cursor-1",
+            position=1,
+            events=(hostile,),
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact CatalogEvent"):
+            page.validate()
+
+    def test_apply_page_rejects_catalog_page_subclass_before_dispatch(self) -> None:
+        class HostileCatalogPage(CatalogPage):
+            def validate(self) -> None:
+                raise AssertionError("CatalogPage subclass dispatch must not execute")
+
+        canonical = self._page(1, self._catalog_event())
+        hostile = HostileCatalogPage(
+            source_id=canonical.source_id,
+            stream_epoch=canonical.stream_epoch,
+            cursor=canonical.cursor,
+            position=canonical.position,
+            events=canonical.events,
+            epoch_changed=canonical.epoch_changed,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = ContinuousEventLifecycle(Path(directory) / "catalog.json")
+            with self.assertRaisesRegex(TypeError, "exact CatalogPage"):
+                lifecycle.apply_page(
+                    hostile,
+                    discovered_at=self.START.isoformat(),
+                )
+
     def test_lifecycle_identity_is_sport_scoped_and_deterministic(self) -> None:
         table_tennis = canonical_event_identity(
             source_id="provider-a",

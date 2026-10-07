@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -205,6 +206,60 @@ def _settle(
 
 
 class PaperSettlementLearningBridgeTests(unittest.TestCase):
+
+
+    def test_bridge_reread_rejects_boolean_schema_version_with_valid_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-schema-version",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                _ticket,
+                _decision,
+                _environment,
+                _baseline,
+                _runtime,
+                _observation,
+                _action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            path = root / "paper_learning_bridge.json"
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["schema_version"] = True
+            bare = {
+                "schema": raw["schema"],
+                "schema_version": raw["schema_version"],
+                "bindings": raw["bindings"],
+            }
+            raw["state_sha256"] = hashlib.sha256(
+                json.dumps(
+                    bare,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            path.write_text(
+                json.dumps(raw, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            forged = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "unsupported bridge schema",
+            ):
+                bridge._read()
+
+            self.assertEqual(path.read_bytes(), forged)
 
     def test_resolution_witness_rejects_observation_subclass_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

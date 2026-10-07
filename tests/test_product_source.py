@@ -29,7 +29,13 @@ from autosport.providers import ProviderBatch, ProviderQuote
 _SOURCE_ID = "parlayapi:table_tennis"
 
 
-def _write_source_rights_manifest(root: Path, *, privacy: str = "NON_PERSONAL_DATA", evidence_class: str = "HUMAN_APPROVED_SOURCE_RIGHTS") -> Path:
+def _write_source_rights_manifest(
+    root: Path,
+    *,
+    privacy: str = "NON_PERSONAL_DATA",
+    evidence_class: str = "HUMAN_APPROVED_SOURCE_RIGHTS",
+    approval_reference: str = "entitlement-record:parlay-fixture",
+) -> Path:
     path = root / "parlay-source-rights.json"
     path.write_text(
         json.dumps(
@@ -46,7 +52,7 @@ def _write_source_rights_manifest(root: Path, *, privacy: str = "NON_PERSONAL_DA
                 "expires_at": "2026-12-01T00:00:00Z",
                 "human_approved": True,
                 "approved_by": "release-owner",
-                "approval_reference": "entitlement-record:parlay-fixture",
+                "approval_reference": approval_reference,
                 "approved_at": "2026-08-31T12:00:00Z",
             },
             sort_keys=True,
@@ -554,6 +560,64 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ProductSourceError,
                     "source rights authorization is inconsistent",
+                ):
+                    create_parlay_product_source()
+
+    def test_factory_persists_rights_snapshot_and_rejects_same_path_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rights = _write_source_rights_manifest(root)
+            environment = {
+                "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                "AUTOSPORT_PRODUCT_WORKSPACE": str(root / "workspace"),
+                "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
+                "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(root / "authority"),
+            }
+            with patch.dict("os.environ", environment, clear=True):
+                source = create_parlay_product_source()
+                state = json.loads(source.state_path.read_text(encoding="utf-8"))
+                binding = state["source_rights_binding"]
+                self.assertEqual(binding["source_identity"], _SOURCE_ID)
+                self.assertEqual(
+                    binding["required_scope"], "provider.market_data.read"
+                )
+                self.assertEqual(
+                    binding["privacy_classification"], "NON_PERSONAL_DATA"
+                )
+                self.assertEqual(
+                    binding["evidence_class"], "HUMAN_APPROVED_SOURCE_RIGHTS"
+                )
+                self.assertEqual(
+                    binding["terms_reference"], "terms:parlayapi:v1"
+                )
+                self.assertEqual(
+                    binding["retention_authority_reference"],
+                    "retention:parlayapi:v1",
+                )
+                self.assertEqual(
+                    binding["approval_reference"],
+                    "entitlement-record:parlay-fixture",
+                )
+                self.assertEqual(len(binding["manifest_sha256"]), 64)
+
+                restored = create_parlay_product_source()
+                self.assertEqual(restored.state_path, source.state_path)
+                self.assertEqual(
+                    json.loads(restored.state_path.read_text(encoding="utf-8"))[
+                        "source_rights_binding"
+                    ],
+                    binding,
+                )
+
+                _write_source_rights_manifest(
+                    root,
+                    approval_reference="entitlement-record:other-authority",
+                )
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "durable source-rights binding does not match current authorization",
                 ):
                     create_parlay_product_source()
 

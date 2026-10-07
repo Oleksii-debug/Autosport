@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -71,6 +72,12 @@ def _canonical_provider_selection_id(name: str, value: object) -> str:
 
 def _canonical_timestamp(name: str, value: object) -> tuple[str, datetime]:
     raw = _canonical_text(name, value)
+    for match in re.finditer(r"[.,]([0-9]+)", raw):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(f"{name} precision finer than microseconds is unsupported")
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:

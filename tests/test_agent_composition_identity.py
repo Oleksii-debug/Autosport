@@ -13,6 +13,7 @@ from autosport.agents import (
     agent_composition_sha256,
 )
 from autosport.domain import MarketEvent
+from autosport.market_mirror import MarketMirror
 from autosport.paper import PaperBook
 from autosport.strategies import available_strategies, build_strategy_agents
 
@@ -211,6 +212,25 @@ class AgentCompositionIdentityTests(unittest.TestCase):
                         paper_provider_accounts=(binding,),
                     )
                 self.assertEqual(dispatch_calls, [])
+
+    def test_context_rejects_market_mirror_subclass_before_authority_dispatch(self):
+        dispatch_calls = []
+
+        class HostileMarketMirror(MarketMirror):
+            def snapshot(self):
+                dispatch_calls.append("snapshot")
+                raise AssertionError("MarketMirror subclass authority must not execute")
+
+            def apply(self, event):
+                dispatch_calls.append("apply")
+                raise AssertionError("MarketMirror subclass authority must not execute")
+
+        hostile = HostileMarketMirror()
+
+        with self.assertRaisesRegex(TypeError, "exact MarketMirror"):
+            AgentContext(PaperBook("100"), market_mirror=hostile)
+
+        self.assertEqual(dispatch_calls, [])
 
     def test_orchestrator_rejects_duplicate_agent_identity(self):
         context = AgentContext(PaperBook("100"))

@@ -60,7 +60,7 @@ def test_causal_records_rejects_record_type_subclass_before_membership_dispatch(
         def __eq__(self, other):
             raise AssertionError("hostile record_type equality dispatched before exact-type admission")
 
-    registry = ScientificRegistry(tmp_path / "registry.json")
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
     with pytest.raises(ValueError, match="record_type must be a non-empty canonical string"):
         registry.causal_records(HostileRecordType("DatasetSnapshot"), as_of=T1)
 

@@ -352,6 +352,15 @@ class MarketEvent:
 
     @property
     def dedupe_key(self) -> str:
+        # Dedupe identity is a public canonical identity surface too. Re-prove the
+        # durable identity components on every read so post-construction mutation
+        # cannot reach formatting/JSON encoding before fail-closed admission.
+        canonical_source_id = _canonical_string_value(self.source_id, "source_id")
+        canonical_event_id = _canonical_string_value(self.event_id, "event_id")
+        canonical_market_id = _canonical_string_value(self.market_id, "market_id")
+        canonical_selection_id = _canonical_string_value(
+            self.selection_id, "selection_id"
+        )
         if self.exchange_side is not None:
             canonical_side = _canonical_exchange_side(self.exchange_side)
             canonical_sport = (
@@ -359,26 +368,26 @@ class MarketEvent:
             )
             return _encoded_exchange_side_identity(
                 "dedupe",
-                self.source_id,
+                canonical_source_id,
                 canonical_sport,
-                self.event_id,
-                self.market_id,
-                self.selection_id,
+                canonical_event_id,
+                canonical_market_id,
+                canonical_selection_id,
                 canonical_side,
                 self.sequence,
             )
         if self.sport is None:
             return (
-                f"{self.source_id}|{self.event_id}|{self.market_id}|"
-                f"{self.selection_id}|{self.sequence}"
+                f"{canonical_source_id}|{canonical_event_id}|{canonical_market_id}|"
+                f"{canonical_selection_id}|{self.sequence}"
             )
         return _encoded_sport_identity(
             "dedupe",
-            self.source_id,
+            canonical_source_id,
             _canonical_sport_value(self.sport),
-            self.event_id,
-            self.market_id,
-            self.selection_id,
+            canonical_event_id,
+            canonical_market_id,
+            canonical_selection_id,
             self.sequence,
         )
 

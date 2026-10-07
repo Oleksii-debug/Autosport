@@ -2839,6 +2839,14 @@ class SQLiteMarketStore:
                     committed_head, committed_state_sha256 = (
                         self._recover_positive_append_authority(authority)
                     )
+                    prior_availability_rows = self._validated_append_availability_rows(
+                        authority
+                    )
+                    prior_available_at = (
+                        prior_availability_rows[-1][3]
+                        if prior_availability_rows
+                        else None
+                    )
                     for event in batch:
                         if self._insert_one(event):
                             accepted.append(event)
@@ -2907,17 +2915,28 @@ class SQLiteMarketStore:
                         _market_product_utc_now()
                     )
                     timed_rows = self._validated_append_commit_time_rows()
+                    committed_instant = _timezone_aware_instant(
+                        committed_at, "append committed_at"
+                    )
                     if (
                         timed_rows
-                        and _timezone_aware_instant(
-                            committed_at, "append committed_at"
-                        )
+                        and committed_instant
                         < _timezone_aware_instant(
                             timed_rows[-1][3], "previous append committed_at"
                         )
                     ):
                         raise MonotonicAuthorityRollbackError(
                             "market append commit-time product clock moved backwards"
+                        )
+                    if (
+                        prior_available_at is not None
+                        and committed_instant
+                        < _timezone_aware_instant(
+                            prior_available_at, "previous append available_at"
+                        )
+                    ):
+                        raise MonotonicAuthorityRollbackError(
+                            "market append commit time precedes prior product availability"
                         )
                     binding_sha256 = _append_binding_sha256(
                         previous_state_sha256=committed_state_sha256,

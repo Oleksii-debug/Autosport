@@ -128,7 +128,7 @@ def _foundation_with_binding(
     protocol = ResearchProtocol(_binding(question, hypothesis, promotion_rule), SHA_C, SHA_D, SHA_A, T0)
     dataset = DatasetSnapshot(
         "dataset-1", SHA_A, "lawful-provider:fixture", "license-evidence:v1",
-        T1, T0, outcome_reveal_after=T1,
+        T1, T1, outcome_reveal_after=T1,
     )
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)
     model = ModelVersion("model-1", "fixture-model", SHA_A, SHA_C, SHA_D,
@@ -160,7 +160,7 @@ def _foundation(registry: ScientificRegistry) -> dict[str, object]:
         "lawful-provider:fixture",
         "license-evidence:v1",
         T1,
-        T0,
+        T1,
         outcome_reveal_after=T1,
     )
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)
@@ -339,6 +339,21 @@ def test_conflicting_identity_rejected_but_exact_replay_is_idempotent(tmp_path):
         registry.append(replace(question, statement="Changed question"))
 
 
+def test_dataset_snapshot_rejects_availability_before_causal_cutoff() -> None:
+    with pytest.raises(
+        ValueError,
+        match="available_at_utc must not precede causal_cutoff",
+    ):
+        DatasetSnapshot(
+            "dataset-future-bearing",
+            SHA_A,
+            "source",
+            "license",
+            T1,
+            T0,
+        )
+
+
 def test_causal_lookup_honors_availability_and_outcome_reveal(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     registry.append(
@@ -348,7 +363,7 @@ def test_causal_lookup_honors_availability_and_outcome_reveal(tmp_path):
             "source",
             "license",
             T1,
-            T0,
+            T1,
             outcome_reveal_after=T2,
         )
     )
@@ -369,7 +384,7 @@ def test_causal_lookup_rejects_self_consistent_malformed_outcome_reveal_after(
             "source",
             "license",
             T1,
-            T0,
+            T1,
             outcome_reveal_after=T2,
         )
     )
@@ -620,7 +635,7 @@ def test_promotion_rejects_cross_dataset_model_experiment_lineage(tmp_path):
             "lawful-provider:fixture-2",
             "license-evidence:v1",
             T1,
-            T0,
+            T1,
             outcome_reveal_after=T1,
         )
     )

@@ -308,8 +308,12 @@ class DatasetSnapshot:
         for name in ("dataset_snapshot_id", "source_identity", "license_identity"):
             _text(getattr(self, name), name)
         _sha256(self.manifest_sha256, "manifest_sha256")
-        _iso(self.causal_cutoff, "causal_cutoff")
-        _iso(self.available_at_utc, "available_at_utc")
+        causal_cutoff = _instant(self.causal_cutoff, "causal_cutoff")
+        available_at = _instant(self.available_at_utc, "available_at_utc")
+        if causal_cutoff > available_at:
+            raise ValueError(
+                "DatasetSnapshot available_at_utc must not precede causal_cutoff"
+            )
         if self.outcome_reveal_after is not None:
             _iso(self.outcome_reveal_after, "outcome_reveal_after")
 

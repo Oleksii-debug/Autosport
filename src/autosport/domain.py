@@ -538,6 +538,35 @@ class MarketEvent:
     def from_dict(cls, raw: dict[str, Any]) -> "MarketEvent":
         if type(raw) is not dict:
             raise ValueError("serialized market event must be a JSON object")
+        required_fields = {
+            "event_id",
+            "market_id",
+            "selection_id",
+            "decimal_odds",
+            "observed_ts",
+            "source_id",
+            "sequence",
+        }
+        optional_fields = {
+            "market_type",
+            "status",
+            "source_ts",
+            "ingest_ts",
+            "score_state",
+            "metadata",
+            "sport",
+            "competition_id",
+            "market_semantics_id",
+            "provider_source_class",
+            "exchange_side",
+        }
+        raw_keys = tuple(raw.keys())
+        if (
+            any(type(key) is not str for key in raw_keys)
+            or not required_fields.issubset(raw_keys)
+            or any(key not in required_fields | optional_fields for key in raw_keys)
+        ):
+            raise ValueError("serialized market event fields mismatch")
 
         event_id = _required_canonical_string(raw, "event_id")
         market_id = _required_canonical_string(raw, "market_id")

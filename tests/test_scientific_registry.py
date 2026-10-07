@@ -1267,3 +1267,8 @@ def test_research_protocol_rejects_binding_subclass_before_identity_dispatch():
 
     with pytest.raises(ValueError, match="exact ScientificProtocolBinding"):
         ResearchProtocol(hostile, SHA_C, SHA_D, SHA_A, T0)
+
+
+def test_scientific_registry_rejects_nonzero_submicrosecond_causal_timestamp() -> None:
+    with pytest.raises(ValueError, match="precision finer than microseconds"):
+        registry_module._iso("2026-01-01T00:00:00.1234561Z", "causal timestamp")

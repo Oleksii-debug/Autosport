@@ -162,6 +162,56 @@ class AgentCompositionIdentityTests(unittest.TestCase):
             _LatestQuotesView((event,))
         self.assertEqual(dispatch_calls, [])
 
+    def test_context_rejects_noncanonical_provider_account_identity_text(self):
+        context_book = PaperBook("100")
+        invalid_bindings = (
+            (("provider\nalpha", "account-a"), "source_id"),
+            (("provider-a", "account\x7fa"), "account_id"),
+            (("provider-a", "account-\ud800"), "account_id"),
+        )
+
+        for binding, _field in invalid_bindings:
+            with self.subTest(binding=repr(binding)):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "paper_provider_accounts must contain canonical non-empty text",
+                ):
+                    AgentContext(
+                        context_book,
+                        paper_provider_accounts=(binding,),
+                    )
+
+    def test_context_rejects_provider_account_str_subclass_before_virtual_dispatch(self):
+        dispatch_calls = []
+
+        class HostileIdentity(str):
+            def strip(self, *args, **kwargs):
+                dispatch_calls.append("strip")
+                raise AssertionError(
+                    "provider account identity virtual method must not execute"
+                )
+
+            def encode(self, *args, **kwargs):
+                dispatch_calls.append("encode")
+                raise AssertionError(
+                    "provider account identity encoding must not execute"
+                )
+
+        for binding in (
+            (HostileIdentity("provider-a"), "account-a"),
+            ("provider-a", HostileIdentity("account-a")),
+        ):
+            with self.subTest(binding=repr(binding)):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "paper_provider_accounts must contain canonical non-empty text",
+                ):
+                    AgentContext(
+                        PaperBook("100"),
+                        paper_provider_accounts=(binding,),
+                    )
+                self.assertEqual(dispatch_calls, [])
+
     def test_orchestrator_rejects_duplicate_agent_identity(self):
         context = AgentContext(PaperBook("100"))
 

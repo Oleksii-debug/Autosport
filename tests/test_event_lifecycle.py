@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 import autosport.event_lifecycle as event_lifecycle_module
+import autosport.storage as storage_module
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import (
     CatalogConflictError,
@@ -39,6 +40,35 @@ from autosport.storage import SQLiteMarketStore
 
 class ContinuousEventLifecycleTests(unittest.TestCase):
     START = datetime(2026, 9, 19, 7, 0, tzinfo=timezone.utc)
+
+    def setUp(self) -> None:
+        self._product_now = self.START
+        self._product_clock = patch.object(
+            storage_module,
+            "_market_product_utc_now",
+            side_effect=lambda: self._product_now.isoformat(),
+        )
+        self._product_clock.start()
+
+    def tearDown(self) -> None:
+        self._product_clock.stop()
+
+    def _advance_product_clock(self, value: str) -> None:
+        resolved = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if self._product_now < resolved:
+            self._product_now = resolved
+
+    def _assess_evidence(self, lifecycle, *args, **kwargs):
+        self._advance_product_clock(kwargs["as_of"])
+        return self._assess_evidence(lifecycle,*args, **kwargs)
+
+    def _register_eligible(self, lifecycle, *args, **kwargs):
+        self._advance_product_clock(kwargs["as_of"])
+        return self._register_eligible(lifecycle,*args, **kwargs)
+
+    def _refresh_and_register(self, lifecycle, *args, **kwargs):
+        self._advance_product_clock(kwargs["discovered_at"])
+        return self._refresh_and_register(lifecycle,*args, **kwargs)
 
     @classmethod
     def _event(
@@ -563,13 +593,13 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             )
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
-                before = lifecycle.assess_evidence(
+                before = self._assess_evidence(lifecycle,
                     identity,
                     store,
                     as_of=(self.START + timedelta(seconds=5)).isoformat(),
                     required_history=timedelta(0),
                 )
-                after = lifecycle.assess_evidence(
+                after = self._assess_evidence(lifecycle,
                     identity,
                     store,
                     as_of=(self.START + timedelta(seconds=6)).isoformat(),
@@ -581,7 +611,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             self.assertEqual(after.status, EvidenceEligibility.COMPLETED)
 
             retired: list[str] = []
-            lifecycle.register_eligible(
+            self._register_eligible(lifecycle,
                 store,
                 as_of=(self.START + timedelta(seconds=5)).isoformat(),
                 required_history=timedelta(0),
@@ -714,7 +744,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                         ingest_offset=95,
                     )
                 )
-                assessment = lifecycle.assess_evidence(
+                assessment = self._assess_evidence(lifecycle,
                     event.identity,
                     store,
                     as_of=(self.START + timedelta(seconds=100)).isoformat(),
@@ -734,13 +764,54 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                         ingest_offset=101,
                     )
                 )
-                later = lifecycle.assess_evidence(
+                later = self._assess_evidence(lifecycle,
                     event.identity,
                     store,
                     as_of=(self.START + timedelta(seconds=130)).isoformat(),
                     required_history=timedelta(seconds=30),
                 )
                 self.assertEqual(later.status, EvidenceEligibility.ELIGIBLE)
+            finally:
+                store.close()
+
+    def test_late_backdated_append_is_not_retroactively_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lifecycle = ContinuousEventLifecycle(root / "catalog.json")
+            event = self._catalog_event(
+                phase=EventPhase.LIVE,
+                available_offset=0,
+            )
+            lifecycle.apply_page(
+                self._page(1, event),
+                discovered_at=self.START.isoformat(),
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                cutoff = self.START + timedelta(seconds=10)
+                self._product_now = cutoff + timedelta(seconds=1)
+                late_backdated = self._event(
+                    event_id=self._stored_event_id("event-1"),
+                    observed_offset=0,
+                    ingest_offset=0,
+                )
+                self.assertTrue(store.append(late_backdated))
+                self.assertEqual(len(store.events(late_backdated.event_id)), 1)
+
+                assessment = self._assess_evidence(
+                    lifecycle,
+                    event.identity,
+                    store,
+                    as_of=cutoff.isoformat(),
+                    required_history=timedelta(0),
+                )
+
+                self.assertEqual(
+                    assessment.status,
+                    EvidenceEligibility.WAIT_EVIDENCE,
+                )
+                self.assertIsNone(assessment.evidence_first_available_at)
+                self.assertIn("cannot backfill", assessment.detail)
             finally:
                 store.close()
 
@@ -762,7 +833,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 ValueError,
                 r"identities\[0\] must be a non-empty trimmed canonical string",
             ):
-                lifecycle.register_eligible(
+                self._register_eligible(lifecycle,
                     None,  # type: ignore[arg-type]
                     as_of=self.START.isoformat(),
                     required_history=timedelta(0),
@@ -787,7 +858,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             try:
                 registered: list[str] = []
                 retired: list[str] = []
-                result = lifecycle.register_eligible(
+                result = self._register_eligible(lifecycle,
                     store,
                     as_of=(self.START + timedelta(seconds=5)).isoformat(),
                     required_history=timedelta(0),
@@ -849,7 +920,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 def register(input_id: str, **selectors: object) -> None:
                     calls.append((input_id, selectors))
 
-                registered = lifecycle.register_eligible(
+                registered = self._register_eligible(lifecycle,
                     store,
                     as_of=(self.START + timedelta(seconds=5)).isoformat(),
                     required_history=timedelta(0),
@@ -895,7 +966,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                     return pages[0]
 
                 calls: list[tuple[str, dict[str, object]]] = []
-                registered = lifecycle.refresh_and_register(
+                registered = self._refresh_and_register(lifecycle,
                     fetch,
                     store,
                     source_id="provider-a",
@@ -927,7 +998,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             )
             store = SQLiteMarketStore(root / "market.db")
             try:
-                assessment = lifecycle.assess_evidence(
+                assessment = self._assess_evidence(lifecycle,
                     completed.identity,
                     store,
                     as_of=(self.START + timedelta(seconds=6)).isoformat(),
@@ -938,7 +1009,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
 
                 calls: list[str] = []
                 self.assertEqual(
-                    lifecycle.register_eligible(
+                    self._register_eligible(lifecycle,
                         store,
                         as_of=(self.START + timedelta(seconds=6)).isoformat(),
                         required_history=timedelta(0),
@@ -994,7 +1065,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                         self.START + timedelta(seconds=2)
                     ).isoformat(),
                 )
-                assessment = lifecycle.assess_evidence(
+                assessment = self._assess_evidence(lifecycle,
                     event.identity,
                     store,
                     as_of=(self.START + timedelta(seconds=2)).isoformat(),
@@ -1003,7 +1074,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 self.assertEqual(assessment.status, EvidenceEligibility.ELIGIBLE)
 
                 calls: list[tuple[str, dict[str, object]]] = []
-                registered = lifecycle.register_eligible(
+                registered = self._register_eligible(lifecycle,
                     store,
                     as_of=(self.START + timedelta(seconds=2)).isoformat(),
                     required_history=timedelta(0),

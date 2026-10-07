@@ -895,8 +895,15 @@ class ContinuousEventLifecycle:
 
         availability: list[datetime] = []
         canonical_event_id = _scoped_identity(record.source_id, record.event_id)
-        for event in store.events(canonical_event_id):
-            if event.source_id != record.source_id or event.sport != record.sport:
+        replay_events = store.replay_events_at_frozen_cutoff(
+            as_of=cutoff.isoformat()
+        )
+        for event in replay_events:
+            if (
+                event.event_id != canonical_event_id
+                or event.source_id != record.source_id
+                or event.sport != record.sport
+            ):
                 continue
             try:
                 observed = _instant(event.observed_ts, "observed_ts")

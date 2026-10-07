@@ -263,7 +263,7 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
                 )
 
     def test_collector_identity_controls_fail_closed(self):
-        bad_values = ("identity\\nvalue", "identity\\tvalue", "identity\\rvalue", "identity\\x7fvalue")
+        bad_values = ("identity\nvalue", "identity\tvalue", "identity\rvalue", "identity\x7fvalue")
 
         for bad in bad_values:
             with self.subTest(boundary="run_id", value=repr(bad)):

@@ -400,7 +400,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 store.append(_market_event(event_id="provider-a:event-1"))
                 result = coordinator.tick()
                 self.assertEqual(result.cycle_index, 1)
-                input_id = f"catalog:{canonical_event_identity('provider-a', 'table_tennis', 'event-1')}"
+                input_id = f"catalog:{canonical_event_identity(source_id='provider-a', sport='table_tennis', event_id='event-1')}"
                 self.assertEqual(result.registered_input_ids, (input_id,))
                 self.assertEqual(dependencies.input_ids, (input_id,))
                 self.assertEqual(coordinator.status().cycles_completed, 1)
@@ -440,8 +440,8 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     store.append(_market_event(event_id=f"provider-a:{event_id}"))
 
                 first = coordinator.tick()
-                event_1_input = f"catalog:{canonical_event_identity('provider-a', 'table_tennis', 'event-1')}"
-                event_2_input = f"catalog:{canonical_event_identity('provider-a', 'table_tennis', 'event-2')}"
+                event_1_input = f"catalog:{canonical_event_identity(source_id='provider-a', sport='table_tennis', event_id='event-1')}"
+                event_2_input = f"catalog:{canonical_event_identity(source_id='provider-a', sport='table_tennis', event_id='event-2')}"
                 self.assertIn(event_1_input, first.registered_input_ids)
                 self.assertIn(event_2_input, first.registered_input_ids)
                 self.assertEqual(lifecycle.get("provider-a:event-2").phase, EventPhase.LIVE)
@@ -458,7 +458,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     ),
                 )
                 second = coordinator.tick()
-                event_3_input = f"catalog:{canonical_event_identity('provider-a', 'table_tennis', 'event-3')}"
+                event_3_input = f"catalog:{canonical_event_identity(source_id='provider-a', sport='table_tennis', event_id='event-3')}"
                 self.assertIn(event_3_input, second.registered_input_ids)
                 records = lifecycle.records()
                 self.assertEqual(len(records), 3)

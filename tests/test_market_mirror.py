@@ -678,27 +678,7 @@ class MarketMirrorTests(unittest.TestCase):
                     raise AssertionError("MarketEvent subtype dispatch must not execute")
                 return super().__getattribute__(name)
 
-        canonical = self.event(sequence=91)
-        hostile = HostileMarketEvent(
-            event_id=canonical.event_id,
-            market_id=canonical.market_id,
-            selection_id=canonical.selection_id,
-            decimal_odds=canonical.decimal_odds,
-            observed_ts=canonical.observed_ts,
-            source_id=canonical.source_id,
-            sequence=canonical.sequence,
-            market_type=canonical.market_type,
-            status=canonical.status,
-            source_ts=canonical.source_ts,
-            ingest_ts=canonical.ingest_ts,
-            score_state=canonical.score_state,
-            metadata=canonical.metadata,
-            sport=canonical.sport,
-            competition_id=canonical.competition_id,
-            market_semantics_id=canonical.market_semantics_id,
-            provider_source_class=canonical.provider_source_class,
-            exchange_side=canonical.exchange_side,
-        )
+        hostile = object.__new__(HostileMarketEvent)
 
         mirror = MarketMirror()
         with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
@@ -712,27 +692,7 @@ class MarketMirrorTests(unittest.TestCase):
                     raise AssertionError("MarketEvent subtype dispatch must not execute")
                 return super().__getattribute__(name)
 
-        canonical = self.event(sequence=92)
-        hostile = HostileMarketEvent(
-            event_id=canonical.event_id,
-            market_id=canonical.market_id,
-            selection_id=canonical.selection_id,
-            decimal_odds=canonical.decimal_odds,
-            observed_ts=canonical.observed_ts,
-            source_id=canonical.source_id,
-            sequence=canonical.sequence,
-            market_type=canonical.market_type,
-            status=canonical.status,
-            source_ts=canonical.source_ts,
-            ingest_ts=canonical.ingest_ts,
-            score_state=canonical.score_state,
-            metadata=canonical.metadata,
-            sport=canonical.sport,
-            competition_id=canonical.competition_id,
-            market_semantics_id=canonical.market_semantics_id,
-            provider_source_class=canonical.provider_source_class,
-            exchange_side=canonical.exchange_side,
-        )
+        hostile = object.__new__(HostileMarketEvent)
 
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

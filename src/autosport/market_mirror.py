@@ -113,7 +113,9 @@ class MarketMirror:
         """Normalize a focused-view selector without treating one ID as characters."""
         if values is None:
             return None
-        if type(values) is str:
+        if isinstance(values, str):
+            if type(values) is not str:
+                raise ValueError(f"{name} entries must be non-empty strings")
             candidates = (values,)
         else:
             try:

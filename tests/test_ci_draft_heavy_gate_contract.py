@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -11,7 +12,8 @@ def _assert_runner_free_pr_admission(workflow: str) -> None:
     jobs = workflow.split("jobs:", 1)[1]
     start = jobs.index("  superseded_run_admission:")
     remainder = jobs[start + len("  superseded_run_admission:") :]
-    next_job = remainder.find("\n  ", 1)
+    next_job_match = re.search(r"\n  [A-Za-z_][A-Za-z0-9_-]*:\n", remainder)
+    next_job = -1 if next_job_match is None else next_job_match.start()
     block = jobs[start:] if next_job < 0 else jobs[start : start + len("  superseded_run_admission:") + next_job]
 
     assert "github.event_name != 'pull_request' ||" in block
@@ -20,7 +22,7 @@ def _assert_runner_free_pr_admission(workflow: str) -> None:
     assert "github.event.pull_request.head.repo.full_name == github.repository" in block
     assert "github.event.pull_request.base.repo.full_name == github.repository" in block
     assert "github.event.pull_request.draft == false" in block
-    assert "runs-on: ubuntu-slim" in block
+    assert "runs-on: ubuntu-latest" in block
     assert "timeout-minutes: 5" in block
 
 

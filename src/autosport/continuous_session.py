@@ -183,6 +183,59 @@ class SettlementResolution:
                 raise ValueError("quote_outcomes contains unsupported outcome")
 
 
+def _snapshot_settlement_resolution(
+    resolution: object,
+    *,
+    as_of: str,
+) -> SettlementResolution:
+    """Detach one exact, causally admitted settlement DTO from external ownership."""
+
+    if type(resolution) is not SettlementResolution:
+        raise ContinuousSessionError(
+            "outcome authority must return exact SettlementResolution or None"
+        )
+    resolution.validate(as_of=as_of)
+    quote_outcomes = dict.copy(resolution.quote_outcomes)
+    snapshot = SettlementResolution(
+        event_identity=resolution.event_identity,
+        settlement_ref=resolution.settlement_ref,
+        quote_outcomes=quote_outcomes,
+        evidence_id=resolution.evidence_id,
+        evidence_sha256=resolution.evidence_sha256,
+        available_at=resolution.available_at,
+    )
+    snapshot.validate(as_of=as_of)
+
+    # Re-prove the externally owned DTO after copying. Frozen dataclasses can still
+    # be changed with object.__setattr__; never publish a mixed snapshot silently.
+    resolution.validate(as_of=as_of)
+    if (
+        resolution.event_identity != snapshot.event_identity
+        or resolution.settlement_ref != snapshot.settlement_ref
+        or resolution.evidence_id != snapshot.evidence_id
+        or resolution.evidence_sha256 != snapshot.evidence_sha256
+        or resolution.available_at != snapshot.available_at
+        or resolution.quote_outcomes != snapshot.quote_outcomes
+    ):
+        raise ContinuousSessionError(
+            "settlement evidence changed during canonical snapshot"
+        )
+    return snapshot
+
+
+def _snapshot_settlement_resolutions(
+    resolutions: tuple[SettlementResolution, ...],
+    *,
+    as_of: str,
+) -> tuple[SettlementResolution, ...]:
+    if type(resolutions) is not tuple:
+        raise TypeError("resolutions must be an exact tuple")
+    return tuple(
+        _snapshot_settlement_resolution(resolution, as_of=as_of)
+        for resolution in resolutions
+    )
+
+
 class SettlementOutcomeAuthority(Protocol):
     """External outcome authority; Autosport never derives outcomes from lifecycle state."""
 
@@ -947,23 +1000,19 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             resolution = self.outcome_authority.resolve(record, as_of=as_of)
             if resolution is None:
                 continue
-            if type(resolution) is not SettlementResolution:
-                raise ContinuousSessionError(
-                    "outcome authority must return exact SettlementResolution or None"
-                )
-            # Validate the exact DTO before any identity/reference comparison.
-            # Construction is intentionally permissive enough for deserialization, so
-            # hostile scalar subclasses must fail closed before __eq__/__ne__ dispatch.
-            resolution.validate(as_of=as_of)
-            if resolution.event_identity != record.identity:
+            snapshot = _snapshot_settlement_resolution(
+                resolution,
+                as_of=as_of,
+            )
+            if snapshot.event_identity != record.identity:
                 raise ContinuousSessionError(
                     "settlement evidence event identity does not match lifecycle identity"
                 )
-            if resolution.settlement_ref != record.settlement_ref:
+            if snapshot.settlement_ref != record.settlement_ref:
                 raise ContinuousSessionError(
                     "settlement evidence reference does not match lifecycle evidence"
                 )
-            resolutions.append(resolution)
+            resolutions.append(snapshot)
         return tuple(resolutions)
 
     def _load_book(self) -> PaperBook:
@@ -977,6 +1026,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self,
         *,
         resolutions: tuple[SettlementResolution, ...],
+        as_of: str,
         _settlement_engine_type: type[SettlementEngine],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if type(resolutions) is not tuple:
@@ -986,7 +1036,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise TypeError(
                     "resolutions must contain exact SettlementResolution values"
                 )
-            resolution.validate(as_of=resolution.available_at)
+            resolution.validate(as_of=as_of)
         if not resolutions:
             return (), ()
         if SettlementEngine is not _settlement_engine_type:
@@ -1140,14 +1190,23 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 if prepare is not None:
                     prepare(
                         paper_book_path=self.paper_book_path,
-                        resolutions=resolutions,
+                        resolutions=_snapshot_settlement_resolutions(
+                            resolutions,
+                            as_of=now,
+                        ),
                         at=now,
                     )
-            settled, evidence_ids = self._settle(resolutions=resolutions)
+            settled, evidence_ids = self._settle(
+                resolutions=resolutions,
+                as_of=now,
+            )
             if self.settlement_learning_handoff is not None:
                 self.settlement_learning_handoff.reconcile_after_settlement(
                     paper_book_path=self.paper_book_path,
-                    resolutions=resolutions,
+                    resolutions=_snapshot_settlement_resolutions(
+                        resolutions,
+                        as_of=now,
+                    ),
                     settled_ticket_ids=settled,
                     at=now,
                 )

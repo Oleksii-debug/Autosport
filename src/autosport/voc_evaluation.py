@@ -445,6 +445,19 @@ class PairedVOCEvaluation:
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, Any]) -> "PairedVOCEvaluation":
+        if cls is not PairedVOCEvaluation:
+            raise VOCEvaluationError(
+                "paired VOC evaluation parser authority cannot be subclassed"
+            )
+        if type(raw) is not dict:
+            raise VOCEvaluationError(
+                "paired VOC evaluation payload must be an exact object"
+            )
+        for key in raw:
+            if type(key) is not str:
+                raise VOCEvaluationError(
+                    "paired VOC evaluation payload keys must be exact strings"
+                )
         try:
             expected_sha256 = raw["evaluation_sha256"]
             value = cls(
@@ -502,6 +515,10 @@ class PairedVOCEvaluation:
                 raise
             raise VOCEvaluationError("invalid paired VOC evaluation payload") from exc
         _sha256("evaluation_sha256", expected_sha256)
+        if set(raw) != set(value.payload()):
+            raise VOCEvaluationError(
+                "paired VOC evaluation payload schema fields mismatch"
+            )
         if value.evaluation_sha256 != expected_sha256:
             raise VOCEvaluationError("paired VOC evaluation SHA-256 mismatch")
         return value
@@ -1080,14 +1097,22 @@ class CanonicalVOCAuthorityResolver:
         if protocol_entry is None:
             raise VOCEvaluationError("canonical ResearchProtocol is missing for outcome binding")
         binding = protocol_entry.payload.get("binding")
-        design_text = None if not isinstance(binding, dict) else binding.get("evaluation_design")
-        if not isinstance(design_text, str):
+        design_text = (
+            None
+            if type(binding) is not dict
+            else binding.get("evaluation_design")
+        )
+        if type(design_text) is not str:
             raise VOCEvaluationError("canonical VOC outcome identity binding is missing")
         try:
             design = json.loads(design_text)
         except json.JSONDecodeError as exc:
             raise VOCEvaluationError("canonical VOC evaluation design is not valid JSON") from exc
-        outcome_identity = design.get("outcome_identity") if isinstance(design, dict) else None
+        outcome_identity = (
+            design.get("outcome_identity")
+            if type(design) is dict
+            else None
+        )
         if type(outcome_identity) is not dict:
             raise VOCEvaluationError("canonical VOC outcome identity binding is missing")
         expected_identity = {

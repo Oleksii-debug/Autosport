@@ -81,10 +81,21 @@ AUTOMATION_IDS = {
 
 
 def strategy_id_from_display(display: str) -> str:
+    if type(display) is not str:
+        raise ValueError(
+            text("ui.error.strategy.unknown_display", display="<non-string>")
+        )
     try:
-        return _STRATEGY_CHOICES[display]
+        strategy_id = _STRATEGY_CHOICES[display]
     except KeyError as exc:
-        raise ValueError(text("ui.error.strategy.unknown_display", display=repr(display))) from exc
+        raise ValueError(
+            text("ui.error.strategy.unknown_display", display=repr(display))
+        ) from exc
+    if type(strategy_id) is not str:
+        raise ValueError(
+            text("ui.error.strategy.unknown_display", display=repr(display))
+        )
+    return strategy_id
 
 
 def _safe_exception_text(exc: BaseException) -> str:

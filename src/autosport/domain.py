@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import copy
 import json
 import math
@@ -230,6 +231,93 @@ def _quote_identity(
         canonical_market_id,
         canonical_selection_id,
     )
+
+
+def _decode_quote_identity_payload(quote_key: str, prefix: str) -> list[object]:
+    token = quote_key[len(prefix) :]
+    if not token or any(
+        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+        for character in token
+    ):
+        raise ValueError("quote_key encoded identity token is not canonical base64url")
+    padding = "=" * (-len(token) % 4)
+    try:
+        raw = base64.b64decode(
+            (token + padding).encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+        payload = json.loads(raw.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("quote_key encoded identity payload is invalid") from exc
+    if type(payload) is not list:
+        raise ValueError("quote_key encoded identity payload must be a JSON array")
+    return payload
+
+
+def _quote_identity_components(
+    value: object,
+) -> tuple[str | None, str, str, str, str | None]:
+    """Decode one canonical quote identity without accepting ambiguous aliases.
+
+    Returns (sport, event_id, market_id, selection_id, exchange_side).
+    Every encoded form must byte-round-trip through the canonical encoder.
+    """
+    quote_key = _canonical_string_value(value, "quote_key")
+    if "|" not in quote_key:
+        if quote_key.startswith("component-boundary-v1-"):
+            payload = _decode_quote_identity_payload(
+                quote_key, "component-boundary-v1-"
+            )
+            if len(payload) != 4 or payload[0] != "quote":
+                raise ValueError("quote_key component-boundary payload is not a quote")
+            event_id = _canonical_string_value(payload[1], "event_id")
+            market_id = _canonical_string_value(payload[2], "market_id")
+            selection_id = _canonical_string_value(payload[3], "selection_id")
+            if _quote_identity(event_id, market_id, selection_id, None, None) != quote_key:
+                raise ValueError("quote_key component-boundary encoding is not canonical")
+            return None, event_id, market_id, selection_id, None
+
+        if quote_key.startswith("sport-v2-"):
+            payload = _decode_quote_identity_payload(quote_key, "sport-v2-")
+            if len(payload) != 5 or payload[0] != "quote":
+                raise ValueError("quote_key sport-v2 payload is not a quote")
+            sport = _canonical_sport_value(payload[1])
+            event_id = _canonical_string_value(payload[2], "event_id")
+            market_id = _canonical_string_value(payload[3], "market_id")
+            selection_id = _canonical_string_value(payload[4], "selection_id")
+            if _quote_identity(event_id, market_id, selection_id, sport, None) != quote_key:
+                raise ValueError("quote_key sport-v2 encoding is not canonical")
+            return sport, event_id, market_id, selection_id, None
+
+        if quote_key.startswith("exchange-side-v1-"):
+            payload = _decode_quote_identity_payload(quote_key, "exchange-side-v1-")
+            if len(payload) != 6 or payload[0] != "quote":
+                raise ValueError("quote_key exchange-side payload is not a quote")
+            sport = None if payload[1] is None else _canonical_sport_value(payload[1])
+            event_id = _canonical_string_value(payload[2], "event_id")
+            market_id = _canonical_string_value(payload[3], "market_id")
+            selection_id = _canonical_string_value(payload[4], "selection_id")
+            exchange_side = _canonical_exchange_side(payload[5])
+            if _quote_identity(
+                event_id,
+                market_id,
+                selection_id,
+                sport,
+                exchange_side,
+            ) != quote_key:
+                raise ValueError("quote_key exchange-side encoding is not canonical")
+            return sport, event_id, market_id, selection_id, exchange_side
+
+    parts = quote_key.split("|")
+    if len(parts) != 3 or not all(parts):
+        raise ValueError("quote_key is not a canonical decodable quote identity")
+    event_id = _canonical_string_value(parts[0], "event_id")
+    market_id = _canonical_string_value(parts[1], "market_id")
+    selection_id = _canonical_string_value(parts[2], "selection_id")
+    if _quote_identity(event_id, market_id, selection_id, None, None) != quote_key:
+        raise ValueError("quote_key legacy identity is not canonical")
+    return None, event_id, market_id, selection_id, None
 
 
 def _optional_canonical_timestamp(raw: dict[str, Any], field_name: str) -> str | None:

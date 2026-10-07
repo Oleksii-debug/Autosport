@@ -261,8 +261,8 @@ class ResearchProtocol:
     available_at_utc: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.binding, ScientificProtocolBinding):
-            raise ValueError("binding must be a ScientificProtocolBinding")
+        if type(self.binding) is not ScientificProtocolBinding:
+            raise ValueError("binding must be an exact ScientificProtocolBinding")
         _sha256(self.source_sha256, "source_sha256")
         _sha256(self.environment_sha256, "environment_sha256")
         _sha256(self.dataset_manifest_sha256, "dataset_manifest_sha256")

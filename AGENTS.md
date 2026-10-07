@@ -1,5 +1,10 @@
 # AGENTS.md
 
+## Immutable closed-Section authority — owner directive 2026-10-07
+
+`SECTION_CLOSURE_IMMUTABILITY.md` is a binding durable skip-list for ordinary workers. Any Section marked `DONE_IMMUTABLE` there MUST be skipped and MUST NOT be reimplemented, polished, re-audited, requalified, or mutated unless a concrete demonstrated regression, invalidated closure evidence, materially changed acceptance contract, or later integration break is first recorded as `REOPENED`. Non-gating improvements belong to later/backlog scope.
+
+
 ## Terminal Section Closure Protocol v2 — owner directive 2026-10-07
 
 **This section overrides every older coordination rule in this repository, including any instruction to use the full execution window, keep creating residual work, prepare FRONT-2, avoid idling, satisfy a depth/work-unit floor, or keep mutating while CI is pending. Product correctness/safety requirements remain binding.**

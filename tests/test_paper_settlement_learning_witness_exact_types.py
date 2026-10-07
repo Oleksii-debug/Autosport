@@ -1,5 +1,6 @@
 from autosport.continuous_session import SettlementResolution
 from decimal import Decimal
+import hashlib
 
 import pytest
 
@@ -68,7 +69,7 @@ def _graph(observation_type=Observation):
         episode_id=episode_id,
         policy_id="policy-1",
         step_index=0,
-        chain_sha256="c" * 64,
+        chain_sha256=hashlib.sha256(b"").hexdigest(),
         last_transition_id=None,
         committed_action_ids=(),
         committed_decision_intents=(),
@@ -81,7 +82,7 @@ def _graph(observation_type=Observation):
         chain_sha256="d" * 64,
         last_transition_id=transition.transition_id,
         committed_action_ids=(action.action_id,),
-        committed_decision_intents=(),
+        committed_decision_intents=(("e" * 64, "f" * 64),),
     )
     return observation, action, outcome, reward, transition, baseline, next_checkpoint
 

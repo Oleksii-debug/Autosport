@@ -734,6 +734,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                 record_id=experiment_id,
                 available_at=T_EVALUATED,
                 payload={
+                    "experiment_id": experiment_id,
                     "fingerprint": SHA_A,
                     "evaluation_bundle_id": bundle_id,
                 },
@@ -746,6 +747,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                 record_id="voc-promotion-evidence-derived",
                 available_at=T_EVALUATED,
                 payload={
+                    "promotion_evidence_id": "voc-promotion-evidence-derived",
                     "research_protocol_id": paired.research_protocol_id,
                     "holdout_access_id": paired.holdout_access_id,
                     "multiple_comparison_control_sha256": (

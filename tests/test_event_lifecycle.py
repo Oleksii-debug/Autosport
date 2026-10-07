@@ -453,7 +453,11 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             self.assertIsNotNone(migrated)
             assert migrated is not None
             self.assertEqual(migrated.sport, "table_tennis")
-            self.assertIsNone(restarted.get(legacy_identity))
+            legacy_alias = restarted.get(legacy_identity)
+            self.assertIsNotNone(legacy_alias)
+            assert legacy_alias is not None
+            self.assertEqual(legacy_alias.identity, event.identity)
+            self.assertEqual(legacy_alias.sport, "table_tennis")
             persisted = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["schema_version"], 2)
             self.assertEqual(set(persisted["events"]), {event.identity})
@@ -618,7 +622,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 register_input=lambda input_id, **_: None,
                 retire_input=lambda input_id: retired.append(input_id),
             )
-            self.assertEqual(retired, [])
+            self.assertEqual(retired, ["catalog:provider-a:event-1"])
 
             with self.assertRaisesRegex(
                 CatalogConflictError,

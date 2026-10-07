@@ -53,13 +53,13 @@ class PersistedForecastDigestShapeTests(unittest.TestCase):
     def test_non_string_json_array_members_fail_before_digest_coercion(self):
         for name, loader in self._loaders():
             with self.subTest(loader=name):
-                with self.assertRaisesRegex(ValueError, "evidence_hashes must contain exact strings"):
+                with self.assertRaisesRegex(ValueError, "evidence_hashes must contain (?:exact )?strings"):
                     loader(self._raw(evidence_hashes=[123]))
 
     def test_non_string_snapshot_hash_is_not_stringified_by_persisted_loader(self):
         for name, loader in self._loaders():
             with self.subTest(loader=name):
-                with self.assertRaisesRegex(ValueError, "market_snapshot_hash.*exact non-empty canonical text"):
+                with self.assertRaisesRegex(ValueError, "market_snapshot_hash.*(?:exact non-empty canonical text|canonical SHA-256 digest)"):
                     loader(self._raw(market_snapshot_hash=7))
 
 

@@ -613,8 +613,25 @@ class ContinuousEventLifecycle:
         return tuple(sorted(values, key=lambda item: item.identity))
 
     def get(self, identity: str) -> EventLifecycleRecord | None:
-        raw = self._read()["events"].get(_text(identity, "identity"))
-        return None if raw is None else EventLifecycleRecord.from_dict(raw)
+        requested = _text(identity, "identity")
+        events = self._read()["events"]
+        direct = events.get(requested)
+        if direct is not None:
+            return EventLifecycleRecord.from_dict(direct)
+
+        # Schema-v2 is canonical, but deployed provider-scoped/local event ids
+        # remain bounded read aliases. Resolve them only when they identify one
+        # canonical record; cross-sport alias collisions fail closed.
+        matches: list[EventLifecycleRecord] = []
+        for raw in events.values():
+            record = EventLifecycleRecord.from_dict(raw)
+            if requested in canonical_event_identity_aliases(record.identity):
+                matches.append(record)
+        if len(matches) > 1:
+            raise CatalogConflictError(
+                "event identity alias is ambiguous across canonical lifecycle records"
+            )
+        return None if not matches else matches[0]
 
     @staticmethod
     def _event_record(
@@ -984,27 +1001,31 @@ class ContinuousEventLifecycle:
                     event_id=record.event_id,
                 )
             )
+            cutoff = _instant(as_of, "as_of")
+            discovered = _instant(record.first_discovered_at, "first_discovered_at")
+            # Once this canonical event identity is causally known, the schema-v1
+            # dependency alias must stop representing it independently. This keeps
+            # one identity authority even while the v2 record is still waiting for
+            # sufficient market history. Do not retire anything before discovery.
+            if (
+                retire_input is not None
+                and discovered <= cutoff
+                and legacy_input_id != input_id
+            ):
+                retire_input(legacy_input_id)
+
             assessment = self.assess_evidence(
                 identity,
                 store,
                 as_of=as_of,
                 required_history=required_history,
             )
-            # Schema-v1 used the provider-scoped event identity as the dependency
-            # input key. Retire that alias only when the v2 identity can replace it
-            # now, or when causally visible completion retires the event entirely.
-            # WAIT_EVIDENCE may describe a future completion not visible at as_of;
-            # retiring the legacy key there would leak future catalog knowledge.
             if assessment.status is EvidenceEligibility.COMPLETED:
                 if retire_input is not None:
-                    if legacy_input_id != input_id:
-                        retire_input(legacy_input_id)
                     retire_input(input_id)
                 continue
             if not assessment.eligible:
                 continue
-            if retire_input is not None and legacy_input_id != input_id:
-                retire_input(legacy_input_id)
             record = self.get(identity)
             assert record is not None
             input_id = f"catalog:{record.identity}"

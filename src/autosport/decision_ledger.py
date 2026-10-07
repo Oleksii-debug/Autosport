@@ -612,14 +612,14 @@ class JsonlDecisionLedger:
                 _canonical_decision_text(value, field_name)
             except ValueError as exc:
                 raise DecisionLedgerIntegrityError(
-                    f"Decision Ledger record field {field_name!r} is invalid{location}"
+                    f"Decision Ledger record field {field_name!r} is invalid{location}: {exc}"
                 ) from exc
         if "decision_kind" in record:
             try:
                 _canonical_decision_text(record["decision_kind"], "decision_kind")
             except ValueError as exc:
                 raise DecisionLedgerIntegrityError(
-                    f"Decision Ledger decision_kind is invalid{location}"
+                    f"Decision Ledger decision_kind is invalid{location}: {exc}"
                 ) from exc
         try:
             observed = _decision_instant(record["observed_ts"], "observed_ts")

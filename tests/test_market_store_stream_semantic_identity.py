@@ -4,6 +4,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from autosport.domain import MarketEvent, MarketType
@@ -26,7 +27,7 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
             event_id="same-event",
             market_id="same-market",
             selection_id="same-selection",
-            decimal_odds=odds,
+            decimal_odds=Decimal(odds),
             observed_ts=timestamp,
             source_id="test-source",
             sequence=sequence,
@@ -291,7 +292,7 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     ValueError,
-                    "current market quote projection is not backed by authoritative history",
+                    "current market quote projection conflicts with authoritative history",
                 ):
                     store.append(continuation)
 
@@ -366,14 +367,20 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
 
 
     def test_durable_ingress_rejects_market_event_subclass_before_dispatch(self) -> None:
+        armed = False
+
         class HostileMarketEvent(MarketEvent):
             def __getattribute__(self, name: str):
-                if name in {"sequence", "to_dict", "dedupe_key"}:
+                if armed and name in {"sequence", "to_dict", "dedupe_key"}:
                     raise AssertionError("MarketEvent subclass dispatch must not execute")
                 return super().__getattribute__(name)
 
         canonical = self._event(sequence=52)
-        hostile = HostileMarketEvent(**canonical.to_dict())
+        hostile_payload = canonical.to_dict()
+        hostile_payload["market_type"] = canonical.market_type
+        hostile_payload["decimal_odds"] = canonical.decimal_odds
+        hostile = HostileMarketEvent(**hostile_payload)
+        armed = True
 
         with tempfile.TemporaryDirectory() as temp_dir:
             store = SQLiteMarketStore(Path(temp_dir) / "market.db")

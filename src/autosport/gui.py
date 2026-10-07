@@ -558,7 +558,7 @@ class AutosportApp(tk.Tk):
 
         dataset = message.result
         if (
-            not isinstance(dataset, ReplayDataset)
+            type(dataset) is not ReplayDataset
             or pending_path is None
             or Path(dataset.root) != pending_path
         ):

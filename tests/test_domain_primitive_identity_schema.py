@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from autosport.domain import MarketEvent, TicketLeg
+from autosport.domain import MarketEvent, MarketType, TicketLeg
 
 
 _TS = "2026-10-07T00:00:00+00:00"
@@ -306,3 +306,28 @@ def test_market_event_rejects_nonzero_submicrosecond_timestamp_precision(
 ) -> None:
     with pytest.raises(ValueError, match="precision finer than microseconds"):
         _event(**{field_name: "2026-10-07T00:00:00.1234561+00:00"})
+
+
+class _ExplosiveMarketType:
+    @property
+    def value(self) -> str:
+        raise AssertionError("noncanonical market_type member dispatch must not execute")
+
+
+def test_market_event_direct_constructor_requires_exact_market_type() -> None:
+    with pytest.raises(ValueError, match="canonical MarketType"):
+        _event(market_type=_ExplosiveMarketType())
+
+
+def test_market_event_to_dict_revalidates_market_type_before_member_dispatch() -> None:
+    event = _event(market_type=MarketType.WINNER)
+    object.__setattr__(event, "market_type", _ExplosiveMarketType())
+
+    with pytest.raises(ValueError, match="canonical MarketType"):
+        event.to_dict()
+
+
+def test_market_event_canonical_market_type_round_trips_unchanged() -> None:
+    event = _event(market_type=MarketType.TOTAL)
+
+    assert event.to_dict()["market_type"] == MarketType.TOTAL.value

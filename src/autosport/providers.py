@@ -15,23 +15,36 @@ _SQLITE_SEQUENCE_MAX = (1 << 63) - 1
 _EXCHANGE_SIDES = frozenset({"back", "lay"})
 
 
+def _require_strict_utf8(value: str, name: str) -> None:
+    try:
+        str.encode(value, "utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
+
+
 def _validate_source_id(source_id: object) -> str:
-    if not isinstance(source_id, str):
+    if type(source_id) is not str:
         raise TypeError("source_id must be str")
     if not source_id or source_id != source_id.strip():
         raise ValueError("source_id must be non-empty and trimmed")
     if "|" in source_id:
         raise ValueError("source_id must not contain reserved identity delimiter '|'")
+    if any(ord(character) < 32 or ord(character) == 127 for character in source_id):
+        raise ValueError("source_id must not contain control characters")
+    _require_strict_utf8(source_id, "source_id")
     return source_id
 
 
 def _validate_provider_component(value: object, name: str) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise TypeError(f"{name} must be str")
     if not value or value != value.strip():
         raise ValueError(f"{name} must be non-empty and trimmed")
     if "|" in value:
         raise ValueError(f"{name} must not contain reserved identity delimiter '|'")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{name} must not contain control characters")
+    _require_strict_utf8(value, name)
     return value
 
 
@@ -53,10 +66,13 @@ def _validate_sequence(value: object) -> int:
 
 
 def _validate_provider_text(value: object, name: str) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise TypeError(f"{name} must be str")
     if not value or value != value.strip():
         raise ValueError(f"{name} must be non-empty and trimmed")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{name} must not contain control characters")
+    _require_strict_utf8(value, name)
     return value
 
 
@@ -148,6 +164,27 @@ def _scoped_identity(source_id: str, provider_component: str) -> str:
     return f"{source_id}:{provider_component}"
 
 
+def _validate_provider_quote_identity_fields(
+    *,
+    provider_event_id: object,
+    provider_market_id: object,
+    provider_selection_id: object,
+    sequence: object,
+    sport: object,
+    exchange_side: object,
+) -> None:
+    """Re-prove canonical quote identity at every durable/use boundary."""
+
+    _validate_provider_event_id(provider_event_id)
+    _validate_provider_component(provider_market_id, "provider_market_id")
+    _validate_provider_component(provider_selection_id, "provider_selection_id")
+    _validate_sequence(sequence)
+    if sport is not None:
+        _validate_sport(sport)
+    if exchange_side is not None:
+        _validate_exchange_side(exchange_side)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderQuote:
     provider_event_id: str
@@ -165,14 +202,14 @@ class ProviderQuote:
     exchange_side: str | None = None
 
     def __post_init__(self) -> None:
-        _validate_provider_event_id(self.provider_event_id)
-        _validate_provider_component(self.provider_market_id, "provider_market_id")
-        _validate_provider_component(self.provider_selection_id, "provider_selection_id")
-        _validate_sequence(self.sequence)
-        if self.sport is not None:
-            _validate_sport(self.sport)
-        if self.exchange_side is not None:
-            _validate_exchange_side(self.exchange_side)
+        _validate_provider_quote_identity_fields(
+            provider_event_id=self.provider_event_id,
+            provider_market_id=self.provider_market_id,
+            provider_selection_id=self.provider_selection_id,
+            sequence=self.sequence,
+            sport=self.sport,
+            exchange_side=self.exchange_side,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,8 +226,23 @@ class ProviderBatch:
         for quote in self.quotes:
             if type(quote) is not ProviderQuote:
                 raise TypeError("provider batch quote must be ProviderQuote")
-        if self.cursor is not None and not isinstance(self.cursor, str):
-            raise TypeError("provider batch cursor must be str or None")
+            _validate_provider_quote_identity_fields(
+                provider_event_id=quote.provider_event_id,
+                provider_market_id=quote.provider_market_id,
+                provider_selection_id=quote.provider_selection_id,
+                sequence=quote.sequence,
+                sport=quote.sport,
+                exchange_side=quote.exchange_side,
+            )
+        if self.cursor is not None:
+            if type(self.cursor) is not str:
+                raise TypeError("provider batch cursor must be str or None")
+            if any(
+                ord(character) < 32 or ord(character) == 127
+                for character in self.cursor
+            ):
+                raise ValueError("provider batch cursor must not contain control characters")
+            _require_strict_utf8(self.cursor, "provider batch cursor")
         if type(self.quality_flags) is not tuple:
             raise TypeError("provider batch quality_flags must be a tuple of strings")
         for flag in self.quality_flags:
@@ -222,6 +274,16 @@ class CanonicalNormalizer:
 
     def normalize(self, source_id: str, quote: ProviderQuote) -> MarketEvent:
         source_id = _validate_source_id(source_id)
+        if type(quote) is not ProviderQuote:
+            raise TypeError("quote must be ProviderQuote")
+        _validate_provider_quote_identity_fields(
+            provider_event_id=quote.provider_event_id,
+            provider_market_id=quote.provider_market_id,
+            provider_selection_id=quote.provider_selection_id,
+            sequence=quote.sequence,
+            sport=quote.sport,
+            exchange_side=quote.exchange_side,
+        )
         if not isinstance(quote.decimal_odds, Decimal):
             raise TypeError("decimal odds must be Decimal")
         if not quote.decimal_odds.is_finite():

@@ -3,6 +3,7 @@ from dataclasses import replace
 
 import pytest
 
+import autosport.scientific_registry as registry_module
 from autosport.scientific_registry import (
     ConflictingScientificRecordError,
     DatasetSnapshot,
@@ -354,6 +355,49 @@ def test_causal_lookup_honors_availability_and_outcome_reveal(tmp_path):
     assert registry.causal_records("DatasetSnapshot", as_of=T1) == ()
     visible = registry.causal_records("DatasetSnapshot", as_of=T2)
     assert [entry.record_id for entry in visible] == ["dataset-hidden"]
+
+
+def test_causal_lookup_rejects_self_consistent_malformed_outcome_reveal_after(
+    tmp_path,
+) -> None:
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(
+        DatasetSnapshot(
+            "dataset-malformed-reveal",
+            SHA_A,
+            "source",
+            "license",
+            T1,
+            T0,
+            outcome_reveal_after=T2,
+        )
+    )
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    entry["payload"]["outcome_reveal_after"] = 7
+    entry["record_sha256"] = registry_module._digest(
+        {
+            "record_type": entry["record_type"],
+            "record_id": entry["record_id"],
+            "available_at": entry["available_at"],
+            "payload": entry["payload"],
+        }
+    )
+    path.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    reopened = ScientificRegistry(path)
+    with pytest.raises(ValueError, match="outcome_reveal_after.*canonical string"):
+        reopened.causal_records("DatasetSnapshot", as_of=T2)
 
 
 def test_promotion_fails_closed_then_blocks_reused_confirmation_holdout(tmp_path):

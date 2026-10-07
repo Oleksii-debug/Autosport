@@ -590,6 +590,7 @@ def test_feature_authority_rejects_lineage_authority_subclass_before_virtual_dis
             decision_cutoff_utc="2099-01-01T00:00:00Z",
         )
 
+
 def test_feature_provenance_rejects_boolean_schema_version_alias() -> None:
     snapshot = _snapshot()
     feature_set = _feature_set()

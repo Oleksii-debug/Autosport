@@ -123,6 +123,25 @@ class MarketMirrorTests(unittest.TestCase):
             Decimal("1.80"),
         )
 
+    def test_restore_and_replay_reject_store_subclass_before_dispatch(self) -> None:
+        class HostileStore(SQLiteMarketStore):
+            def events(self):
+                raise AssertionError("store subclass history dispatch must not execute")
+
+            def replay_events_at_frozen_cutoff(self, *, as_of: str):
+                raise AssertionError("store subclass replay dispatch must not execute")
+
+        hostile = object.__new__(HostileStore)
+
+        with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+            MarketMirror.from_store(hostile)
+        with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+            MarketMirror.replay_view_from_store(
+                hostile,
+                as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
     def test_sport_aware_lookup_survives_store_restore_and_replay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
@@ -356,6 +375,24 @@ class MarketMirrorTests(unittest.TestCase):
             ("boundary", "fresh"),
         )
         self.assertEqual(len(mirror.snapshot()), 4)
+
+    def test_active_snapshot_rejects_ingest_before_observation(self) -> None:
+        mirror = MarketMirror()
+        impossible = self.event(
+            selection="invalid-local-chronology",
+            observed_ts="2026-09-16T18:59:59+00:00",
+            ingest_ts="2026-09-16T18:59:58+00:00",
+            source_ts="2026-09-16T18:59:57+00:00",
+        )
+        mirror.apply(impossible)
+
+        active = mirror.active_snapshot(
+            as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=5),
+        )
+
+        self.assertEqual(active, ())
+        self.assertEqual(mirror.snapshot(), (impossible,))
 
     def test_active_snapshot_prefers_source_time_over_observation_time(self) -> None:
         mirror = MarketMirror()
@@ -617,6 +654,81 @@ class MarketMirrorTests(unittest.TestCase):
                     tuple(event.selection_id for event in replay.events),
                     ("wanted",),
                 )
+            finally:
+                store.close()
+
+
+    def test_apply_rejects_market_event_subclass_before_live_dispatch(self) -> None:
+        class HostileMarketEvent(MarketEvent):
+            def __getattribute__(self, name: str):
+                if name in {"source_id", "quote_key", "sequence", "to_dict"}:
+                    raise AssertionError("MarketEvent subtype dispatch must not execute")
+                return super().__getattribute__(name)
+
+        canonical = self.event(sequence=91)
+        hostile = HostileMarketEvent(
+            event_id=canonical.event_id,
+            market_id=canonical.market_id,
+            selection_id=canonical.selection_id,
+            decimal_odds=canonical.decimal_odds,
+            observed_ts=canonical.observed_ts,
+            source_id=canonical.source_id,
+            sequence=canonical.sequence,
+            market_type=canonical.market_type,
+            status=canonical.status,
+            source_ts=canonical.source_ts,
+            ingest_ts=canonical.ingest_ts,
+            score_state=canonical.score_state,
+            metadata=canonical.metadata,
+            sport=canonical.sport,
+            competition_id=canonical.competition_id,
+            market_semantics_id=canonical.market_semantics_id,
+            provider_source_class=canonical.provider_source_class,
+            exchange_side=canonical.exchange_side,
+        )
+
+        mirror = MarketMirror()
+        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+            mirror.apply(hostile)
+        self.assertEqual(len(mirror), 0)
+
+    def test_persist_and_apply_rejects_market_event_subclass_before_store_use(self) -> None:
+        class HostileMarketEvent(MarketEvent):
+            def __getattribute__(self, name: str):
+                if name in {"source_id", "quote_key", "sequence", "to_dict"}:
+                    raise AssertionError("MarketEvent subtype dispatch must not execute")
+                return super().__getattribute__(name)
+
+        canonical = self.event(sequence=92)
+        hostile = HostileMarketEvent(
+            event_id=canonical.event_id,
+            market_id=canonical.market_id,
+            selection_id=canonical.selection_id,
+            decimal_odds=canonical.decimal_odds,
+            observed_ts=canonical.observed_ts,
+            source_id=canonical.source_id,
+            sequence=canonical.sequence,
+            market_type=canonical.market_type,
+            status=canonical.status,
+            source_ts=canonical.source_ts,
+            ingest_ts=canonical.ingest_ts,
+            score_state=canonical.score_state,
+            metadata=canonical.metadata,
+            sport=canonical.sport,
+            competition_id=canonical.competition_id,
+            market_semantics_id=canonical.market_semantics_id,
+            provider_source_class=canonical.provider_source_class,
+            exchange_side=canonical.exchange_side,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            try:
+                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                    mirror.persist_and_apply(store, hostile)
+                self.assertEqual(store.events(), [])
+                self.assertEqual(len(mirror), 0)
             finally:
                 store.close()
 

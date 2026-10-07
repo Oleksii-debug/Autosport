@@ -139,8 +139,8 @@ def evidence_snapshot_sha256(
 ) -> str:
     """Hash the exact canonical assertion subset for one scientific surface."""
 
-    if not isinstance(evidence, tuple):
-        raise DecisionEnvelopeError("evidence must be a tuple")
+    if type(evidence) is not tuple:
+        raise DecisionEnvelopeError("evidence must be an exact tuple")
     if type(kind) is not EvidenceKind:
         raise DecisionEnvelopeError("kind must be EvidenceKind")
     if any(type(item) is not CausalEvidenceRef for item in evidence):
@@ -189,10 +189,10 @@ class SealedDecisionEnvelope:
     def __post_init__(self) -> None:
         _text(self.protocol_id, "protocol_id")
         _text(self.decision_id, "decision_id")
-        if not isinstance(self.disposition, DecisionDisposition):
-            raise DecisionEnvelopeError("disposition must be DecisionDisposition")
-        if not isinstance(self.evidence, tuple) or not self.evidence:
-            raise DecisionEnvelopeError("evidence must be a non-empty tuple")
+        if type(self.disposition) is not DecisionDisposition:
+            raise DecisionEnvelopeError("disposition must be exact DecisionDisposition")
+        if type(self.evidence) is not tuple or not self.evidence:
+            raise DecisionEnvelopeError("evidence must be a non-empty exact tuple")
         if any(type(item) is not CausalEvidenceRef for item in self.evidence):
             raise DecisionEnvelopeError("evidence must contain exact CausalEvidenceRef values")
         for item in self.evidence:
@@ -292,6 +292,7 @@ class SealedDecisionEnvelope:
         )
 
     def canonical_payload(self) -> dict[str, Any]:
+        SealedDecisionEnvelope.__post_init__(self)
         return {
             "schema": "autosport.sealed_decision_envelope",
             "schema_version": 2,
@@ -357,6 +358,7 @@ class DecisionOutcomeAppend:
         )
 
     def verify_envelope(self, envelope: SealedDecisionEnvelope) -> None:
+        DecisionOutcomeAppend.__post_init__(self)
         if type(envelope) is not SealedDecisionEnvelope:
             raise DecisionEnvelopeError("envelope must be exact SealedDecisionEnvelope")
         if self.decision_id != envelope.decision_id:

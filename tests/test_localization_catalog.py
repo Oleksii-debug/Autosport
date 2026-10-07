@@ -283,7 +283,7 @@ def test_ticket_lines_preserve_canonical_leg_identity_and_decimal_values() -> No
     rendered = ticket_lines(session)
 
     assert len(rendered) == 1
-    assert rendered[0].startswith("WON | ставка 25.50 | коефіцієнт 2.10 | виплата 53.55 | ")
+    assert rendered[0].startswith("WON | ставка 25.50 | коефіцієнт 2.10 | виплата 53.5500 | ")
     assert "event:raw-1/market:raw-2/selection:raw-3@2.10" in rendered[0]
 
     empty_session = SimpleNamespace(book=PaperBook("100"))

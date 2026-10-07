@@ -818,5 +818,43 @@ class MarketMirrorTests(unittest.TestCase):
                 self.assertEqual(hash_calls, [])
 
 
+    def test_lookup_boundaries_reject_control_and_non_utf8_identity_aliases(self) -> None:
+        mirror = MarketMirror()
+        invalid_values = (
+            "provider\x00a",
+            "provider\na",
+            "provider\x7fa",
+            "provider\ud800a",
+        )
+        for invalid in invalid_values:
+            with self.subTest(api="event_for_quote_key", value=repr(invalid)):
+                with self.assertRaises(ValueError):
+                    mirror.event_for_quote_key(invalid, "event|market|selection")
+                with self.assertRaises(ValueError):
+                    mirror.event_for_quote_key("provider-a", invalid)
+
+            with self.subTest(api="active_view_for_keys", value=repr(invalid)):
+                with self.assertRaises(ValueError):
+                    mirror.active_view_for_keys(
+                        ((invalid, "event|market|selection"),),
+                        as_of=datetime(2026, 10, 7, tzinfo=timezone.utc),
+                        max_age=timedelta(minutes=5),
+                    )
+                with self.assertRaises(ValueError):
+                    mirror.active_view_for_keys(
+                        (("provider-a", invalid),),
+                        as_of=datetime(2026, 10, 7, tzinfo=timezone.utc),
+                        max_age=timedelta(minutes=5),
+                    )
+
+    def test_view_selectors_reject_control_and_non_utf8_identity_aliases(self) -> None:
+        mirror = MarketMirror()
+        for invalid in ("provider\x00a", "provider\na", "provider\x7fa", "provider\ud800a"):
+            with self.subTest(value=repr(invalid)):
+                with self.assertRaises(ValueError):
+                    mirror.view(source_ids=(invalid,))
+
+
+
 if __name__ == "__main__":
     unittest.main()

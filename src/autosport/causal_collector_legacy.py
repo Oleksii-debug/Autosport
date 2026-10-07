@@ -319,7 +319,11 @@ class _JsonAtomicStore:
             )
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError("invalid causal collector store") from exc
-        if not isinstance(raw, dict) or raw.get("schema_version") != self.schema_version:
+        if (
+            type(raw) is not dict
+            or type(raw.get("schema_version")) is not int
+            or raw.get("schema_version") != self.schema_version
+        ):
             raise ValueError("unsupported causal collector store schema")
         return raw
 

@@ -35,7 +35,7 @@ _PORTFOLIO_DECIMAL_CONTEXT = Context(
 
 
 def _require_finite_decimal(value: object, label: str) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not Decimal or not value.is_finite():
         raise ValueError(f"{label} must be a finite Decimal")
     return value
 
@@ -53,6 +53,14 @@ def _require_portfolio_ticket_identity(ticket: object) -> PaperTicket:
         raise ValueError("portfolio tickets must be canonical PaperTicket values")
     _canonical_string_value(ticket.ticket_id, "portfolio ticket_id")
     return ticket
+
+
+def _canonical_portfolio_ticket_list(tickets: object) -> list[PaperTicket]:
+    """Reject caller-defined ticket-container dispatch before identity admission."""
+
+    if type(tickets) is not list:
+        raise ValueError("portfolio tickets must be an exact list")
+    return tickets
 
 
 def _canonical_portfolio_quote_keys(value: object, label: str) -> set[str]:
@@ -228,6 +236,7 @@ class PortfolioEngine:
 
     @staticmethod
     def affected_tickets(tickets: list[PaperTicket], quote_key: str) -> list[str]:
+        tickets = _canonical_portfolio_ticket_list(tickets)
         quote_key = _canonical_string_value(quote_key, "portfolio quote_key")
         affected: list[str] = []
         for ticket in tickets:
@@ -241,6 +250,7 @@ class PortfolioEngine:
 
     @staticmethod
     def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:
+        tickets = _canonical_portfolio_ticket_list(tickets)
         canonical_winners = _canonical_portfolio_quote_keys(
             winning_quote_keys,
             "portfolio winning_quote_keys",
@@ -262,6 +272,7 @@ class PortfolioEngine:
         Callers that need complete-state truth must obtain the mapping from the
         authoritative market-outcome contract.
         """
+        tickets = _canonical_portfolio_ticket_list(tickets)
         if type(settlement_by_quote) is not dict:
             raise ValueError("settlement_by_quote must be an exact dict")
         snapshot = settlement_by_quote.copy()
@@ -327,6 +338,7 @@ class PortfolioEngine:
             raise _portfolio_arithmetic_error(exc) from exc
 
     def analyse(self, tickets: list[PaperTicket], exclusive_groups: list[set[str]] | None = None) -> PortfolioReport:
+        tickets = _canonical_portfolio_ticket_list(tickets)
         if exclusive_groups is None:
             raw_groups: list[set[str]] = []
         else:

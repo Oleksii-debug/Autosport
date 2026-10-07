@@ -182,6 +182,35 @@ def test_profile_revalidates_profile_version_after_post_init_mutation() -> None:
         profile.to_canonical_dict()
 
 
+def test_profile_id_rejects_profile_subclass_before_virtual_serialization_dispatch() -> None:
+    class HostileProfile(BookmakerCapabilityProfile):
+        def __post_init__(self) -> None:
+            # Simulate a subclass that bypasses base constructor validation.
+            return None
+
+        def to_canonical_dict(self) -> dict[str, object]:
+            raise AssertionError("profile subclass serialization must not execute")
+
+    base = _profile()
+    profile = HostileProfile(
+        venue_id=base.venue_id,
+        account_id=base.account_id,
+        adapter_id=base.adapter_id,
+        adapter_version=base.adapter_version,
+        profile_version=base.profile_version,
+        facts=base.facts,
+        observed_at=base.observed_at,
+        source_ref=base.source_ref,
+        source_payload_sha256=base.source_payload_sha256,
+    )
+
+    with pytest.raises(
+        BookmakerCapabilityError,
+        match="exact BookmakerCapabilityProfile",
+    ):
+        _ = profile.profile_id
+
+
 def test_profile_rejects_facts_tuple_subclass_before_dispatch() -> None:
     facts = _TrapTuple(
         (

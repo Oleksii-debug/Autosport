@@ -158,6 +158,10 @@ class BookmakerCapabilityProfile:
     source_payload_sha256: str
 
     def __post_init__(self) -> None:
+        if type(self) is not BookmakerCapabilityProfile:
+            raise BookmakerCapabilityError(
+                "profile must be an exact BookmakerCapabilityProfile"
+            )
         _identity_text(self.venue_id, "venue_id")
         _identity_text(self.account_id, "account_id")
         _identity_text(self.adapter_id, "adapter_id")
@@ -188,7 +192,7 @@ class BookmakerCapabilityProfile:
 
     @property
     def profile_id(self) -> str:
-        payload = self.to_canonical_dict()
+        payload = BookmakerCapabilityProfile.to_canonical_dict(self)
         encoded = json.dumps(
             payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
         ).encode("utf-8")

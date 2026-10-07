@@ -179,6 +179,33 @@ def test_forecast_outcome_identity_rejects_string_subclass_before_dispatch() -> 
         )
 
 
+def test_forecast_outcome_requires_exact_integer_binary_value_before_alias_dispatch() -> None:
+    class HostileOutcome(int):
+        def __eq__(self, other):
+            raise AssertionError("outcome alias comparison must not execute")
+
+    for value in (True, False, HostileOutcome(1), HostileOutcome(0), 2, -1):
+        with pytest.raises(ValueError, match="exact integer 0 or 1"):
+            ForecastOutcomeFact(
+                forecast_id="forecast-1",
+                outcome=value,
+                revealed_at=_TS,
+            )
+
+
+def test_evaluation_revalidates_post_init_outcome_value_type() -> None:
+    record = _record(generated_at="2026-10-07T00:00:00+00:00")
+    fact = ForecastOutcomeFact(
+        forecast_id="forecast-1",
+        outcome=1,
+        revealed_at="2026-10-07T00:10:00+00:00",
+    )
+    object.__setattr__(fact, "outcome", True)
+
+    with pytest.raises(ValueError, match="exact integer 0 or 1"):
+        evaluate_forecast_window((record,), (fact,), _evaluation_window())
+
+
 def _evaluation_window() -> TemporalEvaluationWindow:
     return TemporalEvaluationWindow(
         window_id="window-1",

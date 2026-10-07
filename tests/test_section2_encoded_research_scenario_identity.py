@@ -88,9 +88,13 @@ def test_future_market_guard_decodes_encoded_quote_identity() -> None:
         _validate_scenario_future_identity(
             (group,),
             {},
-            {"event|2026": parse_iso_timestamp("2026-10-06T23:59:00+00:00")},
             {
-                ("event|2026", "market|future"): parse_iso_timestamp(
+                (None, "event|2026"): parse_iso_timestamp(
+                    "2026-10-06T23:59:00+00:00"
+                )
+            },
+            {
+                (None, "event|2026", "market|future"): parse_iso_timestamp(
                     "2026-10-07T00:01:00+00:00"
                 )
             },

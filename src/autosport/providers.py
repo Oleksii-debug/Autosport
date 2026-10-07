@@ -112,13 +112,15 @@ def _snapshot_json_value(value: object, field: str) -> Any:
     active_containers: set[int] = set()
 
     def snapshot(current: object, path: str, depth: int) -> Any:
-        if current is None or isinstance(current, (str, bool, int)):
+        if current is None:
+            return None
+        if type(current) in {str, bool, int}:
             return current
-        if isinstance(current, float):
+        if type(current) is float:
             if not math.isfinite(current):
                 raise ValueError(f"{path} contains non-finite JSON number")
             return current
-        if isinstance(current, (list, dict)):
+        if type(current) in {list, dict}:
             if depth > _MAX_PROVIDER_METADATA_NESTING:
                 raise ValueError(
                     f"{field} exceeds maximum JSON nesting depth "
@@ -129,7 +131,7 @@ def _snapshot_json_value(value: object, field: str) -> Any:
                 raise ValueError(f"{path} contains cyclic JSON container")
             active_containers.add(container_id)
             try:
-                if isinstance(current, list):
+                if type(current) is list:
                     return [
                         snapshot(item, f"{path}[{index}]", depth + 1)
                         for index, item in enumerate(current)
@@ -137,7 +139,7 @@ def _snapshot_json_value(value: object, field: str) -> Any:
 
                 result: dict[str, Any] = {}
                 for key, item in current.items():
-                    if not isinstance(key, str):
+                    if type(key) is not str:
                         raise TypeError(f"{path} contains non-string JSON object key")
                     result[key] = snapshot(item, f"{path}.{key}", depth + 1)
                 return result
@@ -300,11 +302,11 @@ class CanonicalNormalizer:
         score_state = quote.score_state
         if score_state is not None:
             score_state = _validate_provider_text(score_state, "score_state")
-        if not isinstance(quote.metadata, dict):
-            raise TypeError("metadata must be dict")
+        if type(quote.metadata) is not dict:
+            raise TypeError("metadata must be an exact dict")
         metadata = _snapshot_json_value(quote.metadata, "metadata")
-        if not isinstance(metadata, dict):
-            raise TypeError("metadata must be dict")
+        if type(metadata) is not dict:
+            raise TypeError("metadata must be an exact dict")
         return MarketEvent(
             event_id=_scoped_identity(source_id, quote.provider_event_id),
             market_id=_scoped_identity(source_id, quote.provider_market_id),

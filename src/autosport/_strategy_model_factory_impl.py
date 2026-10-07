@@ -72,9 +72,11 @@ def _text(value: object, name: str) -> str:
 
 
 def _sha256(value: object, name: str) -> str:
-    text = _text(value, name).lower()
+    text = _text(value, name)
     if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
-        raise ValueError(f"{name} must be a SHA-256 hex digest")
+        raise ValueError(
+            f"{name} must be a canonical lowercase SHA-256 hex digest"
+        )
     return text
 
 

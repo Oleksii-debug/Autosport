@@ -16,7 +16,12 @@ from .causal_collector import (
     SyncState,
 )
 from .collector_service import HeadlessCollectorService
-from .event_lifecycle import ContinuousEventLifecycle, EventLifecycleRecord, EventPhase
+from .event_lifecycle import (
+    ContinuousEventLifecycle,
+    EventLifecycleRecord,
+    EventPhase,
+    canonical_event_identity_aliases,
+)
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .market_mirror_runtime import (
@@ -940,9 +945,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         book: PaperBook,
         event_identity: str,
     ) -> set[str]:
-        parts = {event_identity}
-        if ":" in event_identity:
-            parts.add(event_identity.split(":", 1)[1])
+        try:
+            parts = set(canonical_event_identity_aliases(event_identity))
+        except ValueError as exc:
+            raise ContinuousSessionError(
+                "settlement evidence event identity is not canonical"
+            ) from exc
         return {
             leg.quote_key
             for ticket in book.tickets.values()

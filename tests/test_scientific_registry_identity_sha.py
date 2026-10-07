@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from autosport.scientific_registry import (
+    DatasetSnapshot,
     ModelVersion,
     ScientificRegistry,
     StrategyVersion,
@@ -103,3 +104,62 @@ def test_valid_version_sha_payloads_remain_byte_spelling_stable() -> None:
     assert strategy.to_payload()["source_sha256"] == SHA_A
     assert strategy.to_payload()["environment_sha256"] == SHA_B
     assert strategy.to_payload()["config_sha256"] == SHA_C
+
+
+def _dataset(cls=DatasetSnapshot, **overrides: object) -> DatasetSnapshot:
+    values: dict[str, object] = {
+        "dataset_snapshot_id": "dataset-v1",
+        "manifest_sha256": SHA_A,
+        "source_identity": "source-v1",
+        "license_identity": "license-v1",
+        "causal_cutoff": T0,
+        "available_at_utc": T0,
+        "outcome_reveal_after": None,
+    }
+    values.update(overrides)
+    return cls(**values)  # type: ignore[arg-type]
+
+
+class _DatasetSnapshotSubclass(DatasetSnapshot):
+    pass
+
+
+def test_registry_append_rejects_scientific_record_subclass_before_payload_dispatch(
+    tmp_path,
+) -> None:
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+
+    with pytest.raises(ValueError, match="exact canonical record type"):
+        registry.append(_dataset(_DatasetSnapshotSubclass))
+
+
+def test_registry_append_revalidates_tampered_dataset_snapshot_identity(
+    tmp_path,
+) -> None:
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+    record = _dataset()
+    object.__setattr__(record, "manifest_sha256", "A" * 64)
+
+    with pytest.raises(ValueError, match="canonical lowercase SHA-256"):
+        registry.append(record)
+
+    assert registry.get("DatasetSnapshot", "dataset-v1") is None
+
+
+@pytest.mark.parametrize(
+    ("factory", "field_name", "value"),
+    (
+        (_model, "model_version_id", "model-v1\nforged"),
+        (_model, "dataset_snapshot_id", "dataset-v1\tforged"),
+        (_strategy, "strategy_version_id", "strategy-v1\rforged"),
+        (_strategy, "canonical_strategy_id", "canonical-strategy\x7fforged"),
+        (_dataset, "source_identity", "source-v1\nforged"),
+    ),
+)
+def test_scientific_registry_text_identity_rejects_control_aliases(factory, field_name: str, value: str) -> None:
+    with pytest.raises(ValueError, match="canonical string"):
+        factory(**{field_name: value})

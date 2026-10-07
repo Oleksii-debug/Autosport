@@ -43,7 +43,12 @@ _RECORD_TYPES = frozenset(
 
 
 def _text(value: object, name: str) -> str:
-    if type(value) is not str or not value or value != value.strip():
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
         raise ValueError(f"{name} must be a non-empty canonical string")
     value.encode("utf-8")
     return value
@@ -892,6 +897,25 @@ class RegistryEntry:
         return value if isinstance(value, str) else None
 
 
+_LOCAL_SCIENTIFIC_RECORD_TYPES = {
+    "ResearchQuestion": ResearchQuestion,
+    "Hypothesis": Hypothesis,
+    "ResearchProtocol": ResearchProtocol,
+    "DatasetSnapshot": DatasetSnapshot,
+    "FeatureSet": FeatureSet,
+    "ModelVersion": ModelVersion,
+    "StrategyVersion": StrategyVersion,
+    "EvaluationBundle": EvaluationBundleRef,
+    "Experiment": ExperimentRecord,
+    "PromotionDecision": PromotionDecision,
+    "PromotionEvidence": PromotionEvidence,
+    "Postmortem": Postmortem,
+    "CounterfactualQualification": CounterfactualQualification,
+    "CounterfactualSourceEvidence": CounterfactualSourceEvidence,
+}
+_LOCAL_SCIENTIFIC_RECORD_CLASSES = tuple(_LOCAL_SCIENTIFIC_RECORD_TYPES.values())
+
+
 class ScientificRegistryError(RuntimeError):
     pass
 
@@ -988,16 +1012,26 @@ class ScientificRegistry:
 
     @staticmethod
     def _entry(record: ScientificRecord) -> dict[str, Any]:
-        # Model/strategy version identities are authority-bearing Section-2
-        # records. Re-run their exact constructor contract at the serialization
-        # boundary so post-construction mutation cannot be silently normalized
-        # by to_payload().
-        if type(record) is ModelVersion:
-            ModelVersion.__post_init__(record)
-        elif type(record) is StrategyVersion:
-            StrategyVersion.__post_init__(record)
+        # Local canonical scientific records are durable identity authorities.
+        # Re-run their exact constructor contract before any property/payload
+        # dispatch so subclasses and post-construction mutation cannot alter or
+        # normalize the persisted identity.
+        for record_class in _LOCAL_SCIENTIFIC_RECORD_CLASSES:
+            if isinstance(record, record_class):
+                if type(record) is not record_class:
+                    raise ValueError(
+                        "scientific record must use an exact canonical record type"
+                    )
+                record_class.__post_init__(record)
+                break
 
-        if record.record_type not in _RECORD_TYPES:
+        record_type = record.record_type
+        expected_class = _LOCAL_SCIENTIFIC_RECORD_TYPES.get(record_type)
+        if expected_class is not None and type(record) is not expected_class:
+            raise ValueError(
+                "scientific record_type must use its canonical record class"
+            )
+        if record_type not in _RECORD_TYPES:
             raise ValueError("unsupported scientific record type")
         record_id = _text(record.record_id, "record_id")
         available_at = _iso(record.available_at, "available_at")

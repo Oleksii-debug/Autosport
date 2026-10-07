@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 from dataclasses import asdict, dataclass
@@ -40,8 +42,17 @@ class EvidenceEligibility(StrEnum):
 
 
 def _text(value: object, name: str) -> str:
-    if type(value) is not str or not value or value.strip() != value:
-        raise ValueError(f"{name} must be a non-empty trimmed string")
+    if (
+        type(value) is not str
+        or not value
+        or value.strip() != value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{name} must be a non-empty trimmed canonical string")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
     return value
 
 
@@ -107,6 +118,53 @@ def canonical_event_identity(*, source_id: str, sport: str, event_id: str) -> st
         _source_identity_component(source_id),
         _provider_event_identity_component(event_id),
     )
+
+
+def canonical_event_identity_aliases(identity: object) -> tuple[str, ...]:
+    """Resolve one canonical lifecycle identity to its bounded deployed aliases.
+
+    Schema-v2 lifecycle identity is the authority.  The provider-scoped market
+    event identity and provider-local event id are retained only as explicit
+    migration aliases for downstream TicketLeg/readback surfaces that predate
+    schema-v2.  Re-encoding must reproduce the supplied identity exactly.
+    """
+
+    raw = _text(identity, "identity")
+    prefix = "sport-v2-"
+    if not raw.startswith(prefix):
+        if ":" not in raw:
+            return (raw,)
+        _source, local_event_id = raw.rsplit(":", 1)
+        _provider_event_identity_component(local_event_id)
+        return (raw, local_event_id)
+
+    token = raw[len(prefix) :]
+    if not token:
+        raise ValueError("canonical event identity token is empty")
+    padding = "=" * (-len(token) % 4)
+    try:
+        decoded = base64.b64decode(
+            token + padding,
+            altchars=b"-_",
+            validate=True,
+        ).decode("utf-8")
+        payload = json.loads(decoded)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("canonical event identity encoding is invalid") from exc
+
+    if type(payload) is not list or len(payload) != 4 or payload[0] != "catalog-event":
+        raise ValueError("canonical event identity payload is invalid")
+    _kind, sport, source_id, event_id = payload
+    canonical = canonical_event_identity(
+        source_id=_source_identity_component(source_id),
+        sport=_canonical_sport_value(sport),
+        event_id=_provider_event_identity_component(event_id),
+    )
+    if canonical != raw:
+        raise ValueError("canonical event identity is not in canonical encoded form")
+
+    scoped = _legacy_event_identity(source_id=source_id, event_id=event_id)
+    return (canonical, scoped, event_id)
 
 
 @dataclass(frozen=True, slots=True)

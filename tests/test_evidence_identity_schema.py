@@ -29,6 +29,9 @@ class EvidenceIdentitySchemaTests(unittest.TestCase):
         cases = (
             {"evidence_id": " evidence-1"},
             {"evidence_id": "evidence-1 "},
+            {"evidence_id": "evidence-1\nforged"},
+            {"evidence_id": "evidence-1\tforged"},
+            {"evidence_id": "evidence-1\x7fforged"},
         )
         for overrides in cases:
             with self.subTest(overrides=overrides):
@@ -38,7 +41,10 @@ class EvidenceIdentitySchemaTests(unittest.TestCase):
         for field_name, value in (
             ("source", ""),
             ("source", " provider:test"),
+            ("source", "provider:test\nforged"),
             ("kind", "research\x00forged"),
+            ("kind", "research\tforged"),
+            ("kind", "research\x7fforged"),
             ("source_hash", " a" * 32),
         ):
             kwargs = {

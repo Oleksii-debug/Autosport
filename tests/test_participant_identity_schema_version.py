@@ -117,3 +117,186 @@ def test_unknown_future_registry_version_fails_closed_without_rewrite(
         ParticipantIdentityRegistry(path)
 
     assert path.read_bytes() == future
+
+
+def test_registry_mutation_ingress_rejects_record_subclasses(tmp_path: Path) -> None:
+    from autosport.participant_identity import (
+        EntityLineage,
+        LineageRelation,
+        RosterMembership,
+    )
+
+    class EntityIdentitySubclass(EntityIdentity):
+        pass
+
+    class AliasRecordSubclass(AliasRecord):
+        pass
+
+    class RosterMembershipSubclass(RosterMembership):
+        pass
+
+    class EntityLineageSubclass(EntityLineage):
+        pass
+
+    path = tmp_path / "identity.json"
+    registry = ParticipantIdentityRegistry.initialize_pristine(path)
+
+    with pytest.raises(TypeError, match="entity must be EntityIdentity"):
+        registry.add_entity(
+            EntityIdentitySubclass(
+                entity_id="team:subclass",
+                kind=EntityKind.TEAM,
+                source_reference="canonical:team:subclass",
+                evidence_sha256=SHA,
+                first_known_at=T0,
+                available_at=T0,
+            )
+        )
+
+    team_a = _identity("team:a", EntityKind.TEAM)
+    team_b = _identity("team:b", EntityKind.TEAM)
+    registry.add_entity(team_a)
+    registry.add_entity(team_b)
+
+    with pytest.raises(TypeError, match="alias must be AliasRecord"):
+        registry.add_alias(
+            AliasRecordSubclass(
+                source_id="provider-a",
+                alias="team-a",
+                entity_id=team_a.entity_id,
+                valid_from=T0,
+                valid_until=None,
+                available_at=T0,
+                evidence_sha256=SHA,
+                recorded_at=T0,
+            )
+        )
+
+    with pytest.raises(TypeError, match="membership must be RosterMembership"):
+        registry.add_roster_membership(
+            RosterMembershipSubclass(
+                event_id="event-1",
+                source_id="provider-a",
+                entity_id=team_a.entity_id,
+                member_from=T0,
+                member_until=None,
+                available_at=T0,
+                evidence_sha256=SHA,
+            )
+        )
+
+    with pytest.raises(TypeError, match="lineage must be EntityLineage"):
+        registry.add_lineage(
+            EntityLineageSubclass(
+                predecessor_entity_id=team_a.entity_id,
+                successor_entity_id=team_b.entity_id,
+                relation=LineageRelation.SUPERSEDES,
+                effective_from=T0,
+                available_at=T0,
+                recorded_at=T0,
+                evidence_sha256=SHA,
+            )
+        )
+
+
+def test_registry_mutation_ingress_revalidates_tampered_exact_records(
+    tmp_path: Path,
+) -> None:
+    from autosport.participant_identity import (
+        EntityLineage,
+        LineageRelation,
+        RosterMembership,
+    )
+
+    path = tmp_path / "identity.json"
+    registry = ParticipantIdentityRegistry.initialize_pristine(path)
+    team_a = _identity("team:a", EntityKind.TEAM)
+    team_b = _identity("team:b", EntityKind.TEAM)
+    registry.add_entity(team_a)
+    registry.add_entity(team_b)
+
+    bad_entity = _identity("team:tampered", EntityKind.TEAM)
+    object.__setattr__(bad_entity, "entity_id", " team:tampered")
+    with pytest.raises(ParticipantIdentityError, match="canonical string"):
+        registry.add_entity(bad_entity)
+
+    bad_alias = AliasRecord(
+        source_id="provider-a",
+        alias="team-a",
+        entity_id=team_a.entity_id,
+        valid_from=T0,
+        valid_until=None,
+        available_at=T0,
+        evidence_sha256=SHA,
+        recorded_at=T0,
+    )
+    object.__setattr__(bad_alias, "alias", " team-a")
+    with pytest.raises(ParticipantIdentityError, match="canonical string"):
+        registry.add_alias(bad_alias)
+
+    bad_membership = RosterMembership(
+        event_id="event-1",
+        source_id="provider-a",
+        entity_id=team_a.entity_id,
+        member_from=T0,
+        member_until=None,
+        available_at=T0,
+        evidence_sha256=SHA,
+    )
+    object.__setattr__(bad_membership, "source_id", " provider-a")
+    with pytest.raises(ParticipantIdentityError, match="canonical string"):
+        registry.add_roster_membership(bad_membership)
+
+    bad_lineage = EntityLineage(
+        predecessor_entity_id=team_a.entity_id,
+        successor_entity_id=team_b.entity_id,
+        relation=LineageRelation.SUPERSEDES,
+        effective_from=T0,
+        available_at=T0,
+        recorded_at=T0,
+        evidence_sha256=SHA,
+    )
+    object.__setattr__(bad_lineage, "evidence_sha256", "A" * 64)
+    with pytest.raises(ParticipantIdentityError, match="SHA-256 hex"):
+        registry.add_lineage(bad_lineage)
+
+
+@pytest.mark.parametrize(
+    "entity_id",
+    (
+        "team:one\nforged",
+        "team:one\tforged",
+        "team:one\rforged",
+        "team:one\x7fforged",
+    ),
+)
+def test_participant_identity_rejects_non_nul_control_aliases(entity_id: str) -> None:
+    with pytest.raises(ParticipantIdentityError, match="canonical string"):
+        _identity(entity_id, EntityKind.TEAM)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("source_id", "provider-a\nforged"),
+        ("alias", "team-a\tforged"),
+        ("entity_id", "team:a\x7fforged"),
+    ),
+)
+def test_alias_identity_rejects_non_nul_control_aliases(
+    field_name: str,
+    value: str,
+) -> None:
+    kwargs: dict[str, object] = {
+        "source_id": "provider-a",
+        "alias": "team-a",
+        "entity_id": "team:a",
+        "valid_from": T0,
+        "valid_until": None,
+        "available_at": T0,
+        "evidence_sha256": SHA,
+        "recorded_at": T0,
+    }
+    kwargs[field_name] = value
+    with pytest.raises(ParticipantIdentityError, match="canonical string"):
+        AliasRecord(**kwargs)  # type: ignore[arg-type]

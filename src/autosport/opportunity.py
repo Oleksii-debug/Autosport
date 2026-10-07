@@ -43,6 +43,10 @@ def _canonical_text(value: object, field_name: str) -> str:
         )
     if "\x00" in value:
         raise OpportunityContractError(f"{field_name} must not contain NUL")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise OpportunityContractError(
+            f"{field_name} must not contain control characters"
+        )
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -181,6 +185,8 @@ def _sorted_unique_evidence(
         raise OpportunityContractError(
             f"{field_name} must contain only EvidenceRef values"
         )
+    for item in refs:
+        EvidenceRef.__post_init__(item)
     ordered = tuple(sorted(refs))
     if len(set(ordered)) != len(ordered):
         raise OpportunityContractError(
@@ -574,6 +580,7 @@ class ForecastRef:
                 raise OpportunityContractError(
                     "forecast predictive_eligibility must be typed evidence"
                 )
+            PredictiveEligibilityEvidence.__post_init__(self.predictive_eligibility)
             if self.model_id is None:
                 raise OpportunityContractError(
                     "predictive eligibility cannot bind a legacy forecast reference"
@@ -838,6 +845,8 @@ class Opportunity:
             raise OpportunityContractError(
                 "opportunity quotes must be QuoteRef values"
             )
+        for item in quotes:
+            QuoteRef.__post_init__(item)
         quotes = tuple(sorted(quotes, key=lambda item: item.identity_key))
         identities = [item.identity_key for item in quotes]
         if len(set(identities)) != len(identities):
@@ -858,6 +867,8 @@ class Opportunity:
             raise OpportunityContractError(
                 "opportunity forecasts must be ForecastRef values"
             )
+        for item in forecasts:
+            ForecastRef.__post_init__(item)
         forecasts = tuple(
             sorted(
                 forecasts,
@@ -1045,6 +1056,17 @@ class OpportunitySet:
             raise OpportunityContractError(
                 "opportunity set must contain only Opportunity values"
             )
+        for item in values:
+            try:
+                canonical = Opportunity.from_dict(item.to_dict())
+            except (TypeError, ValueError) as exc:
+                raise OpportunityContractError(
+                    "opportunity set contains a non-canonical Opportunity"
+                ) from exc
+            if canonical != item:
+                raise OpportunityContractError(
+                    "opportunity set member does not match canonical Opportunity state"
+                )
         ordered = tuple(
             sorted(values, key=lambda item: item.opportunity_id)
         )
@@ -1171,6 +1193,16 @@ class PortfolioPlan:
             raise OpportunityContractError(
                 "opportunity_set must be an OpportunitySet"
             )
+        try:
+            canonical_set = OpportunitySet.from_dict(self.opportunity_set.to_dict())
+        except (TypeError, ValueError) as exc:
+            raise OpportunityContractError(
+                "opportunity_set is not canonical at plan use boundary"
+            ) from exc
+        if canonical_set != self.opportunity_set:
+            raise OpportunityContractError(
+                "opportunity_set does not match canonical state"
+            )
 
         if type(self.allocations) is not tuple:
             raise OpportunityContractError("allocations must be a tuple")
@@ -1181,6 +1213,8 @@ class PortfolioPlan:
             raise OpportunityContractError(
                 "allocations must contain only PlanAllocation values"
             )
+        for item in allocations:
+            PlanAllocation.__post_init__(item)
         allocations = tuple(
             sorted(allocations, key=lambda item: item.opportunity_id)
         )

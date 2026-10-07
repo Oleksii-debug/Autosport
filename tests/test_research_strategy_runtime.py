@@ -173,6 +173,44 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
             experiment_strategy_id(RESEARCH_STRATEGY_ID, second),
         )
 
+    def test_forecast_market_semantics_survives_plan_parse(self):
+        raw = self._plan_dict()
+        raw["decisions"][0]["forecasts"][0]["market_semantics_id"] = (
+            "table_tennis:winner:v1"
+        )
+
+        plan = ResearchStrategyPlan.from_dict(raw)
+
+        self.assertEqual(
+            plan.instructions[0].forecasts[0].market_semantics_id,
+            "table_tennis:winner:v1",
+        )
+
+    def test_research_replay_rejects_forecast_market_semantics_mismatch(self):
+        raw = self._plan_dict()
+        raw["decisions"][0]["forecasts"][0]["market_semantics_id"] = (
+            "table_tennis:winner:v1"
+        )
+        plan = ResearchStrategyPlan.from_dict(raw)
+        dataset = load_dataset(Path("examples/tt_demo"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = AutosportSession(
+                tmp,
+                "1000",
+                strategy_id=RESEARCH_STRATEGY_ID,
+                research_plan=plan,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ForecastRecord market semantics do not match replay state",
+                ):
+                    session.run_dataset(dataset)
+                self.assertFalse((Path(tmp) / "paper_book.json").exists())
+            finally:
+                session.close()
+
     def test_research_strategy_requires_plan_before_runtime_state_opens(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"

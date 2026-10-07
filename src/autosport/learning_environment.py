@@ -626,8 +626,10 @@ class CausalLearningEnvironment:
         pending = self._pending.get(action_id)
         if pending is None:
             raise LearningEnvironmentError("unknown or already resolved action identity")
-        if not isinstance(outcome, Outcome) or not isinstance(reward, RewardEvidence):
-            raise TypeError("outcome and reward must be canonical environment evidence")
+        if type(outcome) is not Outcome or type(reward) is not RewardEvidence:
+            raise TypeError(
+                "outcome and reward must be exact canonical environment evidence"
+            )
         action = pending.action
         if outcome.environment_id != self.environment_id or reward.environment_id != self.environment_id:
             raise LearningEnvironmentError("resolution evidence belongs to another environment")

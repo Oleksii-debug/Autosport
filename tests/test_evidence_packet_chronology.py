@@ -128,7 +128,7 @@ def test_research_packet_rejects_one_future_member_in_mixed_evidence() -> None:
     known = _item("2026-10-01T11:59:59Z", "known")
     future = _item("2026-10-01T12:00:00.000001Z", "future")
 
-    with pytest.raises(ValueError, match="after generated_at"):
+    with pytest.raises(ValueError, match="unavailable at generated_at"):
         ResearchPacket(
             event_id="event-1",
             generated_at="2026-10-01T12:00:00Z",

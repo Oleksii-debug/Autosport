@@ -173,8 +173,8 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
         leg = TicketLeg("event", "winner", "alice", Decimal("2"))
         ticket = book.open_ticket([leg], "10")
         invalid_keys = (
-            "event\\x00|winner|alice",
-            "event|winner|\\ud800",
+            "event" + chr(0) + "|winner|alice",
+            "event|winner|" + chr(0xD800),
         )
 
         for invalid_key in invalid_keys:

@@ -45,6 +45,17 @@ def _validate_json_text(value: str) -> None:
         raise ValueError("research strategy plan contains non-UTF-8 JSON text") from exc
 
 
+def _exact_plan_text(value: object, *, field: str) -> str:
+    """Reject raw JSON type drift before identity/time/hash validation can be laundered."""
+
+    if type(value) is not str or not value or value.strip() != value:
+        raise ValueError(
+            f"research {field} must be exact non-empty canonical text"
+        )
+    _validate_json_text(value)
+    return value
+
+
 def _validate_strict_json_domain(raw: Any) -> None:
     """Fail closed on decoded values that cannot represent bounded strict JSON."""
 
@@ -164,8 +175,9 @@ class ResearchReplayInstruction:
     risk_of_ruin_evidence: RiskOfRuinEvidence | None = None
 
     def __post_init__(self) -> None:
-        if not self.decision_id or not self.trigger_quote_key:
-            raise ValueError("research decision identity fields are required")
+        _exact_plan_text(self.decision_id, field="decision_id")
+        _exact_plan_text(self.trigger_quote_key, field="trigger_quote_key")
+        _exact_plan_text(self.decision_ts, field="decision_ts")
         parse_iso_timestamp(self.decision_ts)
         amount = Decimal(str(self.stake))
         if amount <= 0:
@@ -546,20 +558,19 @@ def _validate_scenario_space_binding(
 
 
 def _canonical_identity_field(raw: dict[str, Any], field_name: str) -> str:
-    value = raw.get(field_name)
-    if not isinstance(value, str) or not value or value.strip() != value:
-        raise ValueError(
-            f"research candidate {field_name} must be a non-empty canonical string"
-        )
-    return value
+    return _exact_plan_text(
+        raw.get(field_name),
+        field=f"candidate {field_name}",
+    )
 
 
 def _candidate_leg_from_dict(raw: Any) -> CandidateLeg:
     if not isinstance(raw, dict):
         raise ValueError("research candidate leg must be an object")
-    quote_key = raw.get("quote_key")
-    if not isinstance(quote_key, str) or not quote_key or quote_key.strip() != quote_key:
-        raise ValueError("research candidate quote_key must be a non-empty canonical string")
+    quote_key = _exact_plan_text(
+        raw.get("quote_key"),
+        field="candidate quote_key",
+    )
 
     present = [field in raw for field in ("event_id", "market_id", "selection_id")]
     if any(present) and not all(present):
@@ -628,16 +639,30 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
         outcomes_raw = group_raw.get("outcomes")
         if not isinstance(outcomes_raw, list):
             raise ValueError("research scenario group outcomes must be a list")
-        outcomes = tuple(
-            ScenarioOutcome(
-                str(outcome["quote_key"]),
-                Decimal(str(outcome["probability"]))
-                if outcome.get("probability") is not None
-                else None,
+        parsed_outcomes: list[ScenarioOutcome] = []
+        for outcome in outcomes_raw:
+            if type(outcome) is not dict:
+                raise ValueError("research scenario outcome must be an object")
+            parsed_outcomes.append(
+                ScenarioOutcome(
+                    _exact_plan_text(
+                        outcome["quote_key"],
+                        field="scenario outcome quote_key",
+                    ),
+                    Decimal(str(outcome["probability"]))
+                    if outcome.get("probability") is not None
+                    else None,
+                )
             )
-            for outcome in outcomes_raw
+        groups.append(
+            ScenarioGroup(
+                _exact_plan_text(
+                    group_raw["group_id"],
+                    field="scenario group_id",
+                ),
+                tuple(parsed_outcomes),
+            )
         )
-        groups.append(ScenarioGroup(str(group_raw["group_id"]), outcomes))
 
     forecasts_raw = raw.get("forecasts")
     if not isinstance(forecasts_raw, list) or not forecasts_raw:
@@ -655,9 +680,12 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
         else _risk_of_ruin_evidence_from_dict(risk_of_ruin_raw)
     )
     return ResearchReplayInstruction(
-        decision_id=str(raw["decision_id"]),
-        trigger_quote_key=str(raw["trigger_quote_key"]),
-        decision_ts=str(raw["decision_ts"]),
+        decision_id=_exact_plan_text(raw["decision_id"], field="decision_id"),
+        trigger_quote_key=_exact_plan_text(
+            raw.get("trigger_quote_key"),
+            field="trigger_quote_key",
+        ),
+        decision_ts=_exact_plan_text(raw["decision_ts"], field="decision_ts"),
         stake=Decimal(str(raw["stake"])),
         candidate=candidate,
         groups=tuple(groups),
@@ -672,16 +700,40 @@ def _risk_of_ruin_evidence_from_dict(raw: Any) -> RiskOfRuinEvidence:
         raise ValueError("research risk_of_ruin_evidence must be an object")
     try:
         return RiskOfRuinEvidence(
-            evidence_id=str(raw["evidence_id"]),
-            research_protocol_sha256=str(raw["research_protocol_sha256"]),
-            reproducibility_bundle_sha256=str(raw["reproducibility_bundle_sha256"]),
-            producer_identity=str(raw["producer_identity"]),
-            causal_cutoff=str(raw["causal_cutoff"]),
-            evaluated_at=str(raw["evaluated_at"]),
-            bankroll_id=str(raw["bankroll_id"]),
-            currency=str(raw["currency"]),
-            base_portfolio_sha256=str(raw["base_portfolio_sha256"]),
-            candidate_sha256=str(raw["candidate_sha256"]),
+            evidence_id=_exact_plan_text(raw["evidence_id"], field="risk evidence_id"),
+            research_protocol_sha256=_exact_plan_text(
+                raw.get("research_protocol_sha256"),
+                field="risk research_protocol_sha256",
+            ),
+            reproducibility_bundle_sha256=_exact_plan_text(
+                raw.get("reproducibility_bundle_sha256"),
+                field="risk reproducibility_bundle_sha256",
+            ),
+            producer_identity=_exact_plan_text(
+                raw.get("producer_identity"),
+                field="risk producer_identity",
+            ),
+            causal_cutoff=_exact_plan_text(
+                raw.get("causal_cutoff"),
+                field="risk causal_cutoff",
+            ),
+            evaluated_at=_exact_plan_text(
+                raw.get("evaluated_at"),
+                field="risk evaluated_at",
+            ),
+            bankroll_id=_exact_plan_text(
+                raw.get("bankroll_id"),
+                field="risk bankroll_id",
+            ),
+            currency=_exact_plan_text(raw["currency"], field="risk currency"),
+            base_portfolio_sha256=_exact_plan_text(
+                raw.get("base_portfolio_sha256"),
+                field="risk base_portfolio_sha256",
+            ),
+            candidate_sha256=_exact_plan_text(
+                raw.get("candidate_sha256"),
+                field="risk candidate_sha256",
+            ),
             evaluated_stake=Decimal(str(raw["evaluated_stake"])),
             upper_bound=Decimal(str(raw["upper_bound"])),
         )
@@ -698,26 +750,47 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
     evidence_hashes_raw = raw.get("evidence_hashes", [])
     if not isinstance(evidence_hashes_raw, list):
         raise ValueError("ForecastRecord evidence_hashes must be a JSON array")
-    if any(not isinstance(item, str) for item in evidence_hashes_raw):
-        raise ValueError("ForecastRecord evidence_hashes must contain strings")
+    if any(type(item) is not str for item in evidence_hashes_raw):
+        raise ValueError("ForecastRecord evidence_hashes must contain exact strings")
     return ForecastRecord(
-        quote_key=str(raw["quote_key"]),
+        quote_key=_exact_plan_text(raw["quote_key"], field="forecast quote_key"),
         probability=Decimal(str(raw["probability"])),
-        model_id=str(raw["model_id"]),
-        model_version=str(raw["model_version"]),
-        strategy_version=str(raw["strategy_version"]),
-        model_training_cutoff_ts=str(raw["model_training_cutoff_ts"]),
-        input_cutoff_ts=str(raw["input_cutoff_ts"]),
-        generated_at=str(raw["generated_at"]),
+        model_id=_exact_plan_text(raw["model_id"], field="forecast model_id"),
+        model_version=_exact_plan_text(
+            raw.get("model_version"),
+            field="forecast model_version",
+        ),
+        strategy_version=_exact_plan_text(
+            raw.get("strategy_version"),
+            field="forecast strategy_version",
+        ),
+        model_training_cutoff_ts=_exact_plan_text(
+            raw.get("model_training_cutoff_ts"),
+            field="forecast model_training_cutoff_ts",
+        ),
+        input_cutoff_ts=_exact_plan_text(
+            raw.get("input_cutoff_ts"),
+            field="forecast input_cutoff_ts",
+        ),
+        generated_at=_exact_plan_text(
+            raw.get("generated_at"),
+            field="forecast generated_at",
+        ),
         uncertainty=Decimal(str(raw.get("uncertainty", "0"))),
         evidence_hashes=tuple(evidence_hashes_raw),
         market_snapshot_hash=(
-            raw["market_snapshot_hash"]
+            _exact_plan_text(
+                raw.get("market_snapshot_hash"),
+                field="forecast market_snapshot_hash",
+            )
             if raw.get("market_snapshot_hash") is not None
             else None
         ),
         provenance=dict(raw.get("provenance", {})),
-        forecast_id=str(raw["forecast_id"]),
+        forecast_id=_exact_plan_text(
+            raw.get("forecast_id"),
+            field="forecast forecast_id",
+        ),
     )
 
 
@@ -728,23 +801,29 @@ def _evidence_from_dict(raw: Any) -> ResearchEvidence:
     if not isinstance(quality_flags_raw, list):
         raise ValueError("ResearchEvidence quality_flags must be a JSON array")
     if any(
-        not isinstance(item, str) or not item.strip() or item != item.strip()
+        type(item) is not str or not item.strip() or item != item.strip()
         for item in quality_flags_raw
     ):
         raise ValueError(
             "ResearchEvidence quality_flags must contain non-empty canonical strings"
         )
     return ResearchEvidence(
-        evidence_id=str(raw["evidence_id"]),
-        quote_key=str(raw["quote_key"]),
-        source_id=str(raw["source_id"]),
-        observed_at=str(raw["observed_at"]),
-        available_at=str(raw["available_at"]),
+        evidence_id=_exact_plan_text(raw["evidence_id"], field="evidence evidence_id"),
+        quote_key=_exact_plan_text(raw["quote_key"], field="evidence quote_key"),
+        source_id=_exact_plan_text(raw["source_id"], field="evidence source_id"),
+        observed_at=_exact_plan_text(raw["observed_at"], field="evidence observed_at"),
+        available_at=_exact_plan_text(raw["available_at"], field="evidence available_at"),
         decimal_odds=Decimal(str(raw["decimal_odds"])),
-        content_sha256=str(raw["content_sha256"]),
+        content_sha256=_exact_plan_text(
+            raw.get("content_sha256"),
+            field="evidence content_sha256",
+        ),
         quality_flags=tuple(quality_flags_raw),
         market_snapshot_hash=(
-            str(raw["market_snapshot_hash"])
+            _exact_plan_text(
+                raw.get("market_snapshot_hash"),
+                field="evidence market_snapshot_hash",
+            )
             if raw.get("market_snapshot_hash") is not None
             else None
         ),

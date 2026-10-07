@@ -577,15 +577,14 @@ class JsonlDecisionLedger:
             )
         material_action_id = payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
         if material_action_id is not None:
+            # material_action_id is a cross-restart idempotence key, not proof of
+            # EconomicGoal authority. Legacy/no-goal paper actions legitimately
+            # carry it as GENERAL records. Economic lookups separately require
+            # ECONOMIC_DECISION_KIND plus verified goal/risk provenance.
             cls._require_material_action_id(
                 material_action_id,
                 location=location,
             )
-            if record.get("decision_kind") != ECONOMIC_DECISION_KIND:
-                raise DecisionLedgerIntegrityError(
-                    "Decision Ledger material_action_id is attached to a "
-                    f"non-economic decision{location}"
-                )
         if (
             "decision_kind" in record
             and ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY not in payload

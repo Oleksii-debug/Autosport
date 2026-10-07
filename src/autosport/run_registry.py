@@ -18,6 +18,7 @@ from .workspace_lock import (
 from .outcome_trust import (
     OutcomeLineageBinding,
     OutcomeLineageTrustError,
+    TrustedOutcomeRevision,
     assert_compatible_outcome_lineages,
     outcome_lineage_binding_from_payload,
     outcome_lineage_payload,
@@ -88,6 +89,48 @@ def _require_nonempty_string(name: str, value: object) -> str:
     if type(value) is not str or not value:
         raise ValueError(f"{name} must be an exact non-empty string")
     return value
+
+
+def _canonical_outcome_lineage_binding(
+    binding: object,
+    *,
+    context: str,
+) -> OutcomeLineageBinding:
+    if type(binding) is not OutcomeLineageBinding:
+        raise ValueError(f"{context} must be an exact OutcomeLineageBinding")
+    _require_nonempty_string(f"{context}.source_identity", binding.source_identity)
+    _require_nonempty_string(f"{context}.record_id", binding.record_id)
+    _require_nonempty_string(f"{context}.root_revision_id", binding.root_revision_id)
+    _require_canonical_sha256(
+        f"{context}.root_record_sha256",
+        binding.root_record_sha256,
+    )
+    revisions = binding.revisions
+    if type(revisions) is not tuple or not revisions:
+        raise ValueError(
+            f"{context}.revisions must be a non-empty exact tuple"
+        )
+    for index, revision in enumerate(revisions, start=1):
+        if type(revision) is not TrustedOutcomeRevision:
+            raise ValueError(
+                f"{context}.revisions[{index}] must be an exact TrustedOutcomeRevision"
+            )
+        if type(revision.revision) is not int or revision.revision <= 0:
+            raise ValueError(
+                f"{context}.revisions[{index}].revision must be an exact positive integer"
+            )
+        _require_nonempty_string(
+            f"{context}.revisions[{index}].revision_id",
+            revision.revision_id,
+        )
+        _require_canonical_sha256(
+            f"{context}.revisions[{index}].record_sha256",
+            revision.record_sha256,
+        )
+    return outcome_lineage_binding_from_payload(
+        outcome_lineage_payload(binding),
+        context=context,
+    )
 
 
 def _portable_basename(value: str) -> str:
@@ -943,9 +986,11 @@ class RunRegistry:
 
     def assert_outcome_lineage_compatible(self, binding: OutcomeLineageBinding) -> None:
         """Reject a restart/fork before any new economic base is materialized."""
-        if not isinstance(binding, OutcomeLineageBinding):
-            raise ValueError("outcome lineage binding must be an OutcomeLineageBinding")
-        self._assert_outcome_lineage_compatible_state(self._read(), binding)
+        canonical = _canonical_outcome_lineage_binding(
+            binding,
+            context="outcome lineage binding",
+        )
+        self._assert_outcome_lineage_compatible_state(self._read(), canonical)
 
     def begin(
         self,
@@ -970,8 +1015,11 @@ class RunRegistry:
         if base_paper_book_sha256 is not None:
             _require_canonical_sha256("base_paper_book_sha256", base_paper_book_sha256)
             _require_canonical_sha256("base_decision_ledger_sha256", base_decision_ledger_sha256)
-        if outcome_lineage is not None and not isinstance(outcome_lineage, OutcomeLineageBinding):
-            raise ValueError("outcome_lineage must be an OutcomeLineageBinding or null")
+        if outcome_lineage is not None:
+            outcome_lineage = _canonical_outcome_lineage_binding(
+                outcome_lineage,
+                context="outcome_lineage",
+            )
 
         state = self._read()
         if outcome_lineage is not None:

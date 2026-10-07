@@ -1652,7 +1652,7 @@ class VOCEvaluationStore:
         resolved = resolver.resolve_decision_context(expected, as_of=as_of)
         if resolved is None:
             raise VOCEvaluationError("canonical current VOC decision context is missing")
-        if not isinstance(resolved, Mapping) or set(resolved) != _VOC_CURRENT_CONTEXT_FIELDS:
+        if type(resolved) is not dict or set(resolved) != _VOC_CURRENT_CONTEXT_FIELDS:
             raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
         return {
             field: _text(f"canonical current VOC context {field}", resolved.get(field))

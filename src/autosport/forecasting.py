@@ -48,6 +48,18 @@ def _canonical_sha256(value: object, *, field_name: str) -> str:
     return value
 
 
+def _canonical_identity_text(value: object, *, field_name: str) -> str:
+    if type(value) is not str or not value or value.strip() != value:
+        raise ValueError(f"{field_name} must be canonical non-empty identity text")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{field_name} must not contain control characters")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be valid UTF-8 identity text") from exc
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ForecastRecord:
     """Immutable pre-outcome forecast with explicit model/data causal boundaries."""
@@ -71,8 +83,14 @@ class ForecastRecord:
         uncertainty = Decimal(str(self.uncertainty))
         object.__setattr__(self, "probability", probability)
         object.__setattr__(self, "uncertainty", uncertainty)
-        if not self.quote_key or not self.model_id or not self.model_version or not self.strategy_version:
-            raise ValueError("forecast identities must not be empty")
+        for field_name in (
+            "forecast_id",
+            "quote_key",
+            "model_id",
+            "model_version",
+            "strategy_version",
+        ):
+            _canonical_identity_text(getattr(self, field_name), field_name=field_name)
         if not probability.is_finite():
             raise ValueError("probability must be finite")
         if not uncertainty.is_finite():
@@ -126,6 +144,14 @@ class ForecastRecord:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
+        for field_name in (
+            "forecast_id",
+            "quote_key",
+            "model_id",
+            "model_version",
+            "strategy_version",
+        ):
+            _canonical_identity_text(getattr(self, field_name), field_name=field_name)
         return {
             "forecast_id": self.forecast_id,
             "quote_key": self.quote_key,
@@ -151,6 +177,8 @@ class JsonlForecastLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, record: ForecastRecord) -> str:
+        if type(record) is not ForecastRecord:
+            raise ValueError("forecast ledger requires exact ForecastRecord")
         payload = record.to_dict()
         digest = record.canonical_hash
         envelope = json.dumps(

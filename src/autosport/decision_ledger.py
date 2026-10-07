@@ -72,6 +72,10 @@ def _freeze_decision_payload(value: Any) -> Any:
         return _FrozenDecisionPayloadList(
             _freeze_decision_payload(child) for child in value
         )
+    if isinstance(value, _FrozenDecisionPayloadList):
+        return _FrozenDecisionPayloadList(
+            _freeze_decision_payload(child) for child in value
+        )
     if isinstance(value, tuple):
         return tuple(_freeze_decision_payload(child) for child in value)
     return value

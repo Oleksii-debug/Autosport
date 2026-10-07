@@ -65,6 +65,23 @@ RISK_POLICY_PROVENANCE_PAYLOAD_KEY = "risk_policy_provenance"
 MATERIAL_ACTION_ID_PAYLOAD_KEY = "material_action_id"
 
 
+def _canonical_decision_text(value: object, field_name: str) -> str:
+    """Require one exact, lossless UTF-8 text identity without normalization."""
+
+    if (
+        type(value) is not str
+        or not value
+        or str.strip(value) != value
+        or "\x00" in value
+    ):
+        raise ValueError(f"{field_name} must be a non-empty canonical string")
+    try:
+        str.encode(value, "utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be valid UTF-8 text") from exc
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class EconomicDecisionAuthority:
     """Exact goal + executable paper-risk authority for one economic append."""
@@ -96,11 +113,23 @@ class DecisionRecord:
     decision_kind: str = GENERAL_DECISION_KIND
 
     def __post_init__(self) -> None:
+        for field_name in (
+            "replay_run_id",
+            "agent",
+            "observed_ts",
+            "action",
+            "context_hash",
+            "decision_id",
+            "recorded_at",
+            "decision_kind",
+        ):
+            _canonical_decision_text(getattr(self, field_name), field_name)
+        if self.decision_kind not in {GENERAL_DECISION_KIND, ECONOMIC_DECISION_KIND}:
+            raise ValueError("decision_kind must be GENERAL or ECONOMIC")
+
         payload = _freeze_decision_payload(self.payload)
         if contains_forbidden_future_key(payload):
             raise ValueError("decision payload must not contain future-result fields")
-        if self.decision_kind not in {GENERAL_DECISION_KIND, ECONOMIC_DECISION_KIND}:
-            raise ValueError("decision_kind must be GENERAL or ECONOMIC")
         if (
             self.decision_kind == GENERAL_DECISION_KIND
             and ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY in payload
@@ -387,18 +416,23 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record schema is invalid{location}"
             )
+        # Identity-bearing top-level fields are checked before the generic JSON
+        # walk so a str subclass cannot execute virtual encode/strip/hash behavior
+        # before the ledger has rejected it as non-canonical.
+        for field_name in cls._STRING_FIELDS:
+            value = record.get(field_name)
+            try:
+                _canonical_decision_text(value, field_name)
+            except ValueError as exc:
+                raise DecisionLedgerIntegrityError(
+                    f"Decision Ledger record field {field_name!r} is invalid{location}"
+                ) from exc
         try:
             cls._validate_json_value(record, path="record")
         except RecursionError as exc:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record nesting is too deep{location}"
             ) from exc
-        for field_name in cls._STRING_FIELDS:
-            value = record.get(field_name)
-            if not isinstance(value, str) or not value.strip():
-                raise DecisionLedgerIntegrityError(
-                    f"Decision Ledger record field {field_name!r} is invalid{location}"
-                )
         if "decision_kind" in record and record["decision_kind"] != ECONOMIC_DECISION_KIND:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger decision_kind is invalid{location}"
@@ -605,8 +639,7 @@ class JsonlDecisionLedger:
         *,
         risk_policy: PaperRiskPolicy | None = None,
     ) -> DecisionRecord:
-        if not isinstance(decision_id, str) or not decision_id.strip():
-            raise ValueError("decision_id must be a non-empty string")
+        _canonical_decision_text(decision_id, "decision_id")
         for record in self.verified_records():
             if record.decision_id == decision_id:
                 verify_economic_goal_binding(record, contract, risk_policy)

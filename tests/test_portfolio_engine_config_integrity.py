@@ -35,6 +35,30 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "seed must be an integer"):
                     PortfolioEngine(seed=value)
 
+    def test_ticket_identity_is_revalidated_before_portfolio_dispatch(self) -> None:
+        class HostileTicketId(str):
+            def strip(self) -> str:
+                raise AssertionError(
+                    "hostile ticket identity dispatched before exact-type admission"
+                )
+
+        book = PaperBook("100")
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+        ticket.ticket_id = HostileTicketId(ticket.ticket_id)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "portfolio ticket_id must be a non-empty trimmed string",
+        ):
+            PortfolioEngine().analyse([ticket])
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "portfolio ticket_id must be a non-empty trimmed string",
+        ):
+            PortfolioEngine.affected_tickets([ticket], leg.quote_key)
+
     def test_empty_exclusive_group_fails_before_scenario_enumeration(self) -> None:
         book = PaperBook("100")
         leg = TicketLeg("event", "winner", "alice", Decimal("2"))

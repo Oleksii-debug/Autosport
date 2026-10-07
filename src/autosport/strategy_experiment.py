@@ -32,9 +32,13 @@ def _require_text(value: Any, field: str) -> str:
 
 
 def _require_sha256(value: Any, field: str) -> str:
-    text = _require_text(value, field).lower()
-    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
-        raise ValueError(f"{field} must be a SHA-256 hex digest")
+    text = _require_text(value, field)
+    if (
+        text != text.lower()
+        or len(text) != 64
+        or any(char not in "0123456789abcdef" for char in text)
+    ):
+        raise ValueError(f"{field} must be a canonical lowercase SHA-256 hex digest")
     return text
 
 

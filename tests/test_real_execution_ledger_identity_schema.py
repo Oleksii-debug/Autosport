@@ -178,3 +178,25 @@ def test_external_receipt_identity_constructor_revalidates_identity_fields() -> 
             account_id=" acct-a",
             external_receipt_id="receipt-1",
         )
+
+
+def test_execution_plan_fingerprint_rejects_subclass_before_virtual_serialization() -> None:
+    class HostilePlan(ExecutionPlan):
+        __slots__ = ()
+
+        def to_dict(self) -> dict[str, object]:
+            raise AssertionError("ExecutionPlan subclass serialization must not execute")
+
+    base = _plan()
+    plan = HostilePlan(
+        plan_id=base.plan_id,
+        bookmaker_profile_version=base.bookmaker_profile_version,
+        decision_id=base.decision_id,
+        approval_id=base.approval_id,
+        created_at=base.created_at,
+        actions=base.actions,
+        schema_version=base.schema_version,
+    )
+
+    with pytest.raises(ValueError, match="exact ExecutionPlan"):
+        _ = plan.fingerprint

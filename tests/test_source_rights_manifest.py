@@ -29,6 +29,8 @@ class SourceRightsManifestTests(unittest.TestCase):
                 "historical.internal_research",
                 "historical.read",
             ],
+            "privacy_classification": "NON_PERSONAL_DATA",
+            "evidence_class": "HUMAN_APPROVED_SOURCE_RIGHTS",
             "effective_at": "2026-09-01T00:00:00Z",
             "expires_at": "2026-12-01T00:00:00Z",
             "human_approved": True,
@@ -75,6 +77,10 @@ class SourceRightsManifestTests(unittest.TestCase):
                 manifest.authorized_scopes,
                 ("historical.internal_research", "historical.read"),
             )
+            self.assertEqual(manifest.privacy_classification, "NON_PERSONAL_DATA")
+            self.assertEqual(manifest.evidence_class, "HUMAN_APPROVED_SOURCE_RIGHTS")
+            self.assertEqual(decision.privacy_classification, "NON_PERSONAL_DATA")
+            self.assertEqual(decision.evidence_class, "HUMAN_APPROVED_SOURCE_RIGHTS")
 
     def test_source_identity_must_match_exactly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -113,6 +119,67 @@ class SourceRightsManifestTests(unittest.TestCase):
                 "wildcard scopes are forbidden",
             ):
                 load_source_rights_manifest(self._write(Path(tmp), payload))
+
+    def test_unknown_privacy_classification_never_authorizes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._payload()
+            payload["privacy_classification"] = "UNKNOWN"
+            manifest = load_source_rights_manifest(self._write(Path(tmp), payload))
+            with self.assertRaisesRegex(
+                SourceRightsManifestError,
+                "privacy classification does not permit autonomous source use",
+            ):
+                authorize_source_use(
+                    manifest,
+                    source_identity=manifest.source_identity,
+                    required_scope="historical.read",
+                    at=datetime(2026, 9, 21, tzinfo=timezone.utc),
+                )
+
+    def test_personal_data_restricted_never_silently_authorizes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._payload()
+            payload["privacy_classification"] = "PERSONAL_DATA_RESTRICTED"
+            manifest = load_source_rights_manifest(self._write(Path(tmp), payload))
+            with self.assertRaisesRegex(
+                SourceRightsManifestError,
+                "privacy classification does not permit autonomous source use",
+            ):
+                authorize_source_use(
+                    manifest,
+                    source_identity=manifest.source_identity,
+                    required_scope="historical.read",
+                    at=datetime(2026, 9, 21, tzinfo=timezone.utc),
+                )
+
+    def test_unknown_evidence_class_never_authorizes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._payload()
+            payload["evidence_class"] = "UNKNOWN"
+            manifest = load_source_rights_manifest(self._write(Path(tmp), payload))
+            with self.assertRaisesRegex(
+                SourceRightsManifestError,
+                "evidence class does not support positive source-rights authorization",
+            ):
+                authorize_source_use(
+                    manifest,
+                    source_identity=manifest.source_identity,
+                    required_scope="historical.read",
+                    at=datetime(2026, 9, 21, tzinfo=timezone.utc),
+                )
+
+    def test_unsupported_privacy_or_evidence_class_fails_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            privacy = self._payload()
+            privacy["privacy_classification"] = "PUBLIC"
+            with self.assertRaisesRegex(SourceRightsManifestError, "privacy_classification is unsupported"):
+                load_source_rights_manifest(self._write(root, privacy))
+
+            evidence = self._payload()
+            evidence["evidence_class"] = "CALLER_ASSERTED"
+            with self.assertRaisesRegex(SourceRightsManifestError, "evidence_class is unsupported"):
+                load_source_rights_manifest(self._write(root, evidence))
 
     def test_effective_time_is_inclusive_and_expiry_is_exclusive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -222,6 +289,8 @@ class SourceRightsManifestTests(unittest.TestCase):
                 '"kind":"autosport_source_rights_manifest",'
                 '"source_identity":"source:x",'
                 '"authorized_scopes":["historical.read"],'
+                '"privacy_classification":"NON_PERSONAL_DATA",'
+                '"evidence_class":"HUMAN_APPROVED_SOURCE_RIGHTS",'
                 '"effective_at":"2026-09-01T00:00:00Z",'
                 '"expires_at":"2026-12-01T00:00:00Z",'
                 '"human_approved":true,'
@@ -417,6 +486,8 @@ class SourceRightsManifestTests(unittest.TestCase):
                         required_scope="historical.read",
                         checked_at=datetime(2026, 9, 21, tzinfo=timezone.utc),
                         manifest_sha256=manifest.manifest_sha256,
+                        privacy_classification=manifest.privacy_classification,
+                        evidence_class=manifest.evidence_class,
                         approved_by=manifest.approved_by,
                         approval_reference=manifest.approval_reference,
                         _issuer=forged_issuer,

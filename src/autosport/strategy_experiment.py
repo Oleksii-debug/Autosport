@@ -478,8 +478,9 @@ class ChampionChallengerProtocol:
             raise ValueError("at least one challenger is required")
         if not self.cases:
             raise ValueError("at least one evaluation case is required")
-        if self.primary_metric not in _SUPPORTED_METRICS:
-            raise ValueError(f"unsupported primary metric: {self.primary_metric}")
+        primary_metric = _require_text(self.primary_metric, "primary_metric")
+        if primary_metric not in _SUPPORTED_METRICS:
+            raise ValueError(f"unsupported primary metric: {primary_metric}")
         _require_decimal_instance(
             self.minimum_total_improvement,
             "minimum_total_improvement",

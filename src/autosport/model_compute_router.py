@@ -1333,9 +1333,9 @@ def _candidate_map(
 ) -> dict[str, ComputeCandidate]:
     result: dict[str, ComputeCandidate] = {}
     for candidate in candidates:
-        if not isinstance(candidate, ComputeCandidate):
+        if type(candidate) is not ComputeCandidate:
             raise TypeError(
-                "candidates must contain ComputeCandidate values"
+                "candidates must contain exact ComputeCandidate values"
             )
         if candidate.candidate_id in result:
             raise ModelComputeRouterError(
@@ -1376,10 +1376,10 @@ def route_compute(
     domain_observation: SportDomainFitnessObservation | None = None,
     domain_route: RouteRecommendation | None = None,
 ) -> ComputeRouteDecision:
-    if not isinstance(request, ComputeRouteRequest):
-        raise TypeError("request must be ComputeRouteRequest")
-    if not isinstance(policy, ComputeRoutingPolicy):
-        raise TypeError("policy must be ComputeRoutingPolicy")
+    if type(request) is not ComputeRouteRequest:
+        raise TypeError("request must be exact ComputeRouteRequest")
+    if type(policy) is not ComputeRoutingPolicy:
+        raise TypeError("policy must be exact ComputeRoutingPolicy")
     now = _instant("as_of", as_of)
     if domain_route is not None and not isinstance(
         domain_route, RouteRecommendation

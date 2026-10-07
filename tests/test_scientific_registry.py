@@ -374,19 +374,23 @@ def test_conflicting_identity_rejected_but_exact_replay_is_idempotent(tmp_path):
         registry.append(replace(question, statement="Changed question"))
 
 
-def test_dataset_snapshot_rejects_availability_before_causal_cutoff() -> None:
+def test_dataset_snapshot_rejects_availability_before_causal_cutoff(tmp_path) -> None:
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    snapshot = DatasetSnapshot(
+        "dataset-future-bearing",
+        SHA_A,
+        "source",
+        "license",
+        T1,
+        T0,
+    )
     with pytest.raises(
         ValueError,
-        match="available_at_utc must not precede causal_cutoff",
+        match="DatasetSnapshot available_at must not precede causal_cutoff",
     ):
-        DatasetSnapshot(
-            "dataset-future-bearing",
-            SHA_A,
-            "source",
-            "license",
-            T1,
-            T0,
-        )
+        registry.append(snapshot)
 
 
 def test_dataset_snapshot_restart_rejects_self_consistent_future_bearing_state(tmp_path) -> None:

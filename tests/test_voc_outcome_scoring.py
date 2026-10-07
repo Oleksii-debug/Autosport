@@ -19,6 +19,7 @@ from autosport.model_compute_router import (
     DataClassification,
     ModelComputeRouterStore,
 )
+from autosport.integrity import atomic_write_json
 from autosport.market_outcomes import (
     OutcomeAuthorityStatus,
     assess_betfair_historical_market_definition_authority,
@@ -96,16 +97,7 @@ def _persist_raw_scientific_fixture(
     }
     envelope["record_sha256"] = digest(envelope)
     state["records"].append(envelope)
-    registry.path.write_text(
-        json.dumps(
-            state,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ),
-        encoding="utf-8",
-    )
+    atomic_write_json(registry.path, state)
     registry._read()
 
 

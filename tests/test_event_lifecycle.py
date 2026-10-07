@@ -60,15 +60,15 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
 
     def _assess_evidence(self, lifecycle, *args, **kwargs):
         self._advance_product_clock(kwargs["as_of"])
-        return self._assess_evidence(lifecycle,*args, **kwargs)
+        return lifecycle.assess_evidence(*args, **kwargs)
 
     def _register_eligible(self, lifecycle, *args, **kwargs):
         self._advance_product_clock(kwargs["as_of"])
-        return self._register_eligible(lifecycle,*args, **kwargs)
+        return lifecycle.register_eligible(*args, **kwargs)
 
     def _refresh_and_register(self, lifecycle, *args, **kwargs):
         self._advance_product_clock(kwargs["discovered_at"])
-        return self._refresh_and_register(lifecycle,*args, **kwargs)
+        return lifecycle.refresh_and_register(*args, **kwargs)
 
     @classmethod
     def _event(

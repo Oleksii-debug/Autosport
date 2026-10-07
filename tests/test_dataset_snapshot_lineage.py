@@ -58,6 +58,31 @@ def test_restart_record_parser_rejects_uppercase_sha_identity_alias() -> None:
 
 
 
+def test_restart_record_parser_rejects_availability_before_causal_cutoff() -> None:
+    raw = {
+        "kind": "autosport-dataset-snapshot-lineage-proof-v1",
+        "schema_version": 1,
+        "snapshot_id": "snapshot-causal-order",
+        "dataset_record_sha256": "a" * 64,
+        "manifest_sha256": "b" * 64,
+        "source_identity": "provider:source-a",
+        "license_identity": "license:v1",
+        "causal_cutoff": "2026-09-01T00:01:00Z",
+        "available_at": "2026-09-01T00:00:59Z",
+        "member_sha256": ["c" * 64],
+        "parent_snapshot_id": None,
+        "parent_dataset_record_sha256": None,
+        "parent_proof_sha256": None,
+        "proof_sha256": "d" * 64,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="dataset snapshot lineage availability predates causal cutoff",
+    ):
+        DatasetSnapshotLineageAuthority._record_from_raw(raw)
+
+
 @pytest.mark.parametrize("schema_version", (True, 1.0, 2.0))
 def test_restart_record_parser_rejects_non_exact_int_schema_version(
     schema_version: object,

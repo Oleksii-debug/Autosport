@@ -146,8 +146,12 @@ class DatasetSnapshotLineageRecord:
         _sha256(self.manifest_sha256, "manifest_sha256")
         _text(self.source_identity, "source_identity")
         _text(self.license_identity, "license_identity")
-        _instant(self.causal_cutoff, "causal_cutoff")
+        cutoff = _instant(self.causal_cutoff, "causal_cutoff")
         available = _instant(self.available_at, "available_at")
+        if cutoff > available:
+            raise ValueError(
+                "dataset snapshot lineage availability predates causal cutoff"
+            )
         if self.proof_registered_at is not None:
             registered = _instant(self.proof_registered_at, "proof_registered_at")
             if registered < available:

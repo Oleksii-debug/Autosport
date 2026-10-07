@@ -131,8 +131,8 @@ class MarketMirror:
         and fails closed rather than silently replacing canonical evidence. Material
         updates are serialized with readers and advance one mirror-wide revision.
         """
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
 
         key = self._key(event)
         with self._lock:
@@ -193,10 +193,10 @@ class MarketMirror:
         but valid provider observations may still be retained in history for audit;
         ``apply`` then keeps the live source-local projection monotonic.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
 
         store.append(event)
         return self.apply(event)

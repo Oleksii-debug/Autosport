@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from .domain import PaperTicket, TicketStatus, _canonical_string_value
+from .domain import PaperTicket, TicketLeg, TicketStatus, _canonical_string_value
 from .market_outcomes import MarketSettlementOutcomeAuthority
 from .portfolio import PortfolioEngine, _snapshot_open_tickets_for_analysis
 
@@ -89,16 +89,49 @@ class PortfolioDependencyIndex:
         self.quote_to_tickets: dict[str, set[str]] = {}
         self.ticket_by_id: dict[str, PaperTicket] = {}
         for ticket in tickets:
+            if type(ticket) is not PaperTicket:
+                raise ValueError(
+                    "portfolio dependency index requires exact PaperTicket values"
+                )
+            ticket_id = _canonical_string_value(
+                ticket.ticket_id,
+                "portfolio dependency ticket_id",
+            )
             if ticket.status is not TicketStatus.OPEN:
                 continue
-            self.ticket_by_id[ticket.ticket_id] = ticket
+            if type(ticket.legs) is not tuple:
+                raise ValueError(
+                    "portfolio dependency ticket legs must remain an exact tuple"
+                )
+
+            quote_keys: list[str] = []
             for leg in ticket.legs:
-                self.quote_to_tickets.setdefault(leg.quote_key, set()).add(ticket.ticket_id)
+                if type(leg) is not TicketLeg:
+                    raise ValueError(
+                        "portfolio dependency ticket legs must remain exact TicketLeg values"
+                    )
+                # TicketLeg.quote_key re-proves every structured identity component
+                # before formatting/encoding, including post-construction mutation.
+                quote_keys.append(
+                    _canonical_string_value(
+                        leg.quote_key,
+                        "portfolio dependency quote_key",
+                    )
+                )
+
+            # Publish only after the complete ticket identity has been revalidated.
+            self.ticket_by_id[ticket_id] = ticket
+            for quote_key in quote_keys:
+                self.quote_to_tickets.setdefault(quote_key, set()).add(ticket_id)
 
     def affected_by(self, quote_keys: set[str]) -> set[str]:
         affected: set[str] = set()
         for key in quote_keys:
-            affected.update(self.quote_to_tickets.get(key, set()))
+            canonical_key = _canonical_string_value(
+                key,
+                "portfolio dependency quote_key",
+            )
+            affected.update(self.quote_to_tickets.get(canonical_key, set()))
         return affected
 
 

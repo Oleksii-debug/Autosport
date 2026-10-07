@@ -67,6 +67,21 @@ class RunRegistryIdentityExactTypeTests(unittest.TestCase):
                     self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["runs"], {})
 
 
+    def test_experiment_identity_rejects_subclasses_before_format_dispatch(self) -> None:
+        cases = (
+            (_HostileSha("a" * 64), "b" * 64, "strategy", "canonical SHA-256"),
+            ("a" * 64, _HostileSha("b" * 64), "strategy", "canonical SHA-256"),
+            ("a" * 64, "b" * 64, _HostileIdentity("strategy"), "exact non-empty string"),
+        )
+        for market_sha256, results_sha256, strategy_id, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    RunRegistry.experiment_identity(
+                        market_sha256,
+                        results_sha256,
+                        strategy_id,
+                    )
+
     def test_public_lookup_boundaries_reject_key_subclasses_before_hash_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -18,7 +18,9 @@ from .integrity import atomic_write_json
 
 
 _SCHEMA = "autosport.participant_identity"
-_VERSION = 1
+_LEGACY_VERSION = 1
+_VERSION = 2
+_LEGACY_ENTITY_KIND_VALUES = frozenset({"LEAGUE", "PARTICIPANT", "TEAM"})
 
 
 class EntityKind(StrEnum):
@@ -565,7 +567,7 @@ class ParticipantIdentityRegistry:
             type(raw) is not dict
             or set(raw) != expected_fields
             or raw.get("schema") != _SCHEMA
-            or raw.get("version") != _VERSION
+            or raw.get("version") not in {_LEGACY_VERSION, _VERSION}
             or any(
                 type(raw[field]) is not list
                 for field in ("entities", "aliases", "rosters", "lineages")
@@ -632,11 +634,20 @@ class ParticipantIdentityRegistry:
                     )
                 seen_records.add(canonical_record)
 
+        loaded_version = raw["version"]
         self._loading = True
         try:
             for item in raw["entities"]:
+                raw_kind = item["kind"]
+                if (
+                    loaded_version == _LEGACY_VERSION
+                    and raw_kind not in _LEGACY_ENTITY_KIND_VALUES
+                ):
+                    raise ParticipantIdentityError(
+                        "legacy v1 identity registry contains unsupported entity kind"
+                    )
                 try:
-                    kind = EntityKind(item["kind"])
+                    kind = EntityKind(raw_kind)
                 except ValueError as exc:
                     raise ParticipantIdentityError("unsupported entity identity kind") from exc
                 entity = EntityIdentity(

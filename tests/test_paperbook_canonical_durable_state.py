@@ -295,6 +295,42 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
 
         self.assertEqual(self.path.read_bytes(), last_good)
 
+    def test_save_rejects_hostile_ticket_mapping_key_before_hash_dispatch(self) -> None:
+        dispatch_calls: list[str] = []
+
+        class ArmedTicketId(str):
+            armed = False
+
+            def __hash__(self) -> int:
+                if self.armed:
+                    dispatch_calls.append("hash")
+                    raise AssertionError("hostile ticket id hashed before exact admission")
+                return str.__hash__(self)
+
+            def __eq__(self, other: object) -> bool:
+                if self.armed:
+                    dispatch_calls.append("eq")
+                    raise AssertionError("hostile ticket id compared before exact admission")
+                return str.__eq__(self, other)
+
+        book, ticket = self._valid_book()
+        book.save(self.path)
+        last_good = self.path.read_bytes()
+
+        original = book.tickets.pop(ticket.ticket_id)
+        hostile = ArmedTicketId(ticket.ticket_id)
+        book.tickets[hostile] = original
+        hostile.armed = True
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ticket identity keys must be exact strings",
+        ):
+            book.save(self.path)
+
+        self.assertEqual(dispatch_calls, [])
+        self.assertEqual(self.path.read_bytes(), last_good)
+
     def test_save_rejects_mutated_economic_state_without_replacing_snapshot(self) -> None:
         book, _ = self._valid_book()
         book.save(self.path)

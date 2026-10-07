@@ -91,11 +91,17 @@ def _make_ticket_opening_authority_registry():
                     "PaperBook byte-loaded snapshot lacks product-issued opening authority"
                 )
             expected = dict(current)
-        if set(expected) != set(book.tickets):
+        tickets = getattr(book, "tickets", None)
+        if type(tickets) is not dict:
+            raise ValueError("PaperBook ticket mapping must be an exact dict")
+        ticket_ids = tuple(tickets.keys())
+        if any(type(ticket_id) is not str for ticket_id in ticket_ids):
+            raise ValueError("PaperBook ticket identity keys must be exact strings")
+        if frozenset(ticket_ids) != frozenset(expected):
             raise ValueError(
                 "PaperBook ticket set changed outside product-issued opening authority"
             )
-        for ticket_id, ticket in book.tickets.items():
+        for ticket_id, ticket in tickets.items():
             if expected[ticket_id] != _ticket_opening_commitment(ticket):
                 raise ValueError(
                     "PaperBook ticket opening economic identity changed after admission"
@@ -110,7 +116,14 @@ def _make_ticket_opening_authority_registry():
                 )
             expected = dict(current)
         candidate_tickets = getattr(candidate_book, "tickets", None)
-        if type(candidate_tickets) is not dict or set(candidate_tickets) != set(expected):
+        if type(candidate_tickets) is not dict:
+            raise ValueError("PaperBook serialized candidate ticket mapping must be an exact dict")
+        candidate_ticket_ids = tuple(candidate_tickets.keys())
+        if any(type(ticket_id) is not str for ticket_id in candidate_ticket_ids):
+            raise ValueError(
+                "PaperBook serialized candidate ticket identity keys must be exact strings"
+            )
+        if frozenset(candidate_ticket_ids) != frozenset(expected):
             raise ValueError(
                 "PaperBook serialized candidate ticket set differs from product-issued opening authority"
             )

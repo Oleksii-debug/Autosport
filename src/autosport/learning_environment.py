@@ -510,8 +510,8 @@ class CausalLearningEnvironment:
         policy_id: str,
         admissible_actions: frozenset[str],
     ) -> None:
-        if not isinstance(identity, EnvironmentIdentity):
-            raise TypeError("identity must be EnvironmentIdentity")
+        if type(identity) is not EnvironmentIdentity:
+            raise TypeError("identity must be an exact EnvironmentIdentity")
         actions = _canonical_set("admissible_actions", admissible_actions)
         self.identity = identity
         self.episode = Episode(
@@ -540,8 +540,8 @@ class CausalLearningEnvironment:
         decision_at: str,
         parameters: Metadata = (),
     ) -> Action:
-        if not isinstance(observation, Observation):
-            raise TypeError("observation must be Observation")
+        if type(observation) is not Observation:
+            raise TypeError("observation must be an exact Observation")
         if observation.environment_id != self.environment_id:
             raise LearningEnvironmentError("observation belongs to another environment")
         action_name = _canonical_text("action_type", action_type)
@@ -626,8 +626,10 @@ class CausalLearningEnvironment:
         pending = self._pending.get(action_id)
         if pending is None:
             raise LearningEnvironmentError("unknown or already resolved action identity")
-        if not isinstance(outcome, Outcome) or not isinstance(reward, RewardEvidence):
-            raise TypeError("outcome and reward must be canonical environment evidence")
+        if type(outcome) is not Outcome or type(reward) is not RewardEvidence:
+            raise TypeError(
+                "outcome and reward must be exact canonical environment evidence"
+            )
         action = pending.action
         if outcome.environment_id != self.environment_id or reward.environment_id != self.environment_id:
             raise LearningEnvironmentError("resolution evidence belongs to another environment")
@@ -706,8 +708,8 @@ class CausalLearningEnvironment:
         admissible_actions: frozenset[str],
         checkpoint: EnvironmentCheckpoint,
     ) -> "CausalLearningEnvironment":
-        if not isinstance(checkpoint, EnvironmentCheckpoint):
-            raise TypeError("checkpoint must be EnvironmentCheckpoint")
+        if type(checkpoint) is not EnvironmentCheckpoint:
+            raise TypeError("checkpoint must be an exact EnvironmentCheckpoint")
         environment = cls(
             identity,
             episode_key=episode_key,

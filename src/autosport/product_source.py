@@ -31,6 +31,7 @@ from .json_integrity import strict_json_loads
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .providers import CanonicalNormalizer, MarketProvider, ProviderBatch, ProviderQuote
 from .source_rights_manifest import (
+    SourceRightsAuthorization,
     SourceRightsManifestError,
     authorize_source_use,
     load_source_rights_manifest,
@@ -82,6 +83,7 @@ class ParlayApiProductSource:
         "source_id",
         "stream_epoch",
         "workspace_instance_id",
+        "source_rights_binding",
         "generation",
         "authority_tx_id",
         "last_catalog_position",
@@ -104,6 +106,7 @@ class ParlayApiProductSource:
         workspace: str | Path,
         lawful_terms_ref: str,
         retention_ref: str,
+        source_rights_authorization: SourceRightsAuthorization | None = None,
         authority_root: str | Path | None = None,
         clock: Clock = utc_now_iso,
     ) -> None:
@@ -126,6 +129,9 @@ class ParlayApiProductSource:
         self.workspace = workspace_path
         self.lawful_terms_ref = self._text(lawful_terms_ref, "lawful_terms_ref")
         self.retention_ref = self._text(retention_ref, "retention_ref")
+        self._source_rights_binding = self._snapshot_source_rights(
+            source_rights_authorization
+        )
         self.clock = clock
         self.normalizer = CanonicalNormalizer()
         try:
@@ -167,6 +173,120 @@ class ParlayApiProductSource:
         if type(value) is not str or not value or value.strip() != value:
             raise ValueError(f"{field} must be a non-empty trimmed string")
         return value
+
+    def _snapshot_source_rights(
+        self,
+        authorization: SourceRightsAuthorization | None,
+    ) -> dict[str, object] | None:
+        if authorization is None:
+            return None
+        if type(authorization) is not SourceRightsAuthorization:
+            raise ProductSourceStateError(
+                "source-rights authorization must be canonically issued"
+            )
+        try:
+            source_identity = self._text(
+                authorization.source_identity, "source_rights.source_identity"
+            )
+            required_scope = self._text(
+                authorization.required_scope, "source_rights.required_scope"
+            )
+            manifest_sha256 = self._text(
+                authorization.manifest_sha256, "source_rights.manifest_sha256"
+            )
+            privacy = self._text(
+                authorization.privacy_classification,
+                "source_rights.privacy_classification",
+            )
+            evidence_class = self._text(
+                authorization.evidence_class, "source_rights.evidence_class"
+            )
+            terms_reference = self._text(
+                authorization.terms_reference, "source_rights.terms_reference"
+            )
+            retention_reference = self._text(
+                authorization.retention_authority_reference,
+                "source_rights.retention_authority_reference",
+            )
+            approved_by = self._text(
+                authorization.approved_by, "source_rights.approved_by"
+            )
+            approval_reference = self._text(
+                authorization.approval_reference,
+                "source_rights.approval_reference",
+            )
+            checked_at = authorization.checked_at
+        except (SourceRightsManifestError, ValueError) as exc:
+            raise ProductSourceStateError(
+                "source-rights authorization cannot be snapshotted"
+            ) from exc
+        if (
+            source_identity != self.source_id
+            or required_scope != _PARLAY_SOURCE_RIGHTS_SCOPE
+            or terms_reference != self.lawful_terms_ref
+            or retention_reference != self.retention_ref
+            or privacy != "NON_PERSONAL_DATA"
+            or evidence_class != "HUMAN_APPROVED_SOURCE_RIGHTS"
+            or not self._is_digest(manifest_sha256)
+            or type(checked_at) is not datetime
+            or checked_at.tzinfo is None
+            or checked_at.utcoffset() is None
+        ):
+            raise ProductSourceStateError(
+                "source-rights authorization does not match product source identity"
+            )
+        return {
+            "source_identity": source_identity,
+            "required_scope": required_scope,
+            "checked_at": checked_at.astimezone(timezone.utc).isoformat(),
+            "manifest_sha256": manifest_sha256,
+            "privacy_classification": privacy,
+            "evidence_class": evidence_class,
+            "terms_reference": terms_reference,
+            "retention_authority_reference": retention_reference,
+            "approved_by": approved_by,
+            "approval_reference": approval_reference,
+        }
+
+    def _validate_source_rights_binding(self, value: object) -> None:
+        current = self._source_rights_binding
+        if current is None:
+            if value is not None:
+                raise ProductSourceStateError(
+                    "source-rights authorization is required to reopen governed source state"
+                )
+            return
+        expected_fields = {
+            "source_identity",
+            "required_scope",
+            "checked_at",
+            "manifest_sha256",
+            "privacy_classification",
+            "evidence_class",
+            "terms_reference",
+            "retention_authority_reference",
+            "approved_by",
+            "approval_reference",
+        }
+        if type(value) is not dict or set(value) != expected_fields:
+            raise ProductSourceStateError("source-rights binding is malformed")
+        assert isinstance(value, dict)
+        for field in expected_fields - {"checked_at"}:
+            if value.get(field) != current[field]:
+                raise ProductSourceStateError(
+                    "durable source-rights binding does not match current authorization"
+                )
+        stored_checked = value.get("checked_at")
+        current_checked = current["checked_at"]
+        try:
+            stored_time = self._instant(stored_checked, "source_rights.checked_at")
+            current_time = self._instant(current_checked, "source_rights.current_checked_at")
+        except (ProductSourcePayloadError, ValueError) as exc:
+            raise ProductSourceStateError("source-rights checked_at is invalid") from exc
+        if stored_time > current_time:
+            raise ProductSourceStateError(
+                "current source-rights authorization predates durable authorization"
+            )
 
     @classmethod
     def _instant(cls, value: object, field: str) -> datetime:
@@ -230,6 +350,7 @@ class ParlayApiProductSource:
             "source_id": self.source_id,
             "stream_epoch": self.stream_epoch,
             "workspace_instance_id": self.workspace_instance_id,
+            "source_rights_binding": self._source_rights_binding,
             "generation": 0,
             "authority_tx_id": uuid.uuid4().hex,
             "last_catalog_position": -1,
@@ -264,6 +385,7 @@ class ParlayApiProductSource:
             or raw.get("state_sha256") != self._state_digest(raw)
         ):
             raise ProductSourceStateError("product source state identity/schema/digest mismatch")
+        self._validate_source_rights_binding(raw["source_rights_binding"])
 
         catalog_position = raw["last_catalog_position"]
         delta_position = raw["last_confirmed_delta_position"]
@@ -1064,6 +1186,7 @@ def _capture_parlay_product_source_factory(
             workspace=workspace,
             lawful_terms_ref=lawful_terms_ref,
             retention_ref=retention_ref,
+            source_rights_authorization=authorization,
         )
 
     return create_parlay_product_source

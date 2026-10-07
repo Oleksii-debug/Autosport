@@ -142,6 +142,20 @@ class _HostileVOCContext(dict):
         raise AssertionError("hostile VOC context lookup must not run")
 
 
+def test_paired_voc_identity_rejects_internal_control_aliases():
+    for field, value in (
+        ("evaluation_id", "voc\neval-1"),
+        ("task_class", "forecast\talias"),
+        ("holdout_access_id", "holdout\x7f1"),
+    ):
+        with unittest.TestCase().subTest(field=field):
+            with unittest.TestCase().assertRaisesRegex(
+                VOCEvaluationError,
+                "canonical string",
+            ):
+                evaluation(**{field: value})
+
+
 def test_paired_voc_payload_rejects_mapping_subclass_before_dispatch():
     hostile = _HostileVOCPayload(evaluation().payload())
     with unittest.TestCase().assertRaisesRegex(

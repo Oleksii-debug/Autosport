@@ -201,6 +201,22 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             stop_reason=stop_reason,
         )
 
+    def test_cycle_accepts_provider_scoped_delta_for_canonical_lifecycle_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = FakeCollectorSource(
+                [catalog_page(1, "event-1")],
+                [(make_delta(delta_id="canonical-alias-d1"),)],
+            )
+            service = self.make_service(tmp, source)
+
+            result = service.run_cycle()
+
+            self.assertEqual(result.committed_delta_ids, ("canonical-alias-d1",))
+            records = service.lifecycle.records()
+            self.assertEqual(len(records), 1)
+            self.assertNotEqual(records[0].identity, "source-x:event-1")
+            self.assertEqual(records[0].event_id, "event-1")
+
     def test_runtime_epoch_activation_is_durable_and_revalidated_each_cycle(self):
         with tempfile.TemporaryDirectory() as tmp:
             page = catalog_page(1, "event-1")

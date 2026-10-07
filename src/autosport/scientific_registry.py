@@ -76,6 +76,16 @@ def _instant(value: object, name: str) -> datetime:
     return datetime.fromisoformat(_iso(value, name).replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
+def _optional_outcome_reveal_instant(
+    payload: Mapping[str, Any],
+    name: str,
+) -> datetime | None:
+    value = payload.get("outcome_reveal_after")
+    if value is None:
+        return None
+    return _instant(value, name)
+
+
 def _text_tuple(value: object, name: str, *, allow_empty: bool = False) -> tuple[str, ...]:
     if not isinstance(value, tuple):
         raise ValueError(f"{name} must be a tuple")
@@ -896,7 +906,9 @@ class RegistryEntry:
     @property
     def reveal_after(self) -> str | None:
         value = self.payload.get("outcome_reveal_after")
-        return value if isinstance(value, str) else None
+        if value is None:
+            return None
+        return _iso(value, "outcome_reveal_after")
 
 
 _LOCAL_SCIENTIFIC_RECORD_TYPES = {
@@ -986,11 +998,7 @@ class ScientificRegistry:
             state = json.loads(raw, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
         except json.JSONDecodeError as exc:
             raise ValueError("scientific registry must be valid UTF-8 JSON") from exc
-        if (
-            type(state) is not dict
-            or type(state.get("schema_version")) is not int
-            or state.get("schema_version") != self.SCHEMA_VERSION
-        ):
+        if type(state) is not dict or state.get("schema_version") != self.SCHEMA_VERSION:
             raise ValueError("scientific registry schema_version mismatch")
         records = state.get("records")
         if type(records) is not list:
@@ -1081,7 +1089,6 @@ class ScientificRegistry:
             payload_record_id = None
         if payload_record_id is not None and payload_record_id != raw_entry["record_id"]:
             raise ValueError("scientific registry record identity mismatch")
-
         # Revalidate every persisted identity/version/hash-shaped member before
         # accepting a self-consistent envelope digest.  The writer validates the
         # canonical DTO before persistence, but restart must not let JSON type drift
@@ -1333,10 +1340,13 @@ class ScientificRegistry:
                 except PromotionEvidenceError:
                     continue
             available = _instant(raw["available_at"], "available_at")
-            reveal = raw["payload"].get("outcome_reveal_after")
+            reveal = _optional_outcome_reveal_instant(
+                raw["payload"],
+                "outcome_reveal_after",
+            )
             if available > cutoff:
                 continue
-            if isinstance(reveal, str) and _instant(reveal, "outcome_reveal_after") > cutoff:
+            if reveal is not None and reveal > cutoff:
                 continue
             values.append(RegistryEntry(**raw))
         values.sort(key=lambda item: (_instant(item.available_at, "available_at"), item.record_id))
@@ -1433,8 +1443,11 @@ class ScientificRegistry:
                     raise PromotionEvidenceError(f"promotion evidence missing {kind}:{identity}")
                 if _instant(value["available_at"], f"{kind}.available_at") > decision_at:
                     raise PromotionEvidenceError(f"promotion evidence {kind}:{identity} was not available at decision time")
-                reveal = value["payload"].get("outcome_reveal_after")
-                if isinstance(reveal, str) and _instant(reveal, f"{kind}.outcome_reveal_after") > decision_at:
+                reveal = _optional_outcome_reveal_instant(
+                    value["payload"],
+                    f"{kind}.outcome_reveal_after",
+                )
+                if reveal is not None and reveal > decision_at:
                     raise PromotionEvidenceError(f"promotion evidence {kind}:{identity} was not causally revealed at decision time")
                 return value
 

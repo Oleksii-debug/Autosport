@@ -523,8 +523,9 @@ class PaperSettlementLearningBridge:
         record: DecisionRecord,
         observation: Observation,
     ) -> None:
-        if not isinstance(observation, Observation):
-            raise TypeError("observation must be Observation")
+        if type(observation) is not Observation:
+            raise TypeError("observation must use the exact canonical Observation type")
+        Observation.__post_init__(observation)
         if record.context_hash != observation.observation_id:
             raise PaperSettlementLearningBridgeError(
                 "economic decision context_hash does not bind exact learning Observation"
@@ -545,8 +546,9 @@ class PaperSettlementLearningBridge:
         """Verify immutable economic-decision context before AgentLoop mutation."""
 
         canonical_decision_id = _text(decision_id, "decision_id")
-        if not isinstance(observation, Observation):
-            raise TypeError("observation must be Observation")
+        if type(observation) is not Observation:
+            raise TypeError("observation must use the exact canonical Observation type")
+        Observation.__post_init__(observation)
         decision = self.decision_ledger.verified_economic_decision(
             canonical_decision_id,
             self.economic_goal,
@@ -625,14 +627,17 @@ class PaperSettlementLearningBridge:
 
         _text(ticket_id, "ticket_id")
         _text(decision_id, "decision_id")
-        if not isinstance(environment, CausalLearningEnvironment):
-            raise TypeError("environment must be CausalLearningEnvironment")
-        if not isinstance(observation, Observation):
-            raise TypeError("observation must be Observation")
-        if not isinstance(action, Action):
-            raise TypeError("action must be Action")
-        if not isinstance(baseline_checkpoint, EnvironmentCheckpoint):
-            raise TypeError("baseline_checkpoint must be EnvironmentCheckpoint")
+        if type(environment) is not CausalLearningEnvironment:
+            raise TypeError("environment must use the exact canonical CausalLearningEnvironment type")
+        if type(observation) is not Observation:
+            raise TypeError("observation must use the exact canonical Observation type")
+        if type(action) is not Action:
+            raise TypeError("action must use the exact canonical Action type")
+        if type(baseline_checkpoint) is not EnvironmentCheckpoint:
+            raise TypeError("baseline_checkpoint must use the exact canonical EnvironmentCheckpoint type")
+        Observation.__post_init__(observation)
+        Action.__post_init__(action)
+        EnvironmentCheckpoint.__post_init__(baseline_checkpoint)
         if (
             environment.environment_id != action.environment_id
             or observation.environment_id != action.environment_id
@@ -853,12 +858,12 @@ class PaperSettlementLearningBridge:
         used: dict[str, dict[str, object]] = {}
         leg_by_key = {leg.quote_key: leg for leg in ticket.legs}
         for resolution in resolutions:
-            if not isinstance(resolution, SettlementResolution):
+            if type(resolution) is not SettlementResolution:
                 raise PaperSettlementLearningBridgeError(
                     "handoff contains non-canonical settlement evidence"
                 )
             try:
-                resolution.validate(as_of=at)
+                SettlementResolution.validate(resolution, as_of=at)
             except (TypeError, ValueError) as exc:
                 raise PaperSettlementLearningBridgeError(
                     "settlement evidence failed causal validation"

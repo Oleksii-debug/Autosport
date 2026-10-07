@@ -1,9 +1,11 @@
+from autosport.continuous_session import SettlementResolution
 from decimal import Decimal
 
 import pytest
 
 from autosport.learning_environment import (
     Action,
+    CausalLearningEnvironment,
     EnvironmentCheckpoint,
     EvidenceTruth,
     Observation,
@@ -11,7 +13,11 @@ from autosport.learning_environment import (
     RewardEvidence,
     Transition,
 )
-from autosport.paper_settlement_learning import PaperSettlementLearningWitness
+from autosport.paper_settlement_learning import (
+    PaperSettlementLearningBridge,
+    PaperSettlementLearningBridgeError,
+    PaperSettlementLearningWitness,
+)
 
 
 def _graph(observation_type=Observation):
@@ -100,4 +106,75 @@ def test_witness_rejects_observation_subclass_before_identity_graph_dispatch() -
             transition=transition,
             baseline_checkpoint=baseline,
             next_checkpoint=next_checkpoint,
+        )
+
+
+class _TrapEnvironment(CausalLearningEnvironment):
+    def __getattribute__(self, name):
+        raise AssertionError("environment subtype dispatch must not execute")
+
+
+class _TrapObservation(Observation):
+    def __getattribute__(self, name):
+        raise AssertionError("observation subtype dispatch must not execute")
+
+
+class _TrapAction(Action):
+    def __getattribute__(self, name):
+        raise AssertionError("action subtype dispatch must not execute")
+
+
+class _TrapCheckpoint(EnvironmentCheckpoint):
+    def __getattribute__(self, name):
+        raise AssertionError("checkpoint subtype dispatch must not execute")
+
+
+class _TrapSettlementResolution(SettlementResolution):
+    def __getattribute__(self, name):
+        raise AssertionError("settlement subtype dispatch must not execute")
+
+
+@pytest.mark.parametrize(
+    ("field", "alias_type"),
+    (
+        ("environment", _TrapEnvironment),
+        ("observation", _TrapObservation),
+        ("action", _TrapAction),
+        ("baseline_checkpoint", _TrapCheckpoint),
+    ),
+)
+def test_bind_ticket_rejects_identity_record_subclasses_before_dispatch(
+    field,
+    alias_type,
+) -> None:
+    values = {
+        "environment": object.__new__(CausalLearningEnvironment),
+        "observation": object.__new__(Observation),
+        "action": object.__new__(Action),
+        "baseline_checkpoint": object.__new__(EnvironmentCheckpoint),
+    }
+    values[field] = object.__new__(alias_type)
+
+    with pytest.raises(TypeError, match=field):
+        PaperSettlementLearningBridge.bind_ticket(
+            object(),
+            ticket_id="ticket-identity-fence",
+            decision_id="decision-identity-fence",
+            **values,
+        )
+
+
+def test_collect_evidence_rejects_settlement_subclass_before_validate_dispatch() -> None:
+    class _TicketStub:
+        legs = ()
+
+    alias = object.__new__(_TrapSettlementResolution)
+    with pytest.raises(
+        PaperSettlementLearningBridgeError,
+        match="non-canonical settlement evidence",
+    ):
+        PaperSettlementLearningBridge._collect_evidence(
+            _TicketStub(),
+            (alias,),
+            at="2026-10-07T00:00:00Z",
         )

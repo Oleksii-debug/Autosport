@@ -472,13 +472,10 @@ def _validate_market_binding(
 
 def _scenario_quote_event_market(
     quote_key: str,
-) -> tuple[str | None, str, str] | None:
-    try:
-        sport, event_id, market_id, _selection_id, _exchange_side = (
-            _quote_identity_components(quote_key)
-        )
-    except ValueError:
-        return None
+) -> tuple[str | None, str, str]:
+    sport, event_id, market_id, _selection_id, _exchange_side = (
+        _quote_identity_components(quote_key)
+    )
     return sport, event_id, market_id
 
 

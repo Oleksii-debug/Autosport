@@ -121,6 +121,17 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             "win",
         )
 
+    def test_market_outcome_identity_readback_rejects_subclass_constructor(self):
+        class HostileIdentity(MarketOutcomeIdentity):
+            pass
+
+        payload = self._raw_identity().to_dict()
+        with self.assertRaisesRegex(
+            TypeError,
+            "market outcome identity readback requires canonical type",
+        ):
+            HostileIdentity.from_dict(payload)
+
     def test_market_outcome_identity_read_boundaries_revalidate_mutated_fields(self):
         class HostileSourceId(str):
             def strip(self, *args, **kwargs):

@@ -159,11 +159,13 @@ class MarketOutcomeIdentity:
 
     @classmethod
     def from_dict(cls, raw: object) -> "MarketOutcomeIdentity":
+        if cls is not MarketOutcomeIdentity:
+            raise TypeError("market outcome identity readback requires canonical type")
         expected = {"sport", "event_id", "market_id", "source_id", "market_type"}
         if type(raw) is not dict or set(raw) != expected:
             raise ValueError("serialized market outcome identity must contain canonical fields")
         try:
-            return cls(
+            return MarketOutcomeIdentity(
                 sport=raw["sport"],
                 event_id=raw["event_id"],
                 market_id=raw["market_id"],

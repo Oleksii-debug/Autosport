@@ -169,12 +169,16 @@ class CompleteGameBoardRequest:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "CompleteGameBoardRequest":
+        if type(payload) is not dict:
+            raise ProviderObservationIntegrityError(
+                "complete game-board request payload must be an exact JSON object"
+            )
         try:
-            books = payload["bookmakers"]
-            markets = payload["markets"]
-            if not isinstance(books, list) or not isinstance(markets, list):
+            books = dict.__getitem__(payload, "bookmakers")
+            markets = dict.__getitem__(payload, "markets")
+            if type(books) is not list or type(markets) is not list:
                 raise ProviderObservationIntegrityError(
-                    "request bookmakers/markets must be JSON arrays"
+                    "request bookmakers/markets must be exact JSON arrays"
                 )
             return cls(
                 sport_key=payload["sport_key"],
@@ -341,33 +345,42 @@ class CompleteGameBoardSnapshot:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "CompleteGameBoardSnapshot":
+        if type(payload) is not dict:
+            raise ProviderObservationIntegrityError(
+                "complete game-board evidence payload must be an exact JSON object"
+            )
         try:
-            if payload["schema"] != SCHEMA or payload["schema_version"] != SCHEMA_VERSION:
+            if (
+                dict.__getitem__(payload, "schema") != SCHEMA
+                or dict.__getitem__(payload, "schema_version") != SCHEMA_VERSION
+            ):
                 raise ProviderObservationIntegrityError(
                     "unsupported complete game-board evidence schema"
                 )
-            raw_request = payload["request"]
-            if not isinstance(raw_request, Mapping):
-                raise ProviderObservationIntegrityError("request payload must be an object")
+            raw_request = dict.__getitem__(payload, "request")
+            if type(raw_request) is not dict:
+                raise ProviderObservationIntegrityError(
+                    "request payload must be an exact JSON object"
+                )
             snapshot = cls(
                 request=CompleteGameBoardRequest.from_payload(raw_request),
-                captured_at=payload["captured_at"],
-                frame_json=payload["frame_json"],
+                captured_at=dict.__getitem__(payload, "captured_at"),
+                frame_json=dict.__getitem__(payload, "frame_json"),
             )
         except KeyError as exc:
             raise ProviderObservationIntegrityError(
                 "complete game-board evidence payload is incomplete"
             ) from exc
-        if payload.get("frame_sha256") != snapshot.frame_sha256:
+        if dict.get(payload, "frame_sha256") != snapshot.frame_sha256:
             raise ProviderObservationIntegrityError(
                 "frame_sha256 does not bind exact provider frame"
             )
-        raw_rows = payload.get("row_sha256s")
-        if not isinstance(raw_rows, list) or tuple(raw_rows) != snapshot.row_sha256s:
+        raw_rows = dict.get(payload, "row_sha256s")
+        if type(raw_rows) is not list or tuple(raw_rows) != snapshot.row_sha256s:
             raise ProviderObservationIntegrityError(
                 "row_sha256s do not bind exact provider rows"
             )
-        if payload.get("evidence_sha256") != snapshot.evidence_sha256:
+        if dict.get(payload, "evidence_sha256") != snapshot.evidence_sha256:
             raise ProviderObservationIntegrityError(
                 "evidence_sha256 does not bind complete provider evidence"
             )

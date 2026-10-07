@@ -366,6 +366,72 @@ class _HostileTuple(tuple):
     __len__ = _dispatch
 
 
+class _HostilePayload(dict):
+    def _dispatch(self, *_args, **_kwargs):
+        raise AssertionError("hostile payload mapping dispatched before exact-type rejection")
+
+    __getitem__ = _dispatch
+    get = _dispatch
+    keys = _dispatch
+    __iter__ = _dispatch
+
+
+class _HostileList(list):
+    def _dispatch(self, *_args, **_kwargs):
+        raise AssertionError("hostile payload list dispatched before exact-type rejection")
+
+    __iter__ = _dispatch
+    __len__ = _dispatch
+
+
+def test_request_from_payload_rejects_mapping_subclass_before_dispatch() -> None:
+    payload = _HostilePayload(_request().to_payload())
+    with pytest.raises(ProviderObservationIntegrityError, match="exact JSON object"):
+        CompleteGameBoardRequest.from_payload(payload)
+
+
+def test_request_from_payload_rejects_list_subclass_before_iteration() -> None:
+    payload = _request().to_payload()
+    payload["bookmakers"] = _HostileList(payload["bookmakers"])
+    with pytest.raises(ProviderObservationIntegrityError, match="exact JSON arrays"):
+        CompleteGameBoardRequest.from_payload(payload)
+
+
+def test_snapshot_from_payload_rejects_mapping_subclass_before_dispatch() -> None:
+    snapshot = CompleteGameBoardSnapshot(
+        request=_request(),
+        captured_at=CAPTURED_AT,
+        frame_json=json.dumps(_complete_frame()),
+    )
+    payload = _HostilePayload(snapshot.to_payload())
+    with pytest.raises(ProviderObservationIntegrityError, match="exact JSON object"):
+        CompleteGameBoardSnapshot.from_payload(payload)
+
+
+def test_snapshot_from_payload_rejects_nested_mapping_subclass_before_dispatch() -> None:
+    snapshot = CompleteGameBoardSnapshot(
+        request=_request(),
+        captured_at=CAPTURED_AT,
+        frame_json=json.dumps(_complete_frame()),
+    )
+    payload = snapshot.to_payload()
+    payload["request"] = _HostilePayload(payload["request"])
+    with pytest.raises(ProviderObservationIntegrityError, match="request payload must be an exact JSON object"):
+        CompleteGameBoardSnapshot.from_payload(payload)
+
+
+def test_snapshot_from_payload_rejects_row_hash_list_subclass_before_iteration() -> None:
+    snapshot = CompleteGameBoardSnapshot(
+        request=_request(),
+        captured_at=CAPTURED_AT,
+        frame_json=json.dumps(_complete_frame()),
+    )
+    payload = snapshot.to_payload()
+    payload["row_sha256s"] = _HostileList(payload["row_sha256s"])
+    with pytest.raises(ProviderObservationIntegrityError, match="row_sha256s"):
+        CompleteGameBoardSnapshot.from_payload(payload)
+
+
 def test_request_identity_text_subclass_fails_before_virtual_dispatch() -> None:
     with pytest.raises(ProviderObservationIntegrityError):
         CompleteGameBoardRequest(

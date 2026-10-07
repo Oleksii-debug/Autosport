@@ -61,6 +61,15 @@ class CandidateLeg:
     sport: str | None = None
 
     def __post_init__(self) -> None:
+        _canonical_identity_text(self.quote_key, "quote_key")
+        _canonical_identity_text(self.event_id, "event_id")
+        if (self.market_id is None) != (self.selection_id is None):
+            raise ValueError(
+                "candidate leg market_id and selection_id must be provided together"
+            )
+        if self.market_id is not None and self.selection_id is not None:
+            _canonical_identity_text(self.market_id, "market_id")
+            _canonical_identity_text(self.selection_id, "selection_id")
         if self.sport is not None:
             _canonical_sport(self.sport)
 

@@ -31,6 +31,63 @@ def _leg() -> CandidateLeg:
     "field",
     ("event_id", "market_id", "selection_id"),
 )
+def test_constructor_rejects_hostile_quote_key_before_hash_or_strip() -> None:
+    class _HashTrapStr(str):
+        def __hash__(self) -> int:
+            raise AssertionError("candidate identity must reject str subclass before hashing")
+
+        def strip(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("candidate identity must reject str subclass before strip")
+
+    with pytest.raises(ValueError, match="quote_key must be a non-empty canonical string"):
+        CandidateLeg(
+            quote_key=_HashTrapStr("event-1|market-1|selection-1"),  # type: ignore[arg-type]
+            event_id="event-1",
+            decimal_odds=Decimal("2"),
+            probability=Decimal("0.5"),
+            market_id="market-1",
+            selection_id="selection-1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("event_id", _TrapStr("event-1")),
+        ("market_id", _TrapStr("market-1")),
+        ("selection_id", _TrapStr("selection-1")),
+        ("event_id", " event-1"),
+    ),
+)
+def test_constructor_rejects_noncanonical_structured_identity(
+    field: str,
+    value: str,
+) -> None:
+    kwargs: dict[str, object] = {
+        "quote_key": "event-1|market-1|selection-1",
+        "event_id": "event-1",
+        "decimal_odds": Decimal("2"),
+        "probability": Decimal("0.5"),
+        "market_id": "market-1",
+        "selection_id": "selection-1",
+    }
+    kwargs[field] = value
+    with pytest.raises(ValueError, match="canonical string"):
+        CandidateLeg(**kwargs)  # type: ignore[arg-type]
+
+
+def test_constructor_rejects_half_structured_ticket_identity() -> None:
+    with pytest.raises(ValueError, match="must be provided together"):
+        CandidateLeg(
+            quote_key="event-1|market-1|selection-1",
+            event_id="event-1",
+            decimal_odds=Decimal("2"),
+            probability=Decimal("0.5"),
+            market_id="market-1",
+            selection_id=None,
+        )
+
+
 def test_ticket_identity_rejects_str_subclass_before_virtual_method(field: str) -> None:
     leg = _leg()
     object.__setattr__(leg, field, _TrapStr(getattr(leg, field)))

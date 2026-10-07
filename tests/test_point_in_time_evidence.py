@@ -520,3 +520,44 @@ def test_crash_before_local_publish_aborts_and_exact_retry_uses_fresh_transactio
     )
     assert persisted.consumer_identity == "experiment:a"
     assert len(restarted.records()) == 1
+
+def test_point_in_time_digest_identity_rejects_uppercase_alias() -> None:
+    with pytest.raises(PointInTimeEvidenceError, match="canonical lowercase SHA-256"):
+        point_in_time_module._sha256("A" * 64, "digest")
+
+
+def test_feature_provenance_rejects_uppercase_digest_alias() -> None:
+    snapshot = _snapshot()
+    feature_set = _feature_set()
+    with pytest.raises(PointInTimeEvidenceError, match="canonical lowercase SHA-256"):
+        FeatureArtifactProvenance(
+            dataset_snapshot_id=snapshot.dataset_snapshot_id,
+            source_identity=snapshot.source_identity,
+            license_identity=snapshot.license_identity,
+            dataset_causal_cutoff=snapshot.causal_cutoff,
+            dataset_available_at_utc=snapshot.available_at_utc,
+            feature_set_id=feature_set.feature_set_id,
+            feature_version=feature_set.version,
+            feature_definition_sha256=feature_set.definition_sha256.upper(),
+            feature_source_sha256=feature_set.source_sha256,
+            feature_available_at_utc=feature_set.available_at_utc,
+            feature_payload_sha256=hashlib.sha256(_FEATURE_PAYLOAD).hexdigest(),
+        )
+
+
+def test_feature_provenance_use_boundary_rejects_post_init_digest_alias() -> None:
+    snapshot = _snapshot()
+    feature_set = _feature_set()
+    provenance = FeatureArtifactProvenance.issue(
+        dataset_snapshot=snapshot,
+        feature_set=feature_set,
+        feature_payload=_FEATURE_PAYLOAD,
+    )
+    object.__setattr__(
+        provenance,
+        "feature_payload_sha256",
+        provenance.feature_payload_sha256.upper(),
+    )
+    with pytest.raises(PointInTimeEvidenceError, match="canonical lowercase SHA-256"):
+        provenance.to_payload()
+

@@ -2,10 +2,11 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from pathlib import Path
 
-from autosport.domain import MarketEvent, TicketLeg
+from autosport.domain import MarketEvent, PaperTicket, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
 from autosport.risk import (
@@ -13,6 +14,22 @@ from autosport.risk import (
     ProposedTicketRiskContext,
     RiskOfRuinEvidence,
 )
+
+
+class _HostilePolicyDecimalInput:
+    calls = 0
+
+    def __str__(self) -> str:
+        type(self).calls += 1
+        return "0.5"
+
+
+class _HostileRegistryPath(str):
+    calls = 0
+
+    def __str__(self) -> str:
+        type(self).calls += 1
+        return "/tmp/forged-risk-registry.json"
 
 
 class EconomicGoalRiskBindingTests(unittest.TestCase):
@@ -112,6 +129,417 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         }
         values.update(overrides)
         return PaperRiskPolicy(**values)  # type: ignore[arg-type]
+
+
+
+    def test_policy_rejects_arbitrary_fraction_input_before_str(self) -> None:
+        _HostilePolicyDecimalInput.calls = 0
+
+        with self.assertRaisesRegex(ValueError, "exact built-in Decimal"):
+            PaperRiskPolicy(
+                max_ticket_fraction=_HostilePolicyDecimalInput(),
+            )
+
+        self.assertEqual(_HostilePolicyDecimalInput.calls, 0)
+
+    def test_policy_fraction_ingress_preserves_supported_exact_builtin_inputs(self) -> None:
+        for value in (
+            Decimal("0.5"),
+            "0.5",
+            0,
+            0.5,
+        ):
+            policy = PaperRiskPolicy(max_ticket_fraction=value)
+            self.assertEqual(policy.max_ticket_fraction, Decimal(str(value)))
+
+
+    def test_policy_rejects_registry_path_subclass_before_str(self) -> None:
+        _HostileRegistryPath.calls = 0
+
+        with self.assertRaisesRegex(TypeError, "exact str"):
+            PaperRiskPolicy(
+                risk_of_ruin_registry_path=_HostileRegistryPath(
+                    "/tmp/risk-registry.json"
+                )
+            )
+
+        self.assertEqual(_HostileRegistryPath.calls, 0)
+
+    def test_policy_accepts_exact_path_and_canonicalizes_to_string(self) -> None:
+        path = Path(tempfile.gettempdir()) / "risk-registry.json"
+        policy = PaperRiskPolicy(risk_of_ruin_registry_path=path)
+
+        self.assertEqual(policy.risk_of_ruin_registry_path, str(path))
+        self.assertIs(type(policy.risk_of_ruin_registry_path), str)
+
+
+    def test_evaluate_rejects_hostile_stake_before_str(self) -> None:
+        _HostilePolicyDecimalInput.calls = 0
+        policy = self._policy(self._goal())
+        decision = policy.evaluate(
+            PaperBook("100"),
+            _HostilePolicyDecimalInput(),
+            context=self._context(),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "stake must be a finite decimal")
+        self.assertEqual(_HostilePolicyDecimalInput.calls, 0)
+
+    def test_derive_goal_stake_rejects_hostile_signal_before_str(self) -> None:
+        _HostilePolicyDecimalInput.calls = 0
+        policy = self._policy(self._goal())
+        amount = policy.derive_goal_stake(
+            PaperBook("100"),
+            _HostilePolicyDecimalInput(),
+            context=self._context(),
+        )
+
+        self.assertIsNone(amount)
+        self.assertEqual(_HostilePolicyDecimalInput.calls, 0)
+
+    def test_evaluate_rejects_noncanonical_post_construction_policy_state(self) -> None:
+        _HostilePolicyDecimalInput.calls = 0
+        policy = self._policy(self._goal())
+        object.__setattr__(
+            policy,
+            "max_ticket_fraction",
+            _HostilePolicyDecimalInput(),
+        )
+
+        decision = policy.evaluate(
+            PaperBook("100"),
+            Decimal("1"),
+            context=self._context(),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "paper risk policy state is invalid")
+        self.assertEqual(_HostilePolicyDecimalInput.calls, 0)
+
+    def test_risk_portfolio_digest_binds_full_ticket_leg_identity(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg(
+            "event-risk-identity",
+            "market-risk-identity",
+            "selection-risk-identity",
+            Decimal("2"),
+            sport="football",
+            exchange_side="back",
+        )
+        ticket = book.open_ticket(
+            [leg],
+            Decimal("1"),
+            placed_at="2026-09-16T15:00:00+00:00",
+        )
+        stored_leg = ticket.legs[0]
+        baseline = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        self.assertIsNotNone(baseline)
+
+        object.__setattr__(stored_leg, "exchange_side", "lay")
+        changed_side = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        self.assertIsNotNone(changed_side)
+        self.assertNotEqual(changed_side, baseline)
+
+        object.__setattr__(stored_leg, "exchange_side", "back")
+        object.__setattr__(stored_leg, "sport", "tennis")
+        changed_sport = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        self.assertIsNotNone(changed_sport)
+        self.assertNotEqual(changed_sport, baseline)
+
+
+    def test_risk_candidate_digest_binds_full_ticket_leg_identity(self) -> None:
+        def context(*, sport: str, exchange_side: str) -> ProposedTicketRiskContext:
+            return ProposedTicketRiskContext(
+                legs=(
+                    TicketLeg(
+                        "event-risk-candidate",
+                        "market-risk-candidate",
+                        "selection-risk-candidate",
+                        Decimal("2"),
+                        sport=sport,
+                        exchange_side=exchange_side,
+                    ),
+                ),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+                proposal_ts="2026-09-16T15:00:02+00:00",
+            )
+
+        baseline = PaperRiskPolicy.risk_of_ruin_candidate_sha256(
+            context(sport="football", exchange_side="back")
+        )
+        changed_side = PaperRiskPolicy.risk_of_ruin_candidate_sha256(
+            context(sport="football", exchange_side="lay")
+        )
+        changed_sport = PaperRiskPolicy.risk_of_ruin_candidate_sha256(
+            context(sport="tennis", exchange_side="back")
+        )
+
+        self.assertIsNotNone(baseline)
+        self.assertIsNotNone(changed_side)
+        self.assertIsNotNone(changed_sport)
+        self.assertNotEqual(changed_side, baseline)
+        self.assertNotEqual(changed_sport, baseline)
+
+
+
+
+
+    def test_policy_rejects_economic_goal_subclass(self) -> None:
+        class DerivedGoal(EconomicGoalContract):
+            def __getattribute__(self, name: str) -> object:
+                if name == "max_stake_fraction":
+                    return Decimal("1")
+                return super().__getattribute__(name)
+
+        canonical = self._goal(max_stake_fraction=Decimal("0.01"))
+        derived = DerivedGoal(
+            goal_id=canonical.goal_id,
+            revision=canonical.revision,
+            bankroll_id=canonical.bankroll_id,
+            currency=canonical.currency,
+            objective=canonical.objective,
+            max_stake_fraction=canonical.max_stake_fraction,
+            max_stake_amount=canonical.max_stake_amount,
+            max_session_loss_fraction=canonical.max_session_loss_fraction,
+            max_day_loss_fraction=canonical.max_day_loss_fraction,
+            max_drawdown_fraction=canonical.max_drawdown_fraction,
+            max_capital_at_risk_fraction=canonical.max_capital_at_risk_fraction,
+            max_event_concentration_fraction=canonical.max_event_concentration_fraction,
+            max_market_concentration_fraction=canonical.max_market_concentration_fraction,
+            max_provider_concentration_fraction=canonical.max_provider_concentration_fraction,
+            max_sport_concentration_fraction=canonical.max_sport_concentration_fraction,
+            max_turnover_fraction=canonical.max_turnover_fraction,
+            max_risk_of_ruin=canonical.max_risk_of_ruin,
+            max_execution_slippage_fraction=canonical.max_execution_slippage_fraction,
+            max_quote_age_seconds=canonical.max_quote_age_seconds,
+            minimum_data_quality=canonical.minimum_data_quality,
+            max_concurrent_positions=canonical.max_concurrent_positions,
+            max_parlay_legs=canonical.max_parlay_legs,
+            automation_level=canonical.automation_level,
+            emergency_stop=canonical.emergency_stop,
+            blocked_sports=canonical.blocked_sports,
+            blocked_providers=canonical.blocked_providers,
+            blocked_markets=canonical.blocked_markets,
+        )
+
+        with self.assertRaisesRegex(TypeError, "canonical EconomicGoalContract"):
+            PaperRiskPolicy(economic_goal=derived)
+
+
+    def test_book_state_rejects_ticket_subclass_before_attribute_reads(self) -> None:
+        class HostileTicket(PaperTicket):
+            reads = 0
+
+            def __getattribute__(self, name: str) -> object:
+                if name not in {"reads", "__class__"}:
+                    type(self).reads += 1
+                return super().__getattribute__(name)
+
+        book = PaperBook("100")
+        leg = self._leg()
+        hostile = HostileTicket(
+            ticket_id="hostile-ticket",
+            stake=Decimal("1"),
+            legs=(leg,),
+            placed_at="2026-09-16T15:00:00+00:00",
+        )
+        HostileTicket.reads = 0
+        book.tickets["hostile-ticket"] = hostile
+
+        self.assertIsNone(PaperRiskPolicy._book_state(book))
+        self.assertEqual(HostileTicket.reads, 0)
+
+
+    def test_historical_window_rejects_datetime_subclass_before_hooks(self) -> None:
+        class HostileDateTime(datetime):
+            calls = 0
+
+            def utcoffset(self):
+                type(self).calls += 1
+                return super().utcoffset()
+
+        hostile = HostileDateTime(
+            2026,
+            9,
+            16,
+            15,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+        HostileDateTime.calls = 0
+
+        metrics = PaperRiskPolicy._historical_risk_metrics(
+            PaperBook("100"),
+            realized_loss_window=(hostile, hostile),
+        )
+
+        self.assertIsNone(metrics)
+        self.assertEqual(HostileDateTime.calls, 0)
+
+    def test_risk_portfolio_digest_rejects_paperbook_subclass(self) -> None:
+        class DerivedBook(PaperBook):
+            pass
+
+        self.assertIsNone(
+            PaperRiskPolicy.risk_of_ruin_portfolio_sha256(DerivedBook("100"))
+        )
+
+    def test_evaluate_rejects_paperbook_subclass(self) -> None:
+        class DerivedBook(PaperBook):
+            pass
+
+        decision = self._policy(self._goal()).evaluate(
+            DerivedBook("100"),
+            Decimal("1"),
+            context=self._context(),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
+
+    def test_context_rejects_mutated_quote_decimal_before_str(self) -> None:
+        class HostileOdds(Decimal):
+            calls = 0
+
+            def __str__(self) -> str:
+                type(self).calls += 1
+                return "2"
+
+        leg = self._leg()
+        quote = MarketEvent(
+            event_id=leg.event_id,
+            market_id=leg.market_id,
+            selection_id=leg.selection_id,
+            decimal_odds=Decimal("2"),
+            observed_ts="2026-09-16T15:00:00+00:00",
+            source_id="provider-1",
+            sequence=1,
+            source_ts="2026-09-16T14:59:59+00:00",
+            ingest_ts="2026-09-16T15:00:01+00:00",
+        )
+        hostile = HostileOdds("2")
+        HostileOdds.calls = 0
+        object.__setattr__(quote, "decimal_odds", hostile)
+
+        with self.assertRaisesRegex(ValueError, "invalid quote"):
+            ProposedTicketRiskContext(
+                legs=(leg,),
+                quotes=(quote,),
+            )
+
+        self.assertEqual(HostileOdds.calls, 0)
+
+    def test_context_rejects_mutated_market_type_before_value_read(self) -> None:
+        class HostileMarketType:
+            calls = 0
+
+            @property
+            def value(self) -> str:
+                type(self).calls += 1
+                return "other"
+
+        leg = self._leg()
+        quote = MarketEvent(
+            event_id=leg.event_id,
+            market_id=leg.market_id,
+            selection_id=leg.selection_id,
+            decimal_odds=Decimal("2"),
+            observed_ts="2026-09-16T15:00:00+00:00",
+            source_id="provider-1",
+            sequence=1,
+            source_ts="2026-09-16T14:59:59+00:00",
+            ingest_ts="2026-09-16T15:00:01+00:00",
+        )
+        hostile = HostileMarketType()
+        HostileMarketType.calls = 0
+        object.__setattr__(quote, "market_type", hostile)
+
+        with self.assertRaisesRegex(ValueError, "invalid quote"):
+            ProposedTicketRiskContext(
+                legs=(leg,),
+                quotes=(quote,),
+            )
+
+        self.assertEqual(HostileMarketType.calls, 0)
+
+
+    def test_scalar_ruin_evidence_revalidated_after_mutation_before_comparison(self) -> None:
+        class HostileBound(Decimal):
+            comparisons = 0
+
+            def __gt__(self, other: object) -> bool:
+                type(self).comparisons += 1
+                return super().__gt__(other)
+
+        goal = self._goal(max_risk_of_ruin=Decimal("0.10"))
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        context = self._bound_ruin_context(
+            policy,
+            book,
+            Decimal("1"),
+            Decimal("0.05"),
+        )
+        evidence = context.risk_of_ruin_evidence
+        self.assertIsNotNone(evidence)
+        hostile = HostileBound("0.05")
+        HostileBound.comparisons = 0
+        object.__setattr__(evidence, "upper_bound", hostile)
+
+        decision = policy.evaluate(
+            book,
+            Decimal("1"),
+            context=context,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "portfolio risk-of-ruin evidence is invalid")
+        self.assertEqual(HostileBound.comparisons, 0)
+
+    def test_risk_candidate_digest_rejects_context_subclass(self) -> None:
+        class DerivedContext(ProposedTicketRiskContext):
+            pass
+
+        base = self._context()
+        derived = DerivedContext(
+            legs=base.legs,
+            quotes=base.quotes,
+            provider_accounts=base.provider_accounts,
+            bankroll_id=base.bankroll_id,
+            currency=base.currency,
+            measurement_window_start=base.measurement_window_start,
+            measurement_window_end=base.measurement_window_end,
+            proposal_ts=base.proposal_ts,
+        )
+
+        self.assertIsNone(
+            PaperRiskPolicy.risk_of_ruin_candidate_sha256(derived)
+        )
+
+    def test_evaluate_rejects_context_subclass(self) -> None:
+        class DerivedContext(ProposedTicketRiskContext):
+            pass
+
+        base = self._context()
+        derived = DerivedContext(
+            legs=base.legs,
+            quotes=base.quotes,
+            provider_accounts=base.provider_accounts,
+            bankroll_id=base.bankroll_id,
+            currency=base.currency,
+            measurement_window_start=base.measurement_window_start,
+            measurement_window_end=base.measurement_window_end,
+            proposal_ts=base.proposal_ts,
+        )
+        policy = self._policy(self._goal())
+        decision = policy.evaluate(PaperBook("100"), Decimal("1"), context=derived)
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "proposed ticket risk context is invalid")
 
     def test_owner_stake_fraction_tightens_executable_policy_at_exact_boundary(self) -> None:
         policy = self._policy(self._goal(max_stake_fraction=Decimal("0.10")))
@@ -546,7 +974,11 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
                 Decimal("0.01"),
             ),
         )
-        self.assertTrue(at_boundary.allowed)
+        self.assertFalse(at_boundary.allowed)
+        self.assertEqual(
+            at_boundary.reason,
+            "portfolio risk-of-ruin evidence lacks product-issued durable authority",
+        )
 
         exceeded = policy.evaluate(
             book,
@@ -639,8 +1071,12 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             book.save(path)
             restarted = PaperBook.load(path)
 
-            decision = policy.evaluate(restarted, Decimal("1"), context=bound)
-            self.assertTrue(decision.allowed)
+        decision = policy.evaluate(restarted, Decimal("1"), context=bound)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "portfolio risk-of-ruin evidence lacks product-issued durable authority",
+        )
 
     def test_owner_concurrent_position_limit_counts_only_canonical_open_tickets(self) -> None:
         book = PaperBook("100")

@@ -440,10 +440,11 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             self.assertEqual(record.payload["stake"], "0")
             self.assertNotIn("risk_of_ruin_evidence", record.payload)
 
-    def test_nontrivial_ruin_goal_uses_exact_bound_context_and_persists_witness(self):
+    def test_nontrivial_ruin_goal_rejects_caller_witness_and_audits_it(self):
         goal = self._economic_goal(max_risk_of_ruin=Decimal("0.01"))
         pipeline = self._goal_pipeline(goal)
         book = self._book()
+        before = set(book.tickets)
         candidate = self._candidate(probability="0.60")
         witness = self._bound_ruin_evidence(
             book=book,
@@ -464,13 +465,13 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 material_action_id="research-ror-action",
             )
 
-            self.assertTrue(decision.approved)
-            self.assertTrue(decision.risk.allowed)
-            self.assertIsNotNone(decision.portfolio_impact)
-            self.assertEqual(decision.portfolio_impact.stake, Decimal("20.00"))
-            ticket = book.tickets[decision.ticket_id]
-            self.assertEqual(ticket.stake, Decimal("20.00"))
+            self.assertFalse(decision.approved)
+            self.assertFalse(decision.risk.allowed)
+            self.assertIsNone(decision.portfolio_impact)
+            self.assertEqual(set(book.tickets), before)
             record = ledger.verified_records()[0]
+            self.assertFalse(record.payload["approved"])
+            self.assertEqual(record.payload["stake"], "0")
             self.assertEqual(record.payload["stake_source"], "economic-goal-derived")
             self.assertEqual(
                 record.payload["risk_of_ruin_evidence"]["evidence_id"],
@@ -481,22 +482,20 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 witness.candidate_sha256,
             )
             self.assertEqual(
-                record.payload["risk_of_ruin_evidence"]["evaluated_stake"],
-                "20.00",
-            )
-            self.assertEqual(
                 record.payload["risk_of_ruin_evidence"]["upper_bound"],
                 "0.01",
             )
+            self.assertFalse(record.payload["risk"]["allowed"])
             JsonlDecisionLedger(ledger.path).verified_economic_decision(
                 record.decision_id,
                 goal,
             )
 
-    def test_ruin_witness_is_bound_to_material_action_intent(self):
+    def test_rejected_caller_ruin_witness_does_not_reserve_material_action_intent(self):
         goal = self._economic_goal(max_risk_of_ruin=Decimal("0.01"))
         pipeline = self._goal_pipeline(goal)
         book = self._book()
+        before = set(book.tickets)
         candidate = self._candidate(probability="0.60")
         witness = self._bound_ruin_evidence(
             book=book,
@@ -516,28 +515,37 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 risk_of_ruin_evidence=witness,
                 material_action_id="research-ror-intent",
             )
-            self.assertTrue(first.approved)
+            self.assertFalse(first.approved)
+            self.assertEqual(set(book.tickets), before)
 
             changed_witness = replace(
                 witness,
                 evidence_id="research-pipeline-ror-changed",
             )
-            with self.assertRaisesRegex(
-                ResearchDecisionReconciliationRequired,
-                "decision intent",
-            ):
-                self._decide(
-                    tmp,
-                    book=book,
-                    candidate=candidate,
-                    forecast=self._forecast(probability="0.60"),
-                    pipeline=pipeline,
-                    stake="NaN",
-                    market_quotes=[self._market_event()],
-                    risk_of_ruin_evidence=changed_witness,
-                    decision_ledger=ledger,
-                    material_action_id="research-ror-intent",
-                )
+            book, ledger, second = self._decide(
+                tmp,
+                book=book,
+                candidate=candidate,
+                forecast=self._forecast(probability="0.60"),
+                pipeline=pipeline,
+                stake="NaN",
+                market_quotes=[self._market_event()],
+                risk_of_ruin_evidence=changed_witness,
+                decision_ledger=ledger,
+                material_action_id="research-ror-intent",
+            )
+            self.assertFalse(second.approved)
+            self.assertEqual(set(book.tickets), before)
+            records = ledger.verified_records()
+            self.assertEqual(len(records), 2)
+            self.assertEqual(
+                records[0].payload["risk_of_ruin_evidence"]["evidence_id"],
+                witness.evidence_id,
+            )
+            self.assertEqual(
+                records[1].payload["risk_of_ruin_evidence"]["evidence_id"],
+                changed_witness.evidence_id,
+            )
 
     def test_active_economic_goal_exhaustion_records_zero_without_ticket(self):
         goal = self._economic_goal(max_stake_fraction=Decimal("0"))

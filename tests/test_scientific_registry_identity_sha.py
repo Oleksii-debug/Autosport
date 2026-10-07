@@ -106,7 +106,7 @@ def test_valid_version_sha_payloads_remain_byte_spelling_stable() -> None:
     assert strategy.to_payload()["config_sha256"] == SHA_C
 
 
-def _dataset(**overrides: object) -> DatasetSnapshot:
+def _dataset(cls=DatasetSnapshot, **overrides: object) -> DatasetSnapshot:
     values: dict[str, object] = {
         "dataset_snapshot_id": "dataset-v1",
         "manifest_sha256": SHA_A,
@@ -117,7 +117,7 @@ def _dataset(**overrides: object) -> DatasetSnapshot:
         "outcome_reveal_after": None,
     }
     values.update(overrides)
-    return DatasetSnapshot(**values)  # type: ignore[arg-type]
+    return cls(**values)  # type: ignore[arg-type]
 
 
 class _DatasetSnapshotSubclass(DatasetSnapshot):
@@ -132,7 +132,7 @@ def test_registry_append_rejects_scientific_record_subclass_before_payload_dispa
     )
 
     with pytest.raises(ValueError, match="exact canonical record type"):
-        registry.append(_DatasetSnapshotSubclass(**_dataset().__dict__))  # type: ignore[arg-type]
+        registry.append(_dataset(_DatasetSnapshotSubclass))
 
 
 def test_registry_append_revalidates_tampered_dataset_snapshot_identity(

@@ -34,10 +34,26 @@ class _FrozenDecisionPayloadList(tuple):
 
 
 def _freeze_decision_payload(value: Any) -> Any:
-    if isinstance(value, Mapping):
+    if type(value) is dict:
+        # Snapshot an exact built-in dict without rehashing its existing keys.
+        # This lets us reject hostile key subclasses before any caller-defined
+        # __hash__/__eq__ can run while still preserving the later canonical
+        # JSON validator's historical rejection point for benign non-string keys.
+        snapshot = dict.copy(value)
+        keys = tuple(dict.keys(snapshot))
+        safe_key_types = {str, int, float, bool, type(None)}
+        if any(type(key) not in safe_key_types for key in keys):
+            raise ValueError(
+                "decision payload mapping keys must use exact built-in scalar types"
+            )
         return MappingProxyType(
-            {key: _freeze_decision_payload(child) for key, child in value.items()}
+            {
+                key: _freeze_decision_payload(dict.__getitem__(snapshot, key))
+                for key in keys
+            }
         )
+    if isinstance(value, Mapping):
+        raise ValueError("decision payload mappings must be exact dictionaries")
     if isinstance(value, list):
         return _FrozenDecisionPayloadList(
             _freeze_decision_payload(child) for child in value

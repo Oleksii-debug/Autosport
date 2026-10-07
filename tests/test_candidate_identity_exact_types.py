@@ -178,7 +178,10 @@ def test_legacy_ticket_suffix_cannot_mint_noncanonical_structured_identity(
     leg = _leg()
     object.__setattr__(leg, "quote_key", quote_key)
 
-    with pytest.raises(ValueError, match="canonical string"):
+    with pytest.raises(
+        ValueError,
+        match="structured event/market/selection identity does not match quote_key",
+    ):
         leg.ticket_identity()
 
 

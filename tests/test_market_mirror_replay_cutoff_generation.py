@@ -2681,7 +2681,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_append_chronology_keeps_source_receive_ingest_commit_and_availability_distinct(self) -> None:
+    def test_append_chronology_keeps_clock_classes_distinct(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:

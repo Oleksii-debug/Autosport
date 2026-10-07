@@ -1150,18 +1150,28 @@ class ScientificRegistry:
 
         validate_identity_shape(payload, f"{record_type}.payload")
         if record_type == "DatasetSnapshot":
-            payload_available = _instant(
-                payload.get("available_at"),
-                "DatasetSnapshot.available_at",
-            )
+            # Durable pre-availability-schema snapshots may omit the duplicate
+            # payload-level available_at field.  The immutable registry envelope
+            # already binds available_at into record_sha256, so absence can migrate
+            # conservatively to that exact envelope instant.  A present payload
+            # value remains strict and must equal the envelope; it may never
+            # backdate or rewrite product availability.
             envelope_available = _instant(
                 raw_entry["available_at"],
                 "DatasetSnapshot.envelope_available_at",
             )
-            if payload_available != envelope_available:
-                raise ValueError(
-                    "DatasetSnapshot payload/envelope availability mismatch"
+            payload_available_raw = payload.get("available_at")
+            if payload_available_raw is None:
+                payload_available = envelope_available
+            else:
+                payload_available = _instant(
+                    payload_available_raw,
+                    "DatasetSnapshot.available_at",
                 )
+                if payload_available != envelope_available:
+                    raise ValueError(
+                        "DatasetSnapshot payload/envelope availability mismatch"
+                    )
             causal_cutoff = _instant(
                 payload.get("causal_cutoff"),
                 "DatasetSnapshot.causal_cutoff",

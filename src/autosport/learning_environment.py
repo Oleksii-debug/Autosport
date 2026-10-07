@@ -540,8 +540,8 @@ class CausalLearningEnvironment:
         decision_at: str,
         parameters: Metadata = (),
     ) -> Action:
-        if not isinstance(observation, Observation):
-            raise TypeError("observation must be Observation")
+        if type(observation) is not Observation:
+            raise TypeError("observation must be an exact Observation")
         if observation.environment_id != self.environment_id:
             raise LearningEnvironmentError("observation belongs to another environment")
         action_name = _canonical_text("action_type", action_type)

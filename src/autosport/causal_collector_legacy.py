@@ -1008,3 +1008,8 @@ class RemoteCollectorAdapter:
             raise TypeError("delta must be exact CollectorDelta")
         delta.validate()
         return self._commit_delta(delta)
+
+
+# Stable migration/test reference captured before causal_collector.py intentionally
+# rebinds the legacy module's CollectorDeltaStore name to the canonical SQLite store.
+LegacyJsonCollectorDeltaStore = CollectorDeltaStore

@@ -213,3 +213,13 @@ def test_champion_protocol_rejects_case_and_guardrail_subclasses() -> None:
         _protocol(cases=(_case(_CaseSubclass),))
     with pytest.raises(ValueError, match="guardrails must be a tuple"):
         _protocol(guardrails=(_GuardrailSubclass("roi"),))
+
+
+class _HashTrapStr(str):
+    def __hash__(self) -> int:
+        raise AssertionError("primary metric subclass hash must not execute")
+
+
+def test_champion_protocol_rejects_primary_metric_subclass_before_hash_dispatch() -> None:
+    with pytest.raises(ValueError, match="non-empty trimmed string"):
+        _protocol(primary_metric=_HashTrapStr("net_profit"))

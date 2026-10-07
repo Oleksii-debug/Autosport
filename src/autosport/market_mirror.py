@@ -120,9 +120,13 @@ class MarketMirror:
                 candidates = tuple(values)
             except TypeError as exc:
                 raise TypeError(f"{name} must be a string or iterable of strings") from exc
+        # Preserve the existing exact-type admission contract before invoking
+        # any string method, then validate the stricter canonical text spelling.
+        if any(type(value) is not str or not value for value in candidates):
+            raise ValueError(f"{name} entries must be non-empty strings")
         # Identity selectors are a trust boundary. Validate exact canonical text
-        # before constructing the hash-based set so malformed text or a str subclass
-        # cannot reach caller-controlled __hash__/__eq__ or alias a durable identity.
+        # before constructing the hash-based set so malformed text cannot alias a
+        # durable identity.
         canonical = tuple(
             MarketMirror._canonical_lookup_identity(
                 value,

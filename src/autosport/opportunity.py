@@ -43,6 +43,10 @@ def _canonical_text(value: object, field_name: str) -> str:
         )
     if "\x00" in value:
         raise OpportunityContractError(f"{field_name} must not contain NUL")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise OpportunityContractError(
+            f"{field_name} must not contain control characters"
+        )
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:

@@ -311,3 +311,26 @@ def test_tuple_subclasses_fail_before_iteration() -> None:
             opportunity_set=opportunity_set,
             portfolio_evidence_refs=_HostileTuple(()),  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize("value", ("authority\nline", "authority\tline", "authority\rline", "authority\x7fline"))
+def test_evidence_identity_rejects_non_nul_control_characters(value: str) -> None:
+    with pytest.raises(OpportunityContractError, match="control characters"):
+        EvidenceRef(value, "reference-1")
+
+
+@pytest.mark.parametrize("value", ("event\nline", "event\tline", "event\rline", "event\x7fline"))
+def test_quote_identity_rejects_non_nul_control_characters(value: str) -> None:
+    with pytest.raises(OpportunityContractError, match="control characters"):
+        QuoteRef(
+            event_id=value,
+            market_id="market-1",
+            selection_id="selection-1",
+            source_id="provider-1",
+            sequence=1,
+            decimal_odds=Decimal("2.0"),
+            observed_ts=_TS,
+            source_ts=None,
+            ingest_ts=_TS,
+            market_event_hash=_HASH,
+        )

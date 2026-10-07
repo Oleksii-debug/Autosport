@@ -2,13 +2,16 @@ import unittest
 from contextlib import nullcontext
 
 from autosport.causal_collector import (
+    ApplicationReceiptError,
     CanonicalDesktopApplication,
     CollectorDelta,
     CollectorDeltaStore,
     DesktopApplicationReceipt,
     DesktopDeltaCheckpointStore,
+    DesktopDeltaConsumer,
     RemoteCollectorAdapter,
     StreamCheckpoint,
+    canonical_event_digest,
 )
 from autosport.continuous_session import _ContinuousSessionState
 
@@ -46,6 +49,25 @@ class _HostileReceipt(DesktopApplicationReceipt):
 
     def validate(self) -> None:
         type(self).validate_calls += 1
+
+
+class _CollectorFeed:
+    def __init__(self, delta):
+        self.delta = delta
+
+    def deltas_available_through(self, *, as_of, view):
+        return (self.delta,)
+
+
+class _Checkpoint:
+    def _workspace_lock(self):
+        return nullcontext()
+
+    def has_ack(self, delta_id):
+        return False
+
+    def _ack_locked(self, delta, *, application_receipt, acknowledged_at):
+        return True
 
 
 def _delta(**overrides):

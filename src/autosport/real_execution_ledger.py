@@ -337,12 +337,24 @@ class ExecutionAttempt:
     effect_fingerprint: str
     reserved_at: str
 
+    def __post_init__(self) -> None:
+        _identity_text(self.attempt_id, "attempt_id")
+        _identity_text(self.plan_id, "plan_id")
+        _identity_text(self.action_id, "action_id")
+        _sha256_text(self.effect_fingerprint, "effect_fingerprint")
+        _timestamp(self.reserved_at, "reserved_at")
+
 
 @dataclass(frozen=True, slots=True)
 class ExternalReceiptIdentity:
     bookmaker_id: str
     account_id: str
     external_receipt_id: str
+
+    def __post_init__(self) -> None:
+        _identity_text(self.bookmaker_id, "bookmaker_id")
+        _identity_text(self.account_id, "account_id")
+        _identity_text(self.external_receipt_id, "external_receipt_id")
 
 
 @dataclass(frozen=True, slots=True)

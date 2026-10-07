@@ -137,6 +137,7 @@ class MarketMirror:
             source_time is None
             or observed_time is None
             or ingest_time is None
+            or ingest_time < observed_time
             or source_time > boundary
             or observed_time > boundary
             or ingest_time > boundary

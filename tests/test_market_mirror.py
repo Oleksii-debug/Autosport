@@ -376,6 +376,24 @@ class MarketMirrorTests(unittest.TestCase):
         )
         self.assertEqual(len(mirror.snapshot()), 4)
 
+    def test_active_snapshot_rejects_ingest_before_observation(self) -> None:
+        mirror = MarketMirror()
+        impossible = self.event(
+            selection="invalid-local-chronology",
+            observed_ts="2026-09-16T18:59:59+00:00",
+            ingest_ts="2026-09-16T18:59:58+00:00",
+            source_ts="2026-09-16T18:59:57+00:00",
+        )
+        mirror.apply(impossible)
+
+        active = mirror.active_snapshot(
+            as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=5),
+        )
+
+        self.assertEqual(active, ())
+        self.assertEqual(mirror.snapshot(), (impossible,))
+
     def test_active_snapshot_prefers_source_time_over_observation_time(self) -> None:
         mirror = MarketMirror()
         mirror.apply(

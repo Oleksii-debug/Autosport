@@ -46,6 +46,8 @@ def _require_utf8_encodable(value: str, field_name: str) -> str:
 def _canonical_string_value(value: object, field_name: str) -> str:
     if type(value) is not str or not value or value.strip() != value:
         raise ValueError(f"{field_name} must be a non-empty trimmed string")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{field_name} must not contain control characters")
     return _require_utf8_encodable(value, field_name)
 
 

@@ -326,7 +326,9 @@ class ExecutionPlan:
 
     @property
     def fingerprint(self) -> str:
-        return _digest(self.to_dict())
+        if type(self) is not ExecutionPlan:
+            raise ValueError("execution plan must be an exact ExecutionPlan")
+        return _digest(ExecutionPlan.to_dict(self))
 
 
 @dataclass(frozen=True, slots=True)

@@ -1173,10 +1173,11 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC score is missing"
             )
-        if not isinstance(score, OutcomeDerivedVOCScore):
+        if type(score) is not OutcomeDerivedVOCScore:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC score is invalid"
             )
+        OutcomeDerivedVOCScore.__post_init__(score)
         available_at = _instant("score.available_at", score.available_at)
         if available_at < _instant(
             "outcome_revealed_at",
@@ -1524,8 +1525,9 @@ class CanonicalVOCAuthorityResolver:
         *,
         as_of: str,
     ) -> OutcomeDerivedVOCScore | None:
-        if not isinstance(evaluation, PairedVOCEvaluation):
-            raise TypeError("evaluation must be PairedVOCEvaluation")
+        if type(evaluation) is not PairedVOCEvaluation:
+            raise TypeError("evaluation must be an exact PairedVOCEvaluation")
+        PairedVOCEvaluation.__post_init__(evaluation)
         _instant("as_of", as_of)
         canonical = self._require_registry_result(evaluation, as_of=as_of)
         self._require_decision(canonical)
@@ -1611,8 +1613,9 @@ class VOCEvaluationStore:
 
     def record(self, evaluation: PairedVOCEvaluation) -> str:
         """Persist immutable evidence; persistence alone grants no CLOUD authority."""
-        if not isinstance(evaluation, PairedVOCEvaluation):
-            raise TypeError("evaluation must be PairedVOCEvaluation")
+        if type(evaluation) is not PairedVOCEvaluation:
+            raise TypeError("evaluation must be an exact PairedVOCEvaluation")
+        PairedVOCEvaluation.__post_init__(evaluation)
         with WorkspaceEconomicLock(self.path.parent):
             loaded = self._load()
             existing = loaded.get(evaluation.evaluation_id)
@@ -1677,8 +1680,9 @@ class VOCEvaluationStore:
         resolved = resolver.resolve(value, as_of=as_of)
         if resolved is None:
             raise VOCEvaluationError("canonical VOC authority could not resolve evaluation")
-        if not isinstance(resolved, PairedVOCEvaluation):
+        if type(resolved) is not PairedVOCEvaluation:
             raise VOCEvaluationError("canonical VOC authority returned invalid evaluation")
+        PairedVOCEvaluation.__post_init__(resolved)
         if resolved.payload() != value.payload():
             raise VOCEvaluationError("canonical VOC authority differs from routed evaluation")
         return resolved
@@ -1699,8 +1703,9 @@ class VOCEvaluationStore:
         if resolver is None:
             raise VOCEvaluationError("missing canonical VOC authority resolver")
         score = resolver.resolve_score(value, as_of=as_of)
-        if score is None or not isinstance(score, OutcomeDerivedVOCScore):
+        if score is None or type(score) is not OutcomeDerivedVOCScore:
             raise VOCEvaluationError("canonical outcome-derived VOC score is missing")
+        OutcomeDerivedVOCScore.__post_init__(score)
         return score
 
     def values(self) -> tuple[PairedVOCEvaluation, ...]:

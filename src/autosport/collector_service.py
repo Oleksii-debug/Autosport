@@ -25,6 +25,7 @@ from .event_lifecycle import (
     CatalogPage,
     ContinuousEventLifecycle,
     EventLifecycleRecord,
+    canonical_event_identity_aliases,
 )
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
@@ -755,7 +756,11 @@ class HeadlessCollectorService:
                     "source returned more deltas than the configured batch bound"
                 )
 
-            discovered_event_ids = {item.identity for item in records}
+            discovered_event_ids = {
+                alias
+                for item in records
+                for alias in canonical_event_identity_aliases(item.identity)
+            }
             for delta in raw_deltas:
                 if not isinstance(delta, CollectorDelta):
                     raise TypeError(

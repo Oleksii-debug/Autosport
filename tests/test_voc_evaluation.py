@@ -108,6 +108,33 @@ def evaluation(**overrides):
     return PairedVOCEvaluation(**values)
 
 
+class _HostileVOCPayload(dict):
+    def __getitem__(self, key):
+        raise AssertionError("hostile VOC payload lookup must not run")
+
+    def get(self, key, default=None):
+        raise AssertionError("hostile VOC payload get must not run")
+
+
+def test_paired_voc_payload_rejects_mapping_subclass_before_dispatch():
+    hostile = _HostileVOCPayload(evaluation().payload())
+    with unittest.TestCase().assertRaisesRegex(
+        VOCEvaluationError,
+        "exact object",
+    ):
+        PairedVOCEvaluation.from_payload(hostile)
+
+
+def test_paired_voc_payload_rejects_unknown_schema_fields():
+    payload = evaluation().payload()
+    payload["future_identity_field"] = "unexpected"
+    with unittest.TestCase().assertRaisesRegex(
+        VOCEvaluationError,
+        "schema fields mismatch",
+    ):
+        PairedVOCEvaluation.from_payload(payload)
+
+
 def test_voc_cohort_structured_compute_identity_survives_registry_restart(tmp_path):
     path = tmp_path / "scientific-registry.json"
     registry = ScientificRegistry.initialize_pristine(path)

@@ -237,6 +237,7 @@ class MarketSettlementOutcomeAuthority:
             )
         if type(self.identity) is not MarketOutcomeIdentity:
             raise TypeError("identity must be MarketOutcomeIdentity")
+        MarketOutcomeIdentity.__post_init__(self.identity)
         if self.identity.market_type is not MarketType.WINNER:
             raise ValueError(
                 "authoritative terminal outcome semantics currently support winner markets only"

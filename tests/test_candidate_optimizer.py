@@ -158,5 +158,34 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
             PortfolioAwareCandidateOptimizer().evaluate_candidates([existing], [_single_candidate(a)], [group], stake="1")
 
 
+    def test_optimizer_revalidates_mutated_scenario_identity_before_group_mapping(self):
+        class HostileQuoteKey(str):
+            def __hash__(self):
+                raise AssertionError("scenario quote hash dispatched before exact admission")
+
+        a = CandidateLeg("e1|winner|a", "e1", Decimal("2"), Decimal("0.5"))
+        b = CandidateLeg("e1|winner|b", "e1", Decimal("2"), Decimal("0.5"))
+        first = ScenarioOutcome(a.quote_key, Decimal("0.5"))
+        group = ScenarioGroup(
+            "e1-winner",
+            (
+                first,
+                ScenarioOutcome(b.quote_key, Decimal("0.5")),
+            ),
+        )
+        object.__setattr__(first, "quote_key", HostileQuoteKey(first.quote_key))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "scenario outcome quote_key must be a non-empty trimmed string",
+        ):
+            PortfolioAwareCandidateOptimizer().evaluate_candidates(
+                [],
+                [_single_candidate(a)],
+                [group],
+                stake="10",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

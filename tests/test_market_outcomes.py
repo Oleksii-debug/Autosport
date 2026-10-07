@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import autosport.market_outcomes as market_outcomes_module
 from autosport.domain import MarketType, TicketLeg
 from autosport.market_outcomes import (
     MarketOutcomeIdentity,
@@ -934,3 +935,11 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_market_outcome_authority_rejects_nonzero_submicrosecond_timestamp() -> None:
+    with unittest.TestCase().assertRaisesRegex(ValueError, "precision finer than microseconds"):
+        market_outcomes_module._canonical_timestamp(
+            "observed_at",
+            "2026-09-18T15:00:01.1234561Z",
+        )

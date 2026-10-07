@@ -1919,7 +1919,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     """INSERT INTO market_replay_cutoffs
                        (cutoff_id, as_of, max_append_generation, issued_at)
                        VALUES (?, ?, ?, ?)""",
-                    (cutoff_id, canonical, 1, canonical),
+                    (cutoff_id, canonical, 1, storage_module._canonical_product_time(canonical)),
                 )
                 store.connection.commit()
 
@@ -3784,7 +3784,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     """INSERT INTO market_replay_cutoffs
                        (cutoff_id, as_of, max_append_generation, issued_at)
                        VALUES (?, ?, ?, ?)""",
-                    (forged_id, forged_as_of, 1, forged_as_of),
+                    (forged_id, forged_as_of, 1, storage_module._canonical_product_time(forged_as_of)),
                 )
                 store.connection.commit()
 
@@ -3882,7 +3882,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     """INSERT INTO market_replay_cutoffs
                        (cutoff_id, as_of, max_append_generation, issued_at)
                        VALUES (?, ?, ?, ?)""",
-                    (cutoff_id, canonical_as_of, 1, canonical_as_of),
+                    (cutoff_id, canonical_as_of, 1, storage_module._canonical_product_time(canonical_as_of)),
                 )
                 store.connection.commit()
                 authority.recover(
@@ -4447,7 +4447,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     """INSERT INTO market_replay_cutoffs
                        (cutoff_id, as_of, max_append_generation, issued_at)
                        VALUES (?, ?, ?, ?)""",
-                    (cutoff_id, canonical_as_of, 1, canonical_as_of),
+                    (cutoff_id, canonical_as_of, 1, storage_module._canonical_product_time(canonical_as_of)),
                 )
                 store.connection.commit()
 

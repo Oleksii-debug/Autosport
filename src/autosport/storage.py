@@ -2302,8 +2302,13 @@ class SQLiteMarketStore:
 
                 current_row = next(
                     (
-                        (stored_as_of, max_generation)
-                        for stored_cutoff_id, stored_as_of, max_generation in cutoff_rows
+                        (stored_as_of, max_generation, issued_at)
+                        for (
+                            stored_cutoff_id,
+                            stored_as_of,
+                            max_generation,
+                            issued_at,
+                        ) in cutoff_rows
                         if stored_cutoff_id == cutoff_id
                     ),
                     None,

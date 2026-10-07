@@ -2035,6 +2035,10 @@ class SQLiteMarketStore:
                     )
                 committed_at = row_committed_at
                 used_timed_ends.add(end)
+            elif timed_rows and start >= timed_rows[0][0]:
+                raise MonotonicAuthorityRollbackError(
+                    "timed market append authority cannot regress to legacy v1"
+                )
 
             expected_binding_sha256 = _append_binding_sha256(
                 previous_state_sha256=previous_state_sha256,
@@ -2112,9 +2116,8 @@ class SQLiteMarketStore:
             )
 
         committed_at: str | None = None
-        for row_start, row_end, row_tx_id, row_committed_at in (
-            self._validated_append_commit_time_rows()
-        ):
+        timed_rows = self._validated_append_commit_time_rows()
+        for row_start, row_end, row_tx_id, row_committed_at in timed_rows:
             if row_end != end:
                 continue
             if row_start != start or row_tx_id != pending.tx_id:
@@ -2123,6 +2126,10 @@ class SQLiteMarketStore:
                 )
             committed_at = row_committed_at
             break
+        if committed_at is None and timed_rows and start > timed_rows[-1][1]:
+            raise MonotonicAuthorityRollbackError(
+                "timed market append PREPARE cannot regress to legacy v1"
+            )
 
         expected_binding_sha256 = _append_binding_sha256(
             previous_state_sha256=committed_state_sha256,

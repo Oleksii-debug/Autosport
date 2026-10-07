@@ -233,6 +233,8 @@ class ScenarioSearchEngine:
             raise ValueError(
                 "authoritative outcome analysis requires canonical market authorities"
             )
+        for authority in authorities:
+            MarketSettlementOutcomeAuthority.__post_init__(authority)
 
         ordered = tuple(
             sorted(

@@ -211,6 +211,8 @@ def _optional_canonical_timestamp(raw: dict[str, Any], field_name: str) -> str |
 def _canonical_sequence_value(value: object) -> int:
     if type(value) is not int:
         raise ValueError("sequence must be a non-boolean int")
+    if value < -(2**63) or value > 2**63 - 1:
+        raise ValueError("sequence must fit signed 64-bit integer")
     return value
 
 

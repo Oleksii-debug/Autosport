@@ -9,6 +9,8 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 import autosport.event_lifecycle as event_lifecycle_module
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import (
@@ -848,3 +850,24 @@ class CanonicalEventIdentityAliasTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "canonical"):
             canonical_event_identity_aliases(identity + "A")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("source_id", "provider-a\nforged"),
+        ("source_id", "provider-a\tforged"),
+        ("event_id", "event-1\rforged"),
+        ("event_id", "event-1\x7fforged"),
+    ),
+)
+def test_canonical_event_identity_rejects_control_aliases(field: str, value: str) -> None:
+    kwargs = {"source_id": "provider-a", "sport": "table_tennis", "event_id": "event-1"}
+    kwargs[field] = value
+    with pytest.raises(ValueError, match="canonical"):
+        canonical_event_identity(**kwargs)
+
+
+def test_canonical_event_identity_rejects_non_utf8_identity_text() -> None:
+    with pytest.raises(ValueError, match="UTF-8"):
+        canonical_event_identity(source_id="provider-a", sport="table_tennis", event_id="event-\ud800")

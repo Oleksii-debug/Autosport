@@ -148,3 +148,18 @@ def test_registry_append_revalidates_tampered_dataset_snapshot_identity(
         registry.append(record)
 
     assert registry.get("DatasetSnapshot", "dataset-v1") is None
+
+
+@pytest.mark.parametrize(
+    ("factory", "field_name", "value"),
+    (
+        (_model, "model_version_id", "model-v1\nforged"),
+        (_model, "dataset_snapshot_id", "dataset-v1\tforged"),
+        (_strategy, "strategy_version_id", "strategy-v1\rforged"),
+        (_strategy, "canonical_strategy_id", "canonical-strategy\x7fforged"),
+        (_dataset, "source_identity", "source-v1\nforged"),
+    ),
+)
+def test_scientific_registry_text_identity_rejects_control_aliases(factory, field_name: str, value: str) -> None:
+    with pytest.raises(ValueError, match="canonical string"):
+        factory(**{field_name: value})

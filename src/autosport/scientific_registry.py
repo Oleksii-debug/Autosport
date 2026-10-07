@@ -43,7 +43,12 @@ _RECORD_TYPES = frozenset(
 
 
 def _text(value: object, name: str) -> str:
-    if type(value) is not str or not value or value != value.strip():
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
         raise ValueError(f"{name} must be a non-empty canonical string")
     value.encode("utf-8")
     return value

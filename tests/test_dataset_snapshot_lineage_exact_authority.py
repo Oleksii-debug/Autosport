@@ -4,6 +4,7 @@ import pytest
 
 from autosport.dataset_snapshot_lineage import (
     DatasetSnapshotLineageAuthority,
+    DatasetSnapshotLineageRecord,
     membership_manifest_sha256,
 )
 from autosport.scientific_registry import ScientificRegistry
@@ -50,3 +51,23 @@ def test_pristine_initializer_rejects_registry_subclass_before_filesystem_mutati
         )
 
     assert not lineage.exists()
+
+
+@pytest.mark.parametrize("value", ("snapshot\n1", "snapshot\t1", "snapshot\r1", "snapshot\x7f1"))
+def test_dataset_lineage_identity_rejects_control_aliases(value: str) -> None:
+    with pytest.raises(ValueError, match="canonical string"):
+        DatasetSnapshotLineageRecord(
+            snapshot_id=value,
+            dataset_record_sha256="a" * 64,
+            manifest_sha256="b" * 64,
+            source_identity="source-1",
+            license_identity="license-1",
+            causal_cutoff="2026-10-07T00:00:00Z",
+            available_at="2026-10-07T00:00:00Z",
+            proof_registered_at=None,
+            member_sha256=("c" * 64,),
+            parent_snapshot_id=None,
+            parent_dataset_record_sha256=None,
+            parent_proof_sha256=None,
+            proof_sha256="d" * 64,
+        )

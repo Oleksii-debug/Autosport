@@ -42,8 +42,17 @@ class EvidenceEligibility(StrEnum):
 
 
 def _text(value: object, name: str) -> str:
-    if type(value) is not str or not value or value.strip() != value:
-        raise ValueError(f"{name} must be a non-empty trimmed string")
+    if (
+        type(value) is not str
+        or not value
+        or value.strip() != value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{name} must be a non-empty trimmed canonical string")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
     return value
 
 

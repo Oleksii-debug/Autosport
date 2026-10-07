@@ -322,3 +322,15 @@ def test_outcome_verification_revalidates_append_identity_after_tamper():
 
     with pytest.raises(DecisionEnvelopeError, match="outcome_id.*canonical"):
         append_record.verify_envelope(sealed)
+
+
+@pytest.mark.parametrize("value", ("feature-1\nforged", "feature-1\tforged", "feature-1\rforged", "feature-1\x7fforged"))
+def test_decision_envelope_identity_rejects_control_aliases(value: str) -> None:
+    with pytest.raises(DecisionEnvelopeError, match="control characters"):
+        feature(evidence_id=value)
+
+
+@pytest.mark.parametrize("value", ("decision-1\nforged", "decision-1\tforged", "decision-1\x7fforged"))
+def test_sealed_decision_identity_rejects_control_aliases(value: str) -> None:
+    with pytest.raises(DecisionEnvelopeError, match="control characters"):
+        envelope(decision_id=value)

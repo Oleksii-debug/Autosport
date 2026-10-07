@@ -487,10 +487,10 @@ class HeadlessCollectorService:
             raise TypeError("lifecycle must be ContinuousEventLifecycle")
         source_id = getattr(source, "source_id", None)
         stream_epoch = getattr(source, "stream_epoch", None)
-        if not isinstance(source_id, str) or not source_id.strip():
-            raise ValueError("source.source_id must be a non-empty string")
-        if not isinstance(stream_epoch, str) or not stream_epoch.strip():
-            raise ValueError("source.stream_epoch must be a non-empty string")
+        if type(source_id) is not str or not source_id or source_id != source_id.strip():
+            raise ValueError("source.source_id must be a non-empty canonical string")
+        if type(stream_epoch) is not str or not stream_epoch or stream_epoch != stream_epoch.strip():
+            raise ValueError("source.stream_epoch must be a non-empty canonical string")
         if not callable(getattr(source, "fetch_catalog_page", None)):
             raise TypeError("source.fetch_catalog_page must be callable")
         if not callable(getattr(source, "fetch_deltas", None)):
@@ -540,13 +540,17 @@ class HeadlessCollectorService:
             )
         source_id = getattr(source, "source_id", None)
         stream_epoch = getattr(source, "stream_epoch", None)
+        if type(source_id) is not str or not source_id or source_id != source_id.strip():
+            raise CollectorServiceError(
+                "source.source_id must remain a non-empty canonical string"
+            )
         if source_id != self._source_id:
             raise CollectorServiceError(
                 "source.source_id changed after collector service construction"
             )
-        if not isinstance(stream_epoch, str) or not stream_epoch.strip():
+        if type(stream_epoch) is not str or not stream_epoch or stream_epoch != stream_epoch.strip():
             raise CollectorServiceError(
-                "source.stream_epoch must remain a non-empty string"
+                "source.stream_epoch must remain a non-empty canonical string"
             )
         if (
             expected_stream_epoch is not None

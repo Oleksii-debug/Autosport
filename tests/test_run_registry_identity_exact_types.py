@@ -18,6 +18,9 @@ class _HostileIdentity(str):
     def __bool__(self) -> bool:
         raise AssertionError("hostile identity __bool__ dispatched")
 
+    def __hash__(self) -> int:
+        raise AssertionError("hostile identity __hash__ dispatched")
+
     def __format__(self, spec: str) -> str:
         raise AssertionError("hostile identity __format__ dispatched")
 
@@ -62,6 +65,44 @@ class RunRegistryIdentityExactTypeTests(unittest.TestCase):
                         registry.begin(**kwargs)
                     self.assertEqual(path.read_bytes(), baseline)
                     self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["runs"], {})
+
+
+    def test_public_lookup_boundaries_reject_key_subclasses_before_hash_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "run_registry.json"
+            registry = RunRegistry.initialize_pristine(path)
+            key = registry.begin("a" * 64, "b" * 64, "strategy", "run-1")
+            hostile = _HostileIdentity(key)
+            baseline = path.read_bytes()
+
+            operations = (
+                ("get", lambda: registry.get(hostile)),
+                ("complete", lambda: registry.complete(hostile)),
+                (
+                    "abort_uncommitted",
+                    lambda: registry.abort_uncommitted(
+                        hostile,
+                        reason="abort",
+                        paper_book_sha256="c" * 64,
+                        decision_ledger_sha256="d" * 64,
+                    ),
+                ),
+                (
+                    "reconcile_completed_summary",
+                    lambda: registry.reconcile_completed_summary(
+                        hostile,
+                        root / "run-run-1.json",
+                        root / "paper_book.json",
+                    ),
+                ),
+            )
+            for operation, call in operations:
+                with self.subTest(operation=operation):
+                    with self.assertRaisesRegex(ValueError, "exact non-empty string"):
+                        call()
+                    self.assertEqual(path.read_bytes(), baseline)
+
 
 
 if __name__ == "__main__":

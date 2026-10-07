@@ -88,11 +88,81 @@ def test_future_market_guard_decodes_encoded_quote_identity() -> None:
         _validate_scenario_future_identity(
             (group,),
             {},
-            {"event|2026": parse_iso_timestamp("2026-10-06T23:59:00+00:00")},
             {
-                ("event|2026", "market|future"): parse_iso_timestamp(
+                (None, "event|2026"): parse_iso_timestamp(
+                    "2026-10-06T23:59:00+00:00"
+                )
+            },
+            {
+                (None, "event|2026", "market|future"): parse_iso_timestamp(
                     "2026-10-07T00:01:00+00:00"
                 )
             },
             decision_time,
         )
+
+
+def test_future_market_guard_keeps_sport_in_event_market_identity() -> None:
+    fabricated = _quote_identity(
+        "shared-event",
+        "shared-market",
+        "ghost",
+        "tennis",
+    )
+    group = ScenarioGroup("sport-qualified-future-market", (ScenarioOutcome(fabricated),))
+    decision_time = parse_iso_timestamp(_DECISION_TS)
+    earlier = parse_iso_timestamp("2026-10-06T23:59:00+00:00")
+    future = parse_iso_timestamp("2026-10-07T00:01:00+00:00")
+
+    with pytest.raises(ValueError, match="market identity first appears after decision"):
+        _validate_scenario_future_identity(
+            (group,),
+            {},
+            {
+                ("soccer", "shared-event"): earlier,
+                ("tennis", "shared-event"): future,
+            },
+            {
+                ("soccer", "shared-event", "shared-market"): earlier,
+                ("tennis", "shared-event", "shared-market"): future,
+            },
+            decision_time,
+        )
+
+
+def test_scenario_space_does_not_merge_same_local_market_across_sports() -> None:
+    tennis = MarketEvent(
+        event_id="shared-event",
+        market_id="shared-market",
+        selection_id="tennis-selection",
+        decimal_odds=Decimal("2"),
+        observed_ts=_DECISION_TS,
+        source_id="provider-1",
+        sequence=1,
+        ingest_ts=_DECISION_TS,
+        sport="tennis",
+    )
+    soccer = MarketEvent(
+        event_id="shared-event",
+        market_id="shared-market",
+        selection_id="soccer-selection",
+        decimal_odds=Decimal("2"),
+        observed_ts=_DECISION_TS,
+        source_id="provider-1",
+        sequence=2,
+        ingest_ts=_DECISION_TS,
+        sport="soccer",
+    )
+    group = ScenarioGroup(
+        "tennis-only",
+        (ScenarioOutcome(tennis.quote_key),),
+    )
+
+    _validate_scenario_space_binding(
+        (group,),
+        {
+            tennis.quote_key: tennis,
+            soccer.quote_key: soccer,
+        },
+        parse_iso_timestamp(_DECISION_TS),
+    )

@@ -124,6 +124,16 @@ class _HostileVOCScalar(str):
         raise AssertionError("hostile VOC scalar equality must not run")
 
 
+class _HostilePairedVOCEvaluation(PairedVOCEvaluation):
+    def __getattribute__(self, name):
+        raise AssertionError("hostile paired VOC attribute dispatch must not run")
+
+
+class _HostileOutcomeDerivedVOCScore(OutcomeDerivedVOCScore):
+    def __getattribute__(self, name):
+        raise AssertionError("hostile VOC score attribute dispatch must not run")
+
+
 def test_paired_voc_payload_rejects_mapping_subclass_before_dispatch():
     hostile = _HostileVOCPayload(evaluation().payload())
     with unittest.TestCase().assertRaisesRegex(
@@ -274,6 +284,16 @@ class FixtureCanonicalAuthorityResolver:
             ),
             source_artifact_sha256=SHA_D,
         )
+
+class _HostileResolvedEvaluationResolver(FixtureCanonicalAuthorityResolver):
+    def resolve(self, evaluation, *, as_of):
+        return object.__new__(_HostilePairedVOCEvaluation)
+
+
+class _HostileScoreResolver(FixtureCanonicalAuthorityResolver):
+    def resolve_score(self, evaluation, *, as_of):
+        return object.__new__(_HostileOutcomeDerivedVOCScore)
+
 
 def candidates():
     return (
@@ -1418,6 +1438,58 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("simulated", decision.reason)
+
+
+def test_voc_store_record_rejects_evaluation_subclass_before_dispatch():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = VOCEvaluationStore(Path(tmp) / "voc.json")
+        hostile = object.__new__(_HostilePairedVOCEvaluation)
+        with unittest.TestCase().assertRaisesRegex(
+            TypeError,
+            "exact PairedVOCEvaluation",
+        ):
+            store.record(hostile)
+
+
+def test_voc_store_require_rejects_resolver_evaluation_subclass_before_dispatch():
+    with tempfile.TemporaryDirectory() as tmp:
+        resolver = _HostileResolvedEvaluationResolver()
+        value = evaluation()
+        store = VOCEvaluationStore(
+            Path(tmp) / "voc.json",
+            canonical_authority_resolver=resolver,
+        )
+        store.record(value)
+        with unittest.TestCase().assertRaisesRegex(
+            VOCEvaluationError,
+            "returned invalid evaluation",
+        ):
+            store.require(
+                value.evaluation_id,
+                evaluation_sha256=value.evaluation_sha256,
+                as_of=T2,
+            )
+
+
+def test_voc_store_require_score_rejects_score_subclass_before_dispatch():
+    with tempfile.TemporaryDirectory() as tmp:
+        resolver = _HostileScoreResolver()
+        value = evaluation()
+        resolver.register(value)
+        store = VOCEvaluationStore(
+            Path(tmp) / "voc.json",
+            canonical_authority_resolver=resolver,
+        )
+        store.record(value)
+        with unittest.TestCase().assertRaisesRegex(
+            VOCEvaluationError,
+            "outcome-derived VOC score is missing",
+        ):
+            store.require_score(
+                value.evaluation_id,
+                evaluation_sha256=value.evaluation_sha256,
+                as_of=T2,
+            )
 
 
 if __name__ == "__main__":

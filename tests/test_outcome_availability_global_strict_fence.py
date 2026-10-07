@@ -319,5 +319,67 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
             self.assertEqual(hostile_calls, 0)
 
 
+    def test_resolver_rejects_tampered_availability_before_str_dispatch(self) -> None:
+        class HostileStr(str):
+            def replace(self, *args, **kwargs):
+                raise AssertionError("availability str subclass dispatch must not execute")
+
+        revision = TrustedOutcomeRevision(
+            revision=1,
+            revision_id="event:r1",
+            record_sha256=self._sha("r1"),
+            first_available_at="2026-01-01T10:00:00Z",
+        )
+        binding = OutcomeLineageBinding(
+            source_identity="official-results:causal-use",
+            record_id="event:causal-use",
+            root_revision_id=revision.revision_id,
+            root_record_sha256=revision.record_sha256,
+            revisions=(revision,),
+        )
+        object.__setattr__(
+            revision,
+            "first_available_at",
+            HostileStr("2026-01-01T10:00:00Z"),
+        )
+
+        with self.assertRaisesRegex(
+            OutcomeLineageTrustError,
+            "canonical string",
+        ):
+            outcome_trust.resolve_outcome_revision_as_of(
+                binding,
+                "2026-01-01T10:00:00Z",
+            )
+
+    def test_resolver_rejects_revision_subclass_before_causal_dispatch(self) -> None:
+        class HostileRevision(TrustedOutcomeRevision):
+            @property
+            def first_available_at(self):
+                raise AssertionError("revision subclass dispatch must not execute")
+
+        revision = HostileRevision(
+            revision=1,
+            revision_id="event:r1",
+            record_sha256=self._sha("r1"),
+        )
+        binding = OutcomeLineageBinding(
+            source_identity="official-results:causal-use",
+            record_id="event:causal-use",
+            root_revision_id="event:r1",
+            root_record_sha256=self._sha("r1"),
+            revisions=(revision,),
+        )
+
+        with self.assertRaisesRegex(
+            OutcomeLineageTrustError,
+            "exact tuple of TrustedOutcomeRevision",
+        ):
+            outcome_trust.resolve_outcome_revision_as_of(
+                binding,
+                "2026-01-01T10:00:00Z",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

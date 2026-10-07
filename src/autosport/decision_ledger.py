@@ -69,6 +69,29 @@ MATERIAL_ACTION_ID_PAYLOAD_KEY = "material_action_id"
 _MAX_DECISION_LEDGER_BYTES = 64 * 1024 * 1024
 
 
+def _require_canonical_decision_id(
+    value: object,
+    *,
+    location: str = "",
+) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise DecisionLedgerIntegrityError(
+            f"Decision Ledger decision_id is invalid{location}"
+        )
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise DecisionLedgerIntegrityError(
+            f"Decision Ledger decision_id is invalid{location}"
+        ) from exc
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class EconomicDecisionAuthority:
     """Exact goal + executable paper-risk authority for one economic append."""
@@ -100,6 +123,7 @@ class DecisionRecord:
     decision_kind: str = GENERAL_DECISION_KIND
 
     def __post_init__(self) -> None:
+        _require_canonical_decision_id(self.decision_id)
         payload = _freeze_decision_payload(self.payload)
         if contains_forbidden_future_key(payload):
             raise ValueError("decision payload must not contain future-result fields")
@@ -490,6 +514,7 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record nesting is too deep{location}"
             ) from exc
+        _require_canonical_decision_id(record.get("decision_id"), location=location)
         for field_name in cls._STRING_FIELDS:
             value = record.get(field_name)
             if not isinstance(value, str) or not value.strip():
@@ -746,7 +771,10 @@ class JsonlDecisionLedger:
                     f"Decision Ledger SHA-256 mismatch at line {line_number}"
                 )
 
-            decision_id = str(record["decision_id"])
+            decision_id = _require_canonical_decision_id(
+                record["decision_id"],
+                location=f" at line {line_number}",
+            )
             if decision_id in seen_decision_ids:
                 raise DecisionLedgerIntegrityError(
                     f"Decision Ledger contains duplicate decision_id at line {line_number}"
@@ -813,8 +841,10 @@ class JsonlDecisionLedger:
         *,
         risk_policy: PaperRiskPolicy | None = None,
     ) -> DecisionRecord:
-        if not isinstance(decision_id, str) or not decision_id.strip():
-            raise ValueError("decision_id must be a non-empty string")
+        try:
+            decision_id = _require_canonical_decision_id(decision_id)
+        except DecisionLedgerIntegrityError as exc:
+            raise ValueError("decision_id must be exact canonical text") from exc
         for record in self.verified_records():
             if record.decision_id == decision_id:
                 verify_economic_goal_binding(record, contract, risk_policy)
